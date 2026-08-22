@@ -1,13 +1,21 @@
-import { useState } from "react";
-import { IconArrowUpRight, IconMessage, IconSettings } from "@tabler/icons-react";
+import { useEffect, useRef, useState } from "react";
+import { IconChevronDown, IconMessage, IconSettings } from "@tabler/icons-react";
 
-import { Button, buttonVariants } from "@/components/ui/button";
+import { attachBridge, type BridgeHandle } from "@/lib/bridge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Header } from "@/kernel/pane";
 import { PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { isPortalChat, surfaceWord, useViewer } from "@/lib/audience";
 import { agentName } from "@/lib/agentName";
+import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import type { ChatRow } from "@/lib/rail";
 import { Chat } from "@/views/Chat";
@@ -16,8 +24,13 @@ import type { PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Agent, Conversation, Member } from "@/lib/types";
 
 /** The homepage the app's binding names, the answer that one is being built, or the answer that
- *  it has none. */
-type HomepageRead = { state: "set"; url: string } | { state: "building" } | { state: "none" };
+ *  it has none. `deploy_generation` bumps on every redeploy of the bound page, so the frame
+ *  remounts onto fresh bytes at the same URL (RFC 0039 Contract 2); an older payload without it
+ *  reads as 0. */
+type HomepageRead =
+  | { state: "set"; url: string; deploy_generation?: number }
+  | { state: "building" }
+  | { state: "none" };
 
 /** How often the half asks again while a homepage is being built. A build is minutes of work the
  *  member is watching for the end of, so the read runs faster than the pane's resting rate — and
@@ -35,13 +48,6 @@ const NEW = "New";
  *  founds one writes that conversation's id over it. */
 const FRESH = "new";
 
-/** The lane the app's conversations are read down, and the name it states. The lane is not named in
- *  the address: `opens` says which conversation the pane holds, and a list standing there too would
- *  take the one place that answers that. */
-const INDEX = "conversations";
-const CONVERSATIONS = "Conversations";
-
-
 export type AgentPaneProps = {
   agent: Agent;
   member: Member;
@@ -58,6 +64,9 @@ export type AgentPaneProps = {
    *  holding — this half reads the rail to know which conversations it can carry on, so a chat the
    *  rail has not heard of is one the half would slide off the moment anything re-read. */
   onCreated: (conversationId: string, title: string) => void;
+  /** A conversation the framed page's own send founded, with the agent it ran under — the page
+   *  chats across agents, so the pane's own agent cannot stand in. */
+  onFounded: (agent: Agent, conversationId: string, title: string) => void;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
 };
 
@@ -78,10 +87,12 @@ export function AgentPane({
   place,
   onSettings,
   onCreated,
+  onFounded,
   onPlace,
 }: AgentPaneProps) {
   const [settles, setSettles] = useState(0);
   const viewer = useViewer();
+  const agents = useAgents();
   // Two reads, each authoritative for a different question. The index says which conversations the
   // app has at all — every surface it has ever spoken on. The rail says which of them the portal
   // can carry on, because the chat transport answers only for a conversation the web surface
@@ -100,19 +111,20 @@ export function AgentPane({
             .filter((row) => row.agent_id === agent.id && row.mine && isPortalChat(row.surface))
             .map((row) => row.conversation_id),
         );
-  // Which conversation the half is holding — the one slot this screen's track carries. An address
-  // naming one is the member's pick and is answered by that conversation or by nothing, never by
-  // another one, because a link a member was sent opening a different conversation than it names is
-  // worse than a link that says it cannot be opened. An address naming none opens the newest the
-  // member can speak in, so arriving lands on the work rather than on a list of it, and on an app
-  // they have only ever read, on the composer. Nothing is written to the address for that landing:
-  // a redirect on arrival costs a history entry the member did not ask for, and the app's own
-  // address already means "the latest".
-  const held = place.opens?.[0];
+  // What the address opens, split by what it names. The fresh sentinel and the app's own
+  // conversations — the chats that direct this app — are the pane's to hold: the right-side chat,
+  // a slot in this screen's track beside the page. Any other target — a run, a record, another
+  // agent's conversation — is the page's own, handed to the frame in `init` and opening nothing
+  // portal-side: the page is the screen that knows how to stand on it. An address naming nothing
+  // opens the newest conversation the member can speak in, so arriving lands on the work rather
+  // than on a list of it, and on an app they have only ever read, on the composer.
+  const target = place.opens?.[0];
+  const conversational =
+    target !== undefined && (target === FRESH || rows.some((entry) => entry.id === target));
+  const held = conversational ? target : undefined;
   const wanted = held === FRESH;
   const named =
     held !== undefined && !wanted ? (rows.find((entry) => entry.id === held) ?? null) : null;
-  const missing = held !== undefined && !wanted && named === null && listed.phase === "ready";
   // Acknowledging is recorded, not reflected: the index answers `readable` from audience membership
   // alone, so a conversation this member has just opened still arrives false and would be handed
   // back its own gate — and every press would write another audit row for a disclosure already
@@ -148,10 +160,74 @@ export function AgentPane({
   const state = site.phase === "ready" ? site.payload.state : site.phase === "failed" ? "none" : null;
   if (state !== null && building !== (state === "building")) setBuilding(state === "building");
   const url = site.phase === "ready" && site.payload.state === "set" ? site.payload.url : null;
+  const generation =
+    site.phase === "ready" && site.payload.state === "set"
+      ? (site.payload.deploy_generation ?? 0)
+      : 0;
   // The half stands for a homepage that exists and for one being made; an app that has neither
   // draws one column, because a column whose only content is the sentence that it is empty takes
   // half the screen to say what the app having no homepage already says.
   const beside = url !== null || building;
+  // A target the pane cannot hold is the page's to stand on — but an app with no page has nowhere
+  // to hand it. A conversation the rail knows is drawn here under its own agent, so a rail click
+  // works in the window before the app's page exists; anything else states the miss, because
+  // answering with some other conversation would open a place the link never named.
+  const railRow =
+    target !== undefined && !conversational && !beside
+      ? ((chats ?? []).find(
+          (row) => row.conversation_id === target && row.mine && isPortalChat(row.surface),
+        ) ?? null)
+      : null;
+  const railAgent = railRow ? (agents.find((entry) => entry.id === railRow.agent_id) ?? null) : null;
+  const missing =
+    target !== undefined &&
+    !conversational &&
+    !beside &&
+    railAgent === null &&
+    state !== null &&
+    listed.phase === "ready";
+  // The bridge is how the framed page reads the member's data and drives navigation; it is bound to
+  // the live frame and rebound when a redeploy remounts it under a new key, so each set of bytes
+  // talks to exactly one listener. A target the pane does not hold as a slot is the page's open
+  // target — one meaning per channel, so nothing is opened twice. It rides `init` on a fresh frame
+  // and the bridge's own `open` message while the frame stands, because a rail click lands on a
+  // page that already booted.
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const bridgeRef = useRef<BridgeHandle | null>(null);
+  const heldOpen = conversational ? null : (target ?? null);
+  const openRef = useRef(heldOpen);
+  openRef.current = heldOpen;
+  const foundedRef = useRef<(agentId: string, conversationId: string, title: string) => void>(
+    () => {},
+  );
+  foundedRef.current = (agentId, conversationId, title) => {
+    const speaking = agents.find((entry) => entry.id === agentId);
+    if (speaking) {
+      onFounded(speaking, conversationId, title);
+      setSettles((count) => count + 1);
+    }
+  };
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const handle = attachBridge({
+      iframe: frame,
+      member,
+      agentId: agent.id,
+      open: openRef.current,
+      chatSurface: agent.app === CHAT_SURFACE,
+      onCreated: (agentId, conversationId, title) =>
+        foundedRef.current(agentId, conversationId, title),
+    });
+    bridgeRef.current = handle;
+    return () => {
+      bridgeRef.current = null;
+      handle.detach();
+    };
+  }, [member, agent.id, agent.app, url, generation]);
+  useEffect(() => {
+    bridgeRef.current?.open(heldOpen);
+  }, [heldOpen]);
 
   /** The conversation, whole. Its own band is drawn where the conversation is the screen; standing
    *  in a lane, the lane's header already states the name and draws the way out, and a second band
@@ -239,40 +315,6 @@ export function AgentPane({
   // press can land the member.
   const listable = rows.filter((entry) => entry.readable || entry.disclosable);
 
-  /** The app's conversations, standing where the one being read can be seen beside them. A press
-   *  writes the address and nothing else, so the address stays the one answer to which conversation
-   *  the pane holds and the row marked current is read back off it. The lane states its own name and
-   *  carries no act: at a lane's floor the band has room for the name, the mark and the way out, and
-   *  the acts on this screen act on the app rather than on the list.
-   *
-   *  It stands wherever a conversation does — beside the page once the member has opened the chat
-   *  over it, and beside the conversation that is the whole screen where the app has no page. A page
-   *  standing alone has no conversation to be read beside, and an app nobody has spoken to has
-   *  nothing to list. */
-  const index = useSlot(
-    listable.length > 0 && (!beside || held !== undefined) ? (
-      <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-px overflow-y-auto p-sm">
-        {listable.map((entry) => (
-          <li key={entry.id}>
-            <button
-              type="button"
-              aria-current={entry.id === opened?.id}
-              onClick={() => onPlace({ ...place, opens: [entry.id] }, "push")}
-              className={cn(
-                "flex h-(--size-row) w-full items-center rounded-row border-0 bg-transparent",
-                "px-sm text-left text-label text-inherit hover:bg-fill",
-                entry.id === opened?.id && "bg-fill",
-              )}
-            >
-              <span className="min-w-0 truncate">{subject(entry, viewer)}</span>
-            </button>
-          </li>
-        ))}
-      </ul>
-    ) : null,
-    { id: INDEX, kind: "index", title: CONVERSATIONS },
-  );
-
   /** Where the conversation stands when the app has a page: a slot in the screen's own track,
    *  opened by the titlebar's act and named by the conversation it holds. An app with no page has
    *  no track to divide, so the conversation is the screen and takes the width whole. */
@@ -280,6 +322,36 @@ export function AgentPane({
     id: held ?? FRESH,
     kind: "panel",
     title: opened ? subject(opened, viewer) : NEW_CONVERSATION,
+    acts: (
+      <>
+        {listable.length > 0 ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="quiet"
+                size="icon"
+                aria-label={"Conversations with " + agentName(agent.name)}
+              >
+                <IconChevronDown aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="max-w-hint">
+              {listable.map((entry) => (
+                <DropdownMenuItem
+                  key={entry.id}
+                  onSelect={() => onPlace({ ...place, opens: [entry.id] }, "push")}
+                >
+                  <span className="block max-w-full min-w-0 truncate">{subject(entry, viewer)}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+        <Button variant="send" size="bar" onClick={start}>
+          {NEW}
+        </Button>
+      </>
+    ),
     onClose: () => onPlace({ ...place, opens: [] }, "replace"),
   });
 
@@ -289,77 +361,84 @@ export function AgentPane({
         <section
           aria-label={agentName(agent.name) + " homepage"}
           aria-busy={url === null}
-          className="flex min-h-0 min-w-0 flex-1 flex-col"
+          className="relative flex min-h-0 min-w-0 flex-1 flex-col"
         >
-          <Header
-            heading={2}
-            title={agentName(agent.name)}
-            acts={
-              <>
-                {/* A link, not a button: this is the one act on the screen that leaves the portal,
-                    so it keeps the shape a member already knows how to open in a tab of their own.
-                    It wears the icon control's box so it stands level with the acts beside it
-                    across the band's one line. A homepage still being built has no address. */}
-                {url !== null ? (
-                  <a
-                    href={url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label={"Open " + agentName(agent.name) + " homepage"}
-                    className={cn(buttonVariants({ variant: "quiet", size: "icon" }))}
-                  >
-                    <IconArrowUpRight aria-hidden />
-                  </a>
-                ) : null}
-                <Button
-                  variant="quiet"
-                  size="icon"
-                  aria-label={"Settings for " + agentName(agent.name)}
-                  onClick={onSettings}
-                >
-                  <IconSettings aria-hidden />
-                </Button>
-                <Button
-                  variant="quiet"
-                  size="icon"
-                  aria-label={"Chat with " + agentName(agent.name)}
-                  aria-pressed={held !== undefined}
-                  className={cn(held !== undefined && "bg-fill")}
-                  onClick={() =>
-                    held === undefined
-                      ? onPlace({ ...place, opens: [opened?.id ?? FRESH] }, "push")
-                      : onPlace({ ...place, opens: [] }, "replace")
-                  }
-                >
-                  <IconMessage aria-hidden />
-                </Button>
-              </>
-            }
-            pinned
-          />
+          {/* The page heads itself — it is the portal's own screen and draws the band a section
+              drew, so a pane band over it would state the name twice and push the page down a row
+              it never had. The two acts that are the shell's own stand on the band line at its
+              right end, and the page's band makes room for them: the frame inherits the inset the
+              shell's acts occupy, so its own band-right controls end where these begin. */}
+          <div className="absolute top-lg right-2xl z-10 flex items-center gap-xs">
+            <Button
+              variant="quiet"
+              size="icon"
+              aria-label={"Settings for " + agentName(agent.name)}
+              className="rounded-full border border-edge bg-surface"
+              onClick={onSettings}
+            >
+              <IconSettings aria-hidden />
+            </Button>
+            <Button
+              variant="quiet"
+              size="icon"
+              aria-label={"Chat with " + agentName(agent.name)}
+              aria-pressed={held !== undefined}
+              className={cn(
+                "rounded-full border border-edge bg-surface",
+                held !== undefined && "bg-fill",
+              )}
+              onClick={() =>
+                held === undefined
+                  ? onPlace({ ...place, opens: [opened?.id ?? FRESH] }, "push")
+                  : onPlace({ ...place, opens: [] }, "replace")
+              }
+            >
+              <IconMessage aria-hidden />
+            </Button>
+          </div>
           {url === null ? (
             <Building />
           ) : (
             /* The frame is the app's own trusted page and carries the sandbox around the
                model-authored bytes itself, so this iframe takes no sandbox attribute — sandbox
-               flags inherit, and the inner site is promised scripts. */
+               flags inherit, and the inner site is promised scripts. The key carries the deploy
+               generation, so a redeploy at the same URL remounts the frame onto the fresh bytes
+               rather than showing the page the member last loaded. */
             <iframe
+              key={url + ":" + generation}
+              ref={frameRef}
               src={url}
               title={agentName(agent.name) + " homepage"}
               className="min-h-0 flex-1 border-0"
             />
           )}
         </section>
-        {index}
         {slot}
       </>
     );
   }
 
+  if (railRow && railAgent && target !== undefined) {
+    return (
+      <section
+        aria-label={railRow.title}
+        className="flex min-h-0 min-w-0 flex-1 flex-col"
+      >
+        <Header heading={2} title={railRow.title} pinned />
+        <Chat
+          key={target}
+          agent={railAgent}
+          member={member}
+          conversationId={target}
+          onCreated={onCreated}
+          onSettled={() => setSettles((count) => count + 1)}
+        />
+      </section>
+    );
+  }
   return (
     <>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">{conversation}</div>
-      {index}
     </>
   );
 }

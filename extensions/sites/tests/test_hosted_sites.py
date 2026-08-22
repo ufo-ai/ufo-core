@@ -63,12 +63,12 @@ from ufo_ext_sites.surface import (
     site_url,
 )
 from ufo_ext_sites.tools import (
-    APP_SERVE_PORT,
     DEPLOY_WEBSITE_TOOL,
     PREVIEW_HEIGHT,
     PREVIEW_WIDTH,
     PUBLISH_WEBSITE_TOOL,
     SET_HOMEPAGE_TOOL,
+    serve_port,
 )
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import (
@@ -532,7 +532,7 @@ async def test_default_visibility_follows_the_conversation_audience(
 
     assert payload["visibility"] == expected
     (row,) = await _stored(workspace)
-    assert (row.name, row.port, row.visibility) == (SITE, APP_SERVE_PORT, expected)
+    assert (row.name, row.port, row.visibility) == (SITE, serve_port(conversation_id), expected)
     assert row.creator_member_id == member_id
     assert row.conversation_id == conversation_id
 
@@ -599,6 +599,51 @@ async def test_a_teammate_may_redeploy_without_touching_the_visibility(db: None)
     assert hosted["visibility"] == "private"
     (row,) = await _stored(workspace)
     assert (row.visibility, row.creator_member_id) == ("private", creator_id)
+
+
+async def test_a_redeploy_bumps_the_deploy_generation(db: None) -> None:
+    """The portal keys the framed homepage on this value, so a redeploy of the same site name
+    remounts the frame and shows the new bytes. Every register writes strictly above what the row
+    holds."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+
+    await _deploy(workspace, conversation_id, audience, member_id)
+    (row,) = await _stored(workspace)
+    first = row.deploy_generation
+    assert first > 0
+
+    await _deploy(workspace, conversation_id, audience, member_id)
+    (row,) = await _stored(workspace)
+    second = row.deploy_generation
+    assert second > first
+
+    await _deploy(workspace, conversation_id, audience, member_id)
+    (row,) = await _stored(workspace)
+    assert row.deploy_generation > second
+
+
+async def test_the_deploy_generation_survives_the_sites_recreation(db: None) -> None:
+    """An unhosted name deployed again keeps the same URL — the token hashes (workspace,
+    conversation, name) — so the value the frame is keyed on must land above the deleted row's,
+    or the portal would never remount onto the new site's bytes."""
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+
+    await _deploy(workspace, conversation_id, audience, member_id)
+    (row,) = await _stored(workspace)
+    before_unhost = row.deploy_generation
+
+    with ws(workspace.id):
+        await HostedSites(workspace.id, workspace_tx).unregister(conversation_id, SITE)
+    await _deploy(workspace, conversation_id, audience, member_id)
+
+    (row,) = await _stored(workspace)
+    assert row.deploy_generation > before_unhost
 
 
 async def test_a_speakerless_turn_cannot_name_a_visibility(db: None) -> None:
@@ -835,11 +880,11 @@ async def test_deploy_serves_the_static_output_and_hosts_it(db: None) -> None:
             entry_point="index.html",
         )
 
-    assert payload["url"] == f"http://localhost:{APP_SERVE_PORT}"
+    assert payload["url"] == f"http://localhost:{serve_port(conversation_id)}"
     assert payload["entry_point"] == "index.html"
     assert str(payload["site_url"]).startswith(f"{PUBLIC_BASE_URL}{FRAME_PATH}/")
     (row,) = await _stored(workspace)
-    assert (row.name, row.port) == (SITE, APP_SERVE_PORT)
+    assert (row.name, row.port) == (SITE, serve_port(conversation_id))
 
 
 async def test_a_published_app_installs_serves_and_hosts(db: None) -> None:
@@ -896,7 +941,7 @@ async def test_a_dm_site_opens_for_its_creator_and_hides_from_another_member(
     assert (view.workspace_id, view.conversation_id, view.port) == (
         workspace.id,
         conversation_id,
-        APP_SERVE_PORT,
+        serve_port(conversation_id),
     )
 
     denied = await client.get(link, headers=_cookie(other_token))
@@ -958,7 +1003,7 @@ async def test_a_deep_link_frames_the_site_at_that_path(deployment: Deployment) 
         datetime.now(UTC),
         INGRESS_VIEW_KIND,
     )
-    assert (view.conversation_id, view.port) == (conversation_id, APP_SERVE_PORT)
+    assert (view.conversation_id, view.port) == (conversation_id, serve_port(conversation_id))
 
     flipped = await client.post(
         f"{link}/visibility",
@@ -1247,7 +1292,7 @@ async def test_the_site_kind_reads_and_regates_a_hosted_site(db: None) -> None:
     assert [row["name"] for row in listed["objects"]] == [name]
     assert fetched["spec"] == {"visibility": "private"}
     assert fetched["status"]["site_url"] == hosted["site_url"]
-    assert fetched["status"]["port"] == APP_SERVE_PORT
+    assert fetched["status"]["port"] == serve_port(conversation_id)
     assert fetched["links"] == [
         {"relation": "created_in", "target": {"kind": "conversation", "name": str(conversation_id)}}
     ]
@@ -2108,7 +2153,7 @@ async def test_a_deploy_stopped_inside_the_shot_has_already_moved_the_ports_row(
 
     (row,) = await _stored(workspace)
     assert row.name == "pricing"
-    assert row.port == APP_SERVE_PORT
+    assert row.port == serve_port(conversation_id)
     assert row.preview_blob_key is None
 
 

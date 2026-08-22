@@ -1,34 +1,50 @@
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type MouseEvent,
-  type ReactNode,
-} from "react";
-import { IconChevronDown, IconChevronUp, IconDots } from "@tabler/icons-react";
+// The wiki app's page: TSX compiled in the browser by the portal's app kit. Everything it
+// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
 
-import { Button } from "@/components/ui/button";
-import { Dialog } from "@/components/ui/dialog";
-import {
+const {
+  BANDS,
+  Button,
+  Dialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Facts, Group } from "@/components/ui/facts";
-import { ObjectDetail, objectAt, slotOf, type ObjectAddress } from "@/kernel/objects";
-import type { Placement } from "@/kernel/pager";
-import { BANDS, Header, usePageHead } from "@/kernel/pane";
-import { Panel, PanelBlank, usePanelRead } from "@/kernel/panel";
-import { RebuildDialog } from "@/kernel/rebuild";
-import { RowLines } from "@/kernel/rows";
-import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
-import { isMemberAudience, SHARED_SUBJECT, useViewer } from "@/lib/audience";
-import { cn } from "@/lib/cn";
-import { day, Moment } from "@/lib/moments";
+  Facts,
+  Group,
+  Header,
+  IconChevronDown,
+  IconChevronUp,
+  IconDots,
+  Moment,
+  ObjectDetail,
+  Panel,
+  PanelBlank,
+  React,
+  RebuildDialog,
+  RowLines,
+  SHARED_SUBJECT,
+  SectionApp,
+  appended,
+  beside,
+  closed,
+  cn,
+  day,
+  isMemberAudience,
+  mountApp,
+  objectAt,
+  opened,
+  slotOf,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  usePageHead,
+  usePanelRead,
+  useRef,
+  useSlot,
+  useState,
+  useViewer,
+} = UfoAppKit;
 
 /** What the store calls a consolidated summary: a cluster of facts the consolidator collapsed into
  *  one item. It is the only memory written to be read whole, so it is what a page opens on. */
@@ -201,7 +217,7 @@ function memberAt(opens: string[]): string | null {
  *  bullet takes the first record's place and reading two at once is asked for with a cmd- or
  *  middle-press. Each lane names the app it is read in, since a memory reaches the page through the
  *  app that filed it and one page draws several apps' memories. */
-export function Wiki({
+function Wiki({
   place,
   onPlace,
 }: {
@@ -795,7 +811,7 @@ function Topic({
         {rows.map((row) => {
           const id = slotOf({ agent: row.agent_id, kind: MEMORY_KIND, name: row.name });
           const standing = opens.includes(id);
-          const press = (event: MouseEvent<HTMLButtonElement>) =>
+          const press = (event: ReactMouseEvent<HTMLButtonElement>) =>
             onPlace({ opens: beside(event) ? appended(opens, id) : opened(opens, id, from) });
           return (
             <li key={row.name}>
@@ -908,3 +924,16 @@ function Band({
     </section>
   );
 }
+
+mountApp(document.getElementById("root")!, (init) => (
+  <SectionApp
+    tab="wiki"
+    init={init}
+    view={{
+      label: "Wiki",
+      remountOnPlace: false,
+      ownsHeader: true,
+      render: (place, onPlace) => <Wiki place={place} onPlace={onPlace} />,
+    }}
+  />
+));

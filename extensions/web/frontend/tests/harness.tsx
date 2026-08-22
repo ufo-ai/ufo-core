@@ -9,13 +9,12 @@ import { expect, vi } from "vitest";
 import { NARROW } from "@/App";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { TabbedPane } from "@/views/TabbedPane";
-import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import { SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
   WORKSPACE_TABS,
-  SECTIONS,
 } from "@/lib/route";
 
 /** The shell's own providers, so a view mounted alone draws what it draws inside the app. A tooltip
@@ -60,8 +59,8 @@ export function PlacedSection({
     <Shell>
     <TabbedPane
       group="section"
-      tabs={SECTIONS}
-      views={SECTION_VIEWS}
+      tabs={["connectors"]}
+      views={SECTION_VIEWS as Record<Section, PaneView>}
       view={section}
       place={placed.place}
       onPlace={(next, place) => setPlaced({ section: next, place })}
@@ -226,6 +225,18 @@ export const SECOND = {
   name: "second",
   main: false,
   icon: "aten",
+};
+
+export const CHAT_APP_ID = "44444444-4444-4444-8444-444444444444";
+
+/** The shipped chat app's agent: the pane conversations are read and answered in. */
+export const CHAT_APP = {
+  ...AGENT,
+  id: CHAT_APP_ID,
+  name: "chat",
+  main: false,
+  icon: "aten",
+  app: "chat",
 };
 
 export const MEMBER = { id: "m1", email: "member@example.com", admin: false };

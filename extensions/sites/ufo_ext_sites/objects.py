@@ -174,6 +174,7 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                     "visibility": effective_visibility(site, agents),
                     "owner_email": emails.get(site.creator_member_id),
                     "mine": site.creator_member_id == member_id,
+                    "deploy_generation": site.deploy_generation,
                 }
                 | (
                     {}
@@ -362,6 +363,7 @@ SITE_OBJECT = ObjectKind(
             "preview_url",
             "owner_email",
             HOMEPAGE_FIELD,
+            "deploy_generation",
         }
     ),
 )

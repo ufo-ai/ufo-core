@@ -30,10 +30,11 @@ import {
   wire,
   AGENT,
   AGENT_ID,
+  CHAT_APP,
+  CHAT_APP_ID,
   CHAT_ROW,
   CONVO_ID,
   MEMBER,
-  NO_ARTIFACTS,
   SECOND,
   SECOND_ID,
   SETTINGS,
@@ -966,6 +967,28 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
+test("a rail row lands in the chat app when one is shipped", async () => {
+  location.hash = "#/";
+  wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
+  render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
+  await userEvent.click(await rail.findByRole("button", { name: /Pick one thread/ }));
+
+  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=" + CONVO_ID);
+});
+
+test("new conversation opens the chat app at its start screen when one is shipped", async () => {
+  location.hash = "#/";
+  wire({});
+  render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
+  await userEvent.click(rail.getByRole("button", { name: "New conversation" }));
+
+  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
+});
+
 test("the new-conversation control targets the main agent, and offers no other", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -1016,8 +1039,8 @@ test("the conversations rail stands in the sidebar whatever the destination", as
   expect(await rail.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
   expect(rail.getByRole("button", { name: "New conversation" })).toBeTruthy();
 
-  await userEvent.click(rail.getByRole("button", { name: "Artifacts" }));
-  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
+  await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
+  expect(await screen.findByRole("heading", { name: "Team" })).toBeTruthy();
   expect(rail.getByRole("button", { name: /Pick one thread/ })).toBeTruthy();
   expect(rail.getByRole("button", { name: "New conversation" })).toBeTruthy();
 });
@@ -1116,22 +1139,15 @@ test("the sidebar marks the destination the member is in and leaves the others o
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   const marked = () =>
-    ["New conversation", "Artifacts", "Radar", "Connectors", "Workspace"].filter(
+    ["New conversation", "Connectors", "Workspace"].filter(
       (name) => rail.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
   expect(marked()).toEqual(["New conversation"]);
 
-  await userEvent.click(rail.getByRole("button", { name: "Radar" }));
-  await waitFor(() => expect(marked()).toEqual(["Radar"]));
-
   await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
-  expect(marked()).toEqual(["Workspace"]);
+  await waitFor(() => expect(marked()).toEqual(["Workspace"]));
   await waitFor(() => expect(destination()).toBe("Team"));
-
-  await userEvent.click(rail.getByRole("button", { name: "Artifacts" }));
-  await waitFor(() => expect(marked()).toEqual(["Artifacts"]));
-  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 
   await userEvent.click(rail.getByRole("button", { name: "Connectors" }));
   await waitFor(() => expect(marked()).toEqual(["Connectors"]));

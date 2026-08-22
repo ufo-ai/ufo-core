@@ -43,12 +43,13 @@ uv run --project "$UFO_REPO" ufoctl serve
 Frontend, reloading on every source change:
 
 ```bash
-npm --prefix "$FRONTEND" run dev -- --host 127.0.0.1
+npm --prefix "$FRONTEND" run dev -- --host ufo.localhost
 ```
 
 Run `uv run --project "$UFO_REPO" ufoctl portal` once from `$UFO_DEV_DIR` to land the session
-cookie, then edit against `http://127.0.0.1:5173/surface/web`. Use `127.0.0.1`, not `localhost`:
-the cookie is scoped to the host the portal handshake set it on, and `serve` binds `127.0.0.1`.
+cookie, then edit against `http://ufo.localhost:5173/surface/web`. Use `ufo.localhost` on both:
+`init` writes `public_base_url = "http://ufo.localhost:8710"`, `portal` opens it, and the session
+cookie binds to that host — a dev server on any other host never sees it.
 
 The dev server answers the page and its assets from source and proxies every read to `:8710`, so
 the built tree under `ufo_ext_web/static` is out of the loop entirely — never rebuild it while

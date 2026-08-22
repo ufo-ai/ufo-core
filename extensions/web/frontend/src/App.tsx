@@ -1,12 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconAdjustments,
   IconApps,
-  IconBook,
-  IconBooks,
   IconBrandSlack,
-  IconClockPlay,
   IconCheck,
   IconChevronRight,
   IconDeviceDesktop,
@@ -16,10 +13,7 @@ import {
   IconMenu2,
   IconMessageCircle,
   IconMoon,
-  IconPin,
-  IconPinFilled,
   IconPlug,
-  IconRadar,
   IconSettings,
   IconSun,
   IconTerminal2,
@@ -46,7 +40,7 @@ import { FirstRun } from "@/views/FirstRun";
 import { SignIn } from "@/views/SignIn";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
-import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
   IMESSAGE_SURFACE,
   SLACK_SURFACE,
@@ -61,11 +55,11 @@ import {
   useViewer,
 } from "@/lib/audience";
 import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
-import { COLUMN, Header, Pane } from "@/kernel/pane";
+import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
 import { heldTrack, holdTrack, type TrackScreen } from "@/lib/tracks";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
-import { MainAgentProvider } from "@/lib/mainAgent";
+import { CHAT_SURFACE, COMPOSE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, heldScheme, holdScheme, type Scheme } from "@/lib/scheme";
@@ -251,16 +245,18 @@ export function App({ agents, member, onAgents }: AppProps) {
     setCollapsed(next);
     localStorage.setItem("sidebar", next ? "collapsed" : "expanded");
   }, []);
-  const [pinned, setPinned] = useState<string[]>(heldPinned);
-  const togglePin = useCallback((agentId: string) => {
-    setPinned((current) => {
-      const next = current.includes(agentId)
-        ? current.filter((id) => id !== agentId)
-        : [...current, agentId];
+  const [pinnedHeld, setPinnedHeld] = useState<string[] | null>(heldPinned);
+  const pinned = pinnedHeld ?? defaultPins(agents);
+  const togglePin = useCallback(
+    (agentId: string) => {
+      const next = pinned.includes(agentId)
+        ? pinned.filter((id) => id !== agentId)
+        : [...pinned, agentId];
       holdPinned(next);
-      return next;
-    });
-  }, []);
+      setPinnedHeld(next);
+    },
+    [pinned],
+  );
 
   /** A drawer left open while the window grows past the breakpoint would trap focus behind a
    *  hamburger the layout no longer draws. */
@@ -337,6 +333,28 @@ export function App({ agents, member, onAgents }: AppProps) {
   const openChat = useCallback(
     (conversationId: string) => go(chatHash(conversationId), { kind: "chat", conversationId }),
     [go],
+  );
+
+  /** The agent whose app is the chat surface: conversations are read and answered inside its
+   *  pane. Null on a deploy that ships no chat app, where the shell's own chat pane stands in. */
+  const chatApp = useMemo(() => chatSurface(agents), [agents]);
+
+  /** Where a rail row lands. A chat that directs an app — one whose agent is an app's own —
+   *  reopens as that app's right-side chat, beside the page it edits. Every other conversation is
+   *  a regular chat and loads in the chat app's single column, the way a new conversation does;
+   *  the shell's chat screen stands in where no chat app ships. */
+  const openConversation = useCallback(
+    (conversationId: string, agentId: string) => {
+      const owner = agents.find((agent) => agent.id === agentId);
+      const pane = owner?.app ? owner : chatApp;
+      if (pane === null || pane === undefined) {
+        openChat(conversationId);
+        return;
+      }
+      const place = { opens: [conversationId] };
+      go(agentHash(pane.id, place), { kind: "agent", agentId: pane.id, place });
+    },
+    [agents, chatApp, go, openChat],
   );
 
   const openNewChat = useCallback(
@@ -572,8 +590,10 @@ export function App({ agents, member, onAgents }: AppProps) {
                 onShown={setRailShownHeld}
                 shut={railShut}
                 onShut={setRailShutHeld}
+                chatApp={chatApp}
                 onNewChat={openNewChat}
-                onOpen={openChat}
+                onOpenAgentPlace={openAgentPlace}
+                onOpen={openConversation}
                 onRetry={() => setReloads((count) => count + 1)}
                 onOpenAgent={openAgent}
                 onBuild={openBuilder}
@@ -764,14 +784,23 @@ function AccountMenu({ member, onAdmin }: { member: Member; onAdmin: () => void 
 const NAV_ROW =
   "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill";
 
-/** What the member pinned into the sidebar — apps by id, the fixed reads by name — in the order
- *  they pinned them. Until they have touched a pin the fixed reads stand pinned, so the section
- *  arrives holding its own destinations. */
+/** What the member pinned into the sidebar — apps by id, in the order they pinned them. Until
+ *  they have touched a pin (`null`), the workspace's shipped apps stand pinned, so the sidebar
+ *  arrives holding its own destinations. A stored id no live agent answers (an app since removed)
+ *  resolves to nothing rather than a row. */
 const PINNED_KEY = "pinned-rows";
 
-function heldPinned(): string[] {
+/** Chat leads: it is the app a member reaches for first, and the rest read in name order. */
+
+function heldPinned(): string[] | null {
   const held = localStorage.getItem(PINNED_KEY);
-  return held === null ? [...APPLICATION_SECTIONS] : held.split("\n").filter(Boolean);
+  return held === null ? null : held.split("\n").filter(Boolean);
+}
+
+function defaultPins(agents: Agent[]): string[] {
+  const apps = agents.filter((agent) => agent.app && agent.app !== CHAT_SURFACE);
+  apps.sort((a, b) => a.name.localeCompare(b.name));
+  return apps.map((agent) => agent.id);
 }
 
 function holdPinned(pinned: string[]): void {
@@ -784,21 +813,9 @@ const NewChatGlyph = () => <IconEdit className={GLYPH} aria-hidden />;
 const AppsGlyph = () => <IconApps className={GLYPH} aria-hidden />;
 const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 
-const SECTION_GLYPHS: Record<Section, React.ReactNode> = {
-  wiki: <IconBook className={GLYPH} aria-hidden />,
-  radar: <IconRadar className={GLYPH} aria-hidden />,
-  tasks: <IconClockPlay className={GLYPH} aria-hidden />,
-  artifacts: <IconBooks className={GLYPH} aria-hidden />,
+const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
   connectors: <IconPlug className={GLYPH} aria-hidden />,
 };
-
-/** The fixed reads the Applications section carries beside the apps: destinations that read
- *  across apps rather than being one. They pin and unpin exactly as an app does. */
-const APPLICATION_SECTIONS: Section[] = ["wiki", "artifacts", "radar", "tasks"];
-
-/** The destinations a section's own name moves between: the group the sidebar files it under. An
- *  application switches to the other applications; a section the sidebar stands on its own stands
- *  on its own here too, and its name is a name rather than a control. */
 
 const FLYOUT_ID = "applications-flyout";
 
@@ -929,7 +946,6 @@ function ApplicationsFlyout({
   onPin,
   onOpenAgent,
   onBuild,
-  onSection,
 }: {
   route: Route;
   agents: Agent[];
@@ -938,7 +954,6 @@ function ApplicationsFlyout({
   onPin: (agentId: string) => void;
   onOpenAgent: (agentId: string) => void;
   onBuild: () => void;
-  onSection: (section: Section) => void;
 }) {
   const [open, setOpen] = useState(false);
   useEffect(() => {
@@ -1012,55 +1027,7 @@ function ApplicationsFlyout({
               setOpen(false);
               onBuild();
             }}
-          >
-            {APPLICATION_SECTIONS.map((section) => {
-              const held = pinned.includes(section);
-              const current = route.kind === "section" && route.section === section;
-              return (
-                <li
-                  key={section}
-                  className={cn(
-                    "group/row flex items-center rounded-row hover:bg-fill",
-                    current && "bg-fill",
-                  )}
-                >
-                  <button
-                    type="button"
-                    aria-current={current}
-                    onClick={() => {
-                      setOpen(false);
-                      onSection(section);
-                    }}
-                    className={cn(
-                      "flex min-h-(--size-row) min-w-0 flex-1 items-center gap-sm border-0",
-                      "bg-transparent px-sm py-2xs text-left text-label text-inherit",
-                    )}
-                  >
-                    {SECTION_GLYPHS[section]}
-                    <span className="min-w-0 flex-1 truncate">{SECTION_VIEWS[section].label}</span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={(held ? "Unpin " : "Pin ") + SECTION_VIEWS[section].label}
-                    aria-pressed={held}
-                    onClick={() => onPin(section)}
-                    className={cn(
-                      "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
-                      held
-                        ? undefined
-                        : "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
-                    )}
-                  >
-                    {held ? (
-                      <IconPinFilled className="size-icon" aria-hidden />
-                    ) : (
-                      <IconPin className="size-icon" aria-hidden />
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </AppsIndex>
+          />
         </div>
       ) : null}
     </div>
@@ -1077,6 +1044,7 @@ function WorkspaceSidebar({
   agents,
   member,
   mainAgent,
+  chatApp,
   narrow,
   collapsed,
   onCollapsed,
@@ -1089,6 +1057,7 @@ function WorkspaceSidebar({
   onShut,
   onNewChat,
   onOpen,
+  onOpenAgentPlace,
   onRetry,
   onOpenAgent,
   onBuild,
@@ -1102,6 +1071,7 @@ function WorkspaceSidebar({
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
+  chatApp: Agent | null;
   narrow: boolean;
   collapsed: boolean;
   onCollapsed: (next: boolean) => void;
@@ -1113,7 +1083,8 @@ function WorkspaceSidebar({
   shut: string[] | null;
   onShut: (shut: string[]) => void;
   onNewChat: (agentId: string) => void;
-  onOpen: (conversationId: string) => void;
+  onOpen: (conversationId: string, agentId: string) => void;
+  onOpenAgentPlace: (agentId: string, place: WorkspacePlace) => void;
   onRetry: () => void;
   onOpenAgent: (agentId: string) => void;
   onBuild: () => void;
@@ -1169,10 +1140,19 @@ function WorkspaceSidebar({
           <li>
             <NavRow
               icon={<NewChatGlyph />}
-              current={route.kind === "new-chat" || route.kind === "home"}
+              current={
+                route.kind === "new-chat" ||
+                route.kind === "home" ||
+                (chatApp !== null &&
+                  route.kind === "agent" &&
+                  route.agentId === chatApp.id &&
+                  route.place.opens?.[0] === COMPOSE)
+              }
               collapsed={collapsed}
               label="New conversation"
-              onClick={() => onNewChat(mainAgent.id)}
+              onClick={() =>
+                chatApp ? onOpenAgentPlace(chatApp.id, { opens: [COMPOSE] }) : onNewChat(mainAgent.id)
+              }
             >
               New conversation
             </NavRow>
@@ -1188,26 +1168,9 @@ function WorkspaceSidebar({
           onPin={onPin}
           onOpenAgent={onOpenAgent}
           onBuild={onBuild}
-          onSection={onSection}
         />
         <ul className="m-0 flex list-none flex-col gap-px p-0">
           {pinned.map((id) => {
-            const section = APPLICATION_SECTIONS.find((name) => name === id);
-            if (section) {
-              return (
-                <li key={section}>
-                  <NavRow
-                    icon={SECTION_GLYPHS[section]}
-                    current={route.kind === "section" && route.section === section}
-                    collapsed={collapsed}
-                    label={SECTION_VIEWS[section].label}
-                    onClick={() => onSection(section)}
-                  >
-                    {SECTION_VIEWS[section].label}
-                  </NavRow>
-                </li>
-              );
-            }
             const agent = agents.find((entry) => entry.id === id);
             if (!agent) return null;
             return (
@@ -1239,6 +1202,7 @@ function WorkspaceSidebar({
           rail={rail}
           route={route}
           mainAgent={mainAgent}
+          chatApp={chatApp}
           sort={sort}
           shown={shown}
           shut={shut}
@@ -1253,10 +1217,10 @@ function WorkspaceSidebar({
             icon={SECTION_GLYPHS.connectors}
             current={route.kind === "section" && route.section === "connectors"}
             collapsed={collapsed}
-            label={SECTION_VIEWS.connectors.label}
+            label={CONNECTORS.label}
             onClick={() => onSection("connectors")}
           >
-            {SECTION_VIEWS.connectors.label}
+            {CONNECTORS.label}
           </NavRow>
         </li>
         <li>
@@ -1302,6 +1266,21 @@ function WorkspaceSidebar({
       </footer>
     </nav>,
   );
+}
+
+/** A section address whose screen ships as an app: the name outlives who renders it, so the
+ *  address lands on that app with its place carried rather than dying as a bad link. */
+function SectionLanding({
+  agentId,
+  place,
+  onLand,
+}: {
+  agentId: string;
+  place: WorkspacePlace;
+  onLand: (agentId: string, place: WorkspacePlace) => void;
+}) {
+  useEffect(() => onLand(agentId, place), [agentId, place, onLand]);
+  return null;
 }
 
 function RoutedPane({
@@ -1360,11 +1339,23 @@ function RoutedPane({
     );
   }
   if (route.kind === "section") {
+    const view = SECTION_VIEWS[route.section];
+    if (view === undefined) {
+      const shipped = agents.find((agent) => agent.app === route.section);
+      if (!shipped) return <PaneNote>This link is not valid.</PaneNote>;
+      return (
+        <SectionLanding
+          agentId={shipped.id}
+          place={route.place}
+          onLand={onOpenAgentPlace}
+        />
+      );
+    }
     return (
       <TabbedPane
         group="section"
         tabs={[route.section]}
-        views={SECTION_VIEWS}
+        views={{ [route.section]: view } as Record<Section, PaneView>}
         view={route.section}
         place={route.place}
         onPlace={onPlaceSection}
@@ -1575,14 +1566,6 @@ function NotShared() {
   return <PaneNote>This conversation is not shared with this account.</PaneNote>;
 }
 
-function PaneNote({ children }: { children: React.ReactNode }) {
-  return (
-    <Pane className={COLUMN}>
-      <div className="m-auto max-w-empty text-center text-ink-soft">{children}</div>
-    </Pane>
-  );
-}
-
 const RAIL_PANEL_ID = "conversation-settings-flyout";
 
 /** The conversations header and the settings flyout it holds: the same band, the same hover, and
@@ -1788,6 +1771,7 @@ function RailList({
   rail,
   route,
   mainAgent,
+  chatApp,
   sort,
   shown,
   shut,
@@ -1798,11 +1782,12 @@ function RailList({
   rail: Rail;
   route: Route;
   mainAgent: Agent | null;
+  chatApp: Agent | null;
   sort: RailSort;
   shown: RailShown;
   shut: string[] | null;
   onShut: (shut: string[]) => void;
-  onOpen: (conversationId: string) => void;
+  onOpen: (conversationId: string, agentId: string) => void;
   onRetry: () => void;
 }) {
   const now = new Date();
@@ -1863,11 +1848,15 @@ function RailList({
                     <li key={row.conversation_id}>
                       <RailRow
                         current={
-                          (route.kind === "chat" || route.kind === "conversation-slot") &&
-                          route.conversationId === row.conversation_id
+                          ((route.kind === "chat" || route.kind === "conversation-slot") &&
+                            route.conversationId === row.conversation_id) ||
+                          (chatApp !== null &&
+                            route.kind === "agent" &&
+                            route.agentId === chatApp.id &&
+                            route.place.opens?.[0] === row.conversation_id)
                         }
                         facts={facts.length ? facts.join(" · ") : null}
-                        onClick={() => onOpen(row.conversation_id)}
+                        onClick={() => onOpen(row.conversation_id, row.agent_id)}
                       >
                         <span className="min-w-0 flex-1 truncate">{row.title}</span>
                         <SurfaceGlyph surface={row.surface} />

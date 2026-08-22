@@ -67,7 +67,7 @@ function where(
     case "workspace":
       return [WORKSPACE_VIEWS[route.view].label, WORKSPACE];
     case "section":
-      return [SECTION_VIEWS[route.section].label];
+      return [SECTION_VIEWS[route.section]?.label ?? agentName(route.section)];
     case "admin":
       return [ADMINISTRATION];
     case "bad-link":

@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import { parseHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -120,8 +119,29 @@ function nothing() {
   });
 }
 
+/** The shipped apps whose panes hold the workspace's records: a file or task hit lands on the app
+ *  that reads its kind, so the fixture set carries both. */
+const ARTIFACTS_APP = {
+  id: "7f1b9f6e-9f30-4f8f-9a6e-1d9d1c2b3a41",
+  name: "artifacts",
+  model: "auto",
+  main: false,
+  icon: "stele",
+  app: "artifacts",
+};
+const TASKS_APP = {
+  id: "8c2d0a7f-0a41-4b90-8b7f-2e0e2d3c4b52",
+  name: "tasks",
+  model: "auto",
+  main: false,
+  icon: "flange",
+  app: "tasks",
+};
+
 function portal() {
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+  render(
+    <App agents={[AGENT, SECOND, ARTIFACTS_APP, TASKS_APP]} member={MEMBER} onAgents={() => {}} />,
+  );
 }
 
 function open() {
@@ -207,95 +227,10 @@ test("a hit opens the place that holds it", async () => {
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
-test("an artifact hit opens the artifacts screen on that file", async () => {
-  everything();
-  await open();
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(await found.findByRole("option", { name: /deploy-plan.md/ }));
-
-  expect(location.hash).toBe("#/artifacts?q=deploy&open=" + FOUND_FILE.id);
-});
-
-/** A filename is whatever the agent sharing the file called it — the character a track is written
- *  with included, and at whatever length. One such file among the answers is one hit to draw, never
- *  a search the member reads as broken: every other kind still stands, and the file opens where
- *  files open, because a lane is named by the file's own id. */
-const ODD_FOUND_NAME = "deploy~v2-" + "and-the-whole-quarter-".repeat(20) + "final.md";
-
-test("a found file named oddly and past what a lane id holds leaves every hit standing", async () => {
-  wire({
-    "/slots": () => json({ slots: [] }),
-    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
-    "/workspace/artifacts": () =>
-      json({ artifacts: [{ ...FOUND_FILE, id: "f2", filename: ODD_FOUND_NAME }] }),
-    "/workspace/memory": () => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }),
-    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
-    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
-    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, []),
-    "/transcript": () => json({ messages: [] }),
-  });
-  await open();
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: new RegExp(ODD_FOUND_NAME) })).toBeTruthy();
-  expect(found.getByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
-  expect(found.getByRole("option", { name: /the deploy runbook lives in ops\// })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory"]);
-
-  await userEvent.click(found.getByRole("option", { name: new RegExp(ODD_FOUND_NAME) }));
-
-  expect(location.hash).toBe("#/artifacts?q=deploy&open=f2");
-  expect(parseHash(location.hash)).toMatchObject({ kind: "section", section: "artifacts" });
-});
 
 /** A site belongs to the workspace, not to an agent, so its read names one agent — as the
  *  artifacts screen's does. Fanning it out would list the one site once per agent. It is listed
  *  and opened where sites live, which is the artifacts screen, never the radar feed. */
-test("a hosted site stands once, under artifacts, and opens there", async () => {
-  const site = owned({ name: "deploy-notes", summary: "a page about deploys", site_url: "s" });
-  const record = {
-    ...SITE_KIND,
-    name: "deploy-notes",
-    summary: "a page about deploys",
-    spec: { visibility: "workspace" },
-    status: { conversation: CONVO_ID, visibility: "workspace", site_url: "s", owner_email: null },
-    links: [],
-    created_at: "2026-08-14T09:00:00Z",
-    updated_at: null,
-  };
-  const { calls } = wire({
-    ["/objects/" + SITE_KIND.kind + "/deploy-notes"]: () => json(record),
-    "/slots": () => json({ slots: [] }),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
-    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
-    ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
-    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
-    ["/objects/" + SITE_KIND.kind]: () => objectIndex(SITE_KIND, [site]),
-    "/transcript": () => json({ messages: [] }),
-  });
-  await open();
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  const rows = await found.findAllByRole("option", { name: /deploy-notes/ });
-  expect(rows).toHaveLength(1);
-  const siteReads = calls.filter((url) => url.includes("/objects/" + SITE_KIND.kind));
-  expect(siteReads).toHaveLength(1);
-  expect(siteReads[0]).toContain("agent=" + AGENT_ID);
-  // Sites are listed where sites live: the artifacts screen, whose filter holds a Sites family.
-  expect(headings()).toEqual(["Actions", "Artifacts"]);
-
-  await userEvent.click(rows[0]);
-
-  const opened = decodeURIComponent(location.hash);
-  expect(opened).toContain("#/artifacts?");
-  expect(opened).toContain("chip=Sites");
-  expect(opened).toContain("object/" + AGENT_ID + "/site/deploy-notes");
-  expect(opened).not.toContain("tasks");
-});
 
 /** An object's name is unique under its own agent, not across the workspace, so two agents may
  *  each hold a `nightly-deploy`. Both stand, and each hit opens the lane naming its own agent: the
@@ -320,24 +255,12 @@ test("two agents' same-named records both stand, each opening its own", async ()
   expect(rows).toHaveLength(2);
 
   await userEvent.click(rows[1]);
+  expect(location.hash.startsWith("#/agents/" + TASKS_APP.id)).toBe(true);
   expect(decodeURIComponent(location.hash)).toContain(
     "object/" + SECOND_ID + "/" + TASK_KIND.kind + "/nightly-deploy",
   );
 });
 
-test("a task hit opens that record on the tasks screen", async () => {
-  everything();
-  await open();
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(await found.findByRole("option", { name: /nightly-deploy/ }));
-
-  const opened = decodeURIComponent(location.hash);
-  expect(opened).toContain("#/tasks?");
-  expect(opened).toContain("chip=" + TASK_KIND.kind);
-  expect(opened).toContain("object/" + AGENT_ID + "/" + TASK_KIND.kind + "/nightly-deploy");
-});
 
 /** A read that refused is not a kind with no hits: the group states the refusal, so the member
  *  never reads a searched workspace as an empty one. */
@@ -430,17 +353,7 @@ test("an unopened term lists what to do and where to go, and reads nothing", asy
   expect(headings()).toEqual(["Actions", "Places"]);
   expect(
     found.getAllByRole("option").map((row) => row.textContent),
-  ).toEqual([
-    "New chat",
-    "Chat",
-    "Apps",
-    "Wiki",
-    "Artifacts",
-    "Radar",
-    "Tasks",
-    "Connectors",
-    "Workspace",
-  ]);
+  ).toEqual(["New chat", "Chat", "Apps", "Connectors", "Workspace"]);
   expect(calls.some((url) => url.includes("q="))).toBe(false);
 });
 
@@ -456,16 +369,6 @@ test("the arrow keys move the cursor and Enter takes the row under it", async ()
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
-test("a place opens the screen it names", async () => {
-  everything();
-  await open();
-  await type("radar");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(found.getByRole("option", { name: "Radar" }));
-
-  expect(location.hash).toBe("#/radar");
-});
 
 /** The words are the member's own and they pressed Enter on them, so the row says them: it lands on
  *  a new chat with the term already sent, not with the box filled and waiting for a second press.

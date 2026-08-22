@@ -212,14 +212,22 @@ def test_ingress_public_url_must_be_a_full_https_base(tmp_path: Path) -> None:
     """Every site's address is built by putting a label in front of this host, so a bare hostname or
     a path-only value would mint links to nowhere. `http` is refused for a reason of its own: the
     session cookie the ingress binds is `Secure`, so a plain-http origin can never carry one and
-    every visit would 403 after booting green. Caught at load, not at the first site."""
+    every visit would 403 after booting green. The one exempt host is `localhost` — browsers treat
+    `http://*.localhost` as trustworthy, so a zero-services dev run serves sites with no
+    certificate. Caught at load, not at the first site."""
     path = tmp_path / "ufo.toml"
     for rejected in ("sites.example.com", "http://sites.example.com", "ws://sites.example.com"):
         path.write_text(VALID + f'\n[sandbox]\ningress_public_url = "{rejected}"\n')
         with pytest.raises(ValidationError):
             load_config(path)
-    path.write_text(VALID + '\n[sandbox]\ningress_public_url = "https://sites.example.com"\n')
-    assert load_config(path).sandbox.ingress_public_url == "https://sites.example.com"
+    for accepted in (
+        "https://sites.example.com",
+        "http://localhost:8100",
+        "http://ufo.localhost:8100",
+        "https://localhost:8443",
+    ):
+        path.write_text(VALID + f'\n[sandbox]\ningress_public_url = "{accepted}"\n')
+        assert load_config(path).sandbox.ingress_public_url == accepted
 
 
 def test_ingress_public_url_is_a_scheme_and_a_host_and_nothing_else(tmp_path: Path) -> None:

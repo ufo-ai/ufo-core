@@ -10,12 +10,9 @@ import {
   MEMBER,
   SETTINGS,
   StreamFake,
-  TASK_KIND,
-  TRIGGER_KIND,
   TURN_ID,
   json,
   openAgentSettings,
-  objectIndex,
   useStreamFake,
   wire,
 } from "./harness";
@@ -389,33 +386,3 @@ test("a refused store states the reason the server gave and keeps the field", as
   expect(screen.getByLabelText("the key")).toBeTruthy();
 });
 
-test("the scheduled and settings refusals tone their notices", async () => {
-  const refuse = () => json({ applied: false, message: "The workspace refuses it." });
-
-  location.hash = "#/tasks?chip=scheduled_task";
-  wire({
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
-    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-    "/transcript": () => json({ messages: [] }),
-    "/intents": refuse,
-  });
-  const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(await screen.findByRole("button", { name: "New scheduled task" }));
-  await userEvent.type(await screen.findByLabelText("Name"), "digest");
-  await userEvent.click(screen.getByRole("button", { name: "Create" }));
-  await refusedNotice("The workspace refuses it.");
-  first.unmount();
-
-  location.hash = "#/agents/" + AGENT.id;
-  wire({
-    "/settings": () => json(SETTINGS),
-    "/connections": () => json({ connections: [] }),
-    "/transcript": () => json({ messages: [] }),
-    "/intents": refuse,
-  });
-  const second = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await openAgentSettings();
-  await userEvent.click(await screen.findByRole("button", { name: "Save" }));
-  await refusedNotice("The workspace refuses it.");
-  second.unmount();
-});

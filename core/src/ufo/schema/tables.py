@@ -458,6 +458,23 @@ workspace_balance = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
 
+object_change = sa.Table(
+    "object_change",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("kind", sa.Text, nullable=False),
+    sa.Column("name", sa.Text, nullable=False),
+    sa.Column("verb", sa.Text, nullable=False),
+    sa.Column("caller", sa.Text, nullable=False),
+    sa.Column("agent_id", sa.Uuid, nullable=False),
+    sa.Column("spec_before", sa.Text, nullable=True),
+    sa.Column("spec_after", sa.Text, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("verb in ('create', 'update', 'delete')", name="object_change_verb"),
+    sa.Index("object_change_workspace", "workspace_id", "created_at"),
+)
+
 credential = sa.Table(
     "credential",
     metadata,

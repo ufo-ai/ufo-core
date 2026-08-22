@@ -551,7 +551,7 @@ async def test_start_server_serves_a_static_folder_without_a_command(tmp_path: P
     payload = json.loads(result.content[0].text)
     assert payload["url"] == "http://localhost:5173"
     launch = next(command for command in sandbox.commands if "nohup" in command)
-    assert "nohup python3 -m http.server 5173 --bind 0.0.0.0" in launch
+    assert "nohup env PORT=5173 python3 -m http.server 5173 --bind 0.0.0.0" in launch
 
 
 async def test_the_failure_log_tail_states_its_own_budget(tmp_path: Path) -> None:

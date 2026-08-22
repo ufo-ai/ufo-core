@@ -308,6 +308,22 @@ class Admitted:
     arrival_id: UUID | None = None
 
 
+@dataclass(frozen=True)
+class ObjectChange:
+    """One row of the object-change journal, as the admin audit read renders it: the verb, the
+    caller that ran it (`member:<id>` or `turn:<id>`), the agent whose namespace the object landed
+    in, the kind and name, the before/after specs, and when."""
+
+    kind: str
+    name: str
+    verb: str
+    caller: str
+    agent_id: UUID
+    spec_before: str | None
+    spec_after: str | None
+    created_at: datetime
+
+
 class MemberAdmitter(Protocol):
     """Admit a member message as the member who spoke it."""
 
@@ -598,7 +614,9 @@ class AgentSummary(BaseModel):
     the row (None for the main agent and provisioned rows), so an audience can give an owner
     their own agent without a separate grant. `visibility` is the agent's own audience floor:
     `workspace` answers every member, `private` its owner and admins plus per-surface grants.
-    `icon` is the slug the surface draws the agent with."""
+    `icon` is the slug the surface draws the agent with. `provisioned_by` names the extension
+    whose provision created the row (None for member-created rows and main), so a surface can
+    tell a shipped app from an agent a member built."""
 
     id: UUID
     name: str
@@ -608,6 +626,7 @@ class AgentSummary(BaseModel):
     visibility: AgentVisibility
     icon: TablerIcon
     owner_member_id: UUID | None = None
+    provisioned_by: str | None = None
 
 
 class InstallationSummary(BaseModel):
@@ -2107,6 +2126,7 @@ class SurfaceContext:
                         tables.agent.c.visibility,
                         tables.agent.c.icon,
                         tables.agent.c.owner_member_id,
+                        tables.agent.c.provisioned_by,
                     )
                     .where(tables.agent.c.workspace_id == self.workspace_id)
                     .order_by(tables.agent.c.is_main.desc(), tables.agent.c.name)
@@ -2122,6 +2142,7 @@ class SurfaceContext:
                 visibility=row.visibility,
                 icon=row.icon,
                 owner_member_id=row.owner_member_id,
+                provisioned_by=row.provisioned_by,
             )
             for row in rows
         )
@@ -2612,6 +2633,47 @@ class SurfaceContext:
                 row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
                 str(row.id),
             ),
+        )
+
+    async def recent_object_changes(self, limit: int) -> tuple[ObjectChange, ...]:
+        """The workspace's most recent object-change journal rows, newest first — the admin audit
+        read of every create/update/delete the object verbs recorded. Reads the core journal
+        directly; the surface that calls it admin-gates the read, since the journal is the
+        operator's record rather than a member surface."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.object_change.c.kind,
+                        tables.object_change.c.name,
+                        tables.object_change.c.verb,
+                        tables.object_change.c.caller,
+                        tables.object_change.c.agent_id,
+                        tables.object_change.c.spec_before,
+                        tables.object_change.c.spec_after,
+                        tables.object_change.c.created_at,
+                    )
+                    .where(tables.object_change.c.workspace_id == self.workspace_id)
+                    .order_by(tables.object_change.c.created_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        return tuple(
+            ObjectChange(
+                kind=row.kind,
+                name=row.name,
+                verb=row.verb,
+                caller=row.caller,
+                agent_id=row.agent_id,
+                spec_before=row.spec_before,
+                spec_after=row.spec_after,
+                created_at=(
+                    row.created_at
+                    if row.created_at.tzinfo is not None
+                    else row.created_at.replace(tzinfo=UTC)
+                ),
+            )
+            for row in rows
         )
 
     async def list_conversation_artifacts(

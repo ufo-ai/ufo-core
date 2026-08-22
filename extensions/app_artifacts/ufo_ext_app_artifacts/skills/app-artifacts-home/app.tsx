@@ -1,51 +1,61 @@
-import { IconWorldWww } from "@tabler/icons-react";
-import { useCallback, useRef, useState, type ReactNode, type RefObject } from "react";
+// The artifacts app's page: TSX compiled in the browser by the portal's app kit. Everything it
+// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
 
-import { Button, buttonVariants } from "@/components/ui/button";
-import { Segmented } from "@/components/ui/filter";
-import { Lede, Td, TdFact } from "@/components/ui/table";
-import { ArtifactText, MediaIcon, isTextMedia } from "@/kernel/artifact";
-import { CardGrid } from "@/kernel/cards";
-import {
+const {
+  ArtifactText,
+  Button,
+  CardGrid,
+  DataTable,
+  FacetMenu,
+  IconWorldWww,
+  Lede,
+  MediaIcon,
+  Moment,
   OWNER_FIELD,
   ObjectDetail,
-  creator,
-  objectAt,
-  slotOf,
-  type ObjectRow,
-} from "@/kernel/objects";
-import { Pager, type Placement } from "@/kernel/pager";
-import {
-  FacetMenu,
   PageToolbar,
-  ToolbarRule,
-  ViewSwitch,
-  type Face,
-  type FacetGroup,
-} from "@/kernel/pane";
-import {
+  Pager,
   Panel,
   PanelBlank,
   PanelEmpty,
+  React,
   Section,
+  SectionApp,
+  Segmented,
+  Td,
+  TdFact,
+  ToolbarRule,
+  ViewSwitch,
+  appended,
+  beside,
+  buttonVariants,
+  chatHash,
+  closed,
+  cn,
+  creator,
+  formatSize,
+  isTextMedia,
+  mountApp,
+  objectAt,
+  opened,
+  ownerLabel,
+  slackLink,
+  slotOf,
+  useCallback,
+  useMainAgent,
   usePanelRead,
-  type PanelState,
-} from "@/kernel/panel";
-import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
-import { DataTable } from "@/kernel/table";
-import { ownerLabel, slackLink, useViewer } from "@/lib/audience";
-import { cn } from "@/lib/cn";
-import { useMainAgent } from "@/lib/mainAgent";
-import { Moment } from "@/lib/moments";
-import { chatHash } from "@/lib/route";
-import { formatSize } from "@/lib/size";
+  useRef,
+  useSlot,
+  useState,
+  useViewer,
+} = UfoAppKit;
 
 const SITE_KIND = "site";
 
 const NOT_FOUND = 404;
 /** What the shelf is called where a lane has to say where it was opened from. */
 const SHELF = "Artifacts";
-export const SITE_FAMILY = "Sites";
+const SITE_FAMILY = "Sites";
 const MEDIA: Record<string, string> = {
   Images: "image",
   Documents: "document",
@@ -210,7 +220,7 @@ function tileExcerpt(file: Artifact | null): ReactNode {
  *  the file — free text of any length, holding the characters a track is written with — so a lane
  *  named off it is a lane the address cannot always carry. The spotlight mints the same id from
  *  the same fact, which is what makes a hit open the card this shelf lists. */
-export function fileKey(file: { id: string }): string {
+function fileKey(file: { id: string }): string {
   return file.id;
 }
 
@@ -339,7 +349,7 @@ function SiteView({ url, name }: { url: string; name: string }) {
   );
 }
 
-export function Artifacts({
+function Artifacts({
   place,
   onPlace,
 }: {
@@ -696,3 +706,16 @@ function FullImage({ entry }: { entry: Artifact }) {
     />
   );
 }
+
+mountApp(document.getElementById("root")!, (init) => (
+  <SectionApp
+    tab="artifacts"
+    init={init}
+    view={{
+      label: "Artifacts",
+      remountOnPlace: false,
+      search: "Search artifacts",
+      render: (place, onPlace) => <Artifacts place={place} onPlace={onPlace} />,
+    }}
+  />
+));

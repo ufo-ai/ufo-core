@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   IconApps,
-  IconBook,
-  IconBooks,
-  IconClockPlay,
   IconMessage,
   IconPlug,
   IconPlus,
-  IconRadar,
   IconSearch,
   IconUsers,
   type TablerIcon,
@@ -49,25 +45,23 @@ const WORKING = "Searching…";
  *  `ctrl+k` is kill-line in every readline-shaped field, so it is not a chord to take away. */
 const CHORD = "k";
 
-const SECTION_ICONS: Record<Section, TablerIcon> = {
-  wiki: IconBook,
-  artifacts: IconBooks,
-  radar: IconRadar,
-  tasks: IconClockPlay,
+const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
   connectors: IconPlug,
 };
 
 /** Where the bar reaches, in the order it lists them. These rows are the same destinations as the
  *  buttons beside the search glyph — the palette adds no place the nav does not already carry —
- *  and each takes the glyph its kind is drawn with wherever a hit of that kind stands. */
+ *  and each takes the glyph its kind is drawn with wherever a hit of that kind stands. App-shipped
+ *  screens stand in the palette as the apps themselves, so only the portal's own sections list. */
 const PLACES: { label: string; hash: string; icon: TablerIcon }[] = [
   { label: "Chat", hash: HOME_HASH, icon: IconMessage },
   { label: "Apps", hash: AGENTS_HASH, icon: IconApps },
-  ...SECTIONS.map((section) => ({
-    label: SECTION_VIEWS[section].label,
-    hash: sectionHash(section),
-    icon: SECTION_ICONS[section],
-  })),
+  ...SECTIONS.flatMap((section) => {
+    const view = SECTION_VIEWS[section];
+    const icon = SECTION_ICONS[section];
+    if (!view || !icon) return [];
+    return [{ label: view.label, hash: sectionHash(section), icon }];
+  }),
   { label: "Workspace", hash: workspaceHash("team"), icon: IconUsers },
 ];
 

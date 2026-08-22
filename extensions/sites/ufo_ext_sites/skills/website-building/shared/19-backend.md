@@ -13,9 +13,9 @@ Run a real server process (FastAPI, Express, Flask, etc.) inside the sandbox. Us
 
 The cleanest setup serves the frontend **and** the API from one server on one port, so everything shares a single origin (`http://localhost:<port>`) and the frontend can call the API with relative `/api/...` paths — no cross-origin, no URL injection.
 
-1. Write a server that listens on a port (e.g., 8000) and serves both your static files and `/api/...` routes
+1. Write a server that listens on the `PORT` environment variable (default 8000 for local testing) and serves both your static files and `/api/...` routes
 2. During the build, run it with `start_server(command=…, project_path=…, port=…)` to test
-3. Ship it with `publish_website(project_path=…, app_name=…, install_command=…, run_command=…)` — it installs dependencies, runs your server, and returns the reachable URL. A website-building subagent does not hold this tool: stop after step 2 and report that the app needs publishing, for the agent that delegated to you to do from these same files
+3. Ship it with `publish_website(project_path=…, app_name=…, install_command=…, run_command=…)` — it installs dependencies, runs your server with `PORT` set to the port it probes, and returns the reachable URL. A server that ignores `PORT` never reports ready. A website-building subagent does not hold this tool: stop after step 2 and report that the app needs publishing, for the agent that delegated to you to do from these same files
 
 The server is reachable at `http://localhost:<port>` inside the sandbox. Bind to `0.0.0.0` so the readiness probe on `127.0.0.1` connects.
 
@@ -27,7 +27,8 @@ Create a standard server in your project directory. Mount your static frontend o
 
 ```python
 #!/usr/bin/env python3
-"""api_server.py — runs on port 8000 inside the sandbox."""
+"""api_server.py — binds the PORT the runner sets; 8000 when run by hand."""
+import os
 import sqlite3
 from contextlib import asynccontextmanager
 
@@ -70,7 +71,7 @@ app.mount("/", StaticFiles(directory="public", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
 ```
 
 ### 2. Start the Server (during the build)

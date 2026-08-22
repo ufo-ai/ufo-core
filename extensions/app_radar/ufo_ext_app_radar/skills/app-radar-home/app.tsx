@@ -1,26 +1,52 @@
-import { useCallback, useLayoutEffect, useState, type MouseEvent } from "react";
+// The radar app's page: TSX compiled in the browser by the portal's app kit. Everything it
+// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button, buttonVariants } from "@/components/ui/button";
-import { Dialog, DialogTrigger } from "@/components/ui/dialog";
-import { PressRow } from "@/components/ui/pressrow";
-import { Sheet } from "@/components/ui/sheet";
-import { ARTIFACT_TEXT_BYTES, useTextArtifact } from "@/kernel/artifact";
-import { ObjectDetail, objectAt, slotOf, type ObjectAddress } from "@/kernel/objects";
-import { Pager, type Placement } from "@/kernel/pager";
-import { Header, usePageHead } from "@/kernel/pane";
-import { Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
-import { RebuildDialog } from "@/kernel/rebuild";
-import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
-import { slackLink } from "@/lib/audience";
-import { AgentIcon } from "@/lib/agentIcon";
-import { agentName } from "@/lib/agentName";
-import { cn } from "@/lib/cn";
-import { useAgents } from "@/lib/mainAgent";
-import { Markdown } from "@/lib/markdown";
-import { Moment } from "@/lib/moments";
-import { agentHash, chatHash, sectionHash } from "@/lib/route";
-import { formatSize } from "@/lib/size";
+const {
+  ARTIFACT_TEXT_BYTES,
+  AgentIcon,
+  Avatar,
+  AvatarFallback,
+  Button,
+  Dialog,
+  DialogTrigger,
+  Header,
+  Markdown,
+  Moment,
+  ObjectDetail,
+  Pager,
+  Panel,
+  PanelBlank,
+  PanelEmpty,
+  PressRow,
+  React,
+  RebuildDialog,
+  Section,
+  SectionApp,
+  Sheet,
+  agentHash,
+  agentName,
+  appended,
+  beside,
+  buttonVariants,
+  chatHash,
+  closed,
+  cn,
+  formatSize,
+  mountApp,
+  objectAt,
+  opened,
+  sectionHash,
+  slackLink,
+  slotOf,
+  useAgents,
+  useCallback,
+  useLayoutEffect,
+  usePageHead,
+  usePanelRead,
+  useSlot,
+  useState,
+  useTextArtifact,
+} = UfoAppKit;
 
 const TASK_KIND = "scheduled_task";
 const RUN_PREFIX = "run/";
@@ -31,7 +57,7 @@ const DONE = "done";
  *  coming. */
 const REPORT = "Report";
 
-export type RadarArtifact = {
+type RadarArtifact = {
   filename: string;
   subject: string | null;
   media_type: string;
@@ -40,7 +66,7 @@ export type RadarArtifact = {
   preview_url: string | null;
 };
 
-export type RadarRun = {
+type RadarRun = {
   turn_id: string;
   conversation_id: string;
   agent_id: string;
@@ -56,13 +82,13 @@ export type RadarRun = {
 
 /** One finding as the digest writer states it, and — where the report says who did the thing —
  *  the person who did it. */
-export type DigestPoint = { text: string; actor: string };
+type DigestPoint = { text: string; actor: string };
 
 /** What the report-digest skill wrote about one report. A report published since the job last ran
  *  carries none yet, and stands on its task's name until it does. */
-export type DigestWritten = { title: string; summary: string; points: DigestPoint[] };
+type DigestWritten = { title: string; summary: string; points: DigestPoint[] };
 
-export type RadarPayload = { runs: RadarRun[]; older?: string | null; newer?: string | null };
+type RadarPayload = { runs: RadarRun[]; older?: string | null; newer?: string | null };
 
 /** A run that ended well needs no mark beside its own reply; the other endings are stated. */
 const STATUS_NOTES: Record<string, string> = {
@@ -86,7 +112,7 @@ const STATUS_NOTES: Record<string, string> = {
  *
  *  The one act on the whole feed stands on that band, and only there: a member reading one report
  *  is reading it, not maintaining the list they reached it from. */
-export function Radar({
+function Radar({
   title,
   place,
   onPlace,
@@ -589,7 +615,7 @@ function TaskName({
 }) {
   const id = slotOf({ agent: agentId, kind: TASK_KIND, name: task });
   const standing = opens.includes(id);
-  const press = (event: MouseEvent<HTMLButtonElement>) =>
+  const press = (event: ReactMouseEvent<HTMLButtonElement>) =>
     onPlace({ opens: beside(event) ? appended(opens, id) : opened(opens, id, from) });
   return (
     <button
@@ -738,3 +764,16 @@ function FullPicture({ artifact }: { artifact: RadarArtifact }) {
     />
   );
 }
+
+mountApp(document.getElementById("root")!, (init) => (
+  <SectionApp
+    tab="radar"
+    init={init}
+    view={{
+      label: "Radar",
+      remountOnPlace: false,
+      ownsHeader: true,
+      render: (place, onPlace) => <Radar title="Radar" place={place} onPlace={onPlace} />,
+    }}
+  />
+));

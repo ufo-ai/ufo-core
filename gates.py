@@ -40,7 +40,8 @@ SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "cancel", "list", "inspect"})
 PORTAL_SOURCE = Path("extensions/web/frontend/src")
-PORTAL_ENTRY = PORTAL_SOURCE / "main.tsx"
+APP_PAGE_GLOB = "extensions/app_*/ufo_ext_*/skills/*/app.tsx"
+PORTAL_ENTRIES = frozenset({PORTAL_SOURCE / "main.tsx", PORTAL_SOURCE / "apps" / "kit.ts"})
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
 PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
 STYLESHEET_IMPORT = re.compile(r"""["'][^"']*\.css["']""")
@@ -1516,7 +1517,9 @@ def _portal_style_failures() -> list[str]:
     there is the same escape by a different door. A bracket value in a class that names a raw
     measurement or colour re-decides a token inline — it must resolve through the theme
     (`var(--…)`) or stay structural. The refused class shapes are the ones with a shorter spelling
-    that already means the same thing, so the long form is drift rather than intent."""
+    that already means the same thing, so the long form is drift rather than intent. The extension
+    app pages compile in the browser against this same theme, so they are held to the same rules —
+    and a page glob that matches nothing is itself a failure, not a pass."""
     source = ROOT / PORTAL_SOURCE
     if not source.is_dir():
         return [f"{PORTAL_SOURCE}: the portal source is missing"]
@@ -1530,8 +1533,30 @@ def _portal_style_failures() -> list[str]:
         text = path.read_text()
         if "<style" in text:
             failures.append(f"{rel}: a view may not emit a <style> tag")
-        if STYLESHEET_IMPORT.search(text) and rel != PORTAL_ENTRY:
+        if STYLESHEET_IMPORT.search(text) and rel not in PORTAL_ENTRIES:
             failures.append(f"{rel}: only the entry module imports the theme")
+        failures.extend(
+            f"{rel}: {segment.group(0)} names a raw value — resolve it through a theme token"
+            for segment in BRACKET_SEGMENT.finditer(text)
+            if RAW_CSS_VALUE.search(segment.group(1))
+        )
+        failures.extend(
+            f"{rel}: {found.group(0)!r} — {refusal}"
+            for pattern, refusal in PORTAL_CLASS_REFUSALS
+            for found in pattern.finditer(text)
+        )
+    pages = sorted(ROOT.glob(APP_PAGE_GLOB))
+    if not pages:
+        failures.append(f"{APP_PAGE_GLOB}: no app pages found — the gate lost its subjects")
+    for path in pages:
+        rel = path.relative_to(ROOT)
+        text = path.read_text()
+        if "<style" in text:
+            failures.append(f"{rel}: a view may not emit a <style> tag")
+        if STYLESHEET_IMPORT.search(text):
+            failures.append(
+                f"{rel}: an app page imports no stylesheet — the kit's theme is the sheet"
+            )
         failures.extend(
             f"{rel}: {segment.group(0)} names a raw value — resolve it through a theme token"
             for segment in BRACKET_SEGMENT.finditer(text)

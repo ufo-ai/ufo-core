@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -245,9 +246,11 @@ export function SlotTrack({
     (id: string) => setEntries((held) => held.filter((slot) => slot.id !== id)),
     [],
   );
+  // A lane is a drag handle only where a drag can land somewhere: one lane alone has no order to
+  // restate, so its band is a band and not a grip.
   const move = useMemo(
     () =>
-      opens === undefined || onMove === undefined
+      opens === undefined || onMove === undefined || opens.length < 2
         ? undefined
         : (id: string, onto: string) => {
             const next = lifted(opens, id, onto);
@@ -349,6 +352,8 @@ export function useSlot(
     id: string;
     kind?: SlotKind;
     title?: string;
+    /** Controls the lane's own header carries — a panel whose acts belong to what it holds. */
+    acts?: ReactNode;
     /** The id of the line inside the lane that states what it does. */
     describes?: string;
     parent?: { label: string; onGo?: () => void };
@@ -357,7 +362,7 @@ export function useSlot(
 ): ReactNode {
   const { hosted, hosts, place, drop, move } = useContext(TrackContext);
   const here = useContext(HereContext);
-  const { id, kind = "reading", title, describes, parent, onClose } = slot;
+  const { id, kind = "reading", title, acts, describes, parent, onClose } = slot;
   const on = node !== null;
   const held = useRef<HTMLElement | null>(null);
   const host = hosts.get(id);
@@ -418,6 +423,7 @@ export function useSlot(
           })
         }
         className={cn(SLOT, WIDTHS[kind])}
+        style={{ "--pane-acts-inset": "0px" } as CSSProperties}
       >
         <Header
           pinned
@@ -425,6 +431,19 @@ export function useSlot(
           glyph={<Glyph aria-hidden />}
           parent={parent}
           title={title}
+          acts={
+            acts === undefined ? undefined : (
+              <span
+                className="contents"
+                onDragStart={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+              >
+                {acts}
+              </span>
+            )
+          }
           onClose={onClose}
           closes={title}
           onLift={move && ((event) => event.dataTransfer.setData(LIFTED, id))}

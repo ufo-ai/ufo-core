@@ -32,6 +32,7 @@ from ufo.sandbox.session import (
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     ProxyEndpoint,
+    SandboxHandle,
     SandboxSession,
     SandboxSpec,
 )
@@ -942,3 +943,11 @@ async def test_a_target_deleted_before_the_write_is_still_created(tmp_path: Path
     await carrier.write(handle, "/workspace/gone.txt", b"second")
 
     assert target.read_bytes() == b"second"
+
+
+async def test_dial_targets_the_loopback_port() -> None:
+    carrier = LocalCarrier()
+    handle = SandboxHandle(conversation_id=uuid4(), container_id=LOCAL_CONTAINER_ID)
+    target = await carrier.dial(handle, 8000)
+    assert target.host == "127.0.0.1:8000"
+    assert target.tls is False

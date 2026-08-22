@@ -48,6 +48,11 @@ CUSTOMERS_SECTION = PromptSection(
     ),
 )
 EXTENSIONS = (
+    "app_artifacts",
+    "app_chat",
+    "app_radar",
+    "app_tasks",
+    "app_wiki",
     "turbopuffer",
     "perplexity",
     "todos",

@@ -40,7 +40,6 @@ from ufo.sandbox.session import (
     ExecResult,
     SandboxHandle,
     SandboxSpec,
-    SandboxUnreachable,
     sbxfs_file_op,
 )
 
@@ -266,14 +265,12 @@ class LocalCarrier:
         return await sbxfs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
-        """The local carrier runs commands as host subprocesses, not a network-addressable sandbox,
-        so an in-sandbox service (a browser's CDP endpoint, a site's dev-server preview) has no
-        external per-port host — a deploy that reaches an in-sandbox port needs a remote carrier
-        (e2b)."""
-        raise SandboxUnreachable(
-            "the local carrier exposes no external per-port host; reach an in-sandbox service "
-            "through a remote carrier (e2b)"
-        )
+        """The local carrier runs commands as host subprocesses sharing the host network, so an
+        in-sandbox port is the same port on the loopback — the dial target is `127.0.0.1:port`,
+        plain HTTP. The cost of that sharing is one port namespace for every conversation: two
+        conversations serving the same port contend, and the newer deploy's server owns it. A
+        deploy needing per-conversation port isolation takes a container carrier (Docker, e2b)."""
+        return DialTarget(host=f"127.0.0.1:{port}", tls=False)
 
 
 async def _kill_process_group(process: asyncio.subprocess.Process) -> None:

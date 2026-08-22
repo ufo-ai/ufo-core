@@ -1,8 +1,16 @@
-import { useState } from "react";
+// The tasks app's page: TSX compiled in the browser by the portal's app kit. Everything it
+// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
 
-import { HeldRecords, ObjectPane } from "@/kernel/objects";
-import type { Placement } from "@/kernel/pager";
-import { Header, usePageHead } from "@/kernel/pane";
+const {
+  Header,
+  HeldRecords,
+  ObjectPane,
+  React,
+  SectionApp,
+  mountApp,
+  usePageHead,
+  useState,
+} = UfoAppKit;
 
 /** What is armed to run an agent when nobody is typing: a clock, or a source that changed. The two
  *  are one destination because a member asking what stands ready here asks one question, and an
@@ -29,7 +37,7 @@ const KINDS = [
  *
  *  Closing a record reads the listings again, so a row that record deleted or changed is stated as
  *  it now is rather than as it was when the member opened it. */
-export function Tasks({
+function Tasks({
   title,
   place,
   onPlace,
@@ -62,3 +70,16 @@ export function Tasks({
     </>
   );
 }
+
+mountApp(document.getElementById("root")!, (init) => (
+  <SectionApp
+    tab="tasks"
+    init={init}
+    view={{
+      label: "Tasks",
+      remountOnPlace: false,
+      ownsHeader: true,
+      render: (place, onPlace) => <Tasks title="Tasks" place={place} onPlace={onPlace} />,
+    }}
+  />
+));

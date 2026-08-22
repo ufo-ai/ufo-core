@@ -40,7 +40,14 @@ router = APIRouter()
 
 ARTIFACT_TARGET_PARAM = "a"
 EXPIRED_DETAIL = "The download link expired. Ask the agent to share the file again."
-UNCACHED = {"x-content-type-options": "nosniff", "cache-control": "private, no-store"}
+UNCACHED = {
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, no-store",
+    # The grant is the whole gate: a signed URL serves whoever holds it, and an app page — a
+    # framed site on its own origin — reads artifact bytes with fetch, which needs the origin
+    # stated where a plain download does not.
+    "access-control-allow-origin": "*",
+}
 
 
 @router.get("/" + ARTIFACT_KEY_PREFIX + "{artifact_id}/{filename}")

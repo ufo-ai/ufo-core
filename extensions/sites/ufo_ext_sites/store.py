@@ -14,6 +14,7 @@ have. Scoping every query to that workspace is this module's job: the connection
 whole-database one."""
 
 import re
+import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -55,6 +56,7 @@ hosted_site = sa.Table(
     sa.Column("visibility", sa.Text, nullable=False),
     sa.Column("creator_member_id", sa.Uuid, nullable=False),
     sa.Column("generation", sa.Uuid, nullable=False, default=uuid4),
+    sa.Column("deploy_generation", sa.BigInteger, nullable=False),
     sa.Column("homepage_agent_id", sa.Uuid, nullable=True),
     sa.Column("preview_blob_key", sa.Text, nullable=True),
     sa.Column("preview_size_bytes", sa.Integer, nullable=True),
@@ -139,6 +141,7 @@ class HostedSite:
     visibility: Visibility
     creator_member_id: UUID
     generation: UUID
+    deploy_generation: int
     homepage_agent_id: UUID | None
     preview_blob_key: str | None
     preview_size_bytes: int | None
@@ -178,7 +181,13 @@ class HostedSites:
 
         The preview columns are left as they are: the picture is taken after this write and lands
         through `set_preview`, so a re-deploy keeps the picture the site already had until its own
-        render answers."""
+        render answers.
+
+        `deploy_generation` is a clock stamp held strictly above whatever the row already carries,
+        never a counter: a counter dies with its row, so a name unhosted and deployed again would
+        repeat values its earlier life used — and the portal, which remounts the homepage frame when
+        this value changes, would keep showing the old bytes at the same URL."""
+        stamp = time.time_ns() // 1_000
         async with self.transaction() as connection:
             displaced = await self._refuse(
                 connection, conversation_id, name, port, creator_member_id, visibility, may_unhost
@@ -191,7 +200,17 @@ class HostedSites:
                         hosted_site.c.name == displaced.name,
                     )
                 )
-            values: dict[str, object] = {"port": port, "updated_at": sa.func.now()}
+            values: dict[str, object] = {
+                "port": port,
+                "updated_at": sa.func.now(),
+                "deploy_generation": sa.case(
+                    (
+                        hosted_site.c.deploy_generation >= stamp,
+                        hosted_site.c.deploy_generation + 1,
+                    ),
+                    else_=stamp,
+                ),
+            }
             if visibility is not None:
                 values["visibility"] = visibility
                 if existing := await self._read(connection, conversation_id, name):
@@ -216,6 +235,7 @@ class HostedSites:
                         visibility=visibility or default_visibility(audience),
                         creator_member_id=creator_member_id,
                         generation=uuid4(),
+                        deploy_generation=stamp,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -488,6 +508,7 @@ class HostedSites:
             hosted_site.c.visibility,
             hosted_site.c.creator_member_id,
             hosted_site.c.generation,
+            hosted_site.c.deploy_generation,
             hosted_site.c.homepage_agent_id,
             hosted_site.c.preview_blob_key,
             hosted_site.c.preview_size_bytes,
@@ -512,6 +533,7 @@ def _site(row: sa.Row) -> HostedSite:
         visibility=visibility_level(row.visibility),
         creator_member_id=row.creator_member_id,
         generation=row.generation,
+        deploy_generation=row.deploy_generation,
         homepage_agent_id=row.homepage_agent_id,
         preview_blob_key=row.preview_blob_key,
         preview_size_bytes=row.preview_size_bytes,

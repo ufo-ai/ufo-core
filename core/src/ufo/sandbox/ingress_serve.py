@@ -4,9 +4,10 @@ workspace filters."""
 
 import asyncio
 import os
+import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from urllib.parse import quote, urlsplit
@@ -28,7 +29,7 @@ from ufo.db import init_db, verify_db_reachable, workspace_tx
 from ufo.ext.loader import load_manifests
 from ufo.o11y import init_o11y, log, log_error, warn
 from ufo.proxy_serve import OTLP_ENDPOINT_ENV, owner_dsn
-from ufo.sandbox.ingress_host import SiteLabelError, parse_site_label
+from ufo.sandbox.ingress_host import SiteLabelError, parse_site_label, site_label
 from ufo.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
@@ -80,6 +81,11 @@ that matters here — the sites wildcard is proxied, so an origin sending `cdn-c
 would have the edge store an access-controlled site's bytes however `cache-control` was set."""
 CONTENT_SECURITY_POLICY = "content-security-policy"
 FRAME_ANCESTORS_DIRECTIVE = "frame-ancestors"
+NO_FRAME_ANCESTOR = "'none'"
+FRAME_ANCESTORS_TTL_SECONDS = 30.0
+"""How long one workspace's rendered `frame-ancestors` value is reused before its hosted-site rows
+are read again. A page load asks once per asset, so the read must not be per request; a site
+deployed or torn down mid-window frames or stops framing within this many seconds."""
 ORIGIN_RESPONSE_DROPPED_HEADERS = (
     HOP_BY_HOP_HEADERS
     | CACHE_DIRECTIVE_HEADERS
@@ -205,17 +211,29 @@ class IngressServe:
     carrier: Carrier
     client: httpx.AsyncClient
     frame_ancestor: str
-    """The one source expression a hosted site may be framed by, relayed on every proxied response
-    as a `frame-ancestors` of ours. Framing is core's invariant rather than an accident of what each
-    agent's server emitted: `_open` binds the session `SameSite=Lax`, so a cross-site framer already
-    gets no cookie and lands on 403, but every site label shares one registrable domain — so without
-    this, site A frames site B and the viewer's session cookie for B rides along, and both sites are
-    agent-authored code in the same workspace.
+    """The one deploy-wide source expression a hosted site may be framed by — the app origin, where
+    the frame page that reads a site lives — or `'none'` when no app base is configured. Framing is
+    core's invariant rather than an accident of what each agent's server emitted: `_open` binds the
+    session `SameSite=Lax`, so a cross-site framer already gets no cookie and lands on 403, but
+    every site label shares one registrable domain — so without this, site A frames site B and the
+    viewer's session cookie for B rides along.
+
+    `_frame_ancestors` appends the responding site's sibling origins per response: an app page —
+    itself a hosted site — embeds another site's live view through the app-origin frame page, and
+    a browser checks `frame-ancestors` against every ancestor in that chain, so the outer site's
+    origin must be named alongside the frame page's. Only hosted sites of the responding site's own
+    workspace are named — that is the embed chain, and it keeps a site in another workspace of the
+    same deploy from wrapping this one around the viewer's session.
 
     Carried as our own header rather than appended to the origin's: a site commonly sends no policy
     at all, which is the case this exists for, and several policies combine restrictively — so one
     header of ours binds whatever the site said, and says it exactly once however many the site
     sent."""
+    site_scheme: str
+    site_port_suffix: str
+    """The scheme and rendered `:port` (or empty) of `[sandbox] ingress_public_url` — with
+    `base_host`, what `_frame_ancestors` renders a sibling site's origin from."""
+    frame_ancestors_cache: dict[UUID, tuple[float, str]] = field(default_factory=dict)
 
     def app(self) -> FastAPI:
         """The view path and everything under it is the ingress's, on every method the proxy serves
@@ -395,8 +413,9 @@ class IngressServe:
                     background=BackgroundTask(upstream.aclose),
                 )
                 response.headers["cache-control"] = UNCACHEABLE
+                ancestors = await self._frame_ancestors(dialed.claims.workspace_id)
                 response.headers[CONTENT_SECURITY_POLICY] = (
-                    f"{FRAME_ANCESTORS_DIRECTIVE} {self.frame_ancestor}"
+                    f"{FRAME_ANCESTORS_DIRECTIVE} {ancestors}"
                 )
                 for name, value in upstream.headers.multi_items():
                     lowered = name.lower()
@@ -417,6 +436,44 @@ class IngressServe:
                 await upstream.aclose()
                 raise
         return response
+
+    async def _frame_ancestors(self, workspace_id: UUID) -> str:
+        """The `frame-ancestors` value for one workspace's responses: the app origin, then one
+        origin per hosted site of that workspace. `'none'` stays alone — with no app base there is
+        no frame page and so no embed chain, and `'none'` beside another source would name it
+        anyway. The rows are the sites extension's `hosted_site`, read by name the way extension
+        tables are read elsewhere in core, filtered to the workspace explicitly because this
+        process runs on the owner DSN."""
+        if self.frame_ancestor == NO_FRAME_ANCESTOR:
+            return NO_FRAME_ANCESTOR
+        now = time.monotonic()
+        cached = self.frame_ancestors_cache.get(workspace_id)
+        if cached is not None and now < cached[0]:
+            return cached[1]
+        hosted_site = sa.table(
+            "hosted_site",
+            sa.column("workspace_id", sa.Uuid()),
+            sa.column("conversation_id", sa.Uuid()),
+            sa.column("port", sa.Integer()),
+        )
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(hosted_site.c.conversation_id, hosted_site.c.port)
+                    .distinct()
+                    .where(hosted_site.c.workspace_id == workspace_id)
+                )
+            ).all()
+        ancestors = " ".join(
+            [self.frame_ancestor]
+            + [
+                f"{self.site_scheme}://{site_label(row.conversation_id, row.port)}"
+                f".{self.base_host}{self.site_port_suffix}"
+                for row in rows
+            ]
+        )
+        self.frame_ancestors_cache[workspace_id] = (now + FRAME_ANCESTORS_TTL_SECONDS, ancestors)
+        return ancestors
 
     def _upstream_url(self, scheme: str, host: str, path: str, query_string: bytes) -> str:
         url = f"{scheme}://{host}/{quote(path, safe=PATH_SAFE_CHARACTERS)}"
@@ -683,12 +740,15 @@ def ingress_base_host(configured: str | None) -> str:
 
 
 def ingress_frame_ancestor(configured: str | None) -> str:
-    """The origin of `[connect] public_base_url` — scheme, host and port, never its path — which is
-    where the frame that reads a hosted site lives. `'none'` when unset, since then no frame exists
-    and nothing may embed a site: unset is not a reason to allow what a set base would forbid."""
+    """The deploy-wide source expression a hosted site may be framed by: the origin of
+    `[connect] public_base_url` — scheme, host and port, never its path — which is where the frame
+    that reads a hosted site lives. Sibling site origins are workspace-scoped, so
+    `IngressServe._frame_ancestors` appends them per response rather than here. `'none'` when
+    unset, since then no frame exists and nothing may embed a site: unset is not a reason to allow
+    what a set base would forbid."""
     base = urlsplit(configured or "")
-    if not base.scheme or not base.hostname:
-        return "'none'"
+    if not (base.scheme and base.hostname):
+        return NO_FRAME_ANCESTOR
     port = f":{base.port}" if base.port else ""
     return f"{base.scheme}://{base.hostname}{port}"
 
@@ -726,12 +786,15 @@ def run() -> None:
     init_db(owner_dsn(config))
     asyncio.run(verify_db_reachable())
     ingress_secret()
+    ingress_base = urlsplit(config.sandbox.ingress_public_url or "")
     server = IngressServe(
         backend=config.sandbox.backend,
         base_host=ingress_base_host(config.sandbox.ingress_public_url),
         carrier=select_carrier(config, manifests)[0],
         client=upstream_client(),
         frame_ancestor=ingress_frame_ancestor(config.connect.public_base_url),
+        site_scheme=ingress_base.scheme,
+        site_port_suffix=f":{ingress_base.port}" if ingress_base.port else "",
     )
     log("ingress.starting", port=config.sandbox.ingress_port)
     uvicorn.run(

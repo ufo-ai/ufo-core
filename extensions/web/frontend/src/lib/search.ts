@@ -10,8 +10,7 @@ import {
 import { slotOf } from "@/kernel/objects";
 import { agentName } from "@/lib/agentName";
 import { getJson } from "@/lib/api";
-import { chatHash, sectionHash, workspaceHash, agentHash } from "@/lib/route";
-import { SITE_FAMILY, fileKey } from "@/views/Artifacts";
+import { chatHash, workspaceHash, agentHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 
 /** What one term finds, kind by kind. The bar's search reaches the whole workspace, and the
@@ -111,8 +110,13 @@ export async function searchEverywhere(
   const wanted = term.trim();
   if (!wanted) return [];
   const matched = agents.filter((agent) => agent.name.toLowerCase().includes(wanted.toLowerCase()));
-  /** The agent a workspace-owned kind is read under — the main one, as the artifacts screen does. */
+  /** The agent a workspace-owned kind is read under — the main one, as the artifacts app does. */
   const named = agents.find((agent) => agent.main) ?? agents[0];
+  /** Where a record's hit lands: the shipped app whose pane reads that kind. A workspace without
+   *  the app has no screen for the kind, so its group is dropped rather than pointed nowhere. */
+  const app = (slug: string) => agents.find((agent) => agent.app === slug);
+  const artifactsApp = app("artifacts");
+  const tasksApp = app("tasks");
   const [conversations, files, sites, memory, tasks] = await Promise.all([
     group<"conversations">(
       "Conversations",
@@ -133,8 +137,8 @@ export async function searchEverywhere(
       ["/workspace/artifacts" + query(wanted)],
       (payload) =>
         payload.artifacts.map((entry) => ({
-          key: fileKey(entry),
-          hash: sectionHash("artifacts", { q: wanted, opens: [fileKey(entry)] }),
+          key: entry.id,
+          hash: artifactsApp ? agentHash(artifactsApp.id, { opens: [entry.id] }) : "",
           primary: entry.filename,
           fact: entry.media_type,
         })),
@@ -147,10 +151,11 @@ export async function searchEverywhere(
       (payload) =>
         payload.objects.map((row) => ({
           key: SITE_KIND + "/" + row.name,
-          hash: sectionHash("artifacts", {
-            chip: SITE_FAMILY,
-            opens: [slotOf({ agent: row.agent_id, kind: SITE_KIND, name: row.name })],
-          }),
+          hash: artifactsApp
+            ? agentHash(artifactsApp.id, {
+                opens: [slotOf({ agent: row.agent_id, kind: SITE_KIND, name: row.name })],
+              })
+            : "",
           primary: row.name,
           fact: SITE_KIND,
         })),
@@ -177,10 +182,11 @@ export async function searchEverywhere(
         const kind = path.slice("/objects/".length).split("?")[0];
         return payload.objects.map((row) => ({
           key: row.agent_id + "/" + kind + "/" + row.name,
-          hash: sectionHash("tasks", {
-            chip: kind,
-            opens: [slotOf({ agent: row.agent_id, kind, name: row.name })],
-          }),
+          hash: tasksApp
+            ? agentHash(tasksApp.id, {
+                opens: [slotOf({ agent: row.agent_id, kind, name: row.name })],
+              })
+            : "",
           primary: row.name,
           fact: TASK_KINDS.find((entry) => entry.kind === kind)?.label ?? kind,
         }));
@@ -188,8 +194,8 @@ export async function searchEverywhere(
       signal,
     ),
   ]);
-  /** Files and sites are two reads of one screen, so they stand as one group — the artifacts
-   *  screen is what a member opens either from. */
+  /** Files and sites are two reads of one app, so they stand as one group — the artifacts app is
+   *  what a member opens either from. */
   const artifacts: Group = {
     label: "Artifacts",
     icon: IconFile,
@@ -209,8 +215,8 @@ export async function searchEverywhere(
       failed: null,
     },
     conversations,
-    artifacts,
+    ...(artifactsApp ? [artifacts] : []),
     memory,
-    tasks,
+    ...(tasksApp ? [tasks] : []),
   ].filter((entry) => entry.hits.length > 0 || entry.failed !== null);
 }

@@ -9,20 +9,15 @@ import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import {
   destination,
   fact,
-  goTo,
   heldConversation,
   json,
-  objectIndex,
-  openAgentRow,
   openAgentSettings,
   openConversation,
   opened,
-  owned,
   pick,
   pressRow,
   refusedNotice,
   useStreamFake,
-  viewCard,
   wire,
   AGENT,
   AGENT_ID,
@@ -30,16 +25,11 @@ import {
   CONVO_ID,
   FRESH,
   MEMBER,
-  NO_ARTIFACTS,
-  NO_RUNS,
   PlacedWorkspace,
   SECOND,
   SECOND_ID,
   SETTINGS,
-  SITE_KIND,
   StreamFake,
-  TASK_KIND,
-  TRIGGER_KIND,
   TURN_ID,
 } from "./harness";
 beforeEach(() => {
@@ -50,7 +40,6 @@ function toggleApplications(): void {
   fireEvent.click(screen.getByRole("button", { name: "Applications" }));
 }
 
-const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
 
 function usageDetails(totalMicroUsd: number, tokens: number = 1_200) {
   return {
@@ -326,106 +315,7 @@ test("a settings read that fails states the error and offers no form", async () 
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 });
 
-test("the scheduled index leads with both runs, and its detail pauses through the intent lane", async () => {
-  const posted: unknown[] = [];
-  wire({
-    "/objects/scheduled_task/digest": () =>
-      json({
-        ...TASK_KIND,
-        name: "digest",
-        summary: "0 9 * * * — summarize",
-        spec: { schedule: "0 9 * * *", prompt: "summarize", paused: false },
-        status: { next_run_at: IN_THREE_HOURS, paused: false },
-        links: [],
-        created_at: "2026-07-01T09:00:00Z",
-        updated_at: "2026-07-01T09:00:00Z",
-      }),
-    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-    "/objects/scheduled_task": () =>
-      objectIndex(TASK_KIND, [
-        owned({
-          name: "digest",
-          summary: "0 9 * * * — summarize",
-          mine: true,
-          next_run_at: IN_THREE_HOURS,
-          last_run_at: "2026-07-31T09:00:00Z",
-          last_run_status: "done",
-          origin: "#general",
-          prompt: "summarize",
-          owner_email: "member@example.com",
-          paused: false,
-        }),
-      ]),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Paused digest." });
-    },
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/tasks?chip=scheduled_task";
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const listed = (await screen.findByText("digest")).closest("tr");
-  const said = [...(listed?.querySelectorAll("td") ?? [])].map((box) => String(box.textContent));
-  expect(said[0]).toBe("digestActive");
-  // The workspace feed crosses agents, so the row names the one that holds the task.
-  expect(said[1]).toBe("Assistant");
-  expect(said[2]).toBe("Jul 31 2026 · done");
-  expect(said[3]).toContain("in ");
-  expect(screen.queryByText("summarize")).toBeNull();
-  expect(screen.queryByText("#general")).toBeNull();
-
-  await userEvent.click(screen.getByText("digest"));
-  await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
-  await userEvent.click(await screen.findByLabelText("paused"));
-  await userEvent.click(screen.getByRole("button", { name: "Save" }));
-
-  await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toMatchObject({
-    verb: "apply",
-    kind: "scheduled_task",
-    name: "digest",
-    spec: { paused: true },
-  });
-});
-
-test("a detail whose kind the lane refuses offers no control and no prose about it", async () => {
-  wire({
-    "/objects/site/docs-abc": () =>
-      json({
-        ...SITE_KIND,
-        name: "docs-abc",
-        summary: "docs · workspace · sandbox port 3000",
-        spec: { visibility: "workspace" },
-        status: { conversation: CONVO_ID, created_at: "2026-07-01T09:00:00Z", visibility: "workspace" },
-        links: [],
-        created_at: "2026-07-01T09:00:00Z",
-        updated_at: null,
-      }),
-    "/objects/site": () =>
-      objectIndex(SITE_KIND, [
-        {
-          name: "docs-abc",
-          summary: "docs · workspace · sandbox port 3000",
-          conversation: CONVO_ID,
-          created_at: "2026-07-01T09:00:00Z",
-          visibility: "workspace",
-        },
-      ]),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
-    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/artifacts";
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(await viewCard("docs-abc"));
-
-  expect(await screen.findByRole("region", { name: "docs-abc" })).toBeTruthy();
-  expect(document.querySelector('[data-part="refusal"]')).toBeNull();
-  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-});
 
 test("a private grant is shared with the agent from the settings connectors section", async () => {
   const posted: unknown[] = [];
@@ -935,54 +825,6 @@ test("a member with no rollup sees only their own figure and no workspace sectio
   expect(screen.queryByText("Members")).toBeNull();
 });
 
-test("the sidebar routes agents, sections, and the workspace by hash and marks the one selected", async () => {
-  wire({
-    "/transcript": () => json({ messages: [] }),
-    "/settings": () => json(SETTINGS),
-    "/workspace/team": () => json({ members: [], can_add: false, domain: null }),
-    "/workspace/radar": () => json({ runs: [] }),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
-    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-    "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
-    "/skills": () => json({ skills: [] }),
-    "/connections": () => json({ connections: [] }),
-    "/objects/site": () => objectIndex(SITE_KIND, []),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
-  });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-
-  toggleApplications();
-  await openAgentRow("Second");
-  expect(location.hash).toBe("#/agents/" + SECOND.id);
-
-  toggleApplications();
-  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
-  expect(index.getByRole("button", { name: /^Second/ }).getAttribute("aria-current")).toBe("true");
-  toggleApplications();
-
-  await userEvent.click(screen.getByRole("button", { name: "Radar" }));
-  expect(location.hash).toBe("#/radar");
-  expect(screen.getByRole("button", { name: "Radar" }).getAttribute("aria-current")).toBe("true");
-  expect(await screen.findByText(NO_RUNS)).toBeTruthy();
-  expect(screen.queryByRole("tablist")).toBeNull();
-
-  await userEvent.click(screen.getByRole("button", { name: "Artifacts" }));
-  expect(location.hash).toBe("#/artifacts");
-  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("button", { name: "Workspace" }));
-  expect(location.hash).toBe("#/workspace/team");
-  expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
-    "true",
-  );
-
-  await goTo("Memory");
-  expect(location.hash).toBe("#/workspace/memory");
-  expect(screen.getByRole("button", { name: "Workspace" }).getAttribute("aria-current")).toBe(
-    "true",
-  );
-  expect(await screen.findByText("No memories yet.")).toBeTruthy();
-});
 
 test("a member who is not an admin is offered no administration control", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
@@ -1041,9 +883,8 @@ test("an app opens on the conversation that moved last, and an address names ano
  *  holding one of several has to reach the rest by. The lane lists them, marks the one the pane is
  *  holding, and opens the one pressed — and the address is what it writes, so the mark it draws is
  *  read back off the same place the pane reads. */
-test("an app's conversations stand in a lane, and the pressed one opens", async () => {
+test("an app with no page opens its newest conversation whole, with no lane beside", async () => {
   const older = "44444444-4444-4444-8444-444444444444";
-  const walled = "66666666-6666-4666-8666-666666666666";
   const listed = (id: string, description: string, readable = true) => ({
     id,
     agent: null,
@@ -1071,41 +912,16 @@ test("an app's conversations stand in a lane, and the pressed one opens", async 
       }),
     "/conversations$": () =>
       json({
-        conversations: [
-          listed(CONVO_ID, "Newest thread"),
-          listed(older, "Older thread"),
-          listed(walled, "Someone else's room", false),
-        ],
+        conversations: [listed(CONVO_ID, "Newest thread"), listed(older, "Older thread")],
       }),
     "/homepage": () => json({ state: "none" }),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const lane = await screen.findByRole("region", { name: "Conversations" });
-  // A conversation this member may neither read nor acknowledge is not listed: a press on it would
-  // land the pane on the sentence that it is not shared with this account.
-  expect(within(lane).getAllByRole("button").map((row) => row.textContent)).toEqual([
-    "Newest thread",
-    "Older thread",
-  ]);
-  expect(
-    within(lane).getByRole("button", { name: "Newest thread" }).getAttribute("aria-current"),
-  ).toBe("true");
-  // The band states the lane's name and shuts it; at a lane's floor there is no room for more, so
-  // the acts on this screen stay on the app's own band.
-  const band = lane.querySelector("[data-slot=header]") as HTMLElement;
-  expect(within(band).queryAllByRole("button")).toEqual([]);
-
-  await userEvent.click(within(lane).getByRole("button", { name: "Older thread" }));
-
-  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + older);
-  await waitFor(async () => expect(await heldConversation()).toBe("Older thread"));
-  expect(
-    within(screen.getByRole("region", { name: "Conversations" }))
-      .getByRole("button", { name: "Older thread" })
-      .getAttribute("aria-current"),
-  ).toBe("true");
+  await waitFor(async () => expect(await heldConversation()).toBe("Newest thread"));
+  // The sidebar is the list of conversations; the pane draws no second one beside the chat.
+  expect(screen.queryByRole("region", { name: "Conversations" })).toBeNull();
 });
 
 test("the app pane starts a conversation where it stands, without leaving for the chat screen", async () => {

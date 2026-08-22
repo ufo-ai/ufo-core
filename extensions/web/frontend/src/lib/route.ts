@@ -10,6 +10,9 @@ export const WORKSPACE_TABS = [
   "billing",
 ] as const;
 
+/** Every top-level screen name the address codec reads and writes. The portal itself hosts only
+ *  `connectors`; the rest are screens shipped as apps, and a section address naming one lands on
+ *  that app with its place carried — the name outlives who renders it, so links keep working. */
 export const SECTIONS = ["wiki", "artifacts", "radar", "tasks", "connectors"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];

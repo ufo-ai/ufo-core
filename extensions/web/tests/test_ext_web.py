@@ -2223,6 +2223,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
                 "main": True,
                 "model": "claude-opus-4-8",
                 "icon": "compass",
+                "app": None,
             }
         ],
     }
@@ -2303,6 +2304,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "main": True,
             "model": "claude-opus-4-8",
             "icon": "compass",
+            "app": None,
             "web_audience": [],
         },
         {
@@ -2311,6 +2313,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "main": False,
             "model": "claude-sonnet-5",
             "icon": "telescope",
+            "app": None,
             "web_audience": ["member@example.com"],
         },
     ]
@@ -4395,6 +4398,7 @@ async def test_site_index_answers_through_the_kinds_own_gate(
     assert sorted(m_view["fields"]) == [
         "conversation",
         "created_at",
+        "deploy_generation",
         "homepage_agent",
         "mine",
         "owner_email",
@@ -9217,7 +9221,8 @@ async def test_homepage_read_carries_the_bound_site(
     payload = read.json()
     assert payload["state"] == "set"
     assert payload["url"].startswith("https://web/surface/sites/")
-    assert set(payload) == {"state", "url"}
+    assert set(payload) == {"state", "url", "deploy_generation"}
+    assert payload["deploy_generation"] > 0
 
 
 async def test_homepage_read_answers_building_while_the_seed_run_works(

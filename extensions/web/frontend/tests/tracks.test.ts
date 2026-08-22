@@ -4,7 +4,7 @@ import { TRACK_MAX_SLOTS, heldTrack, holdTrack, type TrackScreen } from "@/lib/t
 
 const AGENT = "9c4d0f2a-1b3e-4a5c-8d7f-6e2b1a0c9d84";
 const OTHER = "5b1e8c37-2d4a-4f61-9a08-3c7d5e2f1b06";
-const ARTIFACTS: TrackScreen = "section:artifacts";
+const ARTIFACTS: TrackScreen = "section:connectors";
 const TEAM: TrackScreen = "workspace:team";
 const APP: TrackScreen = `agent:${AGENT}`;
 
@@ -59,7 +59,7 @@ test("a detour through another screen leaves the first screen's track standing",
 });
 
 test("a screen that has held nothing reads as an empty track", () => {
-  expect(heldTrack("section:radar")).toEqual([]);
+  expect(heldTrack("section:connectors")).toEqual([]);
   expect(heldTrack(`agent:${AGENT}`)).toEqual([]);
 });
 
@@ -75,7 +75,7 @@ test("closing every slot drops the screen's key rather than holding an empty lin
   holdTrack(ARTIFACTS, []);
 
   expect(heldTrack(ARTIFACTS)).toEqual([]);
-  expect(sessionStorage.getItem("ufo.track.section:artifacts")).toBeNull();
+  expect(sessionStorage.getItem("ufo.track.section:connectors")).toBeNull();
 });
 
 /** A track the address holds whole and the store cut short is the same fault one layer down: the
@@ -89,7 +89,7 @@ test("a track past the cap is refused where it was made up, never held short", (
   );
 
   expect(() => holdTrack(ARTIFACTS, opened)).toThrow();
-  expect(sessionStorage.getItem("ufo.track.section:artifacts")).toBeNull();
+  expect(sessionStorage.getItem("ufo.track.section:connectors")).toBeNull();
 
   const full = opened.slice(0, TRACK_MAX_SLOTS);
   holdTrack(ARTIFACTS, full);
@@ -110,9 +110,9 @@ test("a value this store did not write reads as an empty track and is dropped", 
     "ufo.lanes",
     "",
   ]) {
-    sessionStorage.setItem("ufo.track.section:artifacts", corrupt);
+    sessionStorage.setItem("ufo.track.section:connectors", corrupt);
     expect(heldTrack(ARTIFACTS)).toEqual([]);
-    expect(sessionStorage.getItem("ufo.track.section:artifacts")).toBeNull();
+    expect(sessionStorage.getItem("ufo.track.section:connectors")).toBeNull();
   }
 });
 
@@ -121,7 +121,7 @@ test("a slot id the store cannot round trip is refused where it was made up", ()
   expect(refused(["object/" + AGENT + "/report/august", ""])).toThrow();
   expect(refused(["object/" + AGENT + "/report/august\nobject/" + AGENT + "/report/july"])).toThrow();
   expect(refused(["x".repeat(257)])).toThrow();
-  expect(sessionStorage.getItem("ufo.track.section:artifacts")).toBeNull();
+  expect(sessionStorage.getItem("ufo.track.section:connectors")).toBeNull();
 });
 
 test("a track naming one slot twice is refused where it was made up, and dropped on the way back", () => {
@@ -131,16 +131,16 @@ test("a track naming one slot twice is refused where it was made up, and dropped
       "object/" + AGENT + "/report/august",
     ]),
   ).toThrow();
-  expect(sessionStorage.getItem("ufo.track.section:artifacts")).toBeNull();
+  expect(sessionStorage.getItem("ufo.track.section:connectors")).toBeNull();
 
   sessionStorage.setItem(
-    "ufo.track.section:artifacts",
+    "ufo.track.section:connectors",
     ["ufo.lanes", "object/" + AGENT + "/report/august", "object/" + AGENT + "/report/august"].join(
       "\n",
     ),
   );
   expect(heldTrack(ARTIFACTS)).toEqual([]);
-  expect(sessionStorage.getItem("ufo.track.section:artifacts")).toBeNull();
+  expect(sessionStorage.getItem("ufo.track.section:connectors")).toBeNull();
 });
 
 test("a browser that refuses the write leaves the screen standing rather than raising", () => {

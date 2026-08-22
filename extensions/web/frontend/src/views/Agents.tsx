@@ -460,6 +460,7 @@ export function Agents({
           member={member}
           chats={chats}
           onCreated={(conversationId, title) => onCreated(shown, conversationId, title)}
+          onFounded={onCreated}
           onSettings={() => {
             setSettingsTab(SETTINGS_TABS[0]);
             setScheduled([]);

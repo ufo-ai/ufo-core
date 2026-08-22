@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "allowUmdGlobalAccess": true,
+    "jsx": "react",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"], "@brand/*": ["../../../assets/brand/*"] },
+    "types": ["vite/client"]
+  },
+  "files": [
+    "src/apps/pages.d.ts",
+    "../../app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx",
+    "../../app_chat/ufo_ext_app_chat/skills/app-chat-home/app.tsx",
+    "../../app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx",
+    "../../app_tasks/ufo_ext_app_tasks/skills/app-tasks-home/app.tsx",
+    "../../app_wiki/ufo_ext_app_wiki/skills/app-wiki-home/app.tsx"
+  ]
+}

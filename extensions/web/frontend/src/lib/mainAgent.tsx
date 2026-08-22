@@ -26,3 +26,16 @@ export function useAgents(): Agent[] {
   if (agents === undefined) throw new Error("a view read the audience outside the provider");
   return agents;
 }
+
+/** The app whose page is the conversation screen: where a regular conversation — one that is not
+ *  directing some app — is read and answered, single column, the way a new conversation starts. */
+export const CHAT_SURFACE = "chat";
+
+/** The chat surface's start-screen target: the page opened at it draws the composer and the
+ *  starters rather than the conversation list its bare address draws. It is not the pane's fresh
+ *  sentinel — that one opens the right-side chat that directs an app. */
+export const COMPOSE = "compose";
+
+export function chatSurface(agents: Agent[]): Agent | null {
+  return agents.find((agent) => agent.app === CHAT_SURFACE) ?? null;
+}

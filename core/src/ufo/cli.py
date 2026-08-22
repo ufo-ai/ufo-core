@@ -82,7 +82,10 @@ name = "assistant"
 search_provider = "perplexity"
 
 [connect]
-public_base_url = "http://localhost:8710"
+public_base_url = "http://ufo.localhost:8710"
+
+[sandbox]
+ingress_public_url = "http://ufo.localhost:8100"
 """
 CORE_VERSIONS_DIR = MIGRATIONS_DIR / "versions"
 MIGRATION_HEAD_FILENAME = "HEAD"
@@ -387,6 +390,12 @@ def portal() -> None:
 
 
 def _serve_base(config: Config) -> str:
+    """The host the browser session lands on. `public_base_url` when set — every absolute link the
+    deploy mints (a homepage frame, a connect callback) names that host, and a cookie is host-only,
+    so a session opened anywhere else cannot follow those links. The bind address is the fallback
+    for a config that mints none."""
+    if config.connect.public_base_url is not None:
+        return config.connect.public_base_url
     return f"http://{config.serve.host}:{config.serve.port}"
 
 

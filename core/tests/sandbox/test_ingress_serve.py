@@ -34,6 +34,7 @@ from ufo.sandbox.ingress_serve import (
     INGRESS_SESSION_COOKIE,
     INGRESS_SESSION_TTL_SECONDS,
     LINK_NOT_VALID,
+    NO_FRAME_ANCESTOR,
     NO_SITE_HERE,
     SESSION_ENDED,
     SITE_GONE,
@@ -236,6 +237,35 @@ async def _seed_conversation(handle: str | None) -> tuple[UUID, UUID]:
     return workspace_id, conversation_id
 
 
+async def _seed_hosted_site(workspace_id: UUID, conversation_id: UUID, port: int) -> None:
+    hosted_site = sa.table(
+        "hosted_site",
+        sa.column("workspace_id", sa.Uuid()),
+        sa.column("conversation_id", sa.Uuid()),
+        sa.column("name", sa.Text()),
+        sa.column("port", sa.Integer()),
+        sa.column("visibility", sa.Text()),
+        sa.column("creator_member_id", sa.Uuid()),
+        sa.column("generation", sa.Uuid()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(hosted_site).values(
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                name=f"site-{conversation_id.hex[:8]}",
+                port=port,
+                visibility="workspace",
+                creator_member_id=uuid4(),
+                generation=uuid4(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
 def _token(
     workspace_id: UUID,
     conversation_id: UUID,
@@ -272,7 +302,9 @@ async def _open(
     return got.cookies[INGRESS_SESSION_COOKIE]
 
 
-def _server(carrier: Carrier, upstream: httpx.AsyncClient) -> IngressServe:
+def _server(
+    carrier: Carrier, upstream: httpx.AsyncClient, frame_ancestor: str = APP_ORIGIN
+) -> IngressServe:
     """Annotated as the `Carrier` it stands in for, with no suppression: a stub that drifts from the
     protocol it fakes stops standing in for the dependency, and mypy is what catches the drift."""
     return IngressServe(
@@ -280,7 +312,9 @@ def _server(carrier: Carrier, upstream: httpx.AsyncClient) -> IngressServe:
         base_host=BASE_HOST,
         carrier=carrier,
         client=upstream,
-        frame_ancestor=APP_ORIGIN,
+        frame_ancestor=frame_ancestor,
+        site_scheme="https",
+        site_port_suffix="",
     )
 
 
@@ -718,6 +752,42 @@ async def test_a_site_that_says_nothing_about_framing_is_still_only_framed_by_th
     assert _framers(got) == [APP_ORIGIN]
 
 
+async def test_framing_names_only_the_workspaces_own_sites(db, ingress) -> None:
+    """An app page — itself a hosted site — embeds a sibling site's live view through the
+    app-origin frame page, and a browser checks `frame-ancestors` against every ancestor in that
+    chain, so the sibling's origin must be named alongside the app's. Named per workspace: a hosted
+    site of another workspace on the same deploy is not an ancestor, so a stranger's site cannot
+    wrap this one around the viewer's session."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    sibling_conversation_id = uuid4()
+    await _seed_hosted_site(workspace_id, sibling_conversation_id, port=3000)
+    foreign_workspace_id, foreign_conversation_id = await _seed_conversation(None)
+    await _seed_hosted_site(foreign_workspace_id, foreign_conversation_id, port=3000)
+    await _open(ingress, workspace_id, conversation_id)
+    got = await ingress.get(f"{_origin(conversation_id)}/index.html")
+    assert got.status_code == 200
+    assert _framers(got) == [f"{APP_ORIGIN} {_origin(sibling_conversation_id, 3000)}"]
+    assert _origin(foreign_conversation_id, 3000) not in _framers(got)[0]
+
+
+async def test_a_deploy_with_no_app_origin_lets_nothing_frame_a_site(
+    db, origin_port, monkeypatch
+) -> None:
+    """With no app base there is no frame page and so no embed chain: the directive stays `'none'`
+    with no sibling origin beside it — `'none'` next to another source would name that source — and
+    a workspace full of hosted sites changes nothing."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _seed_hosted_site(workspace_id, uuid4(), port=3000)
+    async with upstream_client() as upstream:
+        server = _server(_StubCarrier(origin_port), upstream, frame_ancestor=NO_FRAME_ANCESTOR)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            await _open(client, workspace_id, conversation_id)
+            got = await client.get(f"{_origin(conversation_id)}/index.html")
+    assert got.status_code == 200
+    assert _framers(got) == [NO_FRAME_ANCESTOR]
+
+
 async def test_a_sites_own_framing_directive_is_replaced_not_added_to(db, ingress) -> None:
     """A site's directive is cut and ours put in its place, rather than both being relayed: policies
     combine restrictively, so a surviving `frame-ancestors 'none'` alongside ours would refuse the
@@ -735,8 +805,8 @@ def test_the_frame_ancestor_is_an_origin_and_nothing_frames_a_site_without_one()
     unset is not a reason to permit what a configured base would forbid."""
     assert ingress_frame_ancestor("https://app.example/chat?c=1") == "https://app.example"
     assert ingress_frame_ancestor("http://localhost:8710/") == "http://localhost:8710"
-    assert ingress_frame_ancestor(None) == "'none'"
-    assert ingress_frame_ancestor("") == "'none'"
+    assert ingress_frame_ancestor(None) == NO_FRAME_ANCESTOR
+    assert ingress_frame_ancestor("") == NO_FRAME_ANCESTOR
 
 
 async def test_a_site_cannot_refuse_to_be_framed(db, ingress) -> None:

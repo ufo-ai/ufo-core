@@ -77,6 +77,16 @@ export function Pane({
   );
 }
 
+/** A sentence standing where a screen could not draw: the pane holds it centered, so the note
+ *  reads as the screen's whole answer rather than a row that happens to be alone. */
+export function PaneNote({ children }: { children: ReactNode }) {
+  return (
+    <Pane className={COLUMN}>
+      <div className="m-auto max-w-empty text-center text-ink-soft">{children}</div>
+    </Pane>
+  );
+}
+
 /** Every screen is this: one scrolling column, a gutter either side, and a stack of bands one gap
  *  apart. The page owns that rhythm rather than each band carrying its own margins — a band that
  *  spaced itself would add to the gap instead of sitting in it, so the distance between a title and
@@ -196,6 +206,11 @@ export function Header({
         pinned && "px-2xl py-lg",
         onLift && "cursor-move",
       )}
+      style={
+        pinned
+          ? { paddingRight: "calc(var(--spacing-2xl) + var(--pane-acts-inset, 0px))" }
+          : undefined
+      }
     >
       <div
         className={cn(

@@ -426,7 +426,9 @@ def test_portal_style_gate_reaches_the_source_it_judges() -> None:
     instead."""
     assert (gates.ROOT / gates.PORTAL_SOURCE).is_dir()
     assert (gates.ROOT / gates.PORTAL_THEME).is_file()
-    assert (gates.ROOT / gates.PORTAL_ENTRY).is_file()
+    for entry in gates.PORTAL_ENTRIES:
+        assert (gates.ROOT / entry).is_file()
+    assert len(list(gates.ROOT.glob(gates.APP_PAGE_GLOB))) >= 5
     assert gates._portal_style_failures() == []
 
 
@@ -453,6 +455,29 @@ def test_portal_style_gate_refuses_a_stylesheet_a_single_quoted_import_hides() -
         smuggled.unlink()
     assert failures == [
         "extensions/web/frontend/src/views/smuggled.tsx: only the entry module imports the theme"
+    ]
+
+
+def test_portal_style_gate_holds_an_app_page_to_the_portal_rules() -> None:
+    """The app pages are the portal's former views, compiled in the browser against the portal's
+    own theme, so a stylesheet import or a raw bracket value erodes the same design system from a
+    different directory. The gate scans them by glob, so the probe is a new sibling skill dir."""
+    probe_dir = gates.ROOT / "extensions/app_chat/ufo_ext_app_chat/skills/app-gate-probe"
+    probe_dir.mkdir()
+    probe = probe_dir / "app.tsx"
+    probe.write_text(
+        "import 'some-package/dist/widget.css';\n"
+        'export const x = "bg-[#fff] max-h-[var(--media-tall)]";\n'
+    )
+    try:
+        failures = gates._portal_style_failures()
+    finally:
+        probe.unlink()
+        probe_dir.rmdir()
+    rel = "extensions/app_chat/ufo_ext_app_chat/skills/app-gate-probe/app.tsx"
+    assert failures == [
+        f"{rel}: an app page imports no stylesheet — the kit's theme is the sheet",
+        f"{rel}: [#fff] names a raw value — resolve it through a theme token",
     ]
 
 

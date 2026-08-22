@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -9,7 +9,6 @@ import {
   PlacedWorkspace,
   AGENT,
   MEMBER,
-  NO_RUNS,
   SETTINGS,
   TASK_KIND,
   TRIGGER_KIND,
@@ -59,14 +58,15 @@ test("leaving a view discards the read left behind rather than painting it", asy
   await waitFor(() => expect(releaseConnectors).not.toBeNull());
 
   await userEvent.keyboard("{Escape}");
-  await userEvent.click(screen.getByRole("button", { name: "Radar" }));
-  expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+  const sidebar = within(screen.getByRole("navigation", { name: "Workspace" }));
+  await userEvent.click(sidebar.getByRole("button", { name: "New conversation" }));
+  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
 
   releaseConnectors!(json({ connections: [STALE_CONNECTION] }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(screen.queryByText("stale-provider")).toBeNull();
-  expect(screen.getByText(NO_RUNS)).toBeTruthy();
+  expect(screen.getByLabelText("Message the app")).toBeTruthy();
 });
 
 test("a slow read for a filter the member left never paints over the filter they chose", async () => {

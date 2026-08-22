@@ -43,6 +43,11 @@ dependencies = [
 ufoctl = "ufo.cli:main"
 
 [project.entry-points."ufo.extension"]
+app_artifacts = "ufo_ext_app_artifacts.manifest:manifest"
+app_chat = "ufo_ext_app_chat.manifest:manifest"
+app_radar = "ufo_ext_app_radar.manifest:manifest"
+app_tasks = "ufo_ext_app_tasks.manifest:manifest"
+app_wiki = "ufo_ext_app_wiki.manifest:manifest"
 bedrock = "ufo_ext_bedrock:manifest"
 brief_pipeline = "ufo_ext_brief_pipeline.manifest:manifest"
 browser = "ufo_ext_browser.manifest:manifest"
@@ -146,6 +151,11 @@ artifacts = [
 [tool.hatch.build.targets.wheel]
 packages = [
     "core/src/ufo",
+    "extensions/app_artifacts/ufo_ext_app_artifacts",
+    "extensions/app_chat/ufo_ext_app_chat",
+    "extensions/app_radar/ufo_ext_app_radar",
+    "extensions/app_tasks/ufo_ext_app_tasks",
+    "extensions/app_wiki/ufo_ext_app_wiki",
     "extensions/brief_pipeline/ufo_ext_brief_pipeline",
     "extensions/browser/ufo_ext_browser",
     "extensions/coding/ufo_ext_coding",

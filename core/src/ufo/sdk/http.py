@@ -29,6 +29,8 @@ def set_session_cookie(
     cookies ufo sets and only those: a proxy relaying another server's `Set-Cookie` is handing on a
     header this function never saw, and confining it is that proxy's own job (`ingress_serve`
     strips `Domain` from every cookie a hosted site sends). `HttpOnly` and `Secure` are
-    non-negotiable; only `SameSite` varies by surface. A repo gate forbids raw
-    `Response.set_cookie` outside this module, so the host-only guarantee cannot be bypassed."""
+    non-negotiable; only `SameSite` varies by surface — `Secure` costs a plain-http origin nothing
+    where ufo serves one, because the config gate restricts that to `localhost`, which browsers
+    treat as trustworthy. A repo gate forbids raw `Response.set_cookie` outside this module, so the
+    host-only guarantee cannot be bypassed."""
     response.set_cookie(name, token, httponly=True, secure=True, samesite=samesite)

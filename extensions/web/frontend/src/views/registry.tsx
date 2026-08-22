@@ -3,10 +3,6 @@ import type { ReactNode } from "react";
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
-import { Artifacts } from "@/views/Artifacts";
-import { Radar } from "@/views/Radar";
-import { Tasks } from "@/views/Tasks";
-import { Wiki } from "@/views/Wiki";
 import { WorkspaceConnectors } from "@/views/Connectors";
 import { Memory } from "@/views/Memory";
 import { SOURCES } from "@/views/Sources";
@@ -74,36 +70,16 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   },
 };
 
-export const SECTION_VIEWS: Record<Section, PaneView> = {
-  wiki: {
-    label: "Wiki",
-    remountOnPlace: false,
-    ownsHeader: true,
-    render: (place, onPlace) => <Wiki place={place} onPlace={onPlace} />,
-  },
-  radar: {
-    label: "Radar",
-    remountOnPlace: false,
-    ownsHeader: true,
-    render: (place, onPlace) => <Radar title="Radar" place={place} onPlace={onPlace} />,
-  },
-  tasks: {
-    label: "Tasks",
-    remountOnPlace: false,
-    ownsHeader: true,
-    render: (place, onPlace) => <Tasks title="Tasks" place={place} onPlace={onPlace} />,
-  },
-  artifacts: {
-    label: "Artifacts",
-    remountOnPlace: false,
-    search: "Search artifacts",
-    render: (place, onPlace) => <Artifacts place={place} onPlace={onPlace} />,
-  },
-  connectors: {
-    label: "Connectors",
-    remountOnPlace: false,
-    search: "Search connectors",
-    render: (place, onPlace) => <WorkspaceConnectors place={place} onPlace={onPlace} />,
-  },
+export const CONNECTORS: PaneView = {
+  label: "Connectors",
+  remountOnPlace: false,
+  search: "Search connectors",
+  render: (place, onPlace) => <WorkspaceConnectors place={place} onPlace={onPlace} />,
+};
+
+/** The sections the portal renders itself. A `Section` outside this record is a screen an app
+ *  ships, and the router lands its address on that app. */
+export const SECTION_VIEWS: Partial<Record<Section, PaneView>> = {
+  connectors: CONNECTORS,
 };
 

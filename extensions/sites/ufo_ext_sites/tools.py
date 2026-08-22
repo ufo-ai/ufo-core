@@ -40,6 +40,7 @@ unless the same turn deployed the site, the seed's deploy-and-bind shape."""
 
 import json
 import shlex
+from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -57,8 +58,20 @@ DEPLOY_WEBSITE_TOOL = "deploy_website"
 PUBLISH_WEBSITE_TOOL = "publish_website"
 SET_HOMEPAGE_TOOL = "set_homepage"
 
-APP_SERVE_PORT = 8000
+APP_PORT_FLOOR = 20000
+APP_PORT_SPAN = 20000
 START_SERVER_PORT = 5000
+
+
+def serve_port(conversation_id: UUID) -> int:
+    """The port a conversation's site serves on, derived from the conversation so it is stable
+    across redeploys (the site's origin hangs off `(conversation, port)`). Per-conversation rather
+    than one fixed port because the local carrier's sandboxes share the host's port namespace — on
+    one fixed port every deploy killed the previous conversation's server and every dial reached
+    whoever deployed last. Container carriers are indifferent: any port works inside a namespace."""
+    return APP_PORT_FLOOR + conversation_id.int % APP_PORT_SPAN
+
+
 READINESS_TIMEOUT_SECONDS = 30
 BUILD_TIMEOUT_SECONDS = 600
 LOG_TAIL_LINES = 20
@@ -261,7 +274,7 @@ async def _serve(
     result = await ctx.sandbox.bash(
         f"cd {shlex.quote(project)} && {port_cleanup}\n"
         f"set -C\n"
-        f"nohup {command} >{shlex.quote(log_path)} 2>&1 &\n"
+        f"nohup env PORT={port} {command} >{shlex.quote(log_path)} 2>&1 &\n"
         f"set +C\n"
         f"{readiness_probe}",
         timeout_s=READINESS_TIMEOUT_SECONDS + 5,
@@ -446,18 +459,20 @@ async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
 
 
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
-    name = await _refuse_before_serving(ctx, args.site_name, APP_SERVE_PORT, args.visibility)
-    command = f"python3 -m http.server {APP_SERVE_PORT} --bind 0.0.0.0"
-    deploy_log = DEPLOY_LOG.format(port=APP_SERVE_PORT)
+    port = serve_port(ctx.sandbox.handle.conversation_id)
+    name = await _refuse_before_serving(ctx, args.site_name, port, args.visibility)
+    command = f"python3 -m http.server {port} --bind 0.0.0.0"
+    deploy_log = DEPLOY_LOG.format(port=port)
     project = workspace_path(args.project_path)
-    served = await _serve(ctx, command, project, APP_SERVE_PORT, deploy_log)
-    hosted = await _host(ctx, name, APP_SERVE_PORT, args.visibility)
-    await _illustrate(ctx, name, APP_SERVE_PORT)
+    served = await _serve(ctx, command, project, port, deploy_log)
+    hosted = await _host(ctx, name, port, args.visibility)
+    await _illustrate(ctx, name, port)
     return _json_result({**served, **hosted, "entry_point": args.entry_point})
 
 
 async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolResult:
-    name = await _refuse_before_serving(ctx, args.app_name, APP_SERVE_PORT, args.visibility)
+    port = serve_port(ctx.sandbox.handle.conversation_id)
+    name = await _refuse_before_serving(ctx, args.app_name, port, args.visibility)
     if args.install_command:
         install = await ctx.sandbox.bash(
             f"cd {shlex.quote(workspace_path(args.project_path))} && {args.install_command}",
@@ -465,12 +480,12 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
         )
         if install.exit_code != 0:
             raise RuntimeError(install.stderr or install.stdout)
-    command = args.run_command or f"python3 -m http.server {APP_SERVE_PORT} --bind 0.0.0.0"
+    command = args.run_command or f"python3 -m http.server {port} --bind 0.0.0.0"
     project = workspace_path(args.project_path if args.run_command else args.dist_path)
-    publish_log = PUBLISH_LOG.format(port=APP_SERVE_PORT)
-    served = await _serve(ctx, command, project, APP_SERVE_PORT, publish_log)
-    hosted = await _host(ctx, name, APP_SERVE_PORT, args.visibility)
-    await _illustrate(ctx, name, APP_SERVE_PORT)
+    publish_log = PUBLISH_LOG.format(port=port)
+    served = await _serve(ctx, command, project, port, publish_log)
+    hosted = await _host(ctx, name, port, args.visibility)
+    await _illustrate(ctx, name, port)
     return _json_result({**served, **hosted})
 
 

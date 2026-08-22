@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime
 from typing import ClassVar, Literal, Protocol, get_args, runtime_checkable
-from uuid import UUID
+from uuid import NAMESPACE_OID, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 import yaml
@@ -1053,24 +1053,38 @@ class ObjectVerbs:
             if args.create_only and existing is not None:
                 article = "an" if kind_name[0].lower() in "aeiou" else "a"
                 raise ValueError(f"{article} {kind_name} named {name!r} already exists")
-            operation: AgentTargetVerb = "create" if existing is None else "update"
+            operation: Literal["create", "update"] = "create" if existing is None else "update"
             if target is not None and operation not in bound.kind.agent_target_verbs:
                 raise VerbNotSupported(
                     f"{kind_name!r} objects do not support cross-agent {operation}"
                 )
-            await bound.kind.store.apply(
-                bound_ctx,
+            change_id = await _journal_object_change(
+                ctx,
+                kind_name,
                 name,
-                spec,
+                operation,
                 None if existing is None else existing.spec,
-                expected_generation=(
-                    stated_generation
-                    if stated_generation is not None
-                    else None
-                    if existing is None
-                    else existing.generation
-                ),
+                spec,
+                ctx.turn.agent_id if target is None else target.id,
             )
+            try:
+                await bound.kind.store.apply(
+                    bound_ctx,
+                    name,
+                    spec,
+                    None if existing is None else existing.spec,
+                    expected_generation=(
+                        stated_generation
+                        if stated_generation is not None
+                        else None
+                        if existing is None
+                        else existing.generation
+                    ),
+                )
+            except Exception:
+                if change_id is not None:
+                    await _withdraw_object_change(ctx, change_id)
+                raise
         result = {
             "kind": kind_name,
             "name": name,
@@ -1088,11 +1102,25 @@ class ObjectVerbs:
             old = await bound.kind.store.get(bound_ctx, args.name)
             if old is None:
                 raise UnknownObject(f"no {args.kind} object named {args.name!r}")
-            await bound.kind.store.delete(
-                bound_ctx,
+            change_id = await _journal_object_change(
+                ctx,
+                args.kind,
                 args.name,
-                expected_generation=old.generation,
+                "delete",
+                old.spec,
+                None,
+                ctx.turn.agent_id if target is None else target.id,
             )
+            try:
+                await bound.kind.store.delete(
+                    bound_ctx,
+                    args.name,
+                    expected_generation=old.generation,
+                )
+            except Exception:
+                if change_id is not None:
+                    await _withdraw_object_change(ctx, change_id)
+                raise
         result = {
             "kind": args.kind,
             "name": args.name,
@@ -1160,6 +1188,73 @@ class ObjectVerbs:
         if target is None:
             raise ValueError(f"no agent named {name!r} in this workspace")
         return ObjectAgent(id=target.id, name=target.name)
+
+
+async def _journal_object_change(
+    ctx: ToolContext,
+    kind: str,
+    name: str,
+    verb: Literal["create", "update", "delete"],
+    before: BaseModel | None,
+    after: BaseModel | None,
+    agent_id: UUID,
+) -> UUID | None:
+    """Journal one create/update/delete ahead of the mutation it describes, so a chat-turn write, a
+    prepared-intent write, and a direct portal write are recorded the same way and a journal failure
+    aborts before anything commits — a reported failure is then always a write that did not happen.
+    The row id derives from the dispatch's idempotency key, so a crash-recovery re-run of the same
+    dispatch finds its own row and inserts nothing: the row written before the first mutation keeps
+    the true verb and before-spec, which a re-run reading the already-mutated store could not
+    recompute. Returns the row id when this call inserted it and None when the row pre-existed: on
+    a store refusal the caller withdraws only a row this attempt wrote, so a re-run refused on the
+    stale generation fence keeps the record of the first attempt's committed mutation, while a
+    cancellation between journal and commit leaves the row for the re-run to heal. `caller` names
+    the acting member when one spoke, else the turn; `agent_id` is the agent whose namespace the
+    object landed in. Spec bodies are stored inline for the prototype; promoting them to blob refs
+    is deferred (RFC 0039)."""
+    change_id = (
+        uuid4() if ctx.idempotency_key is None else uuid5(NAMESPACE_OID, ctx.idempotency_key)
+    )
+    caller = (
+        f"member:{ctx.speaker_member_id}"
+        if ctx.speaker_member_id is not None
+        else f"turn:{ctx.turn.id}"
+    )
+    async with workspace_tx() as connection:
+        held = (
+            await connection.execute(
+                sa.select(tables.object_change.c.id).where(tables.object_change.c.id == change_id)
+            )
+        ).one_or_none()
+        if held is not None:
+            return None
+        await connection.execute(
+            sa.insert(tables.object_change).values(
+                id=change_id,
+                workspace_id=ctx.turn.workspace_id,
+                kind=kind,
+                name=name,
+                verb=verb,
+                caller=caller,
+                agent_id=agent_id,
+                spec_before=(
+                    None if before is None else json.dumps(before.model_dump(mode="json"))
+                ),
+                spec_after=(None if after is None else json.dumps(after.model_dump(mode="json"))),
+                created_at=sa.func.now(),
+            )
+        )
+    return change_id
+
+
+async def _withdraw_object_change(ctx: ToolContext, change_id: UUID) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.object_change).where(
+                tables.object_change.c.id == change_id,
+                tables.object_change.c.workspace_id == ctx.turn.workspace_id,
+            )
+        )
 
 
 def _parse_envelope(manifest: str) -> tuple[str, str, Mapping[str, object], UUID | None]:

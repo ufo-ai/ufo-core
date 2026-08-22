@@ -5,16 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "check": "tsc -b",
+    "build": "tsc -b && tsc -p tsconfig.apps.json && vite build && vite build --config vite.kit.config.ts",
+    "check": "tsc -b && tsc -p tsconfig.apps.json",
     "test": "vitest run"
   },
   "devDependencies": {
+    "@babel/standalone": "^8.0.4",
     "@tabler/icons": "^3.46.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
+    "@types/babel__standalone": "^7.1.9",
     "@types/mdast": "^4.0.4",
     "@types/node": "^26.1.2",
     "@types/react": "^19.2.18",

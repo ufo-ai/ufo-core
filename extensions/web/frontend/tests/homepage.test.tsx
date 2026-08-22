@@ -52,10 +52,11 @@ test("a set homepage frames the bound site beside the conversation", async () =>
   expect(frame.tagName).toBe("IFRAME");
   expect(frame.getAttribute("src")).toBe(HOMEPAGE_URL);
   expect(frame.hasAttribute("sandbox")).toBe(false);
-  // The one act on the half, and the one that leaves the portal.
-  const out = screen.getByRole("link", { name: "Open Assistant homepage" });
-  expect(out.getAttribute("href")).toBe(HOMEPAGE_URL);
-  expect(out.getAttribute("target")).toBe("_blank");
+  // The page heads itself, so the pane draws no band and no title of its own over it — only the
+  // shell's two acts, floating in the page's gutter.
+  expect(screen.queryByRole("heading", { name: "Assistant" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Settings for Assistant" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Chat with Assistant" })).toBeTruthy();
 });
 
 /** The conversation stands in a lane of the screen's own track, and a lane is headed by its own
@@ -73,14 +74,15 @@ test("the conversation beside a page is headed by the lane it stands in", async 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
   const conversation = await screen.findByRole("region", { name: "Assistant" });
   expect(conversation.querySelector('[data-slot="header"]')).toBeNull();
-  const page = screen.getByRole("region", { name: "Assistant homepage" });
-  expect(page.querySelector('[data-slot="header"]')).toBeTruthy();
 });
 
 /** A page standing alone is the app whole, so the app's conversations stand only once the member
  *  has opened one over it — and they stand between the page and the conversation they open, which
  *  is the order the member walked. */
-test("the conversations lane stands with the conversation, between the page and it", async () => {
+/** The right-side chat is the shell's own, and it heads itself with a New act and a menu of the
+ *  app's directive conversations — the way between them without the middle lane, whose list the
+ *  sidebar already draws. */
+test("the right-side chat heads itself with New and the conversation menu", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({
     "/homepage": () => json(SET),
@@ -93,11 +95,11 @@ test("the conversations lane stands with the conversation, between the page and 
 
   await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
-  const lane = await screen.findByRole("region", { name: "Conversations" });
-  const conversation = await screen.findByRole("region", { name: "Assistant" });
-  expect(
-    lane.compareDocumentPosition(conversation) & Node.DOCUMENT_POSITION_FOLLOWING,
-  ).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "New" })).toBeTruthy();
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Conversations with Assistant" }),
+  );
+  expect(await screen.findByRole("menuitem", { name: /./ })).toBeTruthy();
 });
 
 test("a homepage being built draws the page's shape rather than the page", async () => {

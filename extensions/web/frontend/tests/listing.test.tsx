@@ -15,9 +15,7 @@ import {
   AGENT,
   MEMBER,
   PlacedWorkspace,
-  SITE_KIND,
   json,
-  objectIndex,
   refusedNotice,
   wire,
 } from "./harness";
@@ -744,67 +742,6 @@ test("share flips the value it carries, and remove posts no spec at all", async 
   });
 });
 
-test("an outcome released after the member left never resets the view they are on", async () => {
-  let release: (value: Response) => void = () => {};
-  const held = new Promise<Response>((resolve) => (release = resolve));
-  const artifactReads: string[] = [];
-  wire({
-    "/workspace/sources": () =>
-      json({
-        sources: [
-          {
-            name: "notion-main",
-            backend: "notion",
-            stream: "pages",
-            account_id: "acct",
-            base_url: null,
-            owner_email: null,
-            shared: false,
-            own: true,
-            consecutive_errors: 0,
-            next_sync_at: "2026-08-01T06:00:00",
-          },
-        ],
-      }),
-    "/workspace/artifacts": (url) => {
-      artifactReads.push(url);
-      return json({
-        artifacts: [
-          {
-            id: "a1",
-            filename: "report.txt",
-            subject: null,
-            media_type: "text/plain",
-            size_bytes: 1,
-            created_at: "2026-08-01T06:00:00",
-            url: null,
-          },
-        ],
-        older: "c1",
-        newer: null,
-      });
-    },
-    "/objects/site": () => objectIndex(SITE_KIND, []),
-    "/intents": () => held,
-  });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  location.hash = "#/workspace/sources";
-  await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
-
-  location.hash = "#/artifacts";
-  await userEvent.click(await screen.findByRole("button", { name: "Older" }));
-  await waitFor(() => expect(artifactReads.length).toBe(2));
-
-  release(json({ applied: true, message: "Resync queued." }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  expect(artifactReads).toEqual([
-    "/surface/web/workspace/artifacts",
-    "/surface/web/workspace/artifacts?after=c1",
-  ]);
-});
 
 test("every declaration keys its rows on fields its own payload carries", () => {
   expect(

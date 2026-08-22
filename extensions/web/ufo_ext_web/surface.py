@@ -114,6 +114,7 @@ from ufo.sdk.surfaces import (
     SurfaceContext,
     SurfaceRoute,
     TerminalFrame,
+    ToolIntent,
     Turn,
     TurnContext,
     inbox_name,
@@ -747,6 +748,17 @@ async def _audience_for(
     return member_id, email, await web_audience(ctx, web_extension(), email)
 
 
+def _app_slug(provisioned_by: str | None) -> str | None:
+    """The slug an app extension shipped this agent under — `app_radar` provisions `radar` — or
+    None for every other agent. The slug is the section identity: extension names are unique where
+    the deploy is assembled, where an agent's own name is a member-visible string provisioning
+    suffixes on collision (`radar-app-radar`), so a route bound to the name dies in exactly the
+    workspace that already had one."""
+    if provisioned_by is None or not provisioned_by.startswith("app_"):
+        return None
+    return provisioned_by.removeprefix("app_")
+
+
 async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     """The portal's first read: the signed-in member and the agents their web audience holds — every
     agent for a workspace admin, the main agent plus the granted non-main agents for everyone else.
@@ -771,6 +783,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "main": agent.main,
                     "model": agent.model,
                     "icon": agent.icon,
+                    "app": _app_slug(agent.provisioned_by),
                     **(
                         {"web_audience": list(grants.get(agent.id, ()))}
                         if grants is not None
@@ -4098,6 +4111,138 @@ async def intents(ctx: SurfaceContext, request: Request) -> Response:
     return await submit_intent(ctx, request, agent_id, member_id, email)
 
 
+DIRECT_WRITE_TIMEOUT_SECONDS = 120
+OBJECT_WRITE_MAX_BYTES = 65_536
+
+
+def _write_agent(
+    request: Request, audience: WebAudience, stated: object = None
+) -> AgentSummary | Response:
+    """The agent namespace a direct write runs in: the body's `agent` field when given — the shape
+    the bridge client posts — else the `agent` query param, else the workspace main agent."""
+    raw = (stated if isinstance(stated, str) else request.query_params.get("agent", "")).strip()
+    if raw:
+        try:
+            agent_id = UUID(raw)
+        except ValueError:
+            return Response("no such agent", status_code=404)
+        for agent in audience.agents:
+            if agent.id == agent_id:
+                return agent
+        return Response("no such agent", status_code=404)
+    main = next((agent for agent in audience.agents if agent.main), None)
+    if main is None:
+        return Response("no main agent", status_code=404)
+    return main
+
+
+def _direct_result(frame: TerminalFrame, name: str) -> Response:
+    if frame.status == "done":
+        return JSONResponse({"ok": True, "name": name, "detail": frame.text or ""})
+    reason = frame.error_message or frame.text or f"not applied ({frame.status})"
+    return JSONResponse({"ok": False, "name": name, "detail": reason})
+
+
+async def object_write(ctx: SurfaceContext, request: Request) -> Response:
+    """The bridge's write path: an app frame's object create/update/delete, run under the member's
+    own session as a prepared-intent turn on the member's durable intent conversation. The turn
+    dispatches object_apply/object_delete verbatim (no model round), the object verb path journals
+    it, and the typed result or refusal returns synchronously. The delete route carries the object
+    name in its path (`objects/{kind}/{name}/delete`); the create/update route names it in the
+    body. Prototype: the write carries no per-request confirmation gate — a frame-initiated write
+    acts under the viewer's session (RFC 0039 security debt #1/#2)."""
+    delete = "name" in request.path_params
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, email, audience = resolved
+    kind = request.path_params["kind"]
+    if ctx.object_kind(kind) is None:
+        return Response(f"no object kind named {kind!r}", status_code=404)
+    if delete:
+        agent = _write_agent(request, audience)
+        if isinstance(agent, Response):
+            return agent
+        name = request.path_params["name"]
+        intent = ToolIntent(tool="object_delete", input={"kind": kind, "name": name})
+    else:
+        try:
+            body = await request.json()
+        except ValueError:
+            return Response("body must be JSON", status_code=400)
+        if not isinstance(body, dict) or not isinstance(body.get("spec"), dict):
+            return Response("body must be a JSON object carrying a spec mapping", status_code=400)
+        agent = _write_agent(request, audience, body.get("agent"))
+        if isinstance(agent, Response):
+            return agent
+        raw_name = body.get("name")
+        if not isinstance(raw_name, str) or not raw_name:
+            return Response("body must name the object", status_code=400)
+        name = raw_name
+        manifest = json.dumps({"kind": kind, "name": name, "spec": body["spec"]})
+        if len(manifest.encode()) > OBJECT_WRITE_MAX_BYTES:
+            return JSONResponse(
+                {"ok": False, "name": None, "detail": "write too large"}, status_code=413
+            )
+        intent = ToolIntent(tool="object_apply", input={"manifest": manifest})
+    conversation_id = await ctx.conversation_for(
+        f"intent/{agent.id}/{email}", conversation_audience(member_id), agent_id=agent.id
+    )
+    admitted = await ctx.admit(
+        conversation_id, intent.model_dump_json(), speaker_member_id=member_id, intent=intent
+    )
+    try:
+        async with (
+            ctx.tail(admitted.turn_id) as frames,
+            asyncio.timeout(DIRECT_WRITE_TIMEOUT_SECONDS),
+        ):
+            async for _cursor, frame in frames:
+                match frame:
+                    case Terminal():
+                        return _direct_result(frame.frame, name)
+                    case Parked():
+                        return JSONResponse({"ok": False, "name": name, "detail": frame.message})
+    except TimeoutError:
+        return JSONResponse(
+            {"ok": False, "name": name, "detail": "still applying"}, status_code=504
+        )
+    raise RuntimeError("the write turn's tail ended without a terminal frame")
+
+
+OBJECT_CHANGES_LIMIT = 200
+
+
+async def object_changes(ctx: SurfaceContext, request: Request) -> Response:
+    """The admin audit read of the object-change journal: the workspace's recent create/update/
+    delete rows, each naming the verb, the caller (`member:<id>` or `turn:<id>`), the kind and
+    name, and when. Admin-only — the journal is the operator's record, not a member surface (RFC
+    0039). The stored spec bodies stay off this read: a kind's own read redacts what its owner
+    withheld (a private task's prompt), and an audit row must not answer what the record refuses,
+    so the audit states that a change happened and the kind stays the one door to its content."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, _email, audience = resolved
+    if not audience.admin:
+        return Response("admin only", status_code=404)
+    changes = await ctx.recent_object_changes(OBJECT_CHANGES_LIMIT)
+    return JSONResponse(
+        {
+            "changes": [
+                {
+                    "kind": change.kind,
+                    "name": change.name,
+                    "verb": change.verb,
+                    "caller": change.caller,
+                    "agent_id": str(change.agent_id),
+                    "at": change.created_at.isoformat(),
+                }
+                for change in changes
+            ]
+        }
+    )
+
+
 async def settings(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's configuration read — its prompt, spec, bound surfaces, and the
     deploy's ceilings — answering the agent's whole web audience, so every member reads the main
@@ -4145,7 +4290,13 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
         return JSONResponse(
             {"state": "building"} if await _seeding_homepage(ctx, agent_id) else {"state": "none"}
         )
-    return JSONResponse({"state": "set", "url": bound.fields["site_url"]})
+    return JSONResponse(
+        {
+            "state": "set",
+            "url": bound.fields["site_url"],
+            "deploy_generation": bound.fields.get("deploy_generation", 0),
+        }
+    )
 
 
 async def _seeding_homepage(ctx: SurfaceContext, agent_id: UUID) -> bool:
@@ -4287,6 +4438,9 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/radar", handler=workspace_radar),
     SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),
+    SurfaceRoute(method="POST", path="objects/{kind}", handler=object_write),
+    SurfaceRoute(method="POST", path="objects/{kind}/{name}/delete", handler=object_write),
+    SurfaceRoute(method="GET", path="workspace/object-changes", handler=object_changes),
     SurfaceRoute(method="GET", path="workspace/usage", handler=workspace_usage),
     SurfaceRoute(method="GET", path="turns/{turn_id}/stream", handler=stream),
     SurfaceRoute(method="GET", path="turns/{turn_id}/connect", handler=connect_handoff),

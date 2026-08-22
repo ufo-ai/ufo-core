@@ -193,10 +193,6 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Search",
     "New conversation",
     "Applications",
-    "Wiki",
-    "Artifacts",
-    "Radar",
-    "Tasks",
     "Conversations",
     "Connectors",
     "Workspace",
@@ -218,8 +214,49 @@ test("the shell opens on the rail, and a sidebar the member widened stays widene
 });
 
 /** A desk width draws the mark at the sidebar's head; a phone width keeps it on the bar, centred
- *  between the hamburger and the account. It is centred out of the row — absolutely placed — so
- *  the row it stands over keeps one line whatever the mark's own width. */
+test("until the member pins for themselves, the workspace's apps stand pinned, chat first", () => {
+  wire({});
+  const apps = [
+    { id: SECOND_ID, name: "wiki", model: "auto", main: false, icon: "stele", app: "wiki" },
+    {
+      id: "3aa87d3e-8f10-4d40-bb9c-9e40f79c11aa",
+      name: "chat",
+      model: "auto",
+      main: false,
+      icon: "flange",
+      app: "chat",
+    },
+  ];
+  render(<App agents={[AGENT, ...apps]} member={MEMBER} onAgents={() => {}} />);
+
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const names = within(sidebar)
+    .getAllByRole("button")
+    .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
+  const chat = names.indexOf("Chat");
+  const wiki = names.indexOf("Wiki");
+  expect(chat).toBeGreaterThan(-1);
+  expect(wiki).toBeGreaterThan(chat);
+  expect(names).not.toContain("Assistant");
+});
+
+/** A stored pin no live agent answers — an app since removed, or the old fixed reads — resolves
+ *  to nothing rather than a row. */
+test("a stored pin nothing answers draws no row", () => {
+  localStorage.setItem("pinned-rows", "wiki\nradar");
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const names = within(sidebar)
+    .getAllByRole("button")
+    .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
+  expect(names).not.toContain("Wiki");
+  expect(names).not.toContain("Radar");
+});
+
+/** The bar's mark stands between the hamburger and the account. It is centred out of the row —
+ *  absolutely placed — so the row it stands over keeps one line whatever the mark's own width. */
 test("the bar's mark stands at a phone width too, centred out of the row", () => {
   atPhoneWidth();
   wire({});
@@ -249,10 +286,6 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Collapse sidebar",
     "New conversation",
     "Applications",
-    "Wiki",
-    "Artifacts",
-    "Radar",
-    "Tasks",
     "Conversations",
     "Connectors",
     "Workspace",
@@ -260,18 +293,6 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
   ]);
 });
 
-test("picking a destination in the drawer moves the page and shuts the drawer", async () => {
-  atPhoneWidth();
-  wire({});
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(screen.getByRole("button", { name: "Menu" }));
-  const drawer = await screen.findByRole("dialog");
-  await userEvent.click(within(drawer).getByRole("button", { name: "Artifacts" }));
-
-  expect(location.hash).toBe("#/artifacts");
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-});
 
 test("the sidebar's foot states who is signed in and offers the theme choice", async () => {
   wire({});
