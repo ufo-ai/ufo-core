@@ -28,7 +28,7 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import PageIndexer
 from ufo_ext_sources.direct import DirectAuthProxy
-from ufo_ext_sources.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
+from ufo_ext_sources.providers.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
 from ufo_ext_sources.tools import SourceObjects, SourceSpec
 
 from ufo.access.connectors import (

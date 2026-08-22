@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from ufo_ext_sources.github import GitHubConnector
+from ufo_ext_sources.providers.github import GitHubConnector
 
 REPO = "northwind/atlas"
 ISSUE_ID_BASE = 2_400_000

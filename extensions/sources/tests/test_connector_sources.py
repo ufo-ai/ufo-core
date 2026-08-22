@@ -24,9 +24,9 @@ from cryptography.fernet import Fernet
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
-from ufo_ext_sources.asana import AsanaConnector
 from ufo_ext_sources.direct import DirectAuthProxy
-from ufo_ext_sources.github import GitHubConnector
+from ufo_ext_sources.providers.asana import AsanaConnector
+from ufo_ext_sources.providers.github import GitHubConnector
 
 from ufo.access.connectors import (
     DIRECT_ACCOUNT,

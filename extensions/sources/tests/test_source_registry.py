@@ -1,5 +1,5 @@
 import pytest
-from ufo_ext_sources.asana import AsanaConnector
+from ufo_ext_sources.providers.asana import AsanaConnector
 from ufo_ext_sources.registry import CONNECTORS, _connector_registry
 
 from ufo.sdk.sources import RestConnector
