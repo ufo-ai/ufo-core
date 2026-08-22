@@ -36,6 +36,30 @@ export async function importWorker(tag) {
     .default;
 }
 
+// Stands in for the colo's shared cache: `match` and `put` alone, keyed by the request URL the
+// worker builds. It stores bytes and headers rather than a live Response, so one stored card can be
+// served over and over.
+export function edgeCache() {
+  const stored = new Map();
+  return {
+    stored,
+    default: {
+      async match(request) {
+        const entry = stored.get(request.url);
+        if (entry === undefined) return undefined;
+        return new Response(entry.body, { status: entry.status, headers: entry.headers });
+      },
+      async put(request, response) {
+        stored.set(request.url, {
+          body: await response.arrayBuffer(),
+          status: response.status,
+          headers: [...response.headers],
+        });
+      },
+    },
+  };
+}
+
 export function d1(database = new DatabaseSync(":memory:")) {
   return {
     database,

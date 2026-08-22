@@ -11,6 +11,7 @@ import {
   PRIVACY_PAGE,
   TERMS_PAGE,
   d1,
+  edgeCache,
   importWorker,
 } from "./harness.mjs";
 
@@ -19,14 +20,27 @@ const worker = await importWorker("shared");
 const EMAIL_LEDGER =
   "create table if not exists waitlist_email (email text primary key, queued_at text, sent_at text)";
 
+// One public site's card, at the app host address the sites surface publishes in `og:image`: the
+// site's own token, then the digest of the card's bytes. The origin's directive is what the edge is
+// allowed to keep it for, and it is never `immutable` — a site narrowed after the fact stops being
+// previewed inside that window.
+const CARD_PATH = "/surface/sites/share/site/site-token/5f2c5f2c.jpg";
+const CARD_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+const CARD_CACHE = "public, max-age=600";
+
 const outbound = [];
 const outboundRequests = [];
 let fleetReply = () => Response.json({ craft: 0 });
+let cardReply = () =>
+  new Response(CARD_BYTES, {
+    headers: { "cache-control": CARD_CACHE, "content-type": "image/jpeg" },
+  });
 globalThis.fetch = async (input) => {
   const url = input instanceof Request ? input.url : input;
   outbound.push(url);
   outboundRequests.push(input instanceof Request ? input : new Request(input));
   if (url.endsWith("/fleet")) return fleetReply();
+  if (url.includes("/surface/sites/share/site/")) return cardReply(url);
   return new Response(`origin:${url}`);
 };
 
@@ -159,6 +173,97 @@ test("the card paths are left to the apex origin", async () => {
     assert.equal(reply.status, 200);
     assert.equal(await reply.text(), `origin:https://flyingobject.ai${path}`);
   }
+});
+
+// A pasted site link is unfurled by every reader's chat app, and each unfurl fetches the card. The
+// edge answers those off one stored copy, so the app host reads the row and streams the bytes once
+// per window instead of once per request.
+test("a site card is served from the edge cache after one origin read", async () => {
+  globalThis.caches = edgeCache();
+  const fresh = await importWorker("site-card-hit");
+  const ask = () => fresh.fetch(new Request(`https://app.ufo.ai${CARD_PATH}`), env);
+  const start = outbound.length;
+
+  const first = await ask();
+  const second = await ask();
+
+  for (const reply of [first, second]) {
+    assert.equal(reply.status, 200);
+    assert.equal(reply.headers.get("content-type"), "image/jpeg");
+    // The lifetime the edge keeps the copy for is the origin's own directive, relayed untouched:
+    // one drain window governs the browser and the colo alike.
+    assert.equal(reply.headers.get("cache-control"), CARD_CACHE);
+    assert.doesNotMatch(reply.headers.get("cache-control"), /immutable/);
+    assert.equal(reply.headers.get("set-cookie"), null);
+    assert.equal(reply.headers.get("location"), null);
+    assert.deepEqual(Buffer.from(await reply.arrayBuffer()), CARD_BYTES);
+  }
+  assert.deepEqual(outbound.slice(start), [`https://app.ufo.ai${CARD_PATH}`]);
+});
+
+// The address is public by construction and the row behind it is mutable, so the gate stays the
+// origin's answer on every window: a refusal is never stored, and the request that carries it
+// reaches the origin with no session on it to gate against.
+test("a refused card is not stored, and no session rides to the origin", async () => {
+  globalThis.caches = edgeCache();
+  const fresh = await importWorker("site-card-gate");
+  const ask = () =>
+    fresh.fetch(
+      new Request(`https://app.ufo.ai${CARD_PATH}`, {
+        headers: { cookie: "ufo_session=member-session", "user-agent": "Slackbot 1.0" },
+      }),
+      env,
+    );
+  const start = outbound.length;
+  cardReply = () => new Response("Not found", { status: 404 });
+
+  const narrowed = await ask();
+
+  assert.equal(narrowed.status, 404);
+  assert.equal(globalThis.caches.stored.size, 0);
+  assert.equal(outboundRequests.at(-1).headers.get("cookie"), null);
+  cardReply = () =>
+    new Response(CARD_BYTES, {
+      headers: { "cache-control": CARD_CACHE, "content-type": "image/jpeg" },
+    });
+  assert.equal((await ask()).status, 200);
+  assert.deepEqual(outbound.slice(start), [
+    `https://app.ufo.ai${CARD_PATH}`,
+    `https://app.ufo.ai${CARD_PATH}`,
+  ]);
+});
+
+// The bytes are addressed by their own digest, so the path alone identifies them: a crawler that
+// appends its own parameter is answered from the same copy rather than sending the app host another
+// read, and the origin is asked for the path it published and nothing else.
+test("the card's cache key is its path alone", async () => {
+  globalThis.caches = edgeCache();
+  const fresh = await importWorker("site-card-key");
+  const start = outbound.length;
+
+  const first = await fresh.fetch(new Request(`https://app.ufo.ai${CARD_PATH}?v=1`), env);
+  const second = await fresh.fetch(new Request(`https://app.ufo.ai${CARD_PATH}?v=2`), env);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.deepEqual(Buffer.from(await second.arrayBuffer()), CARD_BYTES);
+  assert.deepEqual(outbound.slice(start), [`https://app.ufo.ai${CARD_PATH}`]);
+});
+
+// A stored copy answers the read it was stored for and nothing else, so a write on that path is the
+// origin's to refuse.
+test("a write on the card path is passed to the origin and stores nothing", async () => {
+  globalThis.caches = edgeCache();
+  const fresh = await importWorker("site-card-write");
+
+  const reply = await fresh.fetch(
+    new Request(`https://app.ufo.ai${CARD_PATH}`, { method: "POST", body: "x" }),
+    env,
+  );
+
+  assert.equal(reply.status, 200);
+  assert.equal(outboundRequests.at(-1).method, "POST");
+  assert.equal(globalThis.caches.stored.size, 0);
 });
 
 test("favicons serve the exact light and dark product marks", async () => {

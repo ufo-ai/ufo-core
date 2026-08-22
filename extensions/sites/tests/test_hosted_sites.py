@@ -54,6 +54,7 @@ from ufo_ext_sites.surface import (
     SHARE_DESCRIPTION,
     SITE_CARD_ALT,
     SITE_CARD_CACHE,
+    SITE_CARD_PATH,
     UNCONFIGURED_BODY,
     VISIBILITY_BADGES,
     SiteHostingUnconfigured,
@@ -1727,6 +1728,25 @@ async def test_making_a_site_public_composes_a_card_from_the_shot_it_already_had
     card = str(site_card_url(PUBLIC_BASE_URL, link.rsplit("/", 1)[-1], CARD_DIGEST))
     assert _head_tags((await client.get(link)).text)["og:image"] == card
     assert (await client.get(card)).status_code == 200
+
+
+def test_the_edge_fronts_the_card_at_the_address_the_head_publishes() -> None:
+    """One pasted link is unfurled by every chat app that reads it, and each unfurl fetches the
+    card. So the address the head publishes is answered at the edge off one stored copy, and the app
+    host reads the row and streams the bytes once per window instead of once per request.
+
+    Two files in another language hold that arrangement — the worker that answers the path and the
+    route that hands the app host's card path to it — and both are anchored here against the path
+    this module publishes, because a prefix that drifts from it returns every unfurl to the origin
+    with nothing failing. The card keeps the app host, the one origin `og:url` names, so the page
+    and its picture stay one origin."""
+    edge = Path(__file__).resolve().parents[3] / "infra/modules/edge"
+
+    assert f'const SITE_CARD_PREFIX = "{SITE_CARD_PATH}/";' in (edge / "worker.js").read_text()
+    assert f'pattern = "app.${{var.hostname}}{SITE_CARD_PATH}/*"' in (edge / "main.tf").read_text()
+    assert urlsplit(str(site_card_url(PUBLIC_BASE_URL, "site-token", CARD_DIGEST))).netloc == (
+        urlsplit(site_url(PUBLIC_BASE_URL, uuid4(), uuid4(), SITE)).netloc
+    )
 
 
 async def _sites_row(workspace: Workspace, conversation_id: UUID, name: str) -> HostedSite:

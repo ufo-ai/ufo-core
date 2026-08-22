@@ -35,11 +35,14 @@ holds the link. Every other level gets a generic title naming neither the site n
 
 The picture obeys that same rule, harder. A public site's card is the site's own front page beside
 the brandmark, composed at deploy time (`share_card.py`) and served by the one anonymous route here:
-`share/site/<site token>/<digest>.jpg`. That route re-reads the row on every request and serves the
-card only while the site is still public and not homepage-bound, because a level is mutable and a
-URL in a head tag cannot be recalled. It carries no session, sets no cookie, mints no grant, and
-answers `public, max-age=600` rather than `immutable`, so a site that stops being public stops
-being previewed within minutes. Every other site keeps the brand's generic card, naming nothing."""
+`share/site/<site token>/<digest>.jpg`. That route re-reads the row and serves the card only while
+the site is still public and not homepage-bound, because a level is mutable and a URL in a head tag
+cannot be recalled. It carries no session, sets no cookie, mints no grant, and answers
+`public, max-age=600` rather than `immutable`, so a site that stops being public stops being
+previewed within minutes. The edge worker (`infra/modules/edge`) answers that one address off a
+stored copy for exactly the lifetime this route names, so an unfurl storm reads the row once per
+window rather than once per request and the same minutes bound the drain. Every other site keeps the
+brand's generic card, naming nothing."""
 
 import hashlib
 import html
@@ -99,7 +102,10 @@ SITE_CARD_SEGMENT = "share/site"
 SITE_CARD_PATH = f"{FRAME_PATH}/{SITE_CARD_SEGMENT}"
 SITE_CARD_CACHE = "public, max-age=600"
 """Cacheable, and never `immutable`: a site that stops being public must stop being previewed within
-minutes, and the digest in the URL already covers the redeploy case."""
+minutes, and the digest in the URL already covers the redeploy case.
+
+The edge in front of this route stores its copy under this directive and writes none of its own, so
+this is the one place the drain window is set — for the colo and the browser alike."""
 SITE_CARD_HEADERS = {"cache-control": SITE_CARD_CACHE, "x-content-type-options": "nosniff"}
 SITE_CARD_ALT = "The front page of {name}, drawn beside the UFO brandmark."
 GENERIC_SHARE_TITLE = "A site on UFO"
@@ -270,7 +276,9 @@ async def share_card(ctx: SurfaceContext, request: Request) -> Response:
 
     **Cacheable but drainable.** `max-age=600` and not `immutable`: a card must fall out of caches
     within minutes of a site being narrowed, and the digest in the URL already keeps a redeploy from
-    being served from a stale cache.
+    being served from a stale cache. This is the origin behind the edge worker, which keeps its copy
+    under this same directive: the rate reaching here is one read per window per colo, and the
+    window a narrowed site drains in is the one named here.
 
     **Bytes only.** The key served is the one the row carries. The URL's digest is compared against
     the row's and never used to address anything, so no path in the artifact namespace is reachable

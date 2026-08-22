@@ -130,3 +130,15 @@ resource "cloudflare_workers_route" "edge" {
   pattern = "${var.hostname}/*"
   script  = cloudflare_workers_script.edge.script_name
 }
+
+# A public site's share card is the one anonymous address on the app host, and one pasted link is
+# fetched by every unfurler that reads it. This route hands that path to the worker, which answers it
+# off one stored copy so the app host reads the row and streams the bytes once per window rather than
+# once per request. Only the card path is claimed: everything else on that host is a member's own
+# authenticated traffic and keeps going straight to the origin. The pattern is prefixed rather than
+# exact because Cloudflare matches it against the URL including its query.
+resource "cloudflare_workers_route" "site_cards" {
+  zone_id = var.zone_id
+  pattern = "app.${var.hostname}/surface/sites/share/site/*"
+  script  = cloudflare_workers_script.edge.script_name
+}

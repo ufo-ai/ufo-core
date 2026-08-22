@@ -5,6 +5,7 @@ const COUNT_TTL_MS = 3_600_000;
 const FLEET_TTL_MS = 300_000;
 const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const PAGE_CACHE = "public, max-age=600";
+const SITE_CARD_PREFIX = "/surface/sites/share/site/";
 const WAITLIST_SENDER = "__WAITLIST_SENDER__";
 
 const LANDING_HTML = "__LANDING_HTML__";
@@ -125,6 +126,15 @@ async function fleetCount(originBase) {
   return fleet.count;
 }
 
+async function siteCard(url) {
+  const key = new Request(`${url.origin}${url.pathname}`);
+  const cached = await caches.default.match(key);
+  if (cached) return cached;
+  const served = await fetch(key);
+  if (served.ok) await caches.default.put(key, served.clone());
+  return served;
+}
+
 async function landing(request, env, url) {
   if (!CLI_UA.test(request.headers.get("user-agent") ?? "")) {
     const bounce = secure(url);
@@ -179,6 +189,9 @@ export default {
     }
     if (url.pathname.startsWith("/ufo/bin/")) {
       return fetch(`${env.ORIGIN_BASE}${url.pathname}`);
+    }
+    if (request.method === "GET" && url.pathname.startsWith(SITE_CARD_PREFIX)) {
+      return siteCard(url);
     }
     switch (url.pathname) {
       case "/":
