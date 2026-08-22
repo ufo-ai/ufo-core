@@ -397,6 +397,10 @@ const DARK_PROMPT: &str = "38;2;255;135;255";
 const LIGHT_PROMPT: &str = "38;2;162;28;175";
 #[cfg(unix)]
 const PROMPT_GLYPH: &str = "\u{203a}";
+#[cfg(unix)]
+const SPINNER_FIRST: &str = "\u{280b}";
+#[cfg(unix)]
+const SPINNER_SECOND: &str = "\u{2819}";
 
 #[cfg(unix)]
 #[derive(Default)]
@@ -907,6 +911,46 @@ fn a_mid_turn_send_posts_instantly_and_settles_on_absorption() {
         .find(|line| line.contains("\"type\":\"message_absorbed\""))
         .expect("the fold is observable");
     assert!(absorbed.contains("arr-9"), "{absorbed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_first_frame_is_painted_before_the_loop_waits_on_anything() {
+    let served = serve(vec![Exchange {
+        delay_ms: 900,
+        status: 200,
+        reply_lines: &["say\thello", "exit\t0"],
+    }]);
+    let home = scratch_home("tty-frame-zero");
+    let mut session = run_client_on_pty(&served.url, &["echoed"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the launch message reaches the gateway");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let first_frame = loop {
+        let painted = session.painted();
+        if let Some(at) = painted.find(PROMPT_GLYPH) {
+            break painted[..at].to_string();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the composer never painted: {painted:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+    let _ = served.handle.join();
+    assert!(
+        first_frame.contains(SPINNER_FIRST) && !first_frame.contains(SPINNER_SECOND),
+        "a tick advances the spinner before painting, and the turn is open before the frame: {first_frame:?}"
+    );
+    assert!(
+        !first_frame.contains("echoed"),
+        "the wire's echo repaints, and the frame is painted before it is read: {first_frame:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[cfg(unix)]

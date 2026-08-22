@@ -884,6 +884,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
     if !first.is_empty() {
         app.begin_turn();
     }
+    app.paint();
     let mut gate = Gate::default();
     let mut stop: Option<Stop> = None;
     let mut sends: Option<SendLane> = None;
