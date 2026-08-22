@@ -40,6 +40,8 @@ STORAGE_QUERY = (
     "${module.platform.db_instance_identifier}} / avg:aws.rds.total_storage_space"
     "{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 0.05"
 )
+# A Datadog notification handle in a monitor message: a Slack channel or an email address.
+HANDLE = r"@(?:slack-[\w-]+|[\w.-]+@[\w.-]+)"
 
 
 def _code(source: str) -> str:
@@ -4001,7 +4003,7 @@ def test_every_monitor_notifies_a_reachable_handle(environment: str) -> None:
     assert monitors
     for monitor in monitors:
         message = _monitor_attribute(monitor, "message", environment)
-        assert re.search(r"@(?:slack-[\w-]+|[\w.-]+@[\w.-]+)", message), monitor
+        assert re.search(HANDLE, message), monitor
 
 
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
@@ -4029,6 +4031,24 @@ def test_the_source_sync_monitor_watches_the_check_the_reporters_submit(environm
     assert "{{provider.name}}" in message
     assert "{{stream.name}}" in message
     assert "{{source_id.name}}" in message
+
+
+@pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
+def test_the_source_sync_monitor_reports_both_transitions(environment: str) -> None:
+    """A stream that cannot sync holds CRITICAL until somebody fixes it, so the alert repeats hourly
+    rather than scrolling away once. The clear is a message of its own: an operator who reads the
+    channel has no other place to learn the stream came back, and the failure text would read as a
+    second incident if it were sent again on recovery. The handles sit outside both blocks, so both
+    transitions reach the same targets."""
+    assert _monitor_attribute("source_sync_failed", "renotify_interval", environment) == "60"
+    message = _monitor_attribute("source_sync_failed", "message", environment)
+    blocks = dict(re.findall(r"{{#(is_alert|is_recovery)}}(.*?){{/\1}}", message))
+    assert set(blocks) == {"is_alert", "is_recovery"}
+    assert "still failing" in blocks["is_alert"]
+    assert "still failing" not in blocks["is_recovery"]
+    assert re.search(HANDLE, message)
+    for block in blocks.values():
+        assert not re.search(HANDLE, block)
 
 
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)

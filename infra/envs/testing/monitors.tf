@@ -94,18 +94,25 @@ resource "datadog_monitor" "db_pool_exhausted" {
 # alongside, with its `error_class` dimension, for what failed rather than whether it is still
 # failing. No no-data clause: a source a member removed reports nothing again by design, and a fleet
 # whose telemetry stopped is what the silence monitor above alerts on.
+#
+# Both transitions carry their own text, because the clear is the answer an operator waits for and
+# the failure text sent again on OK reads as a second incident. The handles stay outside both blocks,
+# so the failure and the clear reach the same Slack target. The hourly renotify is the other half: a
+# row that cannot sync holds CRITICAL for as long as nobody fixes it, and one message at the
+# transition is all the channel would ever hold.
 resource "datadog_monitor" "source_sync_failed" {
   name    = "ufo testing source sync failing"
   type    = "service check"
   query   = "\"ufo.source_sync\".over(\"env:testing\").by(\"provider\",\"stream\",\"source_id\").last(2).count_by_status()"
-  message = "{{provider.name}} {{stream.name}} source sync failed two runs in a row and is still failing for source {{source_id.name}}. Search source_sync.failed for that source id, its account, error class, and next attempt. The next successful run clears this. @ops@flyingobject.ai @slack-alerts"
+  message = "{{#is_alert}}{{provider.name}} {{stream.name}} source sync failed two runs in a row and is still failing for source {{source_id.name}}. Search source_sync.failed for that source id, its account, error class, and next attempt. The next successful run clears this, and this message repeats every hour until one does.{{/is_alert}}{{#is_recovery}}{{provider.name}} {{stream.name}} source sync succeeded again for source {{source_id.name}} — that row is syncing and needs no operator.{{/is_recovery}} @ops@flyingobject.ai @slack-alerts"
 
   monitor_thresholds {
     critical = 2
     ok       = 1
   }
 
-  notify_no_data = false
+  notify_no_data    = false
+  renotify_interval = 60
 
   tags = ["env:testing", "managed-by:terraform"]
 }
