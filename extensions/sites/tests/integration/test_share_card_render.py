@@ -216,10 +216,12 @@ def _chromium_draws() -> bool:
     because the browser it launched sat waiting on desktop services that runner does not have. That
     is a machine which cannot drive a browser, not a card drawn wrong, so it skips the module rather
     than fails it. This never raises: the required integration gate reads a missing or undrivable
-    browser as a skip, and the card's assertions stay strict wherever one does draw."""
+    browser as a skip, and the card's assertions stay strict wherever one does draw. Chromium's
+    helpers can outlive the shot and write the profile while the scratch directory comes down, so
+    its cleanup tolerates a straggler's leavings instead of failing collection."""
     if next((path for path in map(shutil.which, BROWSERS) if path), None) is None:
         return False
-    with tempfile.TemporaryDirectory() as scratch:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as scratch:
         root = Path(scratch)
         page = root / "probe.html"
         page.write_text(PROBE_PAGE)
