@@ -31,9 +31,7 @@ from evals.coding_repo.runner import (
     REPO_ROOT,
     REPO_SLUG,
     REPO_URL,
-    AllOf,
     DocumentCapture,
-    LaneAndRoute,
     PatchCapture,
     PatchRuns,
     _capability_case,
@@ -48,6 +46,7 @@ from evals.harness.capability import (
     SharedArtifact,
     ToolInvocation,
 )
+from evals.harness.coding import AllOf, PinnedRepositoryRoute
 from evals.harness.registry import EvalTask
 from evals.harness.scorers import delegation_only_scorer
 from evals.harness.target import TargetResult
@@ -247,7 +246,7 @@ async def test_an_unshared_patch_is_refused(tmp_path: Path) -> None:
 
 async def test_the_lane_gate_requires_a_coding_child_at_the_pin() -> None:
     case = PATCH_CASES[0]
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     passed = await grader(output(commands=(f"git fetch --depth 1 origin {case.base_sha}",)))
     assert passed.passed, passed.reason
     assert (await grader(output(delegated=False))).reason == "did not delegate"
@@ -265,7 +264,7 @@ async def test_the_lane_gate_reads_a_background_spawn_as_no_result(moved: bool) 
     for one an arriving message moved there: both name a running child and carry no output, so
     neither counts as a delegation that returned a result."""
     case = PATCH_CASES[0]
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     verdict = await grader(
         output(
             spawn_result=_spawn_handles(CODING_LANE, uuid4(), moved),
@@ -280,7 +279,7 @@ async def test_the_lane_gate_refuses_a_historyless_route() -> None:
     """One case per argument a call reaches a target through, and per route that hands back a tree
     with no history — a shell command, a REPL, a URL fetch, and a connector action."""
     case = PATCH_CASES[0]
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     routes = (
         ("bash", "command", f"gh api repos/{REPO_SLUG}/zipball/{case.base_sha}"),
         ("bash", "command", f"gh api repos/{REPO_SLUG}/contents/core/src/ufo/db.py"),
@@ -574,7 +573,7 @@ async def test_a_materialized_tree_is_its_own_work_tree(tmp_path: Path) -> None:
 
 async def test_the_route_gate_refuses_an_archive_url_and_a_clone() -> None:
     case = PATCH_CASES[0]
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     archive = await grader(
         output(
             commands=(
@@ -596,7 +595,12 @@ async def test_the_route_gate_refuses_an_archive_url_and_a_clone() -> None:
 
 async def test_all_of_merges_evidence_and_joins_its_reasons() -> None:
     case = RESEARCH_CASES[0]
-    grader = AllOf((LaneAndRoute(case.base_sha), delegation_only_scorer(PARENT_FORBIDDEN_TOOLS)))
+    grader = AllOf(
+        (
+            PinnedRepositoryRoute(REPO_SLUG, case.base_sha),
+            delegation_only_scorer(PARENT_FORBIDDEN_TOOLS),
+        )
+    )
     verdict = await grader(output(commands=(f"git fetch --depth 1 origin {case.base_sha}",)))
     assert verdict.passed, verdict.reason
     assert "delegated to 'coding'" in verdict.reason
@@ -631,7 +635,7 @@ async def test_the_route_gate_reads_only_calls_that_act(tmp_path: Path) -> None:
             ),
         ),
     )
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     relayed_only = await grader(relayed)
     assert not relayed_only.passed
     assert "no call fetches" in relayed_only.reason, "the envelope must not satisfy the fetch"
@@ -690,7 +694,7 @@ async def test_the_route_gate_reads_only_the_arguments_a_call_reaches_a_target_t
     """A note, a search for the phrase, and a path that merely spells `archive/` are prose or
     working files, not routes. Reading them refuses runs that took no route at all."""
     case = PATCH_CASES[0]
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     fetch = ToolInvocation(
         name="bash",
         input={"command": f"git fetch --depth 1 origin {case.base_sha}"},
@@ -726,7 +730,7 @@ async def test_a_local_clone_passes_and_a_remote_clone_of_this_repository_does_n
     with git. That copy carries no commit the pin does not; a clone of the remote carries all of
     them."""
     case = PATCH_CASES[0]
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     local = await grader(
         output(
             commands=(
@@ -763,7 +767,7 @@ async def test_each_url_route_is_refused_only_for_this_repository() -> None:
     or raw read is ordinary work — a dependency's source, a snippet from a public repository — so an
     unscoped substring would refuse a run that never reached the pinned commit by that route."""
     case = PATCH_CASES[0]
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     fetch = f"git fetch --depth 1 origin {case.base_sha}"
     for route in SCOPED_ROUTES:
         ours = await grader(output(commands=(fetch, route.format(slug=REPO_SLUG))))
@@ -778,7 +782,7 @@ async def test_a_clone_is_read_in_whichever_shell_segment_names_it() -> None:
     splits on has to split. The same split is what lets a local clone pass while its next segment
     names the remote, so dropping a separator reds that half."""
     case = PATCH_CASES[0]
-    grader = LaneAndRoute(case.base_sha)
+    grader = PinnedRepositoryRoute(REPO_SLUG, case.base_sha)
     fetch = f"git fetch --depth 1 origin {case.base_sha}"
     for separator in CLONE_SEPARATORS:
         remote = await grader(
@@ -807,7 +811,7 @@ async def test_a_fetch_whose_call_errored_does_not_name_the_pin() -> None:
         has_result=True,
         is_error=True,
     )
-    verdict = await LaneAndRoute(case.base_sha)(
+    verdict = await PinnedRepositoryRoute(REPO_SLUG, case.base_sha)(
         CapabilityOutput(response="done", calls=(*output().calls, errored))
     )
     assert not verdict.passed

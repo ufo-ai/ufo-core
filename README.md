@@ -9,6 +9,7 @@ system for everything else (connectors, data sources, tools, subagents, onboardi
 - `docs/plan.md` — build order. `docs/salvage.md` — file-level port map from the previous repo.
 - `docs/sweep.md` — Daily Brief application setup and operating checks.
 - `docs/handbook/` — generated stage-by-stage reference to the harness (start at `overview.md`).
+- `evals/swebench/README.md` — pinned SWE-bench Verified local generation and official grading.
 - `core/` — the axiomatic unit. `extensions/` — first-party extensions. `packs/` — skill packs.
 
 ## Run it

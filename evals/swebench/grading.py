@@ -1,0 +1,348 @@
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from uuid import uuid4
+
+from evals.swebench.models import SWEbenchCase, SWEbenchSnapshot
+from evals.swebench.snapshot import SWEBENCH_UPSTREAM, load_snapshot, verify_source
+
+HARNESS_DISTRIBUTION = "swebench"
+HARNESS_VERSION = "4.1.0"
+HARNESS_PIN = f"{HARNESS_DISTRIBUTION}=={HARNESS_VERSION}"
+OFFICIAL_IMAGE_NAMESPACE = "swebench"
+OFFICIAL_IMAGE_ARCHITECTURE = "x86_64"
+OFFICIAL_IMAGE_TAG = "latest"
+OFFICIAL_IMAGE_PLATFORM = "linux/amd64"
+DEFAULT_SNAPSHOT = Path(".local/swebench/snapshot")
+DEFAULT_PARQUET = Path(".local/swebench/assets/test.parquet")
+DEFAULT_GRADES_ROOT = Path(".local/swebench/grades")
+PREDICTIONS_FILE = "predictions.jsonl"
+SUMMARY_FILE = "summary.json"
+SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def official_instance_image(instance_id: str) -> str:
+    """Official prebuilt evaluation image for one instance, named as the pinned harness names it."""
+    key = f"sweb.eval.{OFFICIAL_IMAGE_ARCHITECTURE}.{instance_id.lower()}:{OFFICIAL_IMAGE_TAG}"
+    return f"{OFFICIAL_IMAGE_NAMESPACE}/{key}".replace("__", "_1776_")
+
+
+def write_predictions(
+    cases: tuple[SWEbenchCase, ...],
+    patches: dict[str, str],
+    output: Path,
+    model_name: str,
+) -> Path:
+    """Write one official prediction per selected case in manifest order."""
+    payload = b"".join(
+        json.dumps(
+            {
+                "instance_id": case.instance_id,
+                "model_patch": patches[case.instance_id],
+                "model_name_or_path": model_name,
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        + b"\n"
+        for case in cases
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(payload)
+    return output
+
+
+def load_submission_patches(
+    cases: tuple[SWEbenchCase, ...], known_ids: set[str], submissions_root: Path
+) -> dict[str, str]:
+    """Load the selected cases' patches, tolerating sibling directories for other known cases."""
+    patches = {case.instance_id: "" for case in cases}
+    if submissions_root.is_symlink():
+        raise ValueError(
+            f"SWE-bench submissions root must not be a symbolic link: {submissions_root}"
+        )
+    if not submissions_root.exists():
+        return patches
+    if not submissions_root.is_dir():
+        raise ValueError(f"SWE-bench submissions root is not a directory: {submissions_root}")
+    entries = tuple(submissions_root.iterdir())
+    unexpected = sorted(
+        entry.name for entry in entries if entry.name not in known_ids or not entry.is_dir()
+    )
+    if unexpected:
+        raise ValueError(f"unexpected SWE-bench submission directories: {', '.join(unexpected)}")
+    for case in cases:
+        directory = submissions_root / case.instance_id
+        if not directory.exists():
+            continue
+        if directory.is_symlink():
+            raise ValueError(
+                f"SWE-bench submission directory must not be a symbolic link: {directory}"
+            )
+        entries = tuple(directory.iterdir())
+        patch_candidates = tuple(
+            entry for entry in entries if entry.suffix == ".patch" and entry.is_file()
+        )
+        if len(patch_candidates) > 1:
+            raise ValueError(f"duplicate SWE-bench patches for {case.instance_id}")
+        expected_patch = directory / f"{case.instance_id}.patch"
+        unexpected = sorted(entry.name for entry in entries if entry != expected_patch)
+        if unexpected:
+            raise ValueError(
+                f"unexpected SWE-bench submission files for {case.instance_id}: "
+                f"{', '.join(unexpected)}"
+            )
+        if not expected_patch.exists():
+            continue
+        if expected_patch.is_symlink() or not expected_patch.is_file():
+            raise ValueError(f"invalid SWE-bench submission patch: {expected_patch}")
+        try:
+            patches[case.instance_id] = expected_patch.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            # A prediction is UTF-8 JSON, so a non-UTF-8 patch cannot be submitted; the official
+            # harness scores an empty patch as unresolved. Skip this one case, not the whole run.
+            print(f"SWE-bench patch for {case.instance_id} is not UTF-8; submitting empty patch")
+    return patches
+
+
+@dataclass(frozen=True)
+class SWEbenchGrading:
+    """Grade selected pinned cases once with the official SWE-bench harness."""
+
+    snapshot: SWEbenchSnapshot
+    selected_cases: tuple[SWEbenchCase, ...]
+    parquet: Path
+    submissions_root: Path | None
+    grade_directory: Path
+    run_id: str
+    gold: bool = False
+    model_name: str = "ufo"
+
+    def __post_init__(self) -> None:
+        selected_ids = tuple(case.instance_id for case in self.selected_cases)
+        selected = set(selected_ids)
+        manifest_cases = tuple(case for case in self.snapshot.cases if case.instance_id in selected)
+        if not selected_ids:
+            raise ValueError("SWE-bench grading requires at least one selected case")
+        if self.selected_cases != manifest_cases:
+            raise ValueError("SWE-bench grading cases must be unique and use manifest order")
+        if not SAFE_RUN_ID.fullmatch(self.run_id):
+            raise ValueError(f"unsafe SWE-bench run id: {self.run_id}")
+        if self.gold and self.submissions_root is not None:
+            raise ValueError("gold SWE-bench grading does not accept submissions")
+        if not self.gold and self.submissions_root is None:
+            raise ValueError("SWE-bench prediction grading requires submissions")
+
+    def run(self) -> Path:
+        """Run official grading once and return the factual summary path."""
+        self._validate_parquet()
+        # Load and validate submissions before minting the grade directory: a rejected submissions
+        # root then leaves no half-made directory to collide with a corrected retry.
+        patches = None if self.gold else self._load_patches()
+        grade_directory = self.grade_directory.resolve()
+        grade_directory.mkdir(parents=True, exist_ok=False)
+        predictions_path = (
+            None
+            if patches is None
+            else write_predictions(
+                self.selected_cases,
+                patches,
+                grade_directory / PREDICTIONS_FILE,
+                self.model_name,
+            )
+        )
+        self._pull_official_images()
+        self._invoke_official_harness(grade_directory, predictions_path)
+        report_path = self._official_report_path(grade_directory)
+        resolved = self._validate_official_report(report_path)
+        return self._write_summary(grade_directory, report_path, resolved)
+
+    def _validate_parquet(self) -> None:
+        verify_source(self.parquet.read_bytes(), SWEBENCH_UPSTREAM)
+
+    def _load_patches(self) -> dict[str, str]:
+        if self.submissions_root is None:
+            raise AssertionError("prediction grading has no submissions root")
+        known_ids = {case.instance_id for case in self.snapshot.cases}
+        return load_submission_patches(self.selected_cases, known_ids, self.submissions_root)
+
+    def _pull_official_images(self) -> None:
+        # The pinned harness pulls without a platform and arm64 daemons refuse the
+        # x86_64-only manifests; a pre-pulled image satisfies its local-image check.
+        for case in self.selected_cases:
+            subprocess.run(
+                (
+                    "docker",
+                    "pull",
+                    "--platform",
+                    OFFICIAL_IMAGE_PLATFORM,
+                    official_instance_image(case.instance_id),
+                ),
+                check=True,
+            )
+
+    def _invoke_official_harness(
+        self, grade_directory: Path, predictions_path: Path | None
+    ) -> None:
+        try:
+            installed = version(HARNESS_DISTRIBUTION)
+        except PackageNotFoundError as error:
+            raise RuntimeError(
+                f"official grading requires {HARNESS_PIN}; run with "
+                f"`uv run --with {HARNESS_PIN} python -m evals.swebench.grading`"
+            ) from error
+        if installed != HARNESS_VERSION:
+            raise RuntimeError(
+                f"official grading requires {HARNESS_PIN}, found "
+                f"{HARNESS_DISTRIBUTION}=={installed}"
+            )
+        command = [
+            sys.executable,
+            "-m",
+            "swebench.harness.run_evaluation",
+            "--dataset_name",
+            str(self.parquet.resolve().parent),
+            "--split",
+            "test",
+            "--predictions_path",
+            "gold" if predictions_path is None else str(predictions_path),
+            "--max_workers",
+            "1",
+            "--instance_ids",
+            *(case.instance_id for case in self.selected_cases),
+            "--run_id",
+            self.run_id,
+        ]
+        subprocess.run(command, cwd=grade_directory, check=True)
+
+    def _official_report_path(self, grade_directory: Path) -> Path:
+        model = "gold" if self.gold else self.model_name
+        return grade_directory / f"{model.replace('/', '__')}.{self.run_id}.json"
+
+    def _validate_official_report(self, report_path: Path) -> int:
+        if not report_path.is_file():
+            raise FileNotFoundError(f"official SWE-bench report is missing: {report_path}")
+        try:
+            report = json.loads(report_path.read_bytes())
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ValueError(f"official SWE-bench report is invalid: {report_path}") from error
+        if not isinstance(report, dict):
+            raise ValueError(f"official SWE-bench report is not an object: {report_path}")
+
+        def ids(key: str) -> tuple[str, ...]:
+            value = report.get(key)
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"official SWE-bench report has invalid {key}")
+            if len(value) != len(set(value)):
+                raise ValueError(f"official SWE-bench report has duplicate {key}")
+            return tuple(value)
+
+        def count(key: str) -> int:
+            value = report.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"official SWE-bench report has invalid {key}")
+            return value
+
+        selected = {case.instance_id for case in self.selected_cases}
+        submitted = set(ids("submitted_ids"))
+        completed = set(ids("completed_ids"))
+        resolved = set(ids("resolved_ids"))
+        unresolved = set(ids("unresolved_ids"))
+        incomplete = set(ids("incomplete_ids"))
+        empty = set(ids("empty_patch_ids"))
+        errors = set(ids("error_ids"))
+        if not selected.issubset(submitted) or (not self.gold and submitted != selected):
+            raise ValueError("official SWE-bench report omitted selected submissions")
+        completed_outcomes = resolved | unresolved
+        if completed != completed_outcomes:
+            raise ValueError("official SWE-bench report has inconsistent completed outcomes")
+        if resolved & unresolved or resolved & empty or unresolved & empty:
+            raise ValueError("official SWE-bench report has overlapping selected outcomes")
+        if resolved | unresolved | empty != selected:
+            raise ValueError("official SWE-bench report omitted selected case outcomes")
+        if incomplete or errors:
+            raise ValueError("official SWE-bench report contains incomplete or error outcomes")
+        expected_counts = {
+            "total_instances": len(selected),
+            "submitted_instances": len(submitted),
+            "completed_instances": len(completed),
+            "resolved_instances": len(resolved),
+            "unresolved_instances": len(unresolved),
+            "empty_patch_instances": len(empty),
+            "error_instances": len(errors),
+        }
+        for key, expected in expected_counts.items():
+            if count(key) != expected:
+                raise ValueError(f"official SWE-bench report has inconsistent {key}")
+        if report.get("schema_version") != 2:
+            raise ValueError("official SWE-bench report has an unsupported schema version")
+        return len(resolved)
+
+    def _write_summary(self, grade_directory: Path, report_path: Path, resolved: int) -> Path:
+        summary = {
+            "pins": {
+                "harness": HARNESS_PIN,
+                "snapshot": self.snapshot.manifest.digest,
+                "dataset": self.snapshot.manifest.upstream.dataset,
+                "revision": self.snapshot.manifest.upstream.revision,
+                "parquet": self.snapshot.manifest.upstream.parquet.sha256,
+            },
+            "selected_ids": [case.instance_id for case in self.selected_cases],
+            "official_report": str(report_path),
+            "official_resolved": resolved,
+        }
+        summary_path = grade_directory / SUMMARY_FILE
+        summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+        return summary_path
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Grade pinned SWE-bench submissions with the official harness."""
+    parser = argparse.ArgumentParser(prog="python -m evals.swebench.grading")
+    parser.add_argument("--submissions", type=Path)
+    parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--gold", action="store_true")
+    parser.add_argument("--run-id")
+    args = parser.parse_args(argv)
+    if args.gold and args.submissions is not None:
+        parser.error("--gold does not accept --submissions")
+    if not args.gold and args.submissions is None:
+        parser.error("--submissions is required without --gold")
+
+    snapshot = load_snapshot(DEFAULT_SNAPSHOT)
+    requested = tuple(args.case)
+    duplicates = sorted(case_id for case_id in set(requested) if requested.count(case_id) > 1)
+    if duplicates:
+        parser.error(f"duplicate SWE-bench case ids: {', '.join(duplicates)}")
+    available = {case.instance_id for case in snapshot.cases}
+    unknown = sorted(set(requested) - available)
+    if unknown:
+        parser.error(f"unknown SWE-bench case ids: {', '.join(unknown)}")
+    wanted = set(requested)
+    selected_cases = tuple(
+        case for case in snapshot.cases if not wanted or case.instance_id in wanted
+    )
+    run_id = args.run_id or (datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{uuid4().hex[:8]}")
+    summary = SWEbenchGrading(
+        snapshot=snapshot,
+        selected_cases=selected_cases,
+        parquet=DEFAULT_PARQUET,
+        submissions_root=args.submissions,
+        grade_directory=DEFAULT_GRADES_ROOT / run_id,
+        run_id=run_id,
+        gold=args.gold,
+    ).run()
+    print(f"summary: {summary}")
+
+
+if __name__ == "__main__":
+    main()

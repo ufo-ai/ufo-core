@@ -111,6 +111,17 @@ from evals.skill_loading.catalog import SKILL_LOADING_PACKS
 from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
 from evals.skill_loading.runner import SUITE as SKILL_LOADING_SUITE
 from evals.skill_loading.runner import skill_loading_task
+from evals.swebench.runner import (
+    SNAPSHOT_ROOT as SWEBENCH_SNAPSHOT_ROOT,
+)
+from evals.swebench.runner import (
+    SWEBENCH_PACKS,
+    load_swebench,
+    new_submissions_root,
+)
+from evals.swebench.runner import (
+    WORKFLOW_WAIT_SECONDS as SWEBENCH_WORKFLOW_WAIT_SECONDS,
+)
 from evals.turn_logs import TurnLogCollector
 from evals.ufo_app_bench import (
     SUPPORTED_BACKENDS as UFO_APP_BENCH_BACKENDS,
@@ -252,6 +263,29 @@ def main(argv: list[str] | None = None) -> None:
         default=CODING_REPO_SUBMISSIONS_ROOT,
         metavar="DIR",
     )
+    parser.add_argument(
+        "--swebench",
+        action="store_true",
+        help="run the pinned SWE-bench Verified smoke set",
+    )
+    parser.add_argument(
+        "--swebench-case",
+        action="append",
+        default=[],
+        metavar="INSTANCE_ID",
+    )
+    parser.add_argument(
+        "--swebench-snapshot",
+        type=Path,
+        default=SWEBENCH_SNAPSHOT_ROOT,
+        metavar="DIR",
+    )
+    parser.add_argument(
+        "--swebench-submissions",
+        type=Path,
+        default=None,
+        metavar="DIR",
+    )
     parser.add_argument("--jobbench", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--jobbench-case", action="append", default=[], metavar="CASE_ID")
     parser.add_argument(
@@ -330,6 +364,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--handbook-ingest requires --handbook")
     if args.coding_repo_case and not args.coding_repo:
         parser.error("--coding-repo-case requires --coding-repo")
+    if args.swebench_case and not args.swebench:
+        parser.error("--swebench-case requires --swebench")
+    if args.swebench and args.swebench_submissions is None:
+        args.swebench_submissions = new_submissions_root()
     if args.skill_loading_case and "skill_loading" not in names:
         parser.error("--skill-loading-case requires --only skill_loading")
     if (args.wandr_subset is not None or args.wandr_case) and args.wandr is None:
@@ -350,6 +388,7 @@ def main(argv: list[str] | None = None) -> None:
             args.issue_recall,
             args.handbook,
             args.coding_repo or None,
+            args.swebench or None,
         )
     )
     if requested_runs > 1:
@@ -396,6 +435,15 @@ def main(argv: list[str] | None = None) -> None:
             if args.coding_repo
             else None
         )
+        swebench_tasks = (
+            load_swebench(
+                tuple(args.swebench_case),
+                args.swebench_snapshot,
+                args.swebench_submissions,
+            )
+            if args.swebench
+            else None
+        )
         wandr_tasks = (
             load_wandr_boundary(
                 args.wandr, args.wandr_subset, tuple(args.wandr_case), args.wandr_submissions
@@ -425,6 +473,7 @@ def main(argv: list[str] | None = None) -> None:
             wandr_tasks,
             handbook_tasks,
             coding_repo_tasks,
+            swebench_tasks,
             args.mcp_atlas_data,
             args.mcp_atlas_samples,
             hle_run,
@@ -520,6 +569,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(
             f"coding_repo requires [pack] name in {CODING_REPO_PACKS}, found {config.pack.name!r}"
         )
+    if swebench_tasks is not None and config.pack.name not in SWEBENCH_PACKS:
+        parser.error(
+            f"swebench requires [pack] name in {SWEBENCH_PACKS}, found {config.pack.name!r}"
+        )
     if wandr_tasks is not None and config.pack.name not in WANDR_PACKS:
         parser.error(f"wandr requires [pack] name in {WANDR_PACKS}, found {config.pack.name!r}")
     if handbook_tasks is not None and config.pack.name not in HANDBOOK_PACKS:
@@ -587,6 +640,9 @@ def main(argv: list[str] | None = None) -> None:
         workflow_wait_seconds = HANDBOOK_WORKFLOW_WAIT_SECONDS
     if coding_repo_tasks is not None:
         workflow_wait_seconds = CODING_REPO_WORKFLOW_WAIT_SECONDS
+    if swebench_tasks is not None:
+        workflow_wait_seconds = SWEBENCH_WORKFLOW_WAIT_SECONDS
+        print(f"SWE-bench submissions {args.swebench_submissions}")
     if memory_run is not None:
         workflow_wait_seconds = MEMORY_100_WORKFLOW_WAIT_SECONDS
     if memory_ingestion_run is not None:
@@ -1056,6 +1112,7 @@ def _tasks(
     wandr_tasks: tuple[EvalTask, ...] | None = None,
     handbook_tasks: tuple[EvalTask, ...] | None = None,
     coding_repo_tasks: tuple[EvalTask, ...] | None = None,
+    swebench_tasks: tuple[EvalTask, ...] | None = None,
     mcp_atlas_data: Path | None = None,
     mcp_atlas_samples: int | None = None,
     hle_run: HLEGoldRun | None = None,
@@ -1072,6 +1129,8 @@ def _tasks(
         return selected_tasks(handbook_tasks, names)
     if coding_repo_tasks is not None:
         return selected_tasks(coding_repo_tasks, names)
+    if swebench_tasks is not None:
+        return selected_tasks(swebench_tasks, names)
     mcp_atlas = (
         (load_mcp_atlas_task(mcp_atlas_data, mcp_atlas_samples),)
         if mcp_atlas_data is not None

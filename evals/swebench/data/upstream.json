@@ -1,0 +1,30 @@
+{
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+  "parquet": {
+    "path": "data/test-00000-of-00001.parquet",
+    "size_bytes": 2096679,
+    "sha256": "sha256:a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd",
+    "rows": 500,
+    "columns": [
+      {"name": "repo", "arrow_type": "string"},
+      {"name": "instance_id", "arrow_type": "string"},
+      {"name": "base_commit", "arrow_type": "string"},
+      {"name": "patch", "arrow_type": "string"},
+      {"name": "test_patch", "arrow_type": "string"},
+      {"name": "problem_statement", "arrow_type": "string"},
+      {"name": "hints_text", "arrow_type": "string"},
+      {"name": "created_at", "arrow_type": "string"},
+      {"name": "version", "arrow_type": "string"},
+      {"name": "FAIL_TO_PASS", "arrow_type": "string"},
+      {"name": "PASS_TO_PASS", "arrow_type": "string"},
+      {"name": "environment_setup_commit", "arrow_type": "string"},
+      {"name": "difficulty", "arrow_type": "string"}
+    ]
+  },
+  "smoke_case_ids": [
+    "django__django-10097",
+    "sympy__sympy-20590",
+    "scikit-learn__scikit-learn-25102"
+  ]
+}
