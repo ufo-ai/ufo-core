@@ -37,8 +37,8 @@ locals {
 
   # The three sequential shutdown phases. `graceful_shutdown_seconds` is the window `DBOS.destroy`
   # polls in-flight turns for before it cancels them, so the model round a roll interrupts finishes
-  # and records. Matches prod: the pods' SIGKILL deadline derives from these below, so a roll is
-  # bounded at 700s, inside the deploy's 15m rollout waits.
+  # and records. Matches prod: the pods' SIGKILL deadline derives from these below, so a drain is
+  # bounded at 700s.
   prestop_seconds           = 10
   request_shutdown_seconds  = 30
   graceful_shutdown_seconds = 600
@@ -318,10 +318,11 @@ resource "kubectl_manifest" "ufo" {
   for_each  = local.ufo_workload_manifests
   yaml_body = each.value
 
-  # The workflow's `kubectl rollout status --timeout=15m` is the one rollout gate. An in-apply wait
-  # is bounded by the provider's 10m update timeout, and a drain-held roll legitimately runs up to
-  # terminationGracePeriodSeconds (700s) plus pod start — so waiting here fails healthy rolls.
-  # maxUnavailable=0 keeps the old pods serving until the new ones are ready.
+  # The workflow's await_rollout.sh is the one rollout gate: each Deployment's newest ReplicaSet
+  # fully available. Rollout-completion waits — this one or `kubectl rollout status` — also wait
+  # out the old pods' drain (up to terminationGracePeriodSeconds, 700s), and this one dies at the
+  # provider's 10m update timeout first, failing healthy rolls. maxUnavailable=0 with maxSurge 100%
+  # keeps the old pods serving until every new one is ready.
   wait_for_rollout = false
 
   depends_on = [kubectl_manifest.ufo_migrate, module.platform]

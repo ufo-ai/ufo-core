@@ -24,6 +24,7 @@ TEMPLATE_DIRECTIVE = (
     r"|if preview_enabled|endif) \}\n?"
 )
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
+AWAIT_ROLLOUT = ".github/scripts/await_rollout.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
 TESTED_TEMPLATES = "small=ufo-sbx-small:b1,medium=ufo-sbx-medium:b2,large=ufo-sbx-large:b3"
 MONITORS = {
@@ -211,6 +212,19 @@ case "$URL" in
     [ "$BAD_ROOT_HOST" != "$HOST" ] || HOST=wrong.example
     printf 'curl https://%s/waitlist\\n' "$HOST"
     ;;
+esac
+"""
+
+KUBECTL_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >> "$KUBECTL_CALLS"
+case "$*" in
+  *"jsonpath={.metadata.generation}") printf '%s\\n' "$KUBECTL_GENERATION" ;;
+  *"jsonpath={.status.observedGeneration}") printf '%s\\n' "$KUBECTL_OBSERVED_GENERATION" ;;
+  *"/revision}") printf '%s\\n' "$KUBECTL_REVISION" ;;
+  *"jsonpath={.spec.replicas}") printf '%s\\n' "$KUBECTL_REPLICAS" ;;
+  *"get replicasets -o json") cat "$KUBECTL_REPLICASETS" ;;
+  *"get replicaset/ufo-serve-new -o jsonpath={.status.availableReplicas}")
+    printf '%s\\n' "$KUBECTL_AVAILABLE" ;;
 esac
 """
 
@@ -3228,11 +3242,6 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
     assert isinstance(script, str)
     assert "output -raw cluster_name" in script
     assert 'NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"' in script
-    ingress = (
-        "kubectl --namespace ingress-nginx rollout status "
-        "deployment/ingress-nginx-controller --timeout=15m"
-    )
-    assert ingress in script
     templates = ROOT / "infra" / "templates"
     manifests = [
         document
@@ -3280,12 +3289,14 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
     commands = [
         shlex.split(line)
         for line in script.replace("\\\n", " ").splitlines()
-        if line.strip().startswith("kubectl ")
+        if line.strip().startswith(("kubectl ", f"{AWAIT_ROLLOUT} "))
     ]
-    namespaced = [command for command in commands if command[1:3] == ["--namespace", "$NAMESPACE"]]
-    wait_commands = [command for command in namespaced if command[3] == "wait"]
-    rollout_commands = [command for command in namespaced if command[3] == "rollout"]
-    assert len(namespaced) == len(wait_commands) + len(rollout_commands)
+    awaited = [command for command in commands if command[0] == AWAIT_ROLLOUT]
+    kubectl_commands = [command for command in commands if command[0] == "kubectl"]
+    assert all(command[1] == "--namespace" for command in kubectl_commands)
+    wait_commands = [command for command in kubectl_commands if command[3] == "wait"]
+    rollout_commands = [command for command in kubectl_commands if command[3] == "rollout"]
+    assert len(kubectl_commands) == len(wait_commands) + len(rollout_commands)
     assert all(
         command[:6]
         == [
@@ -3304,10 +3315,88 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
         and command[-1] == "--timeout=15m"
         for command in rollout_commands
     )
+    assert all(
+        len(command) >= 3 and all(not argument.startswith("-") for argument in command[1:])
+        for command in awaited
+    )
     gated_readiness = {resource for command in wait_commands for resource in command[6:]}
-    gated_rollouts = {command[5] for command in rollout_commands}
+    gated_rollouts: dict[str, set[str]] = {}
+    for command in awaited:
+        gated_rollouts.setdefault(command[1], set()).update(
+            f"deployment/{name}" for name in command[2:]
+        )
+    for command in rollout_commands:
+        gated_rollouts.setdefault(command[2], set()).add(command[5])
     assert gated_readiness == readiness_resources
-    assert gated_rollouts == rollout_resources
+    assert gated_rollouts == {
+        "ingress-nginx": {"deployment/ingress-nginx-controller"},
+        "$NAMESPACE": rollout_resources,
+    }
+    assert os.access(ROOT / AWAIT_ROLLOUT, os.X_OK)
+    # The 15m wall the per-Deployment `rollout status` calls carried now lives in the script.
+    assert "DEADLINE=$((SECONDS + 900))" in (ROOT / AWAIT_ROLLOUT).read_text()
+
+
+def test_await_rollout_answers_on_the_newest_replicaset(tmp_path: Path) -> None:
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(KUBECTL_STUB)
+    kubectl.chmod(0o755)
+    calls = tmp_path / "kubectl-calls"
+    replicasets = tmp_path / "replicasets.json"
+    replicasets.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": "other-new",
+                            "annotations": {"deployment.kubernetes.io/revision": "3"},
+                            "ownerReferences": [{"kind": "Deployment", "name": "ufo-other"}],
+                        }
+                    },
+                    {
+                        "metadata": {
+                            "name": "ufo-serve-old",
+                            "annotations": {"deployment.kubernetes.io/revision": "2"},
+                            "ownerReferences": [{"kind": "Deployment", "name": "ufo-serve"}],
+                        }
+                    },
+                    {
+                        "metadata": {
+                            "name": "ufo-serve-new",
+                            "annotations": {"deployment.kubernetes.io/revision": "3"},
+                            "ownerReferences": [{"kind": "Deployment", "name": "ufo-serve"}],
+                        }
+                    },
+                ]
+            }
+        )
+    )
+    run = subprocess.run(
+        ["bash", str(ROOT / AWAIT_ROLLOUT), "system", "ufo-serve"],
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "KUBECTL_CALLS": str(calls),
+            "KUBECTL_GENERATION": "3",
+            "KUBECTL_OBSERVED_GENERATION": "3",
+            "KUBECTL_REVISION": "3",
+            "KUBECTL_REPLICAS": "2",
+            "KUBECTL_REPLICASETS": str(replicasets),
+            "KUBECTL_AVAILABLE": "2",
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert run.returncode == 0, run.stderr
+    assert (
+        "deployment/ufo-serve rolled out: replicaset/ufo-serve-new has 2 replicas available"
+        in run.stdout
+    )
+    polled = calls.read_text()
+    assert "replicaset/ufo-serve-new" in polled
+    assert "ufo-serve-old" not in polled
+    assert "other-new" not in polled
 
 
 @pytest.mark.parametrize(

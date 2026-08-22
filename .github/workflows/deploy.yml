@@ -467,7 +467,7 @@ jobs:
           aws eks update-kubeconfig \
             --region "$AWS_REGION" \
             --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
-          kubectl --namespace ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=15m
+          .github/scripts/await_rollout.sh ingress-nginx ingress-nginx-controller
           NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
           kubectl --namespace "$NAMESPACE" wait --for=condition=Ready --timeout=15m \
             externalsecret/ufo-control-secrets \
@@ -480,15 +480,12 @@ jobs:
             certificate/ufo-gateway-tls \
             certificate/ufo-ingress-tls \
             certificate/ufo-serve-tls
-          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-gateway --timeout=15m
-          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-sandbox-proxy --timeout=15m
-          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-ingress --timeout=15m
-          kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-serve --timeout=15m
+          .github/scripts/await_rollout.sh "$NAMESPACE" ufo-gateway ufo-sandbox-proxy ufo-ingress ufo-serve
           # Only when the env enables it: preview_enabled=false renders no Deployment to wait on.
           if kubectl --namespace "$NAMESPACE" get deployment/ufo-preview >/dev/null 2>&1; then
-            kubectl --namespace "$NAMESPACE" rollout status deployment/ufo-preview --timeout=15m
+            .github/scripts/await_rollout.sh "$NAMESPACE" ufo-preview
           fi
-          kubectl --namespace "$NAMESPACE" rollout status deployment/otel-collector --timeout=15m
+          .github/scripts/await_rollout.sh "$NAMESPACE" otel-collector
           kubectl --namespace "$NAMESPACE" rollout status daemonset/otel-logs-agent --timeout=15m
 
       - name: Gate gateway origin
