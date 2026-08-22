@@ -201,6 +201,63 @@ def test_a_connected_provider_is_never_offered_as_an_unlock() -> None:
     assert [row.title for row in rows] == ["Runway"]
 
 
+def test_unlocks_take_the_slots_no_ready_application_filled() -> None:
+    """A workspace that has connected nothing has no ready application by definition. The screen
+    reads as named work and its price rather than falling through to rows that need accounts just
+    the same while saying nothing about which."""
+    slate = _slate(
+        ranked=(
+            _ranked("pr-babysitter", "PR watch"),
+            _ranked("runway-report", "Runway"),
+            _ranked("release-notes", "Release notes"),
+        )
+    )
+    rows, unlock = fill_starters(slate, frozenset(), frozenset())
+    assert unlock is not None and unlock.title == "PR watch"
+    assert [(r.kind, r.title) for r in rows] == [("unlock", "Runway"), ("unlock", "Release notes")]
+    assert rows[0].body == "Connect Stripe and QuickBooks."
+    assert [t.name for t in rows[0].providers] == ["stripe", "quickbooks"]
+
+
+def test_promotion_stops_at_the_slots_the_screen_draws() -> None:
+    """A long ranking of unreachable rows still yields one screen, not a list of everything the
+    workspace could connect."""
+    slate = _slate(
+        ranked=(
+            _ranked("pr-babysitter", "PR watch"),
+            _ranked("runway-report", "Runway"),
+            _ranked("release-notes", "Release notes"),
+            _ranked("inbox-triage", "Inbox"),
+            _ranked("ticket-themes", "Tickets"),
+        )
+    )
+    rows, unlock = fill_starters(slate, frozenset(), frozenset())
+    assert unlock is not None
+    assert len([r for r in rows if r.kind == "unlock"]) == STARTER_APP_SLOTS
+
+
+def test_a_row_short_of_accounts_is_never_drawn_twice() -> None:
+    """The connector row takes the first short row, so promotion starts at the second. A screen
+    that offered one row in two places would spend a slot saying the same thing."""
+    slate = _slate(ranked=(_ranked("runway-report", "Runway"), _ranked("inbox-triage", "Inbox")))
+    rows, unlock = fill_starters(slate, frozenset({"gmail"}), frozenset())
+    assert unlock is not None and unlock.title == "Runway"
+    assert [(r.kind, r.title) for r in rows] == [("app", "Inbox")]
+
+
+def test_two_ready_applications_leave_no_slot_to_promote_into() -> None:
+    slate = _slate(
+        ranked=(
+            _ranked("inbox-triage", "Inbox"),
+            _ranked("thread-summarizer", "Threads"),
+            _ranked("runway-report", "Runway"),
+        )
+    )
+    rows, unlock = fill_starters(slate, frozenset({"gmail", "slack"}), frozenset())
+    assert [r.kind for r in rows] == ["app", "app"]
+    assert unlock is not None and unlock.title == "Runway"
+
+
 def test_a_row_more_than_two_accounts_short_is_passed_over() -> None:
     row = Unlock(
         name="three-way",

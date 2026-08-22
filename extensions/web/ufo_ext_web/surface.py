@@ -3081,13 +3081,16 @@ class MissingTile(BaseModel):
 class StarterRow(BaseModel):
     """One row the start screen presses. `ask` is what the member says by pressing it — the whole
     act, in their own voice. `mark` is the app icon an application row wears; a check-in founds no
-    application, so it carries none and the page draws it a plain glyph."""
+    application, so it carries none and the page draws it a plain glyph. An `unlock` row is an
+    application the member is an account or two short of, drawn in an application's slot because
+    none was ready; it carries the accounts it still needs and the page draws their brand."""
 
-    kind: Literal["app", "check_in"]
+    kind: Literal["app", "check_in", "unlock"]
     mark: str | None
     title: str
     body: str
     ask: str
+    providers: tuple[MissingTile, ...] = ()
 
 
 class UnlockRow(BaseModel):
@@ -3096,6 +3099,7 @@ class UnlockRow(BaseModel):
     and pressing the row says the same build ask an owned row says — the agent asks for the
     accounts it finds it does not hold, and its reply carries the connect control."""
 
+    mark: str
     title: str
     ask: str
     providers: tuple[MissingTile, ...]
@@ -3115,6 +3119,12 @@ async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) 
     return frozenset(held)
 
 
+def _named_tiles(providers: "tuple[MissingTile, ...]") -> str:
+    """The accounts a row still needs, said the way a person says them."""
+    labels = [tile.label for tile in providers]
+    return labels[0] if len(labels) < 2 else ", ".join(labels[:-1]) + " and " + labels[-1]
+
+
 def fill_starters(
     slate: Slate, held: frozenset[str], taken: frozenset[str]
 ) -> tuple[tuple[StarterRow, ...], UnlockRow | None]:
@@ -3122,12 +3132,17 @@ def fill_starters(
 
     The ranking states relevance and nothing else; access is answered here. A row whose accounts are
     all held is an application the member can build today, and the first two fill the screen's
-    application slots. A row short of one or two accounts is the unlock, and the first such row
-    takes that slot — short of more than two, the row is a project rather than an offer and is
-    passed over. A row whose name an application already carries is dropped either way. The
-    check-in closes the list, because it asks after work rather than founding any."""
+    application slots. A row short of one or two accounts is an unlock — short of more than two, the
+    row is a project rather than an offer and is passed over. A row whose name an application
+    already carries is dropped either way. The check-in closes the list, because it asks after work
+    rather than founding any.
+
+    Where fewer than two applications are ready, the remaining slots take unlocks instead of
+    standing empty. A workspace that has connected nothing has no ready application by definition,
+    and the rows it would otherwise fall back to need accounts just the same while saying nothing
+    about which — so it reads as named work and its price rather than as generic filler."""
     apps: list[StarterRow] = []
-    unlock: UnlockRow | None = None
+    short: list[UnlockRow] = []
     for entry in slate.ranked:
         row = UNLOCKS_BY_NAME.get(entry.unlock)
         if row is None or row.name in taken or entry.title.strip().lower() in taken:
@@ -3144,16 +3159,31 @@ def fill_starters(
                         ask=entry.ask,
                     )
                 )
-        elif unlock is None and len(missing) <= UNLOCK_MAX_MISSING:
-            unlock = UnlockRow(
-                title=entry.title,
-                ask=entry.ask,
-                providers=tuple(
-                    MissingTile(name=name, label=PROVIDER_LABELS[name]) for name in missing
-                ),
+        elif len(missing) <= UNLOCK_MAX_MISSING:
+            short.append(
+                UnlockRow(
+                    mark=row.mark,
+                    title=entry.title,
+                    ask=entry.ask,
+                    providers=tuple(
+                        MissingTile(name=name, label=PROVIDER_LABELS[name]) for name in missing
+                    ),
+                )
             )
-        if len(apps) == STARTER_APP_SLOTS and unlock is not None:
+    unlock = short[0] if short else None
+    for spare in short[1:]:
+        if len(apps) >= STARTER_APP_SLOTS:
             break
+        apps.append(
+            StarterRow(
+                kind="unlock",
+                mark=spare.mark,
+                title=spare.title,
+                body="Connect " + _named_tiles(spare.providers) + ".",
+                ask=spare.ask,
+                providers=spare.providers,
+            )
+        )
     if slate.check_in is not None:
         apps.append(
             StarterRow(

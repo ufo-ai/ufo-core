@@ -748,11 +748,12 @@ function Composer({
 }
 
 type StarterRow = {
-  kind: "app" | "check_in";
+  kind: "app" | "check_in" | "unlock";
   mark: string | null;
   title: string;
   body: string;
   ask: string;
+  providers?: MissingTile[];
 };
 type MissingTile = { name: string; label: string };
 type UnlockRow = { title: string; ask: string; providers: MissingTile[] };
@@ -832,6 +833,15 @@ function namedTiles(providers: MissingTile[]): string {
 }
 
 function StarterMark({ row }: { row: StarterRow }) {
+  // An unlock drawn in an application's slot wears the brand of the account it still needs, the
+  // way the connector row does — what the row costs is the first thing to read about it.
+  if (row.kind === "unlock" && row.providers?.length) {
+    return (
+      <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
+        <BrandMark provider={row.providers[0].name} className="size-(--size-glyph)" />
+      </span>
+    );
+  }
   if (row.kind === "check_in" || !row.mark) {
     return (
       <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">

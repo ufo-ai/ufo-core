@@ -360,6 +360,12 @@ FIRST_RUN_PROVIDERS = (
         summary="Read invoices, expenses, and reports.",
         group="Customers and revenue",
     ),
+    ProviderTile(
+        name="google_search_console",
+        label="Search Console",
+        summary="Read search traffic, queries, and pages.",
+        group="Customers and revenue",
+    ),
 )
 
 FIRST_RUN_PROVIDER_NAMES = frozenset(tile.name for tile in FIRST_RUN_PROVIDERS)
@@ -508,6 +514,30 @@ UNLOCKS = (
         mark="osculum",
         does="Writes a long channel or thread down to what was decided.",
         needs=(("slack",),),
+    ),
+    Unlock(
+        name="search-performance",
+        mark="aten",
+        does="Reports the queries and pages that gained or lost search traffic.",
+        needs=(("google_search_console",),),
+    ),
+    Unlock(
+        name="funnel-report",
+        mark="nochtli",
+        does="Reports where signups came from and where they fell away.",
+        needs=(("google_search_console",), ("googlesheets",)),
+    ),
+    Unlock(
+        name="lead-followup",
+        mark="ashnan",
+        does="Drafts the reply each inbound lead is still owed.",
+        needs=(("gmail",),),
+    ),
+    Unlock(
+        name="announcement-writer",
+        mark="thyrsus",
+        does="Drafts the launch announcement and says where it should post.",
+        needs=(("slack",), DOCS),
     ),
     Unlock(
         name="competitor-watch",

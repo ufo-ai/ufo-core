@@ -50,22 +50,31 @@ the workspace already has, and a catalog of applications the product knows how t
 
 Rank the catalog rows that would help this member most. Rank a row for the work the memory shows \
 them doing, never because its accounts look popular. Rank no row whose job an existing application \
-already does. Rank at most eight, best first; rank fewer rather than padding with rows the memory \
-gives you no reason for.
+already does. Rank six to eight, best first. The screen draws only a few of \
+them and drops any whose accounts are missing, so a short list leaves it with nothing to show.
 
 For each ranked row write:
 - title: the application's name in the member's own words. Sentence case, at most \
 {TITLE_CHARS} characters.
 - body: what it does for this team, in one sentence of at most {BODY_CHARS} characters. State \
-the work, not the accounts it reads.
+the work, not the accounts it reads. Name what is actually theirs — their product, their customer, \
+their repository, the thing itself. A body that would read the same for any company is too \
+general to be worth a row.
 - ask: the sentence the member says by pressing the row, first person, asking for the application. \
 Name the work concretely. Do not mention connecting an account: the assistant asks for what it \
 needs once the work is agreed.
 
-Then write one check_in: a question this member would actually ask about work in progress, drawn \
-from something specific in their memory — a customer, a project, a decision that was pending. It \
-asks about work; it does not ask to build anything. Write no check_in at all when the memory shows \
-no work in progress; a made-up question is worse than a missing row.
+Then consider one check_in, and only write it if it clearly earns a place.
+
+A check_in asks about work this member or their team owns. Memory also records other people's \
+work — a post someone wrote, an article, another company, something a colleague reported about a \
+third party. A fact being specific, and being in this member's memory, does not make the work \
+theirs. Where the memory names someone else as the owner, or does not make the owner plain, write \
+no check_in. Never restate another party's situation in the first person.
+
+The bar is high. Write no check_in at all unless the memory shows work of their own that is under \
+way and unsettled. Most windows should produce none. A missing row costs nothing; a row that hands \
+the member someone else's problem costs their trust in every other row.
 
 Write plainly. No greeting, no exclamation, no restatement of what the member has done. State what \
 is true or what the row does, and nothing else.
