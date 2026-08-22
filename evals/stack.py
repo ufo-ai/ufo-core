@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO, Self
+from uuid import UUID
 
 import asyncpg
 import tomli_w
@@ -47,6 +48,9 @@ POSTGRES_NAME_LIMIT = 63
 READY_DEADLINE_SECONDS = 180.0
 READY_POLL_SECONDS = 0.5
 SHUTDOWN_GRACE_SECONDS = 30.0
+DOCKER_BACKEND = "docker"
+SANDBOX_CONTAINER_PREFIX = "ufo-sbx-"
+SANDBOX_NETWORK_PREFIX = "ufo-sandbox-"
 EGRESS_READY_DEADLINE_SECONDS = 30.0
 EGRESS_GRACEFUL_SHUTDOWN_SECONDS = 2
 ORCHESTRATOR_ARGS = (
@@ -543,9 +547,50 @@ class EvalStack:
             except TimeoutError:
                 process.kill()
                 await process.wait()
+        await self._release_sandboxes()
+
+    async def _release_sandboxes(self) -> None:
+        """Release the Docker sandboxes this stack's serve created.
+
+        A serve owns its conversations' containers for the life of the process and reclaims an idle
+        one only from a later create, so a serve that exits leaves every container up and every
+        per-conversation bridge subnet held. Nothing else ever releases them, and Docker's default
+        address pool serves about thirty-one subnets — so a second stack starts with fewer free than
+        it needs and its turns fail on `docker network create` before reaching a model, which reads
+        as an arm that scored zero rather than one that never ran.
+
+        Scoped by this stack's own workspace root, whose per-conversation directory names are
+        exactly the container and network suffixes, so a stack can only ever release its own.
+        """
+        workspaces = self.config.sandbox.workspace_root
+        if self.config.sandbox.backend != DOCKER_BACKEND or not workspaces.is_dir():
+            return
+        for path in sorted(workspaces.iterdir()):
+            try:
+                conversation = UUID(path.name)
+            except ValueError:
+                continue
+            await _docker("rm", "-f", f"{SANDBOX_CONTAINER_PREFIX}{conversation}")
+            await _docker("network", "rm", f"{SANDBOX_NETWORK_PREFIX}{conversation.hex}")
 
     def _log_path(self, step: str) -> Path:
         return self.root / f"{step}.log"
+
+
+async def _docker(*argv: str) -> None:
+    """One best-effort `docker` call. A stack tears down whatever it can and never fails a recorded
+    run over cleanup: a box already gone, a network still held by another container, or no Docker on
+    this host are all the same non-event here."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            *argv,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return
+    await process.wait()
 
 
 def _mint_egress_ca() -> tuple[str, str]:

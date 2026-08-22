@@ -671,7 +671,11 @@ def _final_act[PayloadT: BaseModel](
     act: parsed from the handler's own result (the directive line, then the payload as one JSON
     line), so a pre_tool_use hook that folded the args is honored — what a surface renders is what
     the handler structured, never the raw call. A result a post hook rewrote past recognition
-    carries no payload; the reply's prose still asks."""
+    carries no payload; the reply's prose still asks.
+
+    A question is the act this reads for, and its rule is the round's last call: a turn that asked
+    and then went on working has usually answered itself, so a question the round did not end on is
+    stale and never reaches the member. `_pending_act` reads the acts that rule does not fit."""
     last, result = tool_calls[-1], results[-1]
     if last.name != tool_name or result.is_error or not isinstance(result.content, str):
         return None
@@ -680,6 +684,37 @@ def _final_act[PayloadT: BaseModel](
         return model.model_validate(json.loads(rest.split("\n", 1)[0]))
     except (json.JSONDecodeError, ValidationError):
         return None
+
+
+def _pending_act[PayloadT: BaseModel](
+    tool_calls: tuple[ToolUseBlock, ...],
+    results: tuple[ToolResultBlock, ...],
+    tool_name: str,
+    model: type[PayloadT],
+) -> PayloadT | None:
+    """The structured payload a round leaves owed when it called `tool_name` and the call succeeded,
+    read from anywhere in the round. Parsed from the handler's own result exactly as `_final_act`
+    parses it, and for the same reason — a pre_tool_use hook may have folded the args, so what a
+    surface renders is what the handler structured.
+
+    Only the member discharges these acts: nothing the turn does afterwards fills a credential slot
+    or presses a connection control, so the round it happened to end on says nothing about whether
+    the member still owes it. A model that emits the handoff beside other work leaves a request that
+    is still owed, and reading only the round's last call reports it as never asked. The last such
+    call in the round wins, so a round that asks twice stands on its most recent ask."""
+    outcomes = {result.tool_use_id: result for result in results}
+    for call in reversed(tool_calls):
+        if call.name != tool_name:
+            continue
+        result = outcomes.get(call.id)
+        if result is None or result.is_error or not isinstance(result.content, str):
+            continue
+        _directive, _, rest = result.content.partition("\n")
+        try:
+            return model.model_validate(json.loads(rest.split("\n", 1)[0]))
+        except (json.JSONDecodeError, ValidationError):
+            return None
+    return None
 
 
 def _created_refs(
@@ -1262,13 +1297,13 @@ class TurnEngine:
                         is_error=False,
                     ),
                 )
-                connect_request = _final_act(
+                connect_request = _pending_act(
                     (call,),
                     dispatched_result,
                     CONNECT_ACCOUNT_TOOL,
                     ConnectRequest,
                 )
-                credential_request = _final_act(
+                credential_request = _pending_act(
                     (call,),
                     dispatched_result,
                     REQUEST_CREDENTIALS_TOOL,
@@ -1541,10 +1576,14 @@ class TurnEngine:
             finally:
                 await self._fold_created(created, tool_calls, results)
             question = _final_act(tool_calls, results, ASK_USER_TOOL, AskUserInput)
-            credential_request = _final_act(
-                tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest
+            credential_request = (
+                _pending_act(tool_calls, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest)
+                or credential_request
             )
-            connect_request = _final_act(tool_calls, results, CONNECT_ACCOUNT_TOOL, ConnectRequest)
+            connect_request = (
+                _pending_act(tool_calls, results, CONNECT_ACCOUNT_TOOL, ConnectRequest)
+                or connect_request
+            )
             messages = (
                 *messages,
                 Message(role="assistant", content=assistant_blocks),
@@ -1552,7 +1591,7 @@ class TurnEngine:
             )
         meter.incomplete_reason = ROUND_BUDGET_INCOMPLETE
         messages, text = await self._force_final(messages, usage_events, system, requesters)
-        return messages, text, None, None, None
+        return messages, text, None, credential_request, connect_request
 
     async def _fold_created(
         self,

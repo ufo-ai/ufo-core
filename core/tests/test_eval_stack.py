@@ -1,6 +1,7 @@
 import asyncio
 import tomllib
 from pathlib import Path
+from uuid import UUID
 
 import asyncpg
 import pytest
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import make_url
 from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
+import evals.stack as eval_stack
 from evals.stack import (
     STACK_OWNER_EMAIL,
     EvalStack,
@@ -21,6 +23,12 @@ from evals.stack import (
 )
 from ufo.config import Config
 from ufo.proxy_serve import OWNER_DSN_ENV
+
+
+class _ExitedProcess:
+    """A serve or proxy that is already down, so teardown goes straight to what it left behind."""
+
+    returncode = 0
 
 
 def _close(stack: EvalStack) -> None:
@@ -53,6 +61,13 @@ name = "assistant"
 [research]
 search_provider = "perplexity"
 """
+DOCKER_TEMPLATE = (
+    SQLITE_TEMPLATE
+    + """
+[sandbox]
+backend = "docker"
+"""
+)
 POSTGRES_TEMPLATE = """\
 [database]
 url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
@@ -182,6 +197,69 @@ def test_matrix_requires_labels_unique_as_database_names() -> None:
                 ]
             }
         )
+
+
+async def test_shutdown_releases_the_docker_sandboxes_this_stack_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A serve owns its conversations' containers for its own life and reclaims an idle one only
+    from a later create, so a stack that exits holds every bridge subnet it took. Docker's default
+    pool is about thirty-one, so the next stack cannot create its own and its turns die on
+    `docker network create` before reaching a model — an arm that reads as scoring zero when it
+    never ran. Teardown releases them, scoped to this stack's own workspace root."""
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(DOCKER_TEMPLATE)
+    spec = RunSpec(label="release", config=template, args=("--only", "basics"))
+    stack = EvalStack.provision(
+        spec, root=tmp_path / "run" / "release", out=tmp_path / "archive", repo_root=tmp_path
+    )
+    _close(stack)
+    mine = UUID("11111111-2222-3333-4444-555555555555")
+    workspaces = stack.config.sandbox.workspace_root
+    (workspaces / str(mine)).mkdir(parents=True)
+    (workspaces / "not-a-conversation").mkdir()
+    calls: list[tuple[str, ...]] = []
+
+    async def record(*argv: str) -> None:
+        calls.append(argv)
+
+    monkeypatch.setattr(eval_stack, "_docker", record)
+
+    await stack._shutdown(_ExitedProcess(), _ExitedProcess())
+
+    assert calls == [
+        ("rm", "-f", f"ufo-sbx-{mine}"),
+        ("network", "rm", f"ufo-sandbox-{mine.hex}"),
+    ]
+
+
+async def test_shutdown_leaves_sandboxes_alone_on_a_backend_that_owns_no_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the Docker carrier holds host containers and subnets. An off-cluster backend keeps its
+    boxes on its own side, so a stack on one has nothing here to release and must not shell out
+    guessing at names."""
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    spec = RunSpec(label="offcluster", config=template, args=("--only", "basics"))
+    stack = EvalStack.provision(
+        spec, root=tmp_path / "run" / "offcluster", out=tmp_path / "archive", repo_root=tmp_path
+    )
+    _close(stack)
+    workspaces = stack.config.sandbox.workspace_root
+    (workspaces / "11111111-2222-3333-4444-555555555555").mkdir(parents=True)
+    calls: list[tuple[str, ...]] = []
+
+    async def record(*argv: str) -> None:
+        calls.append(argv)
+
+    monkeypatch.setattr(eval_stack, "_docker", record)
+
+    await stack._shutdown(_ExitedProcess())
+
+    assert calls == []
 
 
 def test_provision_writes_the_derived_config_and_owns_the_child_argv(

@@ -81,6 +81,7 @@ from ufo.loop.engine import (
     OFFLOAD_NOTICE,
     PREEMPTED,
     REQUEST_CREDENTIALS_TOOL,
+    ROUND_BUDGET_INCOMPLETE,
     TOOL_IMAGE_BLOB_DIR,
     TOOL_IMAGE_EDGE_LIMIT,
     TOOL_OUTPUT_DIR,
@@ -102,6 +103,7 @@ from ufo.loop.engine import (
     _dispatch_segments,
     _final_act,
     _loaded_skill_closures,
+    _pending_act,
     _RejectedToolCall,
     _RoundInput,
     _TurnMeter,
@@ -4171,6 +4173,319 @@ class CollectThenEndModel:
             partial_json=json.dumps({**REQUEST_INPUT, "requested_by": str(self.message_ref)}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass(frozen=True)
+class CollectThenBookkeepModel:
+    """Calls request_credentials, then spends one more round on work of its own — the shape every
+    real trajectory takes, since an agent that has just asked for a secret goes on to record what it
+    did. The bookkeeping round produces no act of its own, so it must not take away the one the
+    member is waiting on."""
+
+    message_ref: UUID
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        rounds = sum(
+            1
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+        )
+        if rounds == 0:
+            yield ToolCallStart(id="s1", name="request_credentials")
+            yield ToolCallDelta(
+                id="s1",
+                partial_json=json.dumps({**REQUEST_INPUT, "requested_by": str(self.message_ref)}),
+            )
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        if rounds == 1:
+            yield ToolCallStart(id="s2", name="skill_search")
+            yield ToolCallDelta(id="s2", partial_json=json.dumps({"query": "slack setup"}))
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        yield TextDelta(text="A prompt is waiting for the token.")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_credential_request_survives_a_later_round_of_the_agents_own_work(
+    db: None, tmp_path: Path
+) -> None:
+    """The prompt box is drawn from the terminal's credential request and from nothing else, so an
+    act the turn asked for has to outlive the rounds that follow it. The turn here asks and then
+    searches skills — its own bookkeeping, which no member requested and which is right to do. A
+    terminal that came back empty would leave the member a reply promising a prompt and a
+    conversation with no prompt in it."""
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    fernet = Fernet(Fernet.generate_key())
+    requests = CredentialRequests(
+        fernet=fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
+    )
+    engine = _engine(
+        turn,
+        CollectThenBookkeepModel(turn.id),
+        tmp_path,
+        member_id=owner,
+        requestable_credentials=requests,
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.credential_request is not None
+    assert [p.slot for p in frame.credential_request.prompts] == ["sample_api"]
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    assert TerminalFrame.model_validate(stored).credential_request == frame.credential_request
+
+
+@dataclass(frozen=True)
+class CollectBesideOtherWorkModel:
+    """Emits request_credentials beside another call in one round. The handoff is not its round's
+    last call, which is the second way the member ends up with nothing: the call ran and succeeded,
+    and no round ever recorded it."""
+
+    message_ref: UUID
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        rounds = sum(
+            1
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+        )
+        if rounds == 0:
+            yield ToolCallStart(id="s1", name="request_credentials")
+            yield ToolCallDelta(
+                id="s1",
+                partial_json=json.dumps({**REQUEST_INPUT, "requested_by": str(self.message_ref)}),
+            )
+            yield ToolCallStart(id="s2", name="skill_search")
+            yield ToolCallDelta(id="s2", partial_json=json.dumps({"query": "slack setup"}))
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        yield TextDelta(text="A prompt is waiting for the token.")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_credential_request_beside_other_work_in_its_round_still_reaches_the_terminal(
+    db: None, tmp_path: Path
+) -> None:
+    """A model that asks for the secret and searches in the same round has still asked: the slot is
+    empty and only the member can fill it. Reading the handoff from the round's last call alone
+    reports it as never asked, so the reply promises a prompt no surface was told to draw. Neither
+    handoff is `parallel_safe`, so this is a round the engine dispatches in segments — not an exotic
+    trajectory, just one whose last call is something else."""
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    fernet = Fernet(Fernet.generate_key())
+    requests = CredentialRequests(
+        fernet=fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
+    )
+    engine = _engine(
+        turn,
+        CollectBesideOtherWorkModel(turn.id),
+        tmp_path,
+        member_id=owner,
+        requestable_credentials=requests,
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.credential_request is not None
+    assert [p.slot for p in frame.credential_request.prompts] == ["sample_api"]
+
+
+@dataclass(frozen=True)
+class CollectThenAskModel:
+    """Collects the secret, then puts a question to the member. The live suite met this first: the
+    reply said a prompt was waiting, the terminal carried the question, and the box never drew."""
+
+    message_ref: UUID
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        rounds = sum(
+            1
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+        )
+        if rounds == 0:
+            yield ToolCallStart(id="s1", name="request_credentials")
+            yield ToolCallDelta(
+                id="s1",
+                partial_json=json.dumps({**REQUEST_INPUT, "requested_by": str(self.message_ref)}),
+            )
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        if rounds == 1:
+            yield ToolCallStart(id="q1", name="ask_user")
+            yield ToolCallDelta(id="q1", partial_json=json.dumps(ASK_INPUT))
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        yield TextDelta(text="Enter the token and pick a site.")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_prompt_and_a_question_both_stand_when_a_turn_raises_both(
+    db: None, tmp_path: Path
+) -> None:
+    """The terminal carries the three acts in three fields, so a turn that needs a secret and a
+    decision owes both and the member should see both. This is the shape the live suite hit first:
+    the question arrived last and took the slot the prompt was in."""
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    fernet = Fernet(Fernet.generate_key())
+    requests = CredentialRequests(
+        fernet=fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
+    )
+    engine = _engine(
+        turn,
+        CollectThenAskModel(turn.id),
+        tmp_path,
+        member_id=owner,
+        requestable_credentials=requests,
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.credential_request is not None
+    assert frame.question is not None
+    assert frame.question.title == ASK_INPUT["title"]
+
+
+@dataclass(frozen=True)
+class ConnectThenBookkeepModel:
+    """Leaves the connection control, then records what it did. `connect_account` is the other act
+    only the member discharges, and it is lost the same way."""
+
+    message_ref: UUID
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        rounds = sum(
+            1
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+        )
+        if rounds == 0:
+            yield ToolCallStart(id="k1", name="connect_account")
+            yield ToolCallDelta(
+                id="k1",
+                partial_json=json.dumps(
+                    {
+                        "provider": "stub",
+                        "user_description": "connecting their account",
+                        "requested_by": str(self.message_ref),
+                    }
+                ),
+            )
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        if rounds == 1:
+            yield ToolCallStart(id="s2", name="skill_search")
+            yield ToolCallDelta(id="s2", partial_json=json.dumps({"query": "connect"}))
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        yield TextDelta(text="Press the control to authorize.")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_connect_request_survives_a_later_round_of_the_agents_own_work(
+    db: None, tmp_path: Path
+) -> None:
+    """The connection control is owed on the same terms as the prompt: only the member presses it,
+    so the turn's own later work cannot make it stale."""
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    flow = ConnectFlow(
+        providers={"stub": ConnectStubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="http://surface/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    try:
+        engine = _engine(
+            turn.model_copy(
+                update={"admission_source": "member", "speaker_member_id": owner},
+            ),
+            ConnectThenBookkeepModel(turn.id),
+            tmp_path,
+            member_id=owner,
+        )
+        frame = await engine.run()
+    finally:
+        install_connect_flow(None)
+
+    assert frame.status == "done"
+    assert frame.connect_request is not None
+    assert frame.connect_request.provider == "stub"
+
+
+async def test_a_credential_request_survives_the_round_budget(db: None, tmp_path: Path) -> None:
+    """A turn that runs out of rounds still owes what it asked for. The forced close returned no
+    acts at all, so a member whose turn ran long enough to exhaust its budget lost the prompt."""
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    fernet = Fernet(Fernet.generate_key())
+    requests = CredentialRequests(
+        fernet=fernet, declared=frozenset({"sample_api"}), fillable=frozenset({"sample_api"})
+    )
+    engine = replace(
+        _engine(
+            turn,
+            CollectThenBookkeepModel(turn.id),
+            tmp_path,
+            member_id=owner,
+            requestable_credentials=requests,
+        ),
+        max_rounds=2,
+    )
+
+    frame = await engine.run()
+
+    assert frame.incomplete_reason == ROUND_BUDGET_INCOMPLETE
+    assert frame.credential_request is not None
+
+
+def test_the_two_act_rules_stay_apart(tmp_path: Path) -> None:
+    """`_final_act` and `_pending_act` read the same handler results under different rules, and the
+    difference is which acts a member alone can discharge. A question the round did not end on is
+    stale — the turn had its chance to answer it. A credential request is owed whatever the round
+    ended on, because nothing the turn does fills the slot. Sharing one helper is what carried the
+    question's rule onto the acts it does not fit."""
+    asked = ToolUseBlock(id="q1", name=ASK_USER_TOOL, input={})
+    collected = ToolUseBlock(id="s1", name=REQUEST_CREDENTIALS_TOOL, input={})
+    worked = ToolUseBlock(id="c1", name="bash", input={})
+    question_result = ToolResultBlock(
+        tool_use_id="q1", content=f"directive\n{json.dumps(ASK_INPUT)}"
+    )
+    collected_result = ToolResultBlock(
+        tool_use_id="s1", content='directive\n{"reason": "r", "prompts": [], "sealed": "s"}'
+    )
+    worked_result = ToolResultBlock(tool_use_id="c1", content="ok")
+
+    # Both acts asked for, and the round ends on neither. Results ride in call order, which is what
+    # `_final_act` pairs against by position.
+    beside = (asked, collected, worked)
+    results = (question_result, collected_result, worked_result)
+    assert _final_act(beside, results, ASK_USER_TOOL, AskUserInput) is None
+    assert _pending_act(beside, results, REQUEST_CREDENTIALS_TOOL, CredentialRequest) is not None
+
+    # The same question, in a round that does end on it.
+    ending_on_the_ask = (worked, asked)
+    assert (
+        _final_act(ending_on_the_ask, (worked_result, question_result), ASK_USER_TOOL, AskUserInput)
+        is not None
+    )
 
 
 async def _seeded_member(workspace_id: UUID) -> UUID:
