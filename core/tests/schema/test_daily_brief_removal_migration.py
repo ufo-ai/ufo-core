@@ -22,7 +22,8 @@ from alembic.config import Config
 from ufo.db import MIGRATIONS_DIR
 
 NOW = datetime(2026, 8, 23, tzinfo=UTC)
-REVISION = "20260823211339"
+MERGE = "20260823211339"
+DROP = "20260823223019"
 CORE_PARENT = "20260823021954"
 SWEEP_HEAD = "sweep_0002"
 
@@ -131,9 +132,9 @@ def test_the_branch_head_is_retired(tmp_path: Path) -> None:
     config, _ids = _seed(path)
     assert _heads(path) == {CORE_PARENT, SWEEP_HEAD}
 
-    command.upgrade(config, "heads")
+    command.upgrade(config, MERGE)
 
-    assert _heads(path) == {REVISION}
+    assert _heads(path) == {MERGE}
 
 
 def test_both_tables_and_their_rows_outlive_the_merge(tmp_path: Path) -> None:
@@ -141,7 +142,7 @@ def test_both_tables_and_their_rows_outlive_the_merge(tmp_path: Path) -> None:
     path = tmp_path / "rollout.sqlite"
     config, _ids = _seed(path)
 
-    command.upgrade(config, "heads")
+    command.upgrade(config, MERGE)
 
     assert {"sweep_edition", "sweep_application"} <= _tables(path)
     engine = sa.create_engine(f"sqlite:///{path}")
@@ -151,6 +152,17 @@ def test_both_tables_and_their_rows_outlive_the_merge(tmp_path: Path) -> None:
         )
         assert connection.execute(sa.text("select count(*) from sweep_edition")).scalar_one() == 1
     engine.dispose()
+
+
+def test_the_later_revision_drops_both_tables(tmp_path: Path) -> None:
+    """Once no running image reads them, the rows answer to no code."""
+    path = tmp_path / "drop.sqlite"
+    config, _ids = _seed(path)
+
+    command.upgrade(config, "heads")
+
+    assert _heads(path) == {DROP}
+    assert not {"sweep_edition", "sweep_application"} & _tables(path)
 
 
 def test_the_workspace_the_brief_belonged_to_survives(tmp_path: Path) -> None:
