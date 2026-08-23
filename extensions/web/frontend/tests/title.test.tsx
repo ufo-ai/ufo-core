@@ -7,18 +7,7 @@ import { chatHash, type Route } from "@/lib/route";
 import { pageTitle } from "@/lib/title";
 import type { OwnedConversation } from "@/lib/types";
 
-import {
-  AGENT,
-  AGENT_ID,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
-  SECOND,
-  SECOND_ID,
-  json,
-  useStreamFake,
-  wire,
-} from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
 
 const PLACE = { place: {} };
 
@@ -82,7 +71,7 @@ test("a conversation is named by its own subject, and one still unread by the pr
 test("the tab follows the hash the member opens", async () => {
   location.hash = chatHash(CONVO_ID);
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () => json({ messages: [] }),
     "/slots": () => json({ slots: [] }),
   });

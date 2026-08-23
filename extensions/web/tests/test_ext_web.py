@@ -96,6 +96,8 @@ from ufo_testsupport.surfaces import (
 )
 
 import ufo.db
+import ufo.kinds.conversations as conversations_kind
+import ufo.objects as objects_module
 from ufo.access.connectors import CatalogEntry, CatalogPage, ConnectorEntry, ConnectorRegistry
 from ufo.access.credentials import (
     CredentialRequestState,
@@ -1120,8 +1122,10 @@ async def web(
                 SLOTTED,
                 sites_manifest(),
                 skill_create_manifest(),
+                report_digest_manifest(),
             ),
             public_base_url="https://web",
+            artifact_token_secret=SECRET,
         ),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
@@ -1344,10 +1348,8 @@ async def test_chat_title_job_rewrites_the_rail_label_from_the_opening_exchange(
         await web_surface.summarize_chat_titles(ctx)
         assert await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH) == ()
 
-    rail = await client.get("/surface/web/api/chats", headers=headers)
-    assert rail.status_code == 200
-    (row,) = rail.json()["chats"]
-    assert row["conversation_id"] == opened
+    (row,) = await _rail_rows(client, headers)
+    assert row["name"] == opened
     assert row["title"] == "echo:1"
     assert workspace_id not in await candidates()
 
@@ -1459,11 +1461,10 @@ async def test_chat_titles_name_every_surface_s_conversations_and_summarize_each
         await web_surface.summarize_chat_titles(ctx)
         assert await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH) == (landing_id,)
 
-    rail = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={token}"}
-    )
-    assert rail.status_code == 200
-    listed = {row["conversation_id"]: row["title"] for row in rail.json()["chats"]}
+    listed = {
+        row["name"]: row["title"]
+        for row in await _rail_rows(client, {"cookie": f"{SESSION_COOKIE}={token}"})
+    }
     assert listed[str(slack_id)] == "echo:1"
     assert listed[str(cli_id)] == "echo:1"
     assert listed[str(unanswered_id)] == "Still failed"
@@ -1483,12 +1484,8 @@ async def test_chat_titles_name_every_surface_s_conversations_and_summarize_each
     with ws(workspace_id):
         await web_surface.summarize_chat_titles(ctx)
         assert await ctx.conversations_awaiting_title(web_surface.TITLE_BATCH) == ()
-    named = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={token}"}
-    )
-    assert {row["conversation_id"]: row["title"] for row in named.json()["chats"]}[
-        str(landing_id)
-    ] == "echo:1"
+    named = await _rail_rows(client, {"cookie": f"{SESSION_COOKIE}={token}"})
+    assert {row["name"]: row["title"] for row in named}[str(landing_id)] == "echo:1"
 
 
 async def test_transcript_route_returns_durable_tool_activity(
@@ -2227,9 +2224,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             }
         ],
     }
-    empty_rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert empty_rail.status_code == 200
-    assert empty_rail.json() == {"chats": []}
+    assert await _rail_rows(client, cookie) == []
     STREAM_GATE.arm()
     admitted = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"hi", headers=cookie
@@ -3207,13 +3202,14 @@ def test_added_tiles_carry_the_labels_the_memory_states() -> None:
     assert tiles["discord"] == "Discord"
 
 
-async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
+async def test_artifact_objects_list_own_files_with_links_behind_one_fence(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The workspace artifacts view: a member reads their own conversations' shared files newest
-    first, each carrying the signed TTL download link and a signed preview link — a document's off
-    its rendered first page, an image's off its own bytes, a plain file's absent; another member's
-    files never list; an admin reads the workspace's."""
+    """The artifact kind's member listing: a member reads their own conversations' shared files,
+    each carrying the signed TTL download link and a signed preview link — a document's off its
+    rendered first page, an image's off its own bytes; another member's files never list, and an
+    admin stands behind the same fence — audience is not a role, so files shared only in members'
+    private conversations are absent for them too."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
@@ -3263,36 +3259,34 @@ async def test_artifacts_view_lists_own_files_with_links_and_admins_see_all(
                     )
                 )
             minute += 1
-    path = "/surface/web/workspace/artifacts"
-    m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()
-    assert [entry["filename"] for entry in m_view["artifacts"]] == ["chart.png", "report.pdf"]
-    assert [entry["media_type"] for entry in m_view["artifacts"]] == [
+    newest_first = f"{OBJECT_ARTIFACTS_PATH}?order_by=shared_at&order=desc"
+    m_view = (
+        await client.get(newest_first, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    ).json()
+    assert _names(m_view) == ["chart.png", "report.pdf"]
+    assert [entry["media_type"] for entry in m_view["objects"]] == [
         "image/png",
         "application/pdf",
     ]
-    assert {entry["owner_email"] for entry in m_view["artifacts"]} == {"m@example.com"}
-    assert m_view["artifacts"][0]["url"].startswith("https://web/")
-    assert "/chart.png?exp=" in m_view["artifacts"][0]["url"]
-    previews = {entry["filename"]: entry["preview_url"] for entry in m_view["artifacts"]}
-    assert "/chart.png?" in previews["chart.png"] and "preview=" in previews["chart.png"]
-    assert "/report.png?" in previews["report.pdf"] and "preview=" in previews["report.pdf"]
-    n_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})).json()
-    assert [entry["filename"] for entry in n_view["artifacts"]] == ["notes.txt"]
-    assert n_view["artifacts"][0]["preview_url"] is None
-    admin_view = (
-        await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    assert [entry["media"] for entry in m_view["objects"]] == ["image", "document"]
+    assert {entry["owner_email"] for entry in m_view["objects"]} == {"m@example.com"}
+    assert all(entry["mine"] for entry in m_view["objects"])
+    chart = next(entry for entry in m_view["objects"] if entry["filename"] == "chart.png")
+    report = next(entry for entry in m_view["objects"] if entry["filename"] == "report.pdf")
+    assert chart["url"].startswith("https://web/")
+    assert "/chart.png?exp=" in chart["url"]
+    assert "/chart.png?" in chart["preview_url"]
+    assert "/report.png?" in report["preview_url"]
+    n_view = (
+        await client.get(newest_first, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     ).json()
-    assert [entry["filename"] for entry in admin_view["artifacts"]] == [
-        "notes.txt",
-        "chart.png",
-        "report.pdf",
-    ]
-    assert [entry["owner_email"] for entry in admin_view["artifacts"]] == [
-        "n@example.com",
-        "m@example.com",
-        "m@example.com",
-    ]
-    anonymous = await client.get(path)
+    assert _names(n_view) == ["notes.txt"]
+    assert n_view["objects"][0]["preview_url"] is None
+    admin_view = (
+        await client.get(newest_first, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+    ).json()
+    assert _names(admin_view) == []
+    anonymous = await client.get(newest_first)
     assert anonymous.status_code == 401
 
 
@@ -3361,7 +3355,8 @@ async def test_artifacts_view_searches_media_and_shared_conversations(
                 )
             )
     headers = {"cookie": f"{SESSION_COOKIE}={token_m}"}
-    listed = (await client.get(ARTIFACTS_PATH, headers=headers)).json()["artifacts"]
+    newest_first = f"{OBJECT_ARTIFACTS_PATH}?order_by=shared_at&order=desc"
+    listed = (await client.get(newest_first, headers=headers)).json()["objects"]
     assert {entry["filename"] for entry in listed} == {
         "shared.png",
         "report.pdf",
@@ -3372,33 +3367,34 @@ async def test_artifacts_view_searches_media_and_shared_conversations(
     report = next(entry for entry in listed if entry["filename"] == "report.pdf")
     assert report["owner_email"] == "m@example.com"
     assert shared["origin"] == "Project"
-    assert shared["conversation_id"] == str(shared_conversation)
+    assert shared["conversation"] == str(shared_conversation)
     assert (shared["surface"], shared["source"]) == ("slack", SLACK_THREAD_PERMALINK)
     assert (report["surface"], report["source"]) == ("web", None)
-    assert _names((await client.get(f"{ARTIFACTS_PATH}?q=report", headers=headers)).json()) == [
+    assert _names((await client.get(f"{newest_first}&q=report", headers=headers)).json()) == [
         "report.pdf"
     ]
-    needle = (await client.get(f"{ARTIFACTS_PATH}?q=needle", headers=headers)).json()["artifacts"]
+    needle = (await client.get(f"{newest_first}&q=needle", headers=headers)).json()["objects"]
     assert {entry["filename"] for entry in needle} == {
         "shared.png",
         "report.pdf",
     }
-    assert _names((await client.get(f"{ARTIFACTS_PATH}?media=image", headers=headers)).json()) == [
+    assert _names((await client.get(f"{newest_first}&media=image", headers=headers)).json()) == [
         "shared.png"
     ]
-    assert _names(
-        (await client.get(f"{ARTIFACTS_PATH}?media=document", headers=headers)).json()
-    ) == ["data.csv", "report.pdf"]
-    assert _names((await client.get(f"{ARTIFACTS_PATH}?media=other", headers=headers)).json()) == [
+    assert _names((await client.get(f"{newest_first}&media=document", headers=headers)).json()) == [
+        "data.csv",
+        "report.pdf",
+    ]
+    assert _names((await client.get(f"{newest_first}&media=other", headers=headers)).json()) == [
         "archive.zip"
     ]
-    assert (await client.get(f"{ARTIFACTS_PATH}?media=data", headers=headers)).status_code == 400
-    assert (await client.get(f"{ARTIFACTS_PATH}?media=bad", headers=headers)).status_code == 400
-    assert _names(
-        (await client.get(f"{ARTIFACTS_PATH}?scope=created", headers=headers)).json()
-    ) == ["archive.zip", "data.csv", "report.pdf"]
-    assert (await client.get(f"{ARTIFACTS_PATH}?scope=shared", headers=headers)).status_code == 400
-    assert (await client.get(f"{ARTIFACTS_PATH}?scope=bad", headers=headers)).status_code == 400
+    assert _names((await client.get(f"{newest_first}&media=data", headers=headers)).json()) == []
+    assert _names((await client.get(f"{newest_first}&mine=true", headers=headers)).json()) == [
+        "archive.zip",
+        "data.csv",
+        "report.pdf",
+    ]
+    assert (await client.get(f"{newest_first}&scope=created", headers=headers)).status_code == 400
 
 
 async def _seed_priced_turn(workspace_id: UUID, agent_id: UUID, member_id: UUID) -> None:
@@ -3510,7 +3506,7 @@ async def test_workspace_usage_answers_a_member_their_own_and_an_admin_the_rollu
     assert anonymous.status_code == 401
 
 
-ARTIFACTS_PATH = "/surface/web/workspace/artifacts"
+OBJECT_ARTIFACTS_PATH = "/surface/web/objects/artifact"
 
 
 async def _seed_artifacts(
@@ -3576,13 +3572,11 @@ async def _seed_artifacts(
             )
 
 
-async def test_artifacts_view_names_each_file_by_its_own_id(
+async def test_artifact_objects_collapse_reshares_into_versions(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """Every listed file carries `shared_artifact.id`, which is the identity a portal lane, a link
-    to it, and a search hit name one file by. A filename is free text an agent chose, so two files
-    one turn shared under one name at one instant are two rows nothing read off the name tells
-    apart."""
+    """Two shares of one filename in one conversation are one object — the newest share is its
+    current version and the row says how many stand behind it."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "m@example.com")
     shared_at = datetime(2026, 7, 29, 9, 0, tzinfo=UTC)
@@ -3591,106 +3585,63 @@ async def test_artifacts_view_names_each_file_by_its_own_id(
         agent_id,
         member_id,
         "m@example.com",
-        (("report.md", shared_at), ("report.md", shared_at)),
+        (("report.md", shared_at), ("report.md", shared_at + timedelta(minutes=1))),
     )
-    async with workspace_tx() as connection:
-        minted = set((await connection.scalars(sa.select(tables.shared_artifact.c.id))).all())
     listed = (
-        await client.get(ARTIFACTS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
-    ).json()["artifacts"]
-    assert [entry["filename"] for entry in listed] == ["report.md", "report.md"]
-    assert {UUID(entry["id"]) for entry in listed} == minted
+        await client.get(OBJECT_ARTIFACTS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()["objects"]
+    assert [entry["filename"] for entry in listed] == ["report.md"]
+    assert "2 versions" in listed[0]["summary"]
 
 
 def _names(payload: dict) -> list[str]:
-    return [entry["filename"] for entry in payload["artifacts"]]
+    return [entry["filename"] for entry in payload["objects"]]
 
 
-WALK_PAGE_CEILING = 20
-
-
-async def _walk_artifacts(client: AsyncClient, headers: dict[str, str]) -> list[str]:
-    """Every file the Older control reaches, in the order the pages render them. The walk is
-    bounded: a cursor that cannot advance repeats its page forever, and this states that as a
-    failure rather than hanging the suite."""
-    payload = (await client.get(ARTIFACTS_PATH, headers=headers)).json()
-    walked = _names(payload)
-    pages = 1
-    while payload["older"]:
-        assert pages < WALK_PAGE_CEILING, f"the walk never ended: {walked}"
-        payload = (
-            await client.get(f"{ARTIFACTS_PATH}?after={quote(payload['older'])}", headers=headers)
-        ).json()
-        walked.extend(_names(payload))
-        pages += 1
-    return walked
-
-
-async def test_artifacts_listing_walks_pages_without_repeating_or_skipping(
-    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
+async def test_artifact_pages_walk_the_object_cursor_behind_the_member_fence(
+    web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The keyset walk over shared files: Older reaches every file exactly once, Newer returns the
-    page it came from, and each page's boundary cursors say which controls exist. The page size is
-    patched small so the walk's arithmetic is what the assertions read — the real
-    `ARTIFACT_LIST_LIMIT` is pinned by the fence-and-limit test."""
+    """The agent-scoped object cursor pages every one of the member's files exactly once, another
+    member's files are absent from every page of the walk, and a cursor this surface never minted
+    is a 400 rather than the newest page."""
     client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
     base = datetime(2026, 7, 1, tzinfo=UTC)
     await _seed_artifacts(
         workspace_id,
         agent_id,
-        member_id,
+        member_m,
         "m@example.com",
-        tuple((f"file-{index}.txt", base + timedelta(minutes=index)) for index in range(5)),
+        tuple(
+            (f"mine-{index:02d}.txt", base + timedelta(minutes=index * 2))
+            for index in range(OBJECT_LIST_PAGE + 2)
+        ),
     )
-    monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
-    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-
-    first = (await client.get(ARTIFACTS_PATH, headers=headers)).json()
-    assert _names(first) == ["file-4.txt", "file-3.txt"]
-    assert first["newer"] is None
-    assert first["older"] is not None
-    second = (
-        await client.get(f"{ARTIFACTS_PATH}?after={quote(first['older'])}", headers=headers)
-    ).json()
-    assert _names(second) == ["file-2.txt", "file-1.txt"]
-    assert second["newer"] is not None
-    back = (
-        await client.get(f"{ARTIFACTS_PATH}?after={quote(second['newer'])}", headers=headers)
-    ).json()
-    assert _names(back) == _names(first)
-    walked = await _walk_artifacts(client, headers)
-    assert walked == [f"file-{index}.txt" for index in (4, 3, 2, 1, 0)]
-    assert len(walked) == len(set(walked))
-
-
-async def test_artifacts_paging_breaks_a_shared_timestamp_at_the_boundary(
-    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Two files one turn shared in the same instant carry the same `created_at` and the same
-    `turn_id`, so only the row id can break the tie: with the page boundary falling between them,
-    the walk still reaches each exactly once."""
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    together = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
     await _seed_artifacts(
         workspace_id,
         agent_id,
-        member_id,
-        "m@example.com",
-        (
-            ("first.txt", together),
-            ("second.txt", together),
-            ("third.txt", together - timedelta(minutes=1)),
+        member_n,
+        "n@example.com",
+        tuple(
+            (f"theirs-{index}.txt", base + timedelta(minutes=index * 2 + 1)) for index in range(3)
         ),
     )
-    monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 1)
-    walked = await _walk_artifacts(client, {"cookie": f"{SESSION_COOKIE}={token}"})
-    assert sorted(walked) == ["first.txt", "second.txt", "third.txt"]
+    headers = {"cookie": f"{SESSION_COOKIE}={token_m}"}
+    walk = f"{OBJECT_ARTIFACTS_PATH}?agent={agent_id}&order_by=shared_at&order=desc"
+    first = (await client.get(walk, headers=headers)).json()
+    assert len(first["objects"]) == OBJECT_LIST_PAGE
+    assert first["next_cursor"]
+    second = (
+        await client.get(f"{walk}&cursor={quote(first['next_cursor'])}", headers=headers)
+    ).json()
+    assert second["next_cursor"] is None
+    walked = _names(first) + _names(second)
+    assert len(walked) == OBJECT_LIST_PAGE + 2
     assert len(walked) == len(set(walked))
-
-
-RADAR_PATH = "/surface/web/workspace/radar"
+    assert all(name.startswith("mine-") for name in walked)
+    refused = await client.get(f"{walk}&cursor=nonsense", headers=headers)
+    assert refused.status_code == 400
 
 
 async def _seed_radar_task(
@@ -3798,53 +3749,19 @@ async def _seed_digest_entry(
         )
 
 
-async def test_radar_reads_without_the_writer_extension(
-    web: tuple[AsyncClient, UUID, UUID],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A deploy that does not run `report_digest` has no entry table, and installing or removing an
-    extension is a lockfile act rather than a code change. The feed is the portal's, not the
-    writer's: it reads whole, with every entry null, instead of failing on a table that was never
-    created."""
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    conversation_id = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key=f"{agent_id}/m@example.com/{uuid4().hex}",
-        audience=str(conversation_audience(member_id)),
-        member_id=member_id,
-    )
-    run = await _seed_scheduled_run(
-        workspace_id,
-        agent_id,
-        conversation_id,
-        text="the run's own last word",
-        fired=datetime.now(UTC),
-        artifact=("report.md", "text/markdown"),
-    )
-    await _seed_digest_entry(
-        workspace_id, run, title="written already", summary="and stored already"
-    )
-    monkeypatch.setattr(web_surface, "DIGEST_WRITER", "an-extension-no-deploy-carries")
-
-    answered = await client.get(RADAR_PATH, cookies={SESSION_COOKIE: token})
-
-    assert answered.status_code == 200
-    [row] = answered.json()["runs"]
-    assert row["turn_id"] == str(run)
-    assert row["entry"] is None
+REPORTS_PATH = "/surface/web/objects/report"
+REPORTS_NEWEST = f"{REPORTS_PATH}?order_by=fired_at&order=desc"
 
 
-async def test_radar_lists_scheduled_runs_with_output_and_files(
+async def test_report_objects_list_scheduled_runs_with_output_and_files(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The radar feed: every reader — an admin included — gets only the runs of conversations
-    whose content they read, each naming its task, carrying the terminal reply and signed download
-    and preview links for the files it shared, and holding the entry written for what it published
-    — null where the writer has not reached it. Another member's private run, a room's run, and a
-    member turn never list, their entries with them, and an agent outside the audience is
-    unknown."""
+    """The radar's rows as the report kind lists them: every reader — an admin included — gets
+    only the runs of conversations whose content they read, each naming its task, carrying the
+    terminal reply and signed download and preview links for the files it shared, and holding the
+    digest entry written from what it published — null where the writer has not reached it. A run
+    that ended well and shared nothing published nothing and is no row; another member's private
+    run, a room's run, and a member turn never list; an agent outside the audience is unknown."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
@@ -3884,6 +3801,14 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         status="failed",
         text="the queue read timed out",
         fired=fired + timedelta(minutes=3),
+    )
+    await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        shared_conversation,
+        seq=3,
+        text="a quiet fire that published nothing",
+        fired=fired + timedelta(minutes=4),
     )
     private_conversation = await _seed_agent_conversation(
         workspace_id,
@@ -3938,20 +3863,21 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         summary="The run that reported into n's own conversation.",
     )
     m_view = (
-        await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+        await client.get(REPORTS_NEWEST, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     ).json()
-    assert [run["turn_id"] for run in m_view["runs"]] == [str(failed_run), str(shared_run)]
-    failed = m_view["runs"][0]
+    assert [run["name"] for run in m_view["objects"]] == [str(failed_run), str(shared_run)]
+    failed = m_view["objects"][0]
     assert (failed["status"], failed["text"]) == ("failed", "the queue read timed out")
     assert failed["entry"] is None
-    run = m_view["runs"][1]
+    run = m_view["objects"][1]
     assert run["task"] == "morning-digest"
     assert "prompt" not in run
     assert run["text"] == ""
     assert run["status"] == "done"
     assert run["surface"] == "slack"
     assert run["source"] == "https://acme.slack.com/archives/C42/p1"
-    assert run["conversation_id"] == str(shared_conversation)
+    assert run["conversation"] == str(shared_conversation)
+    assert run["agent_id"] == str(agent_id)
     assert [artifact["filename"] for artifact in run["artifacts"]] == ["queue.png"]
     assert run["artifacts"][0]["url"].startswith("https://web/")
     assert "preview" in run["artifacts"][0]["preview_url"]
@@ -3964,14 +3890,14 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         ],
     }
     n_view = (
-        await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
+        await client.get(REPORTS_NEWEST, headers={"cookie": f"{SESSION_COOKIE}={token_n}"})
     ).json()
-    assert {run["turn_id"] for run in n_view["runs"]} == {
+    assert {run["name"] for run in n_view["objects"]} == {
         str(shared_run),
         str(failed_run),
         str(private_run),
     }
-    resumed = next(run for run in n_view["runs"] if run["turn_id"] == str(private_run))
+    resumed = next(run for run in n_view["objects"] if run["name"] == str(private_run))
     assert resumed["task"] is None
     assert resumed["text"] == ""
     assert resumed["entry"] == {
@@ -3980,60 +3906,39 @@ async def test_radar_lists_scheduled_runs_with_output_and_files(
         "points": [],
     }
     admin_view = (
-        await client.get(RADAR_PATH, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
+        await client.get(REPORTS_NEWEST, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     ).json()
-    assert [run["turn_id"] for run in admin_view["runs"]] == [str(failed_run), str(shared_run)]
+    assert [run["name"] for run in admin_view["objects"]] == [str(failed_run), str(shared_run)]
     narrowed = (
         await client.get(
-            f"{RADAR_PATH}?agent={agent_id}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+            f"{REPORTS_NEWEST}&agent={agent_id}",
+            headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
         )
     ).json()
-    assert [run["turn_id"] for run in narrowed["runs"]] == [str(failed_run), str(shared_run)]
+    assert [run["name"] for run in narrowed["objects"]] == [str(failed_run), str(shared_run)]
     unknown = await client.get(
-        f"{RADAR_PATH}?agent={uuid4()}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+        f"{REPORTS_NEWEST}&agent={uuid4()}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
     )
     assert unknown.status_code == 404
-    malformed = await client.get(
-        f"{RADAR_PATH}?after=nonsense", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    unanchored = await client.get(
+        f"{REPORTS_NEWEST}&cursor=nonsense", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
     )
-    assert malformed.status_code == 400
-    anonymous = await client.get(RADAR_PATH)
+    assert unanchored.status_code == 400
+    anonymous = await client.get(REPORTS_NEWEST)
     assert anonymous.status_code == 401
+    retired = await client.get(
+        "/surface/web/workspace/radar", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert retired.status_code == 404
 
 
-async def test_radar_permalink_reads_one_run(web: tuple[AsyncClient, UUID, UUID]) -> None:
-    """`turn` pins the feed to exactly one run under the same audience fence: the reader gets that
-    run alone with its entry and no cursors, a run outside their audience reads as an empty page
-    carrying neither the run nor its entry, and a token that names no turn is refused."""
+async def test_report_object_detail_reads_one_run(web: tuple[AsyncClient, UUID, UUID]) -> None:
+    """The permalink read: one run as objects/report/{name}, its fields on the detail's status,
+    its conversation on the created_in link, under the same audience fence — a run outside the
+    reader's audiences is absent, and a name that is no turn reads the same way."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     _member_n, token_n = await _seed_member(workspace_id, "n@example.com")
-    shared_conversation = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="slack/radar-permalink",
-        audience=str(SHARED_AUDIENCE),
-        member_id=None,
-        surface="slack",
-    )
-    fired = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
-    pinned = await _seed_scheduled_run(
-        workspace_id,
-        agent_id,
-        shared_conversation,
-        text="12 items",
-        fired=fired,
-        artifact=("queue.png", "image/png"),
-    )
-    await _seed_scheduled_run(
-        workspace_id,
-        agent_id,
-        shared_conversation,
-        seq=2,
-        text="later",
-        fired=fired + timedelta(minutes=5),
-        artifact=("later.md", "text/markdown"),
-    )
     private_conversation = await _seed_agent_conversation(
         workspace_id,
         agent_id,
@@ -4041,14 +3946,15 @@ async def test_radar_permalink_reads_one_run(web: tuple[AsyncClient, UUID, UUID]
         audience=str(conversation_audience(member_m)),
         member_id=member_m,
     )
-    private_run = await _seed_scheduled_run(
+    fired = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
+    pinned = await _seed_scheduled_run(
         workspace_id,
         agent_id,
         private_conversation,
         key=f"pin-private:{uuid4()}",
-        text="private",
-        fired=fired + timedelta(minutes=1),
-        artifact=("mine.md", "text/markdown"),
+        text="12 items",
+        fired=fired,
+        artifact=("queue.png", "image/png"),
     )
     await _seed_digest_entry(
         workspace_id,
@@ -4057,42 +3963,33 @@ async def test_radar_permalink_reads_one_run(web: tuple[AsyncClient, UUID, UUID]
         summary="Twelve items are queued.",
         points=(("Twelve items are queued", "the queue"),),
     )
-    await _seed_digest_entry(
-        workspace_id,
-        private_run,
-        title="What m alone reads",
-        summary="The run that reported into m's own conversation.",
+    answered = await client.get(
+        f"{REPORTS_PATH}/{pinned}?agent={agent_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
-    page = (
-        await client.get(
-            f"{RADAR_PATH}?turn={pinned}", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
-        )
-    ).json()
-    assert [run["turn_id"] for run in page["runs"]] == [str(pinned)]
-    assert page["runs"][0]["entry"] == {
-        "title": "The queue holds twelve items",
-        "summary": "Twelve items are queued.",
-        "points": [{"text": "Twelve items are queued", "actor": "the queue"}],
-    }
-    assert page["older"] is None
-    assert page["newer"] is None
-    fenced = (
-        await client.get(
-            f"{RADAR_PATH}?turn={private_run}", headers={"cookie": f"{SESSION_COOKIE}={token_n}"}
-        )
-    ).json()
-    assert fenced["runs"] == []
-    malformed = await client.get(
-        f"{RADAR_PATH}?turn=nonsense", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    assert answered.status_code == 200, answered.text
+    detail = answered.json()
+    assert detail["name"] == str(pinned)
+    assert detail["status"]["entry"]["title"] == "The queue holds twelve items"
+    assert detail["status"]["conversation"] == str(private_conversation)
+    assert [link["name"] for link in detail["links"]] == [str(private_conversation)]
+    fenced = await client.get(
+        f"{REPORTS_PATH}/{pinned}?agent={agent_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token_n}"},
     )
-    assert malformed.status_code == 400
+    assert fenced.status_code == 404
+    nameless = await client.get(
+        f"{REPORTS_PATH}/not-a-turn?agent={agent_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
+    )
+    assert nameless.status_code == 404
 
 
-async def test_radar_pages_by_keyset(
+async def test_report_objects_page_with_a_cursor(
     web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The cursors walk the feed in both directions, and each page carries the entries of the runs
-    standing on it alone."""
+    """An agent-anchored read walks the feed through the object cursor, newest first, each page
+    carrying its own rows' entries and links."""
     client, workspace_id, agent_id = web
     _member, token = await _seed_member(workspace_id, "m@example.com")
     conversation = await _seed_agent_conversation(
@@ -4125,237 +4022,27 @@ async def test_radar_pages_by_keyset(
             summary=f"What run {index} found.",
             points=((f"Point {index}", "the runner"),),
         )
-    monkeypatch.setattr(web_surface, "RADAR_MIN_RUNS", 2)
+    monkeypatch.setattr(objects_module, "OBJECT_LIST_PAGE", 2)
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-    first = (await client.get(RADAR_PATH, headers=headers)).json()
-    assert [run["turn_id"] for run in first["runs"]] == [str(runs[2]), str(runs[1])]
-    assert first["runs"][0]["text"] == ""
-    assert first["runs"][0]["task"] is None
-    assert [run["entry"]["title"] for run in first["runs"]] == ["Run 2", "Run 1"]
-    assert first["newer"] is None and first["older"] is not None
+    first = (await client.get(f"{REPORTS_NEWEST}&agent={agent_id}", headers=headers)).json()
+    assert [run["name"] for run in first["objects"]] == [str(runs[2]), str(runs[1])]
+    assert first["objects"][0]["text"] == ""
+    assert first["objects"][0]["task"] is None
+    assert [run["entry"]["title"] for run in first["objects"]] == ["Run 2", "Run 1"]
+    assert first["next_cursor"] is not None
     second = (
-        await client.get(f"{RADAR_PATH}?after={quote(first['older'])}", headers=headers)
-    ).json()
-    assert [run["turn_id"] for run in second["runs"]] == [str(runs[0])]
-    assert [run["entry"] for run in second["runs"]] == [
-        {
-            "title": "Run 0",
-            "summary": "What run 0 found.",
-            "points": [{"text": "Point 0", "actor": "the runner"}],
-        }
-    ]
-    assert second["older"] is None and second["newer"] is not None
-    back = (
-        await client.get(f"{RADAR_PATH}?after={quote(second['newer'])}", headers=headers)
-    ).json()
-    assert [run["turn_id"] for run in back["runs"]] == [run["turn_id"] for run in first["runs"]]
-
-
-async def test_radar_pages_carry_only_stories_and_never_read_empty(
-    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A page's size counts the runs the feed draws, never the fires behind them: a run that ended
-    well and shared no file reported nothing and is no row here. So the newest page fills with
-    reports however many quiet fires sit between them, and following `older` always answers rows —
-    the cursor is minted from what the member can read, not from what the day happened to hold."""
-    client, workspace_id, agent_id = web
-    _member, token = await _seed_member(workspace_id, "m@example.com")
-    conversation = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="slack/radar-stories",
-        audience=str(SHARED_AUDIENCE),
-        member_id=None,
-        surface="slack",
-    )
-    fired = datetime.now(UTC) - timedelta(hours=1)
-    reported: list[UUID] = []
-    for index in range(12):
-        reports = index % 4 == 3
-        run = await _seed_scheduled_run(
-            workspace_id,
-            agent_id,
-            conversation,
-            seq=index + 1,
-            text="the digest",
-            fired=fired + timedelta(minutes=index),
-            artifact=("report.md", "text/markdown") if reports else None,
+        await client.get(
+            f"{REPORTS_NEWEST}&agent={agent_id}&cursor={quote(first['next_cursor'])}",
+            headers=headers,
         )
-        if reports:
-            reported.append(run)
-    monkeypatch.setattr(web_surface, "RADAR_MIN_RUNS", 2)
-    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-    payload = (await client.get(RADAR_PATH, headers=headers)).json()
-    walked: list[str] = []
-    while True:
-        assert payload["runs"] != []
-        walked.extend(run["turn_id"] for run in payload["runs"])
-        if payload["older"] is None:
-            break
-        after = quote(payload["older"])
-        payload = (await client.get(f"{RADAR_PATH}?after={after}", headers=headers)).json()
-    assert walked == [str(run) for run in reversed(reported)]
-
-
-async def test_radar_newest_page_holds_today_whole(
-    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The newest page never reads shorter than the floor on a quiet day, and grows past the floor
-    to carry today's runs whole once today holds more than that. The ceiling bounds the one
-    response: the rest of today reads behind the `older` cursor, which pages the floor at a time."""
-    client, workspace_id, agent_id = web
-    _member, token = await _seed_member(workspace_id, "m@example.com")
-    conversation = await _seed_agent_conversation(
-        workspace_id,
-        agent_id,
-        queue_key="slack/radar-today",
-        audience=str(SHARED_AUDIENCE),
-        member_id=None,
-        surface="slack",
-    )
-    stale = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
-    for index in range(4):
-        await _seed_scheduled_run(
-            workspace_id,
-            agent_id,
-            conversation,
-            seq=index + 1,
-            text="the older digest",
-            fired=stale + timedelta(minutes=index),
-            artifact=("older.md", "text/markdown"),
-        )
-    monkeypatch.setattr(web_surface, "RADAR_MIN_RUNS", 3)
-    monkeypatch.setattr(web_surface, "RADAR_MAX_RUNS", 4)
-    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-    quiet = (await client.get(RADAR_PATH, headers=headers)).json()
-    assert len(quiet["runs"]) == 3 and quiet["older"] is not None
-    fired = datetime.now(UTC)
-    today = [
-        await _seed_scheduled_run(
-            workspace_id,
-            agent_id,
-            conversation,
-            seq=index + 5,
-            text="today's digest",
-            fired=fired + timedelta(milliseconds=index),
-            artifact=("today.md", "text/markdown"),
-        )
-        for index in range(5)
-    ]
-    busy = (await client.get(RADAR_PATH, headers=headers)).json()
-    assert [run["turn_id"] for run in busy["runs"]] == [str(run) for run in reversed(today[1:])]
-    rest = (await client.get(f"{RADAR_PATH}?after={quote(busy['older'])}", headers=headers)).json()
-    assert len(rest["runs"]) == 3
-    assert rest["runs"][0]["turn_id"] == str(today[0])
-
-
-async def test_artifacts_paging_is_stable_across_a_concurrent_share(
-    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A file shared while the member reads page one neither repeats nor hides a row of page two:
-    the cursor names a position, not an offset."""
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    base = datetime(2026, 7, 1, tzinfo=UTC)
-    await _seed_artifacts(
-        workspace_id,
-        agent_id,
-        member_id,
-        "m@example.com",
-        tuple((f"file-{index}.txt", base + timedelta(minutes=index)) for index in range(4)),
-    )
-    monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
-    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-    first = (await client.get(ARTIFACTS_PATH, headers=headers)).json()
-    assert _names(first) == ["file-3.txt", "file-2.txt"]
-    await _seed_artifacts(
-        workspace_id,
-        agent_id,
-        member_id,
-        "m@example.com",
-        (("arrived.txt", base + timedelta(minutes=9)),),
-    )
-    second = (
-        await client.get(f"{ARTIFACTS_PATH}?after={quote(first['older'])}", headers=headers)
     ).json()
-    assert _names(second) == ["file-1.txt", "file-0.txt"]
-
-
-async def test_artifacts_view_refuses_a_cursor_it_never_minted(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """A token this surface did not mint is the client's error: the view answers 400 rather than
-    quietly serving the newest page, so a member on a stale link is told."""
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    await _seed_artifacts(
-        workspace_id,
-        agent_id,
-        member_id,
-        "m@example.com",
-        (("file.txt", datetime(2026, 7, 1, tzinfo=UTC)),),
-    )
-    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
-    for stale in ("nonsense", f"older|not-a-date|{uuid4()}", "sideways|2026-07-01T00:00:00|x"):
-        refused = await client.get(f"{ARTIFACTS_PATH}?after={quote(stale)}", headers=headers)
-        assert refused.status_code == 400, stale
-
-
-async def test_artifacts_pages_hold_the_member_fence_throughout_the_walk(
-    web: tuple[AsyncClient, UUID, UUID], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Another member's file is absent from every page of the walk, not merely the first — the
-    fence rides the query the cursor pages, not the page it produced. Their files interleave with
-    this member's by timestamp, so a leaked row would land mid-walk."""
-    client, workspace_id, agent_id = web
-    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
-    member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
-    base = datetime(2026, 7, 1, tzinfo=UTC)
-    await _seed_artifacts(
-        workspace_id,
-        agent_id,
-        member_m,
-        "m@example.com",
-        tuple((f"mine-{index}.txt", base + timedelta(minutes=index * 2)) for index in range(4)),
-    )
-    await _seed_artifacts(
-        workspace_id,
-        agent_id,
-        member_n,
-        "n@example.com",
-        tuple(
-            (f"theirs-{index}.txt", base + timedelta(minutes=index * 2 + 1)) for index in range(4)
-        ),
-    )
-    monkeypatch.setattr(web_surface, "ARTIFACT_LIST_LIMIT", 2)
-    walked = await _walk_artifacts(client, {"cookie": f"{SESSION_COOKIE}={token_m}"})
-    assert walked == [f"mine-{index}.txt" for index in (3, 2, 1, 0)]
-
-
-async def test_artifacts_listing_caps_at_the_real_limit_with_more_behind_it(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    """One unpatched page carries at most `ARTIFACT_LIST_LIMIT` files and offers the Older control,
-    so the bound the view ships with is the one a member meets."""
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    base = datetime(2026, 7, 1, tzinfo=UTC)
-    await _seed_artifacts(
-        workspace_id,
-        agent_id,
-        member_id,
-        "m@example.com",
-        tuple(
-            (f"file-{index}.txt", base + timedelta(seconds=index))
-            for index in range(web_surface.ARTIFACT_LIST_LIMIT + 2)
-        ),
-    )
-    page = (
-        await client.get(ARTIFACTS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
-    ).json()
-    assert len(page["artifacts"]) == web_surface.ARTIFACT_LIST_LIMIT
-    assert page["older"] is not None
-    assert page["newer"] is None
+    assert [run["name"] for run in second["objects"]] == [str(runs[0])]
+    assert second["objects"][0]["entry"] == {
+        "title": "Run 0",
+        "summary": "What run 0 found.",
+        "points": [{"text": "Point 0", "actor": "the runner"}],
+    }
+    assert second["next_cursor"] is None
 
 
 async def test_site_index_answers_through_the_kinds_own_gate(
@@ -4528,6 +4215,103 @@ async def test_an_index_longer_than_a_page_walks_on_the_cursor_it_returns(
     )
     assert reordered.status_code == 400
     assert "cursor" in reordered.text
+
+
+async def test_the_conversation_index_pages_portal_rows_alone(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """`portal` is a declared filter, so it narrows the page before the cut: a run of newer rows
+    from other surfaces can never render an empty chat list."""
+    client, workspace_id, agent_id = web
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    portal_row, _turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_m,
+        "m@example.com",
+        TerminalFrame(status="done", text="ok"),
+        title="Portal thread",
+    )
+    await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_m,
+        "m@example.com",
+        TerminalFrame(status="done", text="ok"),
+        title="Slack thread",
+        surface="slack",
+    )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token_m}"}
+    base = "/surface/web/objects/conversation?order_by=last_at&order=desc"
+
+    whole = (await client.get(base, headers=cookie)).json()
+    narrowed = (await client.get(base + "&portal=true", headers=cookie)).json()
+
+    assert {row["title"] for row in whole["objects"]} == {"Portal thread", "Slack thread"}
+    assert [row["name"] for row in narrowed["objects"]] == [str(portal_row)]
+    assert narrowed["objects"][0]["portal"] is True
+
+
+async def test_a_fanned_out_index_walks_every_agent_on_one_token(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An agent-less index continues: the token carries one kind cursor per agent still walking,
+    the next read resumes each agent's own walk, an agent whose rows ran out leaves the token, and
+    a token this route never minted is refused."""
+    client, workspace_id, agent_id = web
+    second_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=second_agent,
+                workspace_id=workspace_id,
+                name="scout",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                reasoning="high",
+                icon="binoculars",
+                is_main=False,
+                visibility="workspace",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    member_m, token_m = await _seed_member(workspace_id, "m@example.com")
+    short = 10
+    for index in range(OBJECT_LIST_PAGE + 1):
+        await _seed_web_turn(
+            workspace_id,
+            agent_id,
+            member_m,
+            "m@example.com",
+            TerminalFrame(status="done", text="ok"),
+            title=f"deep {index:03d}",
+        )
+    for index in range(short):
+        await _seed_web_turn(
+            workspace_id,
+            second_agent,
+            member_m,
+            "m@example.com",
+            TerminalFrame(status="done", text="ok"),
+            title=f"shallow {index:02d}",
+        )
+    cookie = {"cookie": f"{SESSION_COOKIE}={token_m}"}
+    base = "/surface/web/objects/conversation?order_by=title&order=asc"
+
+    first = (await client.get(base, headers=cookie)).json()
+    assert len(first["objects"]) == OBJECT_LIST_PAGE + short
+    assert first["next_cursor"]
+    second = (await client.get(base + "&cursor=" + first["next_cursor"], headers=cookie)).json()
+    assert len(second["objects"]) == 1
+    assert second["next_cursor"] is None
+    walked = [row["name"] for row in first["objects"] + second["objects"]]
+    assert len(set(walked)) == OBJECT_LIST_PAGE + 1 + short
+    assert {row["agent_id"] for row in second["objects"]} == {str(agent_id)}
+
+    stale = await client.get(base + "&cursor=deadbeef", headers=cookie)
+    assert stale.status_code == 400
+    assert "cursor" in stale.text
 
 
 async def test_a_site_detail_carries_its_conversation_link_and_refuses_a_hidden_row(
@@ -4824,7 +4608,8 @@ async def test_the_artifact_index_reads_only_the_members_own_and_shared_files(
     """A shared file answers on the subjects the reading member's own conversation carries: their
     own private conversations plus the workspace-shared. A file shared into a workspace-shared
     conversation answers every member; another member's private file is absent from the index and
-    not-found by name — for an admin too, since audience is not a role."""
+    not-found by name. An admin is fenced the same way — audience is not a role, so a file shared
+    in a conversation an admin cannot read is absent for them too."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
@@ -4897,12 +4682,13 @@ async def test_the_artifact_index_reads_only_the_members_own_and_shared_files(
         )
     names["ours.txt"] = f"{shared_conversation.hex[:8]}-ours-txt"
     index = f"/surface/web/objects/artifact?agent={agent_id}"
-    for token in (token_m, token_admin):
+    for token, reach in (
+        (token_m, {"mine.txt", "ours.txt"}),
+        (token_admin, {"ours.txt"}),
+    ):
         cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
         listed = (await client.get(index, headers=cookie)).json()
-        assert {row["filename"] for row in listed["objects"]} == (
-            {"mine.txt", "ours.txt"} if token == token_m else {"ours.txt"}
-        )
+        assert {row["filename"] for row in listed["objects"]} == reach
         shared_read = await client.get(
             f"/surface/web/objects/artifact/{names['ours.txt']}?agent={agent_id}", headers=cookie
         )
@@ -4912,7 +4698,6 @@ async def test_the_artifact_index_reads_only_the_members_own_and_shared_files(
             f"/surface/web/objects/artifact/{names['theirs.txt']}?agent={agent_id}", headers=cookie
         )
         assert hidden.status_code == 404
-        assert "artifact" in hidden.text
     own = await client.get(
         f"/surface/web/objects/artifact/{names['mine.txt']}?agent={agent_id}",
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
@@ -4931,19 +4716,17 @@ async def test_the_artifact_index_reads_only_the_members_own_and_shared_files(
 async def test_object_pages_refuse_an_unregistered_kind_an_unlisted_kind_and_a_walled_agent(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """Every kind the portal cannot serve refuses by name: an unregistered kind, a kind that reads
-    one row but does not list, and an agent outside the viewer's web audience."""
+    """Every kind the portal cannot serve refuses by name: an unregistered kind, a kind that does
+    not list, and an agent outside the viewer's web audience."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "m@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     unknown = await client.get(f"/surface/web/objects/widget?agent={agent_id}", headers=cookie)
     assert unknown.status_code == 404
     assert "widget" in unknown.text
-    unlisted = await client.get(
-        f"/surface/web/objects/conversation?agent={agent_id}", headers=cookie
-    )
+    unlisted = await client.get(f"/surface/web/objects/agent?agent={agent_id}", headers=cookie)
     assert unlisted.status_code == 404
-    assert "conversation does not list in the portal" in unlisted.text
+    assert "agent does not list in the portal" in unlisted.text
     walled = await client.get(f"/surface/web/objects/site?agent={uuid4()}", headers=cookie)
     assert walled.status_code == 404
     assert walled.text == "no such agent"
@@ -5198,10 +4981,8 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
         headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     await _consume(client, other_token, theirs.json()["turn_id"])
-    rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert rail.status_code == 200
-    rows = rail.json()["chats"]
-    assert [row["conversation_id"] for row in rows] == [
+    rows = await _rail_rows(client, cookie)
+    assert [row["name"] for row in rows] == [
         opened.json()["conversation_id"],
         str(seeded_id),
     ]
@@ -5209,12 +4990,8 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
     assert rows[0]["agent_name"] == "assistant"
     assert rows[0]["last_at"] is not None
     assert rows[1]["title"] == "An earlier exchange"
-    peer_rail = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={other_token}"}
-    )
-    assert [row["conversation_id"] for row in peer_rail.json()["chats"]] == [
-        theirs.json()["conversation_id"]
-    ]
+    peer_rows = await _rail_rows(client, {"cookie": f"{SESSION_COOKIE}={other_token}"})
+    assert [row["name"] for row in peer_rows] == [theirs.json()["conversation_id"]]
 
 
 async def test_the_rail_lists_readable_conversations_with_the_surface_they_came_in_on(
@@ -5266,11 +5043,10 @@ async def test_the_rail_lists_readable_conversations_with_the_surface_they_came_
         surface="web",
     )
 
-    member_rail = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
-    )
-    assert member_rail.status_code == 200
-    listed = {row["conversation_id"]: row for row in member_rail.json()["chats"]}
+    listed = {
+        row["name"]: row
+        for row in await _rail_rows(client, {"cookie": f"{SESSION_COOKIE}={member_token}"})
+    }
     assert set(listed) == {str(slack_id), str(cli_id)}
     assert listed[str(slack_id)]["title"] == "Review this Slack message"
     assert listed[str(slack_id)]["surface"] == "slack"
@@ -5279,14 +5055,8 @@ async def test_the_rail_lists_readable_conversations_with_the_surface_they_came_
     assert listed[str(cli_id)]["surface"] == "ufo"
     assert listed[str(cli_id)]["surface_label"] is None
 
-    other_rail = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={other_token}"}
-    )
-    assert other_rail.json()["chats"] == []
-    admin_rail = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
-    )
-    assert admin_rail.json()["chats"] == []
+    assert await _rail_rows(client, {"cookie": f"{SESSION_COOKIE}={other_token}"}) == []
+    assert await _rail_rows(client, {"cookie": f"{SESSION_COOKIE}={admin_token}"}) == []
 
 
 async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
@@ -5331,8 +5101,10 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
         inbound="Review pull request 42.",
     )
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(conversation_id)]
+    reached = await client.get(
+        f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie
+    )
+    assert [row["conversation_id"] for row in reached.json()["chats"]] == [str(conversation_id)]
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert str(review_agent) not in {agent["id"] for agent in index.json()["agents"]}
     settings = await client.get(f"/surface/web/agents/{review_agent}/settings", headers=cookie)
@@ -5422,10 +5194,9 @@ async def test_the_rail_reads_every_surface_under_its_bound(
         inbound="new Slack traffic",
         speaker_member_id=member_id,
     )
-    monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 2)
-    rail = await client.get("/surface/web/api/chats", headers=cookie)
-    rows = rail.json()["chats"]
-    assert [row["conversation_id"] for row in rows] == [str(slack_id)]
+    monkeypatch.setattr(conversations_kind, "CONVERSATION_MINE_LIMIT", 1)
+    rows = await _rail_rows(client, cookie)
+    assert [row["name"] for row in rows] == [str(slack_id)]
     assert rows[0]["title"] == "new Slack traffic"
     assert rows[0]["surface"] == "slack"
     assert rows[0]["surface_label"] is None
@@ -5473,17 +5244,16 @@ async def test_the_rail_groups_the_members_own_conversations_and_everyone_elses(
         workspace_id, theirs_id, agent_id, seq=2, inbound="i answered", speaker_member_id=member_id
     )
     await _seed_listed_turn(workspace_id, triggered_id, agent_id, seq=1, inbound="review run")
-    rail = await client.get("/surface/web/api/chats", headers=cookie)
-    rows = {row["conversation_id"]: row for row in rail.json()["chats"]}
+    rows = {row["name"]: row for row in await _rail_rows(client, cookie)}
     assert set(rows) == {str(mine_id), str(theirs_id)}
     assert rows[str(mine_id)]["mine"] is True
     assert rows[str(theirs_id)]["mine"] is True
     assert rows[str(mine_id)]["speaker"] is None
 
-    peer_rail = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={peer_token}"}
-    )
-    peer_rows = {row["conversation_id"]: row for row in peer_rail.json()["chats"]}
+    peer_rows = {
+        row["name"]: row
+        for row in await _rail_rows(client, {"cookie": f"{SESSION_COOKIE}={peer_token}"})
+    }
     assert set(peer_rows) == {str(mine_id), str(theirs_id)}
     assert peer_rows[str(theirs_id)]["mine"] is True
     assert peer_rows[str(mine_id)]["mine"] is False
@@ -5517,8 +5287,7 @@ async def test_a_conversation_the_member_cannot_name_is_not_railed(
         title="",
     )
 
-    rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert [row["conversation_id"] for row in rail.json()["chats"]] == [str(named_id)]
+    assert [row["name"] for row in await _rail_rows(client, cookie)] == [str(named_id)]
 
     # The row is hidden, never destroyed: its permalink still resolves the conversation it names.
     reached = await client.get(f"/surface/web/api/chats?conversation={nameless_id}", headers=cookie)
@@ -5577,6 +5346,20 @@ async def test_a_parameterless_call_is_refused_before_anything_opens(
     assert conversations == 0
 
 
+async def test_a_bare_chats_read_names_no_conversation_and_is_refused(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The rail's listing is the `conversation` kind's member listing; `api/chats` keeps only the
+    permalink resolve, so a read naming no conversation is a stated refusal rather than a page."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    bare = await client.get(
+        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    )
+    assert bare.status_code == 400
+    assert bare.text == "name a conversation to resolve"
+
+
 async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     web: tuple[AsyncClient, UUID, UUID],
     monkeypatch: pytest.MonkeyPatch,
@@ -5609,9 +5392,8 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
         headers=cookie,
     )
     await _consume(client, token, newer.json()["turn_id"])
-    monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 1)
-    rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert [row["conversation_id"] for row in rail.json()["chats"]] == [
+    monkeypatch.setattr(conversations_kind, "CONVERSATION_MINE_LIMIT", 1)
+    assert [row["name"] for row in await _rail_rows(client, cookie)] == [
         newer.json()["conversation_id"]
     ]
     resolved = await client.get(f"/surface/web/api/chats?conversation={older_id}", headers=cookie)
@@ -5764,8 +5546,7 @@ async def test_an_orphaned_chat_row_is_inert(
         headers=cookie,
     )
     await _consume(client, token, landed.json()["turn_id"])
-    rail = await client.get("/surface/web/api/chats", headers=cookie)
-    assert [row["conversation_id"] for row in rail.json()["chats"]] == [
+    assert [row["name"] for row in await _rail_rows(client, cookie)] == [
         landed.json()["conversation_id"]
     ]
 
@@ -5773,8 +5554,8 @@ async def test_an_orphaned_chat_row_is_inert(
 async def test_a_malformed_chat_row_is_a_fault_not_a_missing_conversation(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """A chat row that fails validation raises — the chat POST and the rail both surface the
-    fault instead of degrading to not-found or silently dropping the row."""
+    """A chat row that fails validation raises — the chat POST and the permalink resolve both
+    surface the fault instead of degrading to not-found or silently dropping the row."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -5801,7 +5582,7 @@ async def test_a_malformed_chat_row_is_a_fault_not_a_missing_conversation(
             headers=cookie,
         )
     with pytest.raises(ValidationError):
-        await client.get("/surface/web/api/chats", headers=cookie)
+        await client.get(f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie)
 
 
 async def test_a_conversation_is_walled_to_its_member_and_its_agent(
@@ -6431,6 +6212,7 @@ async def _seed_web_turn(
     title: str = "a seeded conversation",
     context: TurnContext | None = None,
     audience: str | None = None,
+    surface: str = "web",
 ) -> tuple[UUID, UUID]:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -6439,7 +6221,7 @@ async def _seed_web_turn(
                 id=conversation_id,
                 workspace_id=workspace_id,
                 agent_id=agent_id,
-                surface="web",
+                surface=surface,
                 queue_key=f"{agent_id}/{email}/{uuid4().hex}",
                 member_id=None if audience is not None else member_id,
                 title=title,
@@ -6467,6 +6249,7 @@ async def _seed_web_turn(
                 seq=1,
                 status="done",
                 inbound="ask",
+                admission_source="member",
                 speaker_member_id=member_id,
                 context=None if context is None else context.model_dump(mode="json"),
                 terminal=terminal.model_dump(mode="json"),
@@ -6475,6 +6258,16 @@ async def _seed_web_turn(
             )
         )
     return conversation_id, turn_id
+
+
+async def _rail_rows(client: AsyncClient, headers: dict[str, str]) -> list[dict[str, object]]:
+    listing = await client.get(
+        "/surface/web/objects/conversation?order_by=last_at&order=desc", headers=headers
+    )
+    assert listing.status_code == 200
+    rows = listing.json()["objects"]
+    assert isinstance(rows, list)
+    return rows
 
 
 async def _seed_subagent(

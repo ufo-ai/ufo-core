@@ -425,8 +425,9 @@ async def _source_listing(ctx: ToolContext, project: str) -> dict[str, dict[str,
 
 async def _promote_source(ctx: ToolContext, project: str, conversation_id: UUID, name: str) -> str:
     """Store the served directory's bytes as the site's source of record and answer the manifest
-    `register` writes: each deploy under its own key prefix, so the keys are immutable and the
-    previous deploy's are retired separately. The bytes go straight from the sandbox to the store —
+    `register` writes: each deploy under its own key prefix, so the keys are immutable and every
+    deploy's prefix stands in the store as the site's history. The bytes go straight from the
+    sandbox to the store —
     an S3 store takes them on presigned PUTs core mints for these exact keys, curled from inside
     the container, and a filesystem dev store takes the same files as streams — so a site's source
     never crosses this process."""
@@ -525,8 +526,8 @@ async def _refuse_before_serving(
     ctx: ToolContext, raw_name: str, port: int, visibility: Visibility | None
 ) -> tuple[str, HostedSite | None]:
     """Raise anything hosting would raise, while the member's site is still up, and answer with the
-    slugged name and the site this deploy will displace — whose stored source is the deploy's to
-    retire once the row has moved.
+    slugged name and the site this deploy will displace — a homepage redeploy's to unhost once its
+    scratch serve has killed that site's server.
 
     Serving kills whatever holds the port in a container the member's own turns share, and
     registering only afterwards is what keeps a refusal from costing them that site. The other

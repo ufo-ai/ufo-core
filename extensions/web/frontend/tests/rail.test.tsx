@@ -20,29 +20,7 @@ import {
   type ChatRow,
 } from "@/lib/rail";
 
-import {
-  atPhoneWidth,
-  destination,
-  json,
-  objectIndex,
-  openAgentRow,
-  useStreamFake,
-  wire,
-  AGENT,
-  AGENT_ID,
-  CHAT_APP,
-  CHAT_APP_ID,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
-  SECOND,
-  SECOND_ID,
-  SETTINGS,
-  SITE_KIND,
-  TASK_KIND,
-  TRIGGER_KIND,
-  TURN_ID,
-} from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -214,8 +192,34 @@ async function filterBy(label: string) {
   fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
 }
 
+test("the rail walks the listing to its far page", async () => {
+  const older = {
+    ...CHAT_ROW,
+    conversation_id: SECOND_ID,
+    title: "Second page thread",
+    last_at: "2026-08-01T09:00:00.000Z",
+  };
+  let calls = 0;
+  wire({
+    "/objects/conversation$": () => {
+      calls += 1;
+      return json(
+        calls === 1
+          ? { objects: [conversationObject(CHAT_ROW)], next_cursor: "walk-on" }
+          : { objects: [conversationObject(older)], next_cursor: null },
+      );
+    },
+    "/api/chats": () => json({ chats: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /Second page thread/ })).toBeTruthy();
+  expect(calls).toBe(2);
+});
+
 test("the filter admits a surface into the rail and the browser keeps the choice", async () => {
-  wire({ "/api/chats": () => json({ chats: [CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT] }) });
+  wire({ ...chatsOnWire([CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT]) });
   const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
@@ -240,7 +244,7 @@ test("the filter admits a surface into the rail and the browser keeps the choice
  *  opens the conversation and shuts the drawer. */
 test("the drawer holds the rail at a phone width, and a pick shuts it", async () => {
   atPhoneWidth();
-  wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
+  wire({ ...chatsOnWire([CHAT_ROW]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
@@ -258,7 +262,7 @@ test("the drawer holds the rail at a phone width, and a pick shuts it", async ()
 });
 
 test("a tick leaves the filter open, so both surfaces are named in one visit", async () => {
-  wire({ "/api/chats": () => json({ chats: [CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT] }) });
+  wire({ ...chatsOnWire([CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   fireEvent.click(await screen.findByRole("button", { name: "Conversations" }));
@@ -312,7 +316,7 @@ test("an agent name carrying a comma survives the round trip", () => {
 
 test("a group heading shuts its rows, and the browser holds that past a remount", async () => {
   const today = { ...CHAT_ROW, last_at: stampIso(new Date()) };
-  wire({ "/api/chats": () => json({ chats: [today] }) });
+  wire({ ...chatsOnWire([today]) });
   const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
@@ -334,7 +338,7 @@ test("opening one group leaves the groups the default shut alone", async () => {
     mine: false,
     speaker: "pat@example.com",
   };
-  wire({ "/api/chats": () => json({ chats: [today, colleague] }) });
+  wire({ ...chatsOnWire([today, colleague]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await openGroup("Other members");
@@ -367,7 +371,7 @@ test("merging keeps held rows the fetch does not know and prefers fetched rows i
 test("a deep link waits while the rail loads instead of denying the conversation", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () =>
+    "/objects/conversation$": () =>
       new Promise<Response>(() => {
         return;
       }),
@@ -379,7 +383,7 @@ test("a deep link waits while the rail loads instead of denying the conversation
 });
 
 test("a rail read that fails states so and keeps the rows it has", async () => {
-  wire({ "/api/chats": () => new Response("nope", { status: 503 }) });
+  wire({ "/objects/conversation$": () => new Response("nope", { status: 503 }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const toast = await screen.findByRole("status");
@@ -388,7 +392,7 @@ test("a rail read that fails states so and keeps the rows it has", async () => {
 });
 
 test("a rail read the session refuses states nothing, since sign-in answers it", async () => {
-  wire({ "/api/chats": () => new Response("unauthorized", { status: 401 }) });
+  wire({ "/objects/conversation$": () => new Response("unauthorized", { status: 401 }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
@@ -491,7 +495,7 @@ test("two submits the page could not re-render between still open one conversati
 test("a first message sent before the rail resolves still lands, and the rail merge keeps it", async () => {
   let releaseRail: ((value: Response) => void) | null = null;
   wire({
-    "/api/chats": () =>
+    "/objects/conversation$": () =>
       new Promise<Response>((resolve) => {
         releaseRail = resolve;
       }),
@@ -507,12 +511,12 @@ test("a first message sent before the rail resolves still lands, and the rail me
 
   releaseRail!(
     json({
-      chats: [
-        {
+      objects: [
+        conversationObject({
           ...CHAT_ROW,
           conversation_id: "88888888-8888-4888-8888-888888888888",
           last_at: stampIso(new Date()),
-        },
+        }),
       ],
     }),
   );
@@ -523,7 +527,7 @@ test("a first message sent before the rail resolves still lands, and the rail me
 
 test("a rail row opens its conversation's transcript", async () => {
   const { calls } = wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () => json({ messages: [{ role: "user", text: "earlier words" }] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -548,7 +552,7 @@ test("sending from an existing conversation posts to it and bumps its rail row",
     last_at: "2026-08-01T09:00:00",
   };
   const { calls } = wire({
-    "/api/chats": () => json({ chats: [newer, older] }),
+    ...chatsOnWire([newer, older]),
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: older.title }),
   });
@@ -575,7 +579,7 @@ test("a row of a non-main agent names its agent in the rail", async () => {
     agent_name: "second",
     title: "An ops question",
   };
-  wire({ "/api/chats": () => json({ chats: [foreign] }) });
+  wire({ ...chatsOnWire([foreign]) });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /An ops question/ });
@@ -592,7 +596,7 @@ test("a row from another surface draws its glyph and states the surface's own na
     title: "Slack question",
   };
   holdRailShown(EVERY_SURFACE);
-  wire({ "/api/chats": () => json({ chats: [slack] }) });
+  wire({ ...chatsOnWire([slack]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Slack question/ });
@@ -605,7 +609,7 @@ test("a row from another surface draws its glyph and states the surface's own na
 test("a cli row draws the terminal glyph and reads as Terminal, never as the surface's own name", async () => {
   const cli = { ...CHAT_ROW, surface: "ufo", surface_label: null, title: "Deploy the branch" };
   holdRailShown(EVERY_SURFACE);
-  wire({ "/api/chats": () => json({ chats: [cli] }) });
+  wire({ ...chatsOnWire([cli]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Deploy the branch/ });
@@ -617,7 +621,7 @@ test("a cli row draws the terminal glyph and reads as Terminal, never as the sur
 test("the surface glyph is drawn at the sidebar's glyph size, not at the row's text size", async () => {
   const slack = { ...CHAT_ROW, surface: "slack", surface_label: "#ops", title: "Slack question" };
   holdRailShown(EVERY_SURFACE);
-  wire({ "/api/chats": () => json({ chats: [slack] }) });
+  wire({ ...chatsOnWire([slack]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Slack question/ });
@@ -627,7 +631,7 @@ test("the surface glyph is drawn at the sidebar's glyph size, not at the row's t
 });
 
 test("a portal row draws no glyph — the rail is read where those conversations happen", async () => {
-  wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
+  wire({ ...chatsOnWire([CHAT_ROW]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
@@ -635,7 +639,7 @@ test("a portal row draws no glyph — the rail is read where those conversations
 });
 
 test("a row whose title is the whole of it is no tooltip trigger", async () => {
-  wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
+  wire({ ...chatsOnWire([CHAT_ROW]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
@@ -651,7 +655,7 @@ test("a conversation another member spoke stands at the foot and names them", as
     mine: false,
     speaker: "Pat Reyes (pat@example.com)",
   };
-  wire({ "/api/chats": () => json({ chats: [CHAT_ROW, colleague] }) });
+  wire({ ...chatsOnWire([CHAT_ROW, colleague]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await openGroup("Other members");
@@ -691,10 +695,8 @@ test("an origin rail row opens the read-only pane, never the live chat", async (
   };
   holdRailShown(EVERY_SURFACE);
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? json({ chats: [slack], conversation: linked })
-        : json({ chats: [slack] }),
+    ...chatsOnWire([slack]),
+    "/api/chats": () => json({ chats: [slack], conversation: linked }),
     "/transcript": () => json({ messages: [{ role: "user", text: "slack words" }] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -711,13 +713,12 @@ test("a private extension conversation opens the live chat", async () => {
     ...CHAT_ROW,
     agent_id: "22222222-2222-4222-8222-222222222222",
     agent_name: "Daily-Brief",
-    agent_model: "claude-sonnet-5",
     surface: "extension:sweep",
     surface_label: null,
     title: "Daily brief",
   };
   wire({
-    "/api/chats": () => json({ chats: [sweep] }),
+    ...chatsOnWire([sweep]),
     "/transcript": () => json({ messages: [{ role: "assistant", text: "Work to finish" }] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -731,7 +732,6 @@ test("a private extension conversation opens the live chat", async () => {
   // linked.
   expect(crumb.getByText("Daily-Brief")).toBeTruthy();
   expect(crumb.queryByRole("button", { name: "Back to daily-brief" })).toBeNull();
-  expect(screen.queryByText("claude-sonnet-5")).toBeNull();
   expect(screen.getByLabelText("Message the app")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
@@ -969,7 +969,7 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
 
 test("a rail row lands in the chat app when one is shipped", async () => {
   location.hash = "#/";
-  wire({ "/api/chats": () => json({ chats: [CHAT_ROW] }) });
+  wire({ ...chatsOnWire([CHAT_ROW]) });
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
@@ -1028,7 +1028,7 @@ test("the applications flyout opens the agent's page, and the sidebar starts the
 
 test("the conversations rail stands in the sidebar whatever the destination", async () => {
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () => json({ messages: [] }),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/objects/site": () => objectIndex(SITE_KIND, []),
@@ -1047,7 +1047,7 @@ test("the conversations rail stands in the sidebar whatever the destination", as
 
 test("the chat header names the agent holding the conversation and what it is called, never the model", async () => {
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () => json({ messages: [] }),
     "/settings": () => new Response("nope", { status: 503 }),
   });
@@ -1065,7 +1065,7 @@ test("the chat header names the agent holding the conversation and what it is ca
 
 test("a deep link is not blamed while the rail is the thing that failed", async () => {
   location.hash = "#/c/" + CONVO_ID;
-  wire({ "/api/chats": () => new Response("nope", { status: 500 }) });
+  wire({ "/objects/conversation$": () => new Response("nope", { status: 500 }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const notes = await screen.findAllByText("Couldn't load conversations.");
@@ -1082,7 +1082,7 @@ test("a failed send neither bumps the rail nor reorders it", async () => {
     last_at: hoursAgo(2),
   };
   wire({
-    "/api/chats": () => json({ chats: [newer, older] }),
+    ...chatsOnWire([newer, older]),
     "/transcript": () => json({ messages: [] }),
     "/chat": () => new Response("nope", { status: 500 }),
   });
@@ -1161,9 +1161,11 @@ test("the sidebar marks the destination the member is in and leaves the others o
 test("a failed rail read states it and retries on demand", async () => {
   let failures = 0;
   wire({
-    "/api/chats": () => {
+    "/objects/conversation$": () => {
       failures += 1;
-      return failures === 1 ? new Response("nope", { status: 500 }) : json({ chats: [CHAT_ROW] });
+      return failures === 1
+        ? new Response("nope", { status: 500 })
+        : json({ objects: [conversationObject(CHAT_ROW)] });
     },
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);

@@ -4,7 +4,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, AGENT_ID, CHAT_ROW, CONVO_ID, MEMBER, json, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, useStreamFake, wire } from "./harness";
 
 const HOMEPAGE_URL = "/surface/sites/tok-abc/";
 
@@ -194,7 +194,7 @@ test("the right-side chat carries no New act and no conversation menu", async ()
   location.hash = "#/agents/" + AGENT_ID;
   open({
     "/homepage": () => json(SET),
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/conversations$": () => json({ conversations: [LISTED] }),
   });
 
@@ -215,18 +215,15 @@ test("the chat toggle opens the newest directive conversation", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({
     "/homepage": () => json(SET),
-    "/api/chats": () =>
-      json({
-        chats: [
-          CHAT_ROW,
-          {
-            ...CHAT_ROW,
-            conversation_id: newer,
-            title: "Bold titles",
-            last_at: "2026-08-09T09:00:00.000Z",
-          },
-        ],
-      }),
+    ...chatsOnWire([
+      CHAT_ROW,
+      {
+        ...CHAT_ROW,
+        conversation_id: newer,
+        title: "Bold titles",
+        last_at: "2026-08-09T09:00:00.000Z",
+      },
+    ]),
     "/conversations$": () =>
       json({
         conversations: [LISTED, { ...LISTED, id: newer, description: "Bold titles" }],

@@ -3,7 +3,6 @@
 
 const {
   ArtifactText,
-  Button,
   CardGrid,
   DataTable,
   FacetMenu,
@@ -14,7 +13,6 @@ const {
   OWNER_FIELD,
   ObjectDetail,
   PageToolbar,
-  Pager,
   Panel,
   PanelBlank,
   PanelEmpty,
@@ -96,25 +94,24 @@ function asScope(value: string | undefined): Scope {
 }
 
 type Artifact = {
-  id: string;
+  name: string;
   filename: string;
   subject: string | null;
   media_type: string;
   size_bytes: number;
-  created_at: string;
+  shared_at: string;
   url: string | null;
   preview_url: string | null;
   owner_email: string | null;
   origin: string | null;
-  conversation_id: string;
+  conversation: string;
   surface: string;
   source: string | null;
 };
 
 type FilesPayload = {
-  artifacts: Artifact[];
-  newer?: string | null;
-  older?: string | null;
+  objects: Artifact[];
+  next_cursor?: string | null;
 };
 
 type SitesPayload = { objects: ObjectRow[] };
@@ -139,7 +136,7 @@ type Card = {
 
 type Shelf = { cards: Card[]; files: FilesPayload };
 
-const NO_FILES: PanelState<FilesPayload> = { phase: "ready", payload: { artifacts: [] } };
+const NO_FILES: PanelState<FilesPayload> = { phase: "ready", payload: { objects: [] } };
 const NO_SITES: PanelState<SitesPayload> = { phase: "ready", payload: { objects: [] } };
 
 function isImage(entry: Artifact): boolean {
@@ -215,21 +212,21 @@ function tileExcerpt(file: Artifact | null): ReactNode {
   );
 }
 
-/** A shared file's lane id: the file's own id, which is what the shelf keys its card by and what
- *  the address and the track store carry. A filename is whatever the agent that shared it called
- *  the file — free text of any length, holding the characters a track is written with — so a lane
- *  named off it is a lane the address cannot always carry. The spotlight mints the same id from
- *  the same fact, which is what makes a hit open the card this shelf lists. */
-function fileKey(file: { id: string }): string {
-  return file.id;
+/** A shared file's lane id: the file's own object name, which is what the shelf keys its card by
+ *  and what the address and the track store carry. A filename is whatever the agent that shared it
+ *  called the file — free text of any length, holding the characters a track is written with — so a
+ *  lane named off it is a lane the address cannot always carry. The spotlight mints the same id
+ *  from the same fact, which is what makes a hit open the card this shelf lists. */
+function fileKey(file: { name: string }): string {
+  return file.name;
 }
 
 function fileCard(entry: Artifact, viewer: string | null): Card {
   return {
     key: fileKey(entry),
     name: entry.filename,
-    time: moment(entry.created_at),
-    status: <Moment at={entry.created_at} />,
+    time: moment(entry.shared_at),
+    status: <Moment at={entry.shared_at} />,
     body: entry.subject,
     meta: ownerLabel(entry.owner_email, viewer),
     type: typeLabel(entry.media_type),
@@ -239,17 +236,15 @@ function fileCard(entry: Artifact, viewer: string | null): Card {
   };
 }
 
-/** The files walk is the shelf's own read: it fails the section, and it is the one page a cursor
- *  continues. A deploy with no sites extension answers the site read with a 404, which is a family
- *  that does not exist here rather than a fault — every other refusal is stated.
+/** The files listing is the shelf's own read: it fails the section. A deploy with no sites
+ *  extension answers the site read with a 404, which is a family that does not exist here rather
+ *  than a fault — every other refusal is stated.
  *
- *  The sites arrive whole on every read, and a shelf mixing them into a walk of files has to say
- *  which page each one stands on. They stand on the newest: a site is a place that goes on being
- *  worked on rather than a file dated once, so the top of the shelf is where a member looks for
- *  it, and the family's own narrowing lists every one of them at any depth. Which page is the
- *  newest is read off the files payload rather than off the cursor in the address — a member who
- *  walked back up to the top is on the newest page and carries a cursor saying so, and a shelf
- *  judging by the cursor alone would drop the sites the moment they walked back to them. */
+ *  The sites arrive whole on every read, and a shelf mixing them into a listing of files has to
+ *  say which page each one stands on. They stand on the newest: a site is a place that goes on
+ *  being worked on rather than a file dated once, so the top of the shelf is where a member looks
+ *  for it, and the family's own narrowing lists every one of them at any depth. A page a cursor
+ *  continues is not the top. */
 function shelf(
   sites: PanelState<SitesPayload>,
   files: PanelState<FilesPayload>,
@@ -259,17 +254,18 @@ function shelf(
   /** The app the sites were read under, which is the app their lanes name; null where the shelf
    *  read no sites at all. */
   owner: string | null,
+  top: boolean,
 ): PanelState<Shelf> {
   if (files.phase !== "ready") return files;
   if (sites.phase === "loading") return sites;
   if (sites.phase === "failed" && sites.status !== NOT_FOUND) return sites;
   const shown =
-    owner !== null && sites.phase === "ready" && (onSites || !files.payload.newer)
+    owner !== null && sites.phase === "ready" && (onSites || top)
       ? sites.payload.objects
           .filter((row) => scope === "all" || (viewer !== null && row[OWNER_FIELD] === viewer))
           .map((row) => siteCard(row, viewer, owner))
       : [];
-  const cards = [...shown, ...files.payload.artifacts.map((entry) => fileCard(entry, viewer))];
+  const cards = [...shown, ...files.payload.objects.map((entry) => fileCard(entry, viewer))];
   cards.sort((left, right) => (left.time < right.time ? 1 : left.time > right.time ? -1 : 0));
   return { phase: "ready", payload: { cards, files: files.payload } };
 }
@@ -373,15 +369,14 @@ function Artifacts({
   const held = usePanelRead<SitesPayload>(
     mainAgent ? "/objects/" + SITE_KIND + "?" + siteParams.toString() : null,
   );
-  const fileParams = new URLSearchParams();
+  const after = place.after ?? "";
+  const fileParams = new URLSearchParams({ order_by: "shared_at", order: "desc" });
   if (query) fileParams.set("q", query);
   if (media) fileParams.set("media", media);
-  if (scope !== "all") fileParams.set("scope", scope);
-  if (place.after) fileParams.set("after", place.after);
+  if (scope !== "all") fileParams.set("mine", "true");
+  if (after) fileParams.set("cursor", after);
   const walked = usePanelRead<FilesPayload>(
-    picked === SITE_FAMILY
-      ? null
-      : "/workspace/artifacts" + (fileParams.size ? "?" + fileParams.toString() : ""),
+    picked === SITE_FAMILY ? null : "/objects/artifact?" + fileParams.toString(),
   );
   const onSites = picked === SITE_FAMILY;
   /** The app the sites are read under, which is the app their lanes name. A shelf narrowed to one
@@ -394,6 +389,7 @@ function Artifacts({
     onSites,
     scope,
     siteOwner,
+    !after,
   );
 
   const opens = place.opens ?? [];
@@ -416,11 +412,6 @@ function Artifacts({
               onPlace({ scope: value === "all" ? undefined : value, after: undefined })
             }
           />
-          {state.phase === "failed" && place.after ? (
-            <Button variant="row" onClick={() => onPlace({ after: undefined, opens: undefined })}>
-              First page
-            </Button>
-          ) : null}
           <span className="ml-auto flex shrink-0 items-center gap-sm max-narrow:ml-0">
             <FacetMenu
               groups={facets}
@@ -475,7 +466,28 @@ function Artifacts({
                     />
                   )}
                 </Presses>
-                {onSites ? null : <Pager payload={payload.files} onPlace={onPlace} />}
+                {payload.files.next_cursor || after ? (
+                  <div className="flex gap-xs">
+                    {payload.files.next_cursor ? (
+                      <button
+                        className={cn(buttonVariants({ variant: "row" }))}
+                        onClick={() =>
+                          onPlace({ after: payload.files.next_cursor ?? undefined })
+                        }
+                      >
+                        Next page
+                      </button>
+                    ) : null}
+                    {after ? (
+                      <button
+                        className={cn(buttonVariants({ variant: "row" }))}
+                        onClick={() => onPlace({ after: undefined })}
+                      >
+                        First page
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </>
             );
           }}
@@ -647,7 +659,7 @@ function Viewer({ entry }: { entry: Artifact }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2xl overflow-y-auto px-2xl pb-2xl">
       <div className="font-mono text-small text-ink-soft">
-        {meta} · <Moment at={entry.created_at} />
+        {meta} · <Moment at={entry.shared_at} />
       </div>
       <div className="flex flex-wrap items-center gap-lg">
         {entry.url ? (
@@ -660,7 +672,7 @@ function Viewer({ entry }: { entry: Artifact }) {
           </a>
         ) : null}
         <span className="flex flex-wrap gap-x-lg font-mono text-small text-ink-soft">
-          <a href={chatHash(entry.conversation_id)} className={out}>
+          <a href={chatHash(entry.conversation)} className={out}>
             Conversation
           </a>
           {thread ? (

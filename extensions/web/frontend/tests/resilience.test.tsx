@@ -5,20 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { setReattachTimer } from "@/lib/turnStream";
 
-import {
-  AGENT,
-  ARRIVAL_ID,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
-  SECOND,
-  StreamFake,
-  TURN_ID,
-  json,
-  useStreamFake,
-  saying,
-  wire,
-} from "./harness";
+import { AGENT, ARRIVAL_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 
 const OTHER_ID = "66666666-6666-4666-8666-666666666666";
 const TODAY = new Date().toISOString();
@@ -39,7 +26,7 @@ function fatal(stream: StreamFake) {
 
 async function streaming(routes: Record<string, () => Response> = {}) {
   wire({
-    "/api/chats": () => json(RAIL),
+    ...chatsOnWire(RAIL.chats),
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
     ...routes,
@@ -202,7 +189,7 @@ test("returning to a tab with a dead stream reattaches without waiting out the b
 test("returning to an idle tab refetches the transcript", async () => {
   let serves = 0;
   wire({
-    "/api/chats": () => json(RAIL),
+    ...chatsOnWire(RAIL.chats),
     "/transcript": () => {
       serves += 1;
       return json({
@@ -220,7 +207,7 @@ test("returning to an idle tab refetches the transcript", async () => {
 
 test("a transcript that never loads says so in the pane, not as an empty conversation", async () => {
   wire({
-    "/api/chats": () => json(RAIL),
+    ...chatsOnWire(RAIL.chats),
     "/transcript": () => new Response("nope", { status: 503 }),
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
@@ -234,7 +221,7 @@ test("a transcript that never loads says so in the pane, not as an empty convers
 test("a re-read that fails states so over the conversation it already holds", async () => {
   let serves = 0;
   wire({
-    "/api/chats": () => json(RAIL),
+    ...chatsOnWire(RAIL.chats),
     "/transcript": () => {
       serves += 1;
       if (serves === 1) return json({ messages: [{ role: "assistant", text: "still here" }] });
@@ -252,7 +239,7 @@ test("a re-read that fails states so over the conversation it already holds", as
 
 test("a draft survives leaving the chat and is cleared by sending", async () => {
   wire({
-    "/api/chats": () => json(RAIL),
+    ...chatsOnWire(RAIL.chats),
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
@@ -326,7 +313,7 @@ test("a transcript fetched before a send never erases the exchange", async () =>
   let release: (value: Response) => void = () => {};
   let serves = 0;
   wire({
-    "/api/chats": () => json(RAIL),
+    ...chatsOnWire(RAIL.chats),
     "/transcript": () => {
       serves += 1;
       if (serves === 1) return json({ messages: [] });
@@ -381,7 +368,7 @@ test("reattach delays climb the declared ladder", async () => {
 test("a failed idle refetch keeps what the member already sees", async () => {
   let serves = 0;
   wire({
-    "/api/chats": () => json(RAIL),
+    ...chatsOnWire(RAIL.chats),
     "/transcript": () => {
       serves += 1;
       if (serves === 1) return json({ messages: [{ role: "assistant", text: "kept history" }] });
@@ -399,7 +386,7 @@ test("a failed idle refetch keeps what the member already sees", async () => {
 test("returning visibility alone refetches an idle transcript", async () => {
   let serves = 0;
   wire({
-    "/api/chats": () => json(RAIL),
+    ...chatsOnWire(RAIL.chats),
     "/transcript": () => {
       serves += 1;
       return json({
@@ -415,7 +402,7 @@ test("returning visibility alone refetches an idle transcript", async () => {
 });
 
 test("a draft never crosses members on a shared browser", async () => {
-  wire({ "/api/chats": () => json(RAIL), "/transcript": () => json({ messages: [] }) });
+  wire({ ...chatsOnWire(RAIL.chats), "/transcript": () => json({ messages: [] }) });
   const first = render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Message the app"), "private thought");

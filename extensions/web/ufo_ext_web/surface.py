@@ -36,7 +36,6 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import httpx
-import sqlalchemy as sa
 from pydantic import BaseModel, JsonValue, ValidationError
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
@@ -96,7 +95,6 @@ from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import AGENT_KIND, ObjectListQuery, ObjectRef
-from ufo.sdk.scheduled_fire import scheduled_fire_task_id
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     MEMBER_ADMISSION,
@@ -108,7 +106,6 @@ from ufo.sdk.surfaces import (
     KeyedAdmission,
     ListedConversation,
     PortalKind,
-    ScheduledRun,
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
@@ -166,16 +163,10 @@ MAX_MEMORY_QUERY_CHARS = 500
 MAX_SEARCH_CHARS = 200
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
-ARTIFACT_LIST_LIMIT = 100
-RADAR_MIN_RUNS = 10
-RADAR_MAX_RUNS = 200
 SCHEDULED_TASK_KIND = "scheduled_task"
 SITE_KIND = "site"
-ARTIFACT_MEDIA_FILTERS = frozenset(("image", "document", "other"))
-ARTIFACT_SCOPE_FILTERS = frozenset(("created",))
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
-OTHER_CONVERSATION_LIMIT = 25
 SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
 CHAT_STORE_PREFIX = "chat/"
@@ -813,7 +804,7 @@ async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
     liveest non-terminal turn it holds — with what a running one is doing right now, peeked off
     the hub's newest activity frame — when any turn of its last moved, whether its most recent
     terminal turn failed, and the soonest unpaused scheduled task on it — read through the task
-    kind's own member gate, the seam the radar names tasks by, never its table.
+    kind's own member gate, never its table.
 
     An agent is visible workspace-wide; its turns are not. The aggregate is fenced to the
     conversations this reader reads, so a row reports this member's picture of the agent and never
@@ -1957,77 +1948,18 @@ def _provider_label(ctx: SurfaceContext, provider: str) -> str:
 
 
 async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
-    """The rail: every conversation this member is in, across the agents their web audience holds,
-    plus the readable ones their colleagues are in, newest activity first. `mine` says which of the
-    two a row is, and the rail groups on it — a member who answered in a thread has work there, and
-    a thread nobody here spoke in is a review an extension triggered, which belongs to no rail.
-
-    Each side reads under its own bound, because one bound over the merged order is the whole
-    workspace's traffic displacing a member's own: the member's own gets `CONVERSATION_LIST_LIMIT`
-    and everyone else's `OTHER_CONVERSATION_LIMIT`. Both read as this member, never as an admin, so
-    an admin's rail is their own work and not every private conversation in the workspace.
-
-    Web conversations use the chat row this surface stores; another surface's conversations use
-    their opening message. A same-surface conversation without a chat row is dropped: the member's
-    prepared-intent lane. A colleague's row also names who spoke it, which is the one fact the
-    member cannot get from the title.
-
-    A conversation this member cannot name is not listed. `title` is the member's own opening words,
-    so a conversation with none was opened by something other than a member speaking — a probe, a
-    provisioning run — and holds nothing they can read; and the listing answers the same empty title
-    for a conversation whose audience shuts them out. Both are a nameless row leading to a screen
-    that says only that it is empty.
-
-    Every row carries `surface` and the surface's own name for it, never one string collapsing the
-    two: the rail draws a glyph off the surface and reads the label as the words, and a Slack
-    conversation in `#ops` would otherwise arrive as `#ops` with nothing saying it came from
-    Slack."""
+    """The `#/c/<id>` permalink resolve: the one conversation `?conversation=` names, answered as
+    `_resolve_chat` answers it. The rail's listing is the `conversation` kind's member listing —
+    `GET objects/conversation` — so a read naming no conversation has nothing to answer here."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, email, audience = resolved
     store = web_extension().store
     requested = request.query_params.get("conversation", "").strip()
-    if requested:
-        return await _resolve_chat(ctx, store, audience, member_id, email, requested)
-    sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
-        ("mine", CONVERSATION_LIST_LIMIT),
-        ("others", OTHER_CONVERSATION_LIMIT),
-    )
-    rows: list[dict[str, object]] = []
-    for agent in audience.chat_agents:
-        for participation, limit in sides:
-            listed = await ctx.list_agent_conversations(
-                agent.id, member_id, admin=False, limit=limit, participation=participation
-            )
-            records = await store.get_many([_chat_row_key(entry.summary.id) for entry in listed])
-            for entry in listed:
-                bound = records.get(_chat_row_key(entry.summary.id))
-                if bound is not None:
-                    ChatRecord.model_validate(bound)
-                elif entry.summary.surface == SURFACE_WEB or not entry.readable:
-                    continue
-                if not entry.title:
-                    continue
-                speakers = [who.sender or who.email for who in entry.speakers]
-                rows.append(
-                    {
-                        "conversation_id": str(entry.summary.id),
-                        "agent_id": str(agent.id),
-                        "agent_name": agent.name,
-                        "agent_model": agent.model,
-                        "title": entry.title,
-                        "mine": participation == "mine",
-                        "speaker": (
-                            None if participation == "mine" or not speakers else speakers[0]
-                        ),
-                        "surface": entry.summary.surface,
-                        "surface_label": entry.surface_label,
-                        "last_at": _iso(entry.summary.last_turn_at or entry.summary.created_at),
-                    }
-                )
-    rows.sort(key=lambda row: (str(row["last_at"]), str(row["conversation_id"])), reverse=True)
-    return JSONResponse({"chats": rows})
+    if not requested:
+        return Response("name a conversation to resolve", status_code=400)
+    return await _resolve_chat(ctx, store, audience, member_id, email, requested)
 
 
 async def _resolve_chat(
@@ -3273,239 +3205,6 @@ async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
-async def workspace_artifacts(ctx: SurfaceContext, request: Request) -> Response:
-    """One searchable, filterable keyset page of the files turns have shared with this member."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, _email, audience = resolved
-    raw_cursor = request.query_params.get("after", "").strip()
-    q = request.query_params.get("q") or None
-    media = request.query_params.get("media") or None
-    if media is not None and media not in ARTIFACT_MEDIA_FILTERS:
-        return Response("invalid artifact media filter", status_code=400)
-    scope = request.query_params.get("scope") or None
-    if scope is not None and scope not in ARTIFACT_SCOPE_FILTERS:
-        return Response("invalid artifact scope filter", status_code=400)
-    cursor: ListingCursor | None = None
-    if raw_cursor:
-        try:
-            cursor = ListingCursor.decode(raw_cursor)
-        except MalformedCursor:
-            return Response("malformed listing cursor", status_code=400)
-    page = await ctx.list_artifacts(
-        member_id,
-        admin=audience.admin,
-        limit=ARTIFACT_LIST_LIMIT,
-        cursor=cursor,
-        q=q,
-        media=media,
-        scope=scope,
-    )
-    return JSONResponse(
-        {
-            "artifacts": [
-                {
-                    "id": str(entry.id),
-                    "filename": entry.artifact.filename,
-                    "subject": entry.artifact.subject,
-                    "owner_email": entry.owner_email,
-                    "media_type": entry.artifact.media_type,
-                    "size_bytes": entry.artifact.size_bytes,
-                    "created_at": _iso(entry.created_at),
-                    "url": ctx.artifact_link(entry.artifact),
-                    "preview_url": ctx.artifact_preview_link(entry.artifact),
-                    "origin": entry.origin,
-                    "conversation_id": str(entry.conversation_id),
-                    "surface": entry.surface,
-                    "source": entry.source,
-                }
-                for entry in page.rows
-            ],
-            "older": None if page.older is None else page.older.encode(),
-            "newer": None if page.newer is None else page.newer.encode(),
-        }
-    )
-
-
-def _radar_run(
-    ctx: SurfaceContext,
-    run: ScheduledRun,
-    task_names: Mapping[UUID, str],
-) -> dict[str, object]:
-    task_id = None if run.idempotency_key is None else scheduled_fire_task_id(run.idempotency_key)
-    return {
-        "turn_id": str(run.turn_id),
-        "conversation_id": str(run.conversation_id),
-        "agent_id": str(run.agent_id),
-        "fired_at": _iso(run.fired_at),
-        "status": run.status,
-        "task": None if task_id is None else task_names.get(task_id),
-        "surface": run.surface,
-        "source": run.source,
-        "text": "" if run.status == "done" else run.text,
-        "artifacts": [
-            {
-                "filename": artifact.filename,
-                "subject": artifact.subject,
-                "media_type": artifact.media_type,
-                "size_bytes": artifact.size_bytes,
-                "url": ctx.artifact_link(artifact),
-                "preview_url": ctx.artifact_preview_link(artifact),
-            }
-            for artifact in run.artifacts
-        ],
-    }
-
-
-async def _radar_task_names(
-    ctx: SurfaceContext,
-    audience: WebAudience,
-    member_id: UUID,
-    runs: tuple[ScheduledRun, ...],
-) -> dict[UUID, str]:
-    """Each visible scheduled task's name by its id, read only for the agents this page's runs
-    fired on. A run of a since-deleted task resolves no name and reads on the conversation it
-    reported into alone."""
-    fired = {run.agent_id for run in runs}
-    names: dict[UUID, str] = {}
-    for agent in audience.agents:
-        if agent.id not in fired:
-            continue
-        page = await ctx.list_member_objects(
-            SCHEDULED_TASK_KIND, agent.id, member_id, admin=audience.admin, query=ObjectListQuery()
-        )
-        if page is None:
-            return {}
-        for row in page.rows:
-            named = row.fields.get("id")
-            if isinstance(named, str):
-                names[UUID(named)] = row.name
-    return names
-
-
-DIGEST_WRITER = "report_digest"
-
-
-async def _digest_entries(
-    ctx: SurfaceContext, turn_ids: tuple[UUID, ...]
-) -> dict[UUID, dict[str, object]]:
-    """The entry written for each of this page's runs, by turn — one query, so a page joins its
-    entries without a read per run. The rows are the `report_digest` extension's, written by its
-    job from what a run published; this projection only reads them, and a run the job has not
-    reached yet has no row.
-
-    The table exists only where that extension's migration ran, and installing or removing one is a
-    lockfile act — so the read is gated on the deploy's own extension set, the same set fixed at
-    boot, rather than on the database answering. A deploy without the writer draws the feed with no
-    entries, which is what a deploy without the writer has."""
-    writing = any(entry.name == DIGEST_WRITER for entry in ctx.deploy_extensions)
-    if not turn_ids or not writing:
-        return {}
-    report_digest_entry = sa.table(
-        "report_digest_entry",
-        sa.column("workspace_id", sa.Uuid),
-        sa.column("turn_id", sa.Uuid),
-        sa.column("title", sa.Text),
-        sa.column("summary", sa.Text),
-        sa.column("points", sa.JSON),
-    )
-    async with web_extension().transaction() as connection:
-        rows = (
-            await connection.execute(
-                sa.select(
-                    report_digest_entry.c.turn_id,
-                    report_digest_entry.c.title,
-                    report_digest_entry.c.summary,
-                    report_digest_entry.c.points,
-                ).where(
-                    report_digest_entry.c.workspace_id == ctx.workspace_id,
-                    report_digest_entry.c.turn_id.in_(turn_ids),
-                )
-            )
-        ).all()
-    return {
-        row.turn_id: {
-            "title": row.title,
-            "summary": row.summary,
-            "points": [{"text": point["text"], "actor": point["actor"]} for point in row.points],
-        }
-        for row in rows
-    }
-
-
-async def workspace_radar(ctx: SurfaceContext, request: Request) -> Response:
-    """One keyset page of what ran on its own — the scheduled turns reporting into conversations
-    whose content this reader reads, an admin's page included, each naming the task that fired it
-    and linking the files it shared: what a run made is its published report, so a successful
-    run's reply carries no text here and only a run that did not end well says why. `agent`
-    narrows the page to one agent the audience holds.
-
-    Each run carries `entry`, the digest a job wrote from what that run published — a title, a
-    one-line summary, and up to three points, each naming whoever the report says acted. A run the
-    writer has not reached carries it null and reads on its task's name: a line that guessed at
-    findings would be the one line on the page a reader could not trust.
-
-    The newest page holds today whole: it carries every run of the current UTC day — the day the
-    portal dates a stamp by — and never fewer than `RADAR_MIN_RUNS`, so a quiet day still reads as
-    a feed and a busy one is not cut mid-day. `RADAR_MAX_RUNS` bounds the one response; a day past
-    that ceiling, and every older run, reads behind the `older` cursor, which pages
-    `RADAR_MIN_RUNS` at a time. Both counts are counts of runs that reported — the rows the feed
-    draws — so a day of fires that published nothing costs the page nothing and no page reads
-    empty while a run remains behind it.
-
-    `turn` pins the page to exactly one run — the permalink read — with no cursors; a run the
-    reader's audience refuses reads as an empty page."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, _email, audience = resolved
-    raw_cursor = request.query_params.get("after", "").strip()
-    cursor: ListingCursor | None = None
-    if raw_cursor:
-        try:
-            cursor = ListingCursor.decode(raw_cursor)
-        except MalformedCursor:
-            return Response("malformed listing cursor", status_code=400)
-    agent_id: UUID | None = None
-    raw_agent = request.query_params.get("agent", "").strip()
-    if raw_agent:
-        try:
-            agent_id = UUID(raw_agent)
-        except ValueError:
-            return Response("invalid agent", status_code=400)
-        if not audience.allows(agent_id):
-            return Response("unknown agent", status_code=404)
-    raw_turn = request.query_params.get("turn", "").strip()
-    if raw_turn:
-        try:
-            turn_id = UUID(raw_turn)
-        except ValueError:
-            return Response("invalid turn", status_code=400)
-        page = await ctx.list_scheduled_runs(member_id, limit=1, turn_id=turn_id)
-    else:
-        limit = RADAR_MIN_RUNS
-        if cursor is None:
-            midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-            today = await ctx.count_scheduled_runs_since(member_id, midnight, agent_id=agent_id)
-            limit = min(max(RADAR_MIN_RUNS, today), RADAR_MAX_RUNS)
-        page = await ctx.list_scheduled_runs(
-            member_id, limit=limit, cursor=cursor, agent_id=agent_id
-        )
-    task_names = await _radar_task_names(ctx, audience, member_id, page.rows)
-    entries = await _digest_entries(ctx, tuple(run.turn_id for run in page.rows))
-    return JSONResponse(
-        {
-            "runs": [
-                _radar_run(ctx, run, task_names) | {"entry": entries.get(run.turn_id)}
-                for run in page.rows
-            ],
-            "older": None if page.older is None else page.older.encode(),
-            "newer": None if page.newer is None else page.newer.encode(),
-        }
-    )
-
-
 async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
     """The reader's own range and all-time usage and their member-scoped caps — a member's burn is
     theirs to read, so this answers every member. An admin additionally receives the workspace
@@ -3929,6 +3628,34 @@ def _filter_value(raw: str) -> JsonValue:
         return raw
 
 
+def _fanout_token(walking: dict[str, str]) -> str | None:
+    """One opaque continuation for a fanned-out index — each still-walking agent's own kind cursor
+    under its id — or None when every agent's walk is done."""
+    if not walking:
+        return None
+    return json.dumps(walking, sort_keys=True).encode().hex()
+
+
+def _fanout_walks(token: str) -> dict[UUID, str] | None:
+    """The per-agent cursors a fan-out token carries, or None for a token this route never
+    minted."""
+    try:
+        decoded = json.loads(bytes.fromhex(token).decode())
+    except ValueError:
+        return None
+    if not isinstance(decoded, dict) or not decoded:
+        return None
+    walks: dict[UUID, str] = {}
+    for agent, held in decoded.items():
+        if not isinstance(held, str) or not held:
+            return None
+        try:
+            walks[UUID(agent)] = held
+        except ValueError:
+            return None
+    return walks
+
+
 def _merged_rank(row: dict[str, object], order_by: str) -> tuple[int, float | str, str]:
     """Where one row falls in a fanned-out index. Each agent answers its own ordered page, so the
     merge re-ranks every row on the same field — absent, then flags, then numbers, then text, ties
@@ -3951,11 +3678,12 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
     kind declared. `agent` names one agent's namespace; without it the read fans out over every
     agent the viewer's web audience holds, and every row names the agent that owns it either way,
     so a section listing one kind across the workspace addresses each edit to the right lane. `q`
-    searches, `order_by`/`order` sort, `cursor` continues one agent's walk, and every remaining
+    searches, `order_by`/`order` sort, `cursor` continues the walk, and every remaining
     query parameter is an exact filter; a field the kind never declared is the kind's own refusal,
     so the page offers only what the kind admits. A fanned-out read takes `OBJECT_FANOUT_LIMIT`
-    rows from each agent and answers no cursor — the kind mints one per agent, and there is no
-    single walk for the member to continue."""
+    rows from each agent, re-ranks the merge, and continues on a compound token — one kind cursor
+    per agent still walking, so each agent's page resumes exactly where its own walk stopped and
+    an agent whose rows ran out leaves the token."""
     gated = await _object_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -3971,14 +3699,19 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
             return Response("order must be asc or desc", status_code=400)
     named = bool(request.query_params.get("agent", ""))
     cursor = request.query_params.get("cursor", "")
-    if cursor and not named:
-        return Response("a cursor continues one agent's walk and names that agent", status_code=400)
     agents = audience.agents
+    continuations: dict[UUID, str] = {}
     if named:
         one = _object_agent(request, audience)
         if isinstance(one, Response):
             return one
         agents = (one,)
+    elif cursor:
+        walks = _fanout_walks(cursor)
+        if walks is None:
+            return Response("malformed fan-out cursor", status_code=400)
+        continuations = walks
+        agents = tuple(agent for agent in audience.agents if agent.id in walks)
     query = ObjectListQuery(
         query=request.query_params.get("q", ""),
         filters={
@@ -3992,10 +3725,15 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
     )
     rows: list[dict[str, object]] = []
     walk: str | None = None
+    walking: dict[str, str] = {}
     for agent in agents:
         try:
             page = await ctx.list_member_objects(
-                kind.kind, agent.id, member_id, admin=audience.admin, query=query
+                kind.kind,
+                agent.id,
+                member_id,
+                admin=audience.admin,
+                query=(query if named else replace(query, cursor=continuations.get(agent.id, ""))),
             )
         except ValueError as error:
             return Response(str(error), status_code=400)
@@ -4013,8 +3751,11 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
         )
         if named:
             walk = page.next_cursor
+        elif page.next_cursor:
+            walking[str(agent.id)] = page.next_cursor
     if not named:
         rows.sort(key=lambda row: _merged_rank(row, query.order_by), reverse=order == "desc")
+        walk = _fanout_token(walking)
     return JSONResponse({**_kind_payload(kind), "objects": rows, "next_cursor": walk})
 
 
@@ -4432,10 +4173,8 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/surfaces", handler=workspace_surfaces),
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
-    SurfaceRoute(method="GET", path="workspace/artifacts", handler=workspace_artifacts),
     SurfaceRoute(method="GET", path="workspace/first-run", handler=workspace_first_run),
     SurfaceRoute(method="GET", path="workspace/starters", handler=workspace_starters),
-    SurfaceRoute(method="GET", path="workspace/radar", handler=workspace_radar),
     SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),
     SurfaceRoute(method="POST", path="objects/{kind}", handler=object_write),

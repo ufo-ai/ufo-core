@@ -4,18 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import {
-  AGENT,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
-  StreamFake,
-  TURN_ID,
-  json,
-  useStreamFake,
-  wire,
-  type Route,
-} from "./harness";
+import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -28,7 +17,7 @@ const CHAT_URL = "/surface/web/agents/" + AGENT.id + "/chat?conversation=" + CON
  *  so a payload carrying one opens the log on a live turn and the composer on a turn to stop. */
 function reading(chat: Route, turn: string | null = TURN_ID) {
   return {
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/slots": () => json({ slots: [] }),
     "/transcript": () =>
       json({

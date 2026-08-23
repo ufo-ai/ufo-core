@@ -6,7 +6,6 @@ export type ChatRow = {
   conversation_id: string;
   agent_id: string;
   agent_name: string;
-  agent_model?: string;
   title: string;
   last_at: string;
   surface: string;
@@ -15,9 +14,39 @@ export type ChatRow = {
   speaker: string | null;
 };
 
-/** The rail, and — for a permalink to a conversation another surface holds, which has no chat row
+/** The permalink resolve, and — for a conversation another surface holds, which has no chat row
  *  to route by — that conversation, naming the agent it ran under. */
 export type ChatsPayload = { chats: ChatRow[]; conversation?: OwnedConversation };
+
+/** One row of the conversation kind's member listing — the rail's read. The row's `name` is the
+ *  conversation id, and the index adds the agent beside the kind's own fields. */
+export type ConversationRow = {
+  name: string;
+  agent_id: string;
+  agent_name: string;
+  title: string;
+  last_at: string;
+  surface: string;
+  surface_label: string | null;
+  mine: boolean;
+  speaker: string | null;
+};
+
+export type ConversationsPayload = { objects: ConversationRow[]; next_cursor?: string | null };
+
+export function chatRows(payload: ConversationsPayload): ChatRow[] {
+  return payload.objects.map((row) => ({
+    conversation_id: row.name,
+    agent_id: row.agent_id,
+    agent_name: row.agent_name,
+    title: row.title,
+    last_at: row.last_at,
+    surface: row.surface,
+    surface_label: row.surface_label,
+    mine: row.mine,
+    speaker: row.speaker,
+  }));
+}
 
 export type RailGroup = { label: string; rows: ChatRow[] };
 

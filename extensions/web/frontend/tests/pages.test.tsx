@@ -120,7 +120,7 @@ afterEach(() => {
 
 test("the radar page mounts and draws its empty feed under its own band", async () => {
   await runPage("radar", {
-    "/workspace/radar": () => json({ runs: [] }),
+    "/objects/report": () => json({ objects: [] }),
   });
   expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
   expect(await screen.findByRole("button", { name: "Rebuild entries" })).toBeTruthy();
@@ -139,7 +139,6 @@ test("the tasks page mounts and draws both of its listings", async () => {
 
 test("the wiki page mounts and draws the workspace article", async () => {
   await runPage("wiki", {
-    "/workspace/memory": () => json({ available: true, matches: [] }),
     "/objects/memory": () => json({ objects: [] }),
     "/objects/member": () => json({ objects: [] }),
   });
@@ -151,7 +150,7 @@ test("the wiki page mounts and draws the workspace article", async () => {
 test("the artifacts page mounts and draws the empty shelf with its search", async () => {
   await runPage("artifacts", {
     "/objects/site": () => objectIndex(SITE_KIND, []),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/objects/artifact": () => json({ objects: [] }),
   });
   expect(await screen.findByRole("heading", { name: "Artifacts" })).toBeTruthy();
   expect(await screen.findByRole("searchbox", { name: "Search artifacts" })).toBeTruthy();
@@ -159,7 +158,9 @@ test("the artifacts page mounts and draws the empty shelf with its search", asyn
 });
 
 test("the chat page mounts and draws the empty conversation list", async () => {
-  await runPage("chat", {});
+  await runPage("chat", {
+    "/objects/conversation": () => json({ objects: [] }),
+  });
   expect(await screen.findByRole("heading", { name: "Chat" })).toBeTruthy();
   expect(await screen.findByText("No conversations yet.")).toBeTruthy();
 });

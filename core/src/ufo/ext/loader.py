@@ -64,7 +64,7 @@ from ufo.ext.manifest import (
 from ufo.ext.surface import TurnTailer
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.kinds.agents import AGENT_OBJECT
-from ufo.kinds.artifacts import ARTIFACT_OBJECT
+from ufo.kinds.artifacts import artifact_object
 from ufo.kinds.conversations import CONVERSATION_OBJECT
 from ufo.kinds.credential_kind import (
     CREDENTIAL_DESCRIPTION,
@@ -93,7 +93,6 @@ from ufo.turns.audience import SHARED_AUDIENCE, Audience
 
 CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
-    BoundKind(kind=ARTIFACT_OBJECT, extension=None, context=None),
     BoundKind(kind=CONVERSATION_OBJECT, extension=None, context=None),
     BoundKind(kind=MEMBER_OBJECT, extension=None, context=None),
     BoundKind(kind=WORKSPACE_OBJECT, extension=None, context=None),
@@ -479,7 +478,14 @@ def turn_tools(
             BoundKind(kind=kind, extension=manifest.name, context=context)
             for kind in manifest.objects
         )
-    bound_kinds.extend(core_object_kinds(manifests, credential_store))
+    bound_kinds.extend(
+        core_object_kinds(
+            manifests,
+            credential_store,
+            public_base_url=public_base_url,
+            artifact_token_secret=artifact_token_secret,
+        )
+    )
     tools.extend(ObjectVerbs(object_registry(tuple(bound_kinds))).tools())
     return tuple(tools), ext_by_tool
 
@@ -522,18 +528,30 @@ def member_object_registry(
             BoundKind(kind=kind, extension=manifest.name, context=context)
             for kind in manifest.objects
         )
-    bound.extend(core_object_kinds(manifests, credential_store))
+    bound.extend(
+        core_object_kinds(
+            manifests,
+            credential_store,
+            public_base_url=public_base_url,
+            artifact_token_secret=artifact_token_secret,
+        )
+    )
     return object_registry(tuple(bound))
 
 
 def core_object_kinds(
-    manifests: tuple[Manifest, ...], credential_store: CredentialStore | None = None
+    manifests: tuple[Manifest, ...],
+    credential_store: CredentialStore | None = None,
+    *,
+    public_base_url: str | None = None,
+    artifact_token_secret: str = "",
 ) -> tuple[BoundKind, ...]:
     """The kinds core itself registers over the active manifest set, bound with no extension
     context — their handlers read the ambient workspace directly. `credential` projects every
     manifest's declared slots, and reads a keyed slot's live host through the store so a read
     reports the host the wire uses; `extension` projects the manifests themselves, so two rendering
-    one object name fail loud here at boot."""
+    one object name fail loud here at boot; `artifact` takes the deploy's public base and artifact
+    secret so its listing rows publish signed links."""
     credential = ObjectKind(
         name=CREDENTIAL_KIND,
         description=CREDENTIAL_DESCRIPTION,
@@ -550,7 +568,11 @@ def core_object_kinds(
         store=ExtensionObjects(extensions=named_extensions(manifests)),
         list_fields=frozenset({"version", "tool_count", "credential_slot_count"}),
     )
+    artifact = artifact_object(
+        public_base_url=public_base_url, artifact_token_secret=artifact_token_secret
+    )
     return (
+        BoundKind(kind=artifact, extension=None, context=None),
         BoundKind(kind=credential, extension=None, context=None),
         BoundKind(kind=extension, extension=None, context=None),
     )

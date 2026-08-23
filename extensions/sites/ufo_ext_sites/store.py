@@ -84,9 +84,9 @@ class SiteFile(BaseModel):
 class SourceManifest(BaseModel):
     """The stored source a static deploy promoted into the blob store: the workspace-relative key
     prefix its files live under, and every file by its site-relative path. The prefix carries a
-    per-deploy token, so each deploy's keys are immutable and the previous deploy's are the retire
-    step's to delete. A row with no manifest serves off its sandbox port instead — a published app
-    with its own server."""
+    per-deploy token, so each deploy's keys are immutable and every deploy's prefix stands in the
+    store — the site's stored history. A row with no manifest serves off its sandbox port instead —
+    a published app with its own server."""
 
     root: str
     files: dict[str, SiteFile]
@@ -531,7 +531,8 @@ class HostedSites:
         may_unhost: bool,
     ) -> HostedSite | None:
         """Raise whatever `register` would raise for these arguments, writing nothing, and answer
-        the site this registration would displace — whose stored source is the deploy's to retire.
+        the site this registration would displace — the caller's to unhost where its own serve has
+        already killed that site's server.
 
         A deploy serves before it registers, and serving kills whatever holds the port — the
         member's own site, in a container their turns share. So the caller asks here first, while

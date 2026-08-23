@@ -976,7 +976,7 @@ function RoutedPane({
       const agent =
         listedAgent ??
         (row && row.surface.startsWith("extension:")
-          ? { id: row.agent_id, name: row.agent_name, model: row.agent_model ?? "" }
+          ? { id: row.agent_id, name: row.agent_name, model: "" }
           : undefined);
       if (!row || !agent) {
         if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;

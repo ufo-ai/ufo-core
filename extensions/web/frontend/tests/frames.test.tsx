@@ -5,20 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { tokens } from "@/lib/turnStream";
 
-import {
-  AGENT,
-  ARRIVAL_ID,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
-  SECOND_ID,
-  StreamFake,
-  TURN_ID,
-  json,
-  saying,
-  useStreamFake,
-  wire,
-} from "./harness";
+import { AGENT, ARRIVAL_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND_ID, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 
 async function streaming() {
   wire({
@@ -320,7 +307,7 @@ test("a thought flushed to a step survives the drain that ends its round", async
 test("a reloaded turn draws the thought it settled into as a step", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () =>
       json({
         messages: [
@@ -529,7 +516,7 @@ test("a credentials frame arriving mid-stream renders the prompt it asks for", a
 test("an arrival the reload found undrained waits until an absorbed frame names it", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () =>
       json({
         messages: [
@@ -663,7 +650,7 @@ test("the slot strip is one quiet act per slot, the open one drawn as held", asy
   wire({
     ["/conversations/" + CONVO_ID + "/slots/changes"]: () =>
       json({ type: "changes", changes: [], truncated: false }),
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () => json({ messages: [] }),
     "/slots": () =>
       json({

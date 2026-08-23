@@ -13,6 +13,7 @@ from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.manifest import Manifest, SkillSpec
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_report_digest.digest import SKILL_DIR
+from ufo_ext_report_digest.objects import REPORT_OBJECT
 from ufo_ext_report_digest.writer import DigestRebuild, DigestWriter, undigested_workspaces
 
 NAME = "report_digest"
@@ -100,5 +101,6 @@ def manifest() -> Manifest:
                 candidates=owner_candidates(undigested_workspaces),
             ),
         ),
+        objects=(REPORT_OBJECT,),
         member_context_read=True,
     )

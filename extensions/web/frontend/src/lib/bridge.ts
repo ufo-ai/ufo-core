@@ -26,13 +26,9 @@ type Endpoint = { method: "GET" | "POST"; template: string[]; body?: BodyKind; s
  *  only by adding a row here. */
 const ENDPOINTS: Endpoint[] = (
   [
-    ["GET", "api/chats"],
     ["GET", "api/agents"],
     ["GET", "api/agents/status"],
-    ["GET", "workspace/radar"],
-    ["GET", "workspace/artifacts"],
-    ["GET", "workspace/memory"],
-    ["GET", "workspace/team"],
+    ["GET", "api/chats"],
     ["GET", "workspace/starters"],
     ["GET", "objects/{kind}"],
     ["GET", "objects/{kind}/{name}"],

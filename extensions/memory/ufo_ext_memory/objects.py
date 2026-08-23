@@ -40,6 +40,10 @@ MEMORY_UNDELETABLE = (
     "memories cannot be deleted — consolidation supersedes them and recall drops superseded items"
 )
 SUMMARY_MAX = 120
+TEXT_MAX = 2000
+"""How much of an item's body a listing row carries as `text`. A consolidated summary is a
+paragraph a band renders whole, so the bound sits far past one; a row stays lightweight, so the
+bound exists."""
 MEMORY_LIST_MAX = 500
 
 
@@ -86,6 +90,7 @@ def _row(
             "subject": subject,
             "item_class": item_class,
             "memory_kind": memory_kind,
+            "text": clip_to_word(body, TEXT_MAX),
             "written": None if written is None else _stamp(written),
         },
     )
@@ -330,5 +335,5 @@ MEMORY_OBJECT = ObjectKind(
     ),
     spec_model=MemorySpec,
     store=MemoryObjects(),
-    list_fields=frozenset({"subject", "item_class", "memory_kind", "written"}),
+    list_fields=frozenset({"subject", "item_class", "memory_kind", "text", "written"}),
 )

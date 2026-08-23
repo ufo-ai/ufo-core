@@ -84,7 +84,6 @@ from ufo.db import owner_tx, workspace_tx
 from ufo.hub import LiveFrame, SkillLoad, ToolCall
 from ufo.kinds.agent_setup import AgentSetup, pending_setup
 from ufo.kinds.governance import prompt_digest
-from ufo.listings import page_of, page_query
 from ufo.media.artifact_url import (
     artifact_url_expiry,
     mint_artifact_url,
@@ -378,35 +377,6 @@ WRITEBACK_CLAIM_BATCH = 16
 WRITEBACK_WORKSPACE_BATCH = 16
 WRITEBACK_WORKSPACE_CONCURRENCY = 4
 WRITEBACK_WORKSPACE_IN_FLIGHT = WRITEBACK_WORKSPACE_BATCH * 2
-MEDIA_CLAIMS: dict[str, tuple[tuple[str, str], ...]] = {
-    "image": (("like", "image/%"),),
-    "document": (
-        ("like", "text/%"),
-        ("eq", "application/pdf"),
-        ("like", "application/vnd.openxmlformats-officedocument%"),
-        ("eq", "application/msword"),
-    ),
-}
-MEDIA_FILTERS = frozenset((*MEDIA_CLAIMS, "other"))
-
-
-def _media_predicate(column: sa.ColumnElement[str], media: str) -> sa.ColumnElement[bool]:
-    claims = tuple(
-        sa.or_(
-            *(
-                column == value if operator == "eq" else column.ilike(value)
-                for operator, value in operators
-            )
-        )
-        for operators in MEDIA_CLAIMS.values()
-    )
-    if media == "other":
-        return sa.not_(sa.or_(*claims))
-    if media not in MEDIA_FILTERS:
-        raise ValueError(f"unknown artifact media filter: {media}")
-    selected = claims[tuple(MEDIA_CLAIMS).index(media)]
-    earlier = claims[: tuple(MEDIA_CLAIMS).index(media)]
-    return sa.and_(selected, *(sa.not_(claim) for claim in earlier))
 
 
 SURFACE_MODEL_JOB_PREFIX = "surface:"
@@ -508,6 +478,163 @@ class SharedArtifact:
     preview_blob_key: str | None = None
     preview_media_type: str | None = None
     preview_size_bytes: int | None = None
+
+
+def shared_artifact_link(
+    secret: str, public_base_url: str | None, workspace_id: UUID, artifact: SharedArtifact
+) -> str | None:
+    """A TTL download link for a shared file, or None when artifact delivery is unconfigured (no
+    token secret or no public base URL) — the caller then names the file without a link. Mints the
+    same signed URL the web download route verifies: the link opens for anyone holding it until it
+    expires, and after that only for a signed-in member of the workspace that shared it."""
+    if not secret or not public_base_url:
+        return None
+    expires_at = artifact_url_expiry(datetime.now(UTC))
+    path = mint_artifact_url(secret, artifact.blob_key, expires_at, workspace_id=workspace_id)
+    return f"{public_base_url.rstrip('/')}{path}"
+
+
+def shared_artifact_preview_link(
+    secret: str, public_base_url: str | None, workspace_id: UUID, artifact: SharedArtifact
+) -> str | None:
+    """A signed raster-preview link, or None when its type, size, or delivery is ineligible.
+
+    Two files reach this: one that is already an image, previewed off its own bytes, and one the
+    sandbox rasterized a first page for at share time, previewed off that second blob. Either way
+    the grant names a raster type and an exact size, so the route serves the bytes inline only
+    after they prove to be that picture. The row's own declared type has to agree with the key it
+    names, so a document row whose filename says `pdf` never grants a picture."""
+    if artifact.preview_blob_key is not None:
+        blob_key = artifact.preview_blob_key
+        declared = artifact.preview_media_type
+        size_bytes = artifact.preview_size_bytes
+    else:
+        blob_key = artifact.blob_key
+        declared = artifact.media_type
+        size_bytes = artifact.size_bytes
+    if raster_image_media_type(blob_key) != declared:
+        return None
+    return mint_image_preview_url(
+        secret, public_base_url, blob_key, size_bytes, workspace_id=workspace_id
+    )
+
+
+def _scheduled_runs_query(
+    workspace_id: UUID, member_id: UUID, agent_id: UUID | None
+) -> sa.Select[Any]:
+    reported = (
+        sa.select(tables.shared_artifact.c.turn_id)
+        .where(
+            tables.shared_artifact.c.workspace_id == workspace_id,
+            tables.shared_artifact.c.turn_id == tables.turn.c.id,
+        )
+        .exists()
+    )
+    query = (
+        sa.select(
+            tables.turn.c.id,
+            tables.turn.c.conversation_id,
+            tables.turn.c.agent_id,
+            tables.turn.c.status,
+            tables.turn.c.idempotency_key,
+            tables.turn.c.terminal,
+            tables.turn.c.created_at,
+            tables.conversation.c.surface,
+        )
+        .select_from(
+            tables.turn.join(
+                tables.conversation,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+            )
+        )
+        .where(
+            tables.turn.c.workspace_id == workspace_id,
+            tables.turn.c.admission_source == SCHEDULED_ADMISSION,
+            tables.turn.c.terminal.is_not(None),
+            sa.or_(tables.turn.c.status != "done", reported),
+            tables.conversation.c.audience.in_(readable_audiences(member_id)),
+        )
+    )
+    return query if agent_id is None else query.where(tables.turn.c.agent_id == agent_id)
+
+
+async def scheduled_runs(
+    workspace_id: UUID,
+    member_id: UUID,
+    *,
+    limit: int,
+    agent_id: UUID | None = None,
+    turn_id: UUID | None = None,
+    subjects: frozenset[str] | None = None,
+) -> tuple[ScheduledRun, ...]:
+    """The newest turns that fired on their own — scheduled admissions — reporting into
+    conversations whose content this reader reads: the workspace-shared ones and their own. A
+    run's reply is transcript content, so the read never widens for an admin the way
+    `readable_conversation` never answers them a private conversation without a recorded
+    disclosure, or a room at all — a feed aggregates, and an aggregate of what each row would
+    refuse is still refused. A turn still going is not yet a run — it has no reply to report — so
+    only terminal turns list, and each carries its terminal reply and the files it shared, so a
+    feed renders output and previews without a second walk.
+
+    A run reports by sharing a file — the fire asks for exactly that act — so a run that ended
+    well and shared none published nothing and is no row here; its conversation holds it. A
+    failure is always a row, because how a fire went wrong is itself the report. `limit` therefore
+    counts rows a feed draws, newest first. `turn_id` narrows the read to one run — a permalink —
+    under the same fence, so a run outside the audience reads as no rows. `subjects` narrows the
+    fence further to the conversation subjects a turn's own room reads — the turn path's fence, so
+    an externally shared room is never handed workspace content its audience does not carry."""
+    query = _scheduled_runs_query(workspace_id, member_id, agent_id)
+    if turn_id is not None:
+        query = query.where(tables.turn.c.id == turn_id)
+    if subjects is not None:
+        query = query.where(tables.conversation.c.audience.in_(subjects))
+    query = query.order_by(tables.turn.c.created_at.desc(), tables.turn.c.id.desc()).limit(limit)
+    async with workspace_tx() as connection:
+        rows = (await connection.execute(query)).all()
+        files = (
+            await connection.execute(
+                sa.select(tables.shared_artifact)
+                .where(
+                    tables.shared_artifact.c.workspace_id == workspace_id,
+                    tables.shared_artifact.c.turn_id.in_(tuple(row.id for row in rows)),
+                )
+                .order_by(tables.shared_artifact.c.created_at, tables.shared_artifact.c.blob_key)
+            )
+        ).all()
+    shared: dict[UUID, list[SharedArtifact]] = {}
+    for file in files:
+        shared.setdefault(file.turn_id, []).append(
+            SharedArtifact(
+                blob_key=file.blob_key,
+                filename=file.filename,
+                subject=file.subject,
+                media_type=file.media_type,
+                size_bytes=file.size_bytes,
+                preview_blob_key=file.preview_blob_key,
+                preview_media_type=file.preview_media_type,
+                preview_size_bytes=file.preview_size_bytes,
+            )
+        )
+    sources = await ConversationDirectory(workspace_id).sources(
+        tuple({row.conversation_id for row in rows})
+    )
+    return tuple(
+        ScheduledRun(
+            turn_id=row.id,
+            conversation_id=row.conversation_id,
+            agent_id=row.agent_id,
+            fired_at=(
+                row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC)
+            ),
+            status=row.status,
+            text=TerminalFrame.model_validate(row.terminal).text,
+            idempotency_key=row.idempotency_key,
+            surface=row.surface,
+            source=sources.get(row.conversation_id),
+            artifacts=tuple(shared.get(row.id, ())),
+        )
+        for row in rows
+    )
 
 
 @dataclass(frozen=True)
@@ -999,6 +1126,331 @@ class ListedConversation(BaseModel):
     speakers: tuple[ConversationSpeaker, ...]
 
 
+@dataclass(frozen=True)
+class ConversationDirectory:
+    """One workspace's conversation listings: the single implementation behind the portal's
+    per-agent views, the permalink resolves, and the `conversation` kind's member listing, so a
+    conversation listed anywhere is listed by exactly one query."""
+
+    workspace_id: UUID
+
+    async def list(
+        self,
+        agent_id: UUID,
+        member_id: UUID,
+        *,
+        admin: bool,
+        limit: int,
+        surface: str | None = None,
+        conversation_id: UUID | None = None,
+        participation: Literal["mine", "others"] | None = None,
+        search: str | None = None,
+        member_admitted: bool = False,
+    ) -> tuple[ListedConversation, ...]:
+        """One agent's conversations as the portal lists them, newest activity first and bounded:
+        the member's own plus the workspace-shared ones, every one of the agent's for an admin.
+        `surface` narrows to one surface's conversations in the query, before the bound, so a
+        member's rows are never displaced by another surface's newer traffic under the cap.
+        `participation` narrows the same way to one side of the member: `mine` is the ones they
+        are in — `_participated` defines that — and `others` the readable ones somebody else spoke
+        and they did not. A rail reads both, one bound each; an agent's directory reads neither.
+        `member_admitted` narrows to conversations a member's own message ever opened a turn in —
+        what separates a conversation from a machine lane sharing its surface (a homepage seed, the
+        portal's prepared-intent queue). Each entry carries `readable` (content this viewer reads
+        now) and `disclosable` (an admin may acknowledge and read another member's private one —
+        `record_transcript_access` is the act). Subagent conversations are absent: they are the
+        agent's own work on a request, listed nested under the turn that spawned them, never beside
+        it. `conversation_id` selects one exact row before the bound for a durable permalink.
+
+        Newest activity is the last turn, and creation only where no turn has landed yet, so the
+        top of the page is what moved most recently rather than what was opened most recently.
+        Creation breaks a tie under it, which is what two conversations opened together and never
+        spoken in are.
+
+        The opening words and the speakers are two further reads over the page's ids, never one
+        per row: what a conversation is about and who is in it are facts of its turns, and only a
+        turn read can answer them. Both reads are narrowed to the rows this viewer may read, so an
+        unreadable row's content is never fetched, let alone carried."""
+        activity = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                sa.func.count().label("turn_count"),
+                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
+            )
+            .where(tables.turn.c.workspace_id == self.workspace_id)
+            .group_by(tables.turn.c.conversation_id)
+            .subquery()
+        )
+        query = (
+            sa.select(
+                tables.conversation.c.id,
+                tables.conversation.c.surface,
+                tables.conversation.c.queue_key,
+                tables.conversation.c.audience,
+                tables.conversation.c.surface_label,
+                tables.conversation.c.title,
+                tables.member.c.email,
+                tables.conversation.c.created_at,
+                activity.c.turn_count,
+                activity.c.last_turn_at,
+            )
+            .select_from(
+                tables.conversation.outerjoin(
+                    tables.member, tables.member.c.id == tables.conversation.c.member_id
+                ).outerjoin(activity, activity.c.conversation_id == tables.conversation.c.id)
+            )
+            .where(
+                tables.conversation.c.workspace_id == self.workspace_id,
+                tables.conversation.c.agent_id == agent_id,
+                tables.conversation.c.surface != SUBAGENT_SURFACE,
+            )
+            .order_by(
+                sa.func.coalesce(activity.c.last_turn_at, tables.conversation.c.created_at).desc(),
+                tables.conversation.c.created_at.desc(),
+            )
+            .limit(limit)
+        )
+        if surface is not None:
+            query = query.where(tables.conversation.c.surface == surface)
+        if conversation_id is not None:
+            query = query.where(tables.conversation.c.id == conversation_id)
+        match participation:
+            case "mine":
+                query = query.where(self._participated(member_id))
+            case "others":
+                query = query.where(self._others(member_id))
+            case None:
+                pass
+        if member_admitted:
+            query = query.where(self._member_admitted())
+        if not admin:
+            query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
+        if search:
+            query = query.where(self._matches(search, member_id))
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        if not rows:
+            return ()
+        readable = readable_audiences(member_id)
+        content = [row.id for row in rows if row.audience in readable]
+        sources = await self.sources(content)
+        speakers = await self.speakers(content)
+        mine = str(conversation_audience(member_id))
+        return tuple(
+            ListedConversation(
+                summary=ConversationSummary(
+                    id=row.id,
+                    surface=row.surface,
+                    queue_key=row.queue_key,
+                    member_email=row.email,
+                    created_at=row.created_at,
+                    turn_count=row.turn_count or 0,
+                    last_turn_at=row.last_turn_at,
+                ),
+                audience=row.audience,
+                surface_label=row.surface_label,
+                readable=row.audience in readable,
+                disclosable=admin
+                and row.audience != mine
+                and audience_member(parse_audience(row.audience)) is not None,
+                title=row.title or "" if row.audience in readable else "",
+                source=sources.get(row.id),
+                speakers=speakers.get(row.id, ()),
+            )
+            for row in rows
+        )
+
+    async def sources(self, listed: Sequence[UUID]) -> dict[UUID, str | None]:
+        """Each listed conversation's opening `TurnContext.source` — the link the admitting surface
+        reported for the message that opened it."""
+        if not listed:
+            return {}
+        opening = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                sa.func.min(tables.turn.c.seq).label("seq"),
+            )
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id.in_(listed),
+            )
+            .group_by(tables.turn.c.conversation_id)
+            .subquery()
+        )
+        query = (
+            sa.select(tables.turn.c.conversation_id, tables.turn.c.context)
+            .select_from(
+                tables.turn.join(
+                    opening,
+                    sa.and_(
+                        tables.turn.c.conversation_id == opening.c.conversation_id,
+                        tables.turn.c.seq == opening.c.seq,
+                    ),
+                )
+            )
+            .where(tables.turn.c.workspace_id == self.workspace_id)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return {
+            row.conversation_id: (
+                None if row.context is None else TurnContext.model_validate(row.context).source
+            )
+            for row in rows
+        }
+
+    async def speakers(self, listed: Sequence[UUID]) -> dict[UUID, tuple[ConversationSpeaker, ...]]:
+        """Each listed conversation's speakers in order of first appearance, stopping at
+        `MAX_CONVERSATION_SPEAKERS`."""
+        if not listed:
+            return {}
+        said = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                tables.turn.c.seq,
+                tables.turn.c.context,
+                tables.member.c.email,
+                sa.func.row_number()
+                .over(
+                    partition_by=(tables.turn.c.conversation_id, tables.turn.c.speaker_member_id),
+                    order_by=tables.turn.c.seq,
+                )
+                .label("said_rank"),
+            )
+            .select_from(
+                tables.turn.join(
+                    tables.member, tables.member.c.id == tables.turn.c.speaker_member_id
+                )
+            )
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id.in_(listed),
+            )
+            .subquery()
+        )
+        first = (
+            sa.select(
+                said.c.conversation_id,
+                said.c.context,
+                said.c.email,
+                sa.func.row_number()
+                .over(partition_by=said.c.conversation_id, order_by=said.c.seq)
+                .label("speaker_rank"),
+            )
+            .where(said.c.said_rank == 1)
+            .subquery()
+        )
+        query = (
+            sa.select(first.c.conversation_id, first.c.context, first.c.email)
+            .where(first.c.speaker_rank <= MAX_CONVERSATION_SPEAKERS)
+            .order_by(first.c.conversation_id, first.c.speaker_rank)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        spoke: dict[UUID, list[ConversationSpeaker]] = {}
+        for row in rows:
+            context = None if row.context is None else TurnContext.model_validate(row.context)
+            spoke.setdefault(row.conversation_id, []).append(
+                ConversationSpeaker(
+                    email=row.email, sender=None if context is None else context.sender
+                )
+            )
+        return {conversation_id: tuple(who) for conversation_id, who in spoke.items()}
+
+    def _member_admitted(self) -> sa.ColumnElement[bool]:
+        """Whether a member's own message ever opened a turn here. An intent turn carries the
+        member as speaker but is admitted as `intent`, and a seed's turn is `scheduled`, so the
+        admission source is the one column that tells a conversation from a machine lane."""
+        return (
+            sa.select(sa.literal(1))
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.admission_source == MEMBER_ADMISSION,
+            )
+            .correlate(tables.conversation)
+            .exists()
+        )
+
+    def _spoken(self, member_id: UUID | None) -> sa.ColumnElement[bool]:
+        """Whether the conversation holds a member turn — this member's where one is named, any
+        member's where none is.
+
+        Correlated on the row being listed rather than grouped over the workspace: `turn_spoken`
+        indexes exactly this lookup, so each candidate costs one seek instead of every turn in the
+        workspace being reduced to a speaker table the bound then throws most of away."""
+        speaker = (
+            tables.turn.c.speaker_member_id.is_not(None)
+            if member_id is None
+            else tables.turn.c.speaker_member_id == member_id
+        )
+        return (
+            sa.select(sa.literal(1))
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                speaker,
+            )
+            .correlate(tables.conversation)
+            .exists()
+        )
+
+    def _participated(self, member_id: UUID) -> sa.ColumnElement[bool]:
+        """Whether this member is in the conversation: it is bound to them, or they spoke a turn of
+        it. Answering in another member's thread counts — the member was there, and a rail that
+        drops it hides work they did. A conversation an extension opened — a trigger run, a review,
+        an agent's own errand — carries no member and holds no member turn, so it is in nobody's."""
+        return sa.or_(
+            tables.conversation.c.member_id == member_id,
+            self._spoken(member_id),
+        )
+
+    def _others(self, member_id: UUID) -> sa.ColumnElement[bool]:
+        """The complement, over the conversations a member turn stands in: somebody spoke, and it
+        was not this member, and the row is not bound to them either.
+
+        `is_distinct_from` carries the binding test because `member_id` is null on exactly the rows
+        this group is made of — a shared thread belongs to no member — and `member_id <> :me` is
+        null there, which a `where` reads as false. Negating the participation predicate whole
+        would empty the group in silence."""
+        return sa.and_(
+            tables.conversation.c.member_id.is_distinct_from(member_id),
+            sa.not_(self._spoken(member_id)),
+            self._spoken(None),
+        )
+
+    def _matches(self, search: str, member_id: UUID) -> sa.ColumnElement[bool]:
+        """Whether a conversation answers to `search`. It narrows in the query, ahead of the bound,
+        because a term applied after one is a filter over the page the bound already cut — the
+        conversation the member is looking for is the one that fell off it.
+
+        What a row states about itself is matched for whoever may list it: the origin the surface
+        named, and the member it belongs to. What the conversation holds — what it is called, and
+        who has spoken in it — is matched only where this member may read that content, the same
+        gate `readable` puts on carrying it. Otherwise an admin's search would answer which words
+        stand in another member's private thread, which reading it would have audited."""
+        speaker = tables.member.alias("search_speaker")
+        spoke = (
+            sa.select(sa.literal(1))
+            .select_from(tables.turn.join(speaker, speaker.c.id == tables.turn.c.speaker_member_id))
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                speaker.c.email.icontains(search, autoescape=True),
+            )
+            .correlate(tables.conversation)
+            .exists()
+        )
+        return sa.or_(
+            tables.conversation.c.surface_label.icontains(search, autoescape=True),
+            tables.member.c.email.icontains(search, autoescape=True),
+            sa.and_(
+                tables.conversation.c.audience.in_(readable_audiences(member_id)),
+                sa.or_(tables.conversation.c.title.icontains(search, autoescape=True), spoke),
+            ),
+        )
+
+
 class LedgerEntry(BaseModel):
     """One accounting row of a turn — a dimension's metered amount and its priced cost."""
 
@@ -1433,16 +1885,9 @@ class SurfaceContext:
         names the file without a link. Mints the same signed URL the web download route verifies:
         the link opens for anyone holding it until it expires, and after that only for a signed-in
         member of the workspace that shared it."""
-        if not self._artifact_token_secret or not self._public_base_url:
-            return None
-        expires_at = artifact_url_expiry(datetime.now(UTC))
-        path = mint_artifact_url(
-            self._artifact_token_secret,
-            artifact.blob_key,
-            expires_at,
-            workspace_id=self.workspace_id,
+        return shared_artifact_link(
+            self._artifact_token_secret, self._public_base_url, self.workspace_id, artifact
         )
-        return f"{self._public_base_url.rstrip('/')}{path}"
 
     def artifact_preview_link(self, artifact: SharedArtifact) -> str | None:
         """A signed raster-preview link, or None when its type, size, or delivery is ineligible.
@@ -1452,22 +1897,8 @@ class SurfaceContext:
         way the grant names a raster type and an exact size, so the route serves the bytes inline
         only after they prove to be that picture. The row's own declared type has to agree with the
         key it names, so a document row whose filename says `pdf` never grants a picture."""
-        if artifact.preview_blob_key is not None:
-            blob_key = artifact.preview_blob_key
-            declared = artifact.preview_media_type
-            size_bytes = artifact.preview_size_bytes
-        else:
-            blob_key = artifact.blob_key
-            declared = artifact.media_type
-            size_bytes = artifact.size_bytes
-        if raster_image_media_type(blob_key) != declared:
-            return None
-        return mint_image_preview_url(
-            self._artifact_token_secret,
-            self._public_base_url,
-            blob_key,
-            size_bytes,
-            workspace_id=self.workspace_id,
+        return shared_artifact_preview_link(
+            self._artifact_token_secret, self._public_base_url, self.workspace_id, artifact
         )
 
     def ingress_url(self, conversation_id: UUID, port: int, entry_path: str) -> str | None:
@@ -2527,114 +2958,6 @@ class SurfaceContext:
             sources=bool(sources),
         )
 
-    async def list_artifacts(
-        self,
-        member_id: UUID,
-        *,
-        admin: bool,
-        limit: int,
-        cursor: "ListingCursor | None" = None,
-        q: str | None = None,
-        media: str | None = None,
-        scope: str | None = None,
-    ) -> "ListingPage[ListedArtifact]":
-        """One keyset page of the files turns have shared, as the portal's artifacts view lists
-        them: a member sees their own conversations' artifacts, an admin the workspace's — newest
-        first, bounded, `shared_artifact.id` breaking a `created_at` tie so two files one turn
-        shared in the same instant page without repeating or skipping either. `scope` narrows to
-        the conversations the member owns (`created`). Each entry carries the `SharedArtifact`
-        the link minter signs, so the view links exactly what the writeback delivery would."""
-        query = (
-            sa.select(
-                tables.shared_artifact.c.id,
-                tables.shared_artifact.c.blob_key,
-                tables.shared_artifact.c.filename,
-                tables.shared_artifact.c.subject,
-                tables.shared_artifact.c.media_type,
-                tables.shared_artifact.c.size_bytes,
-                tables.shared_artifact.c.preview_blob_key,
-                tables.shared_artifact.c.preview_media_type,
-                tables.shared_artifact.c.preview_size_bytes,
-                tables.shared_artifact.c.created_at,
-                tables.shared_artifact.c.turn_id,
-                tables.member.c.email,
-                tables.conversation.c.surface_label,
-                tables.conversation.c.surface,
-                tables.conversation.c.id.label("conversation_id"),
-            )
-            .select_from(
-                tables.shared_artifact.join(
-                    tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
-                )
-                .join(
-                    tables.conversation,
-                    tables.turn.c.conversation_id == tables.conversation.c.id,
-                )
-                .outerjoin(tables.member, tables.conversation.c.member_id == tables.member.c.id)
-            )
-            .where(tables.shared_artifact.c.workspace_id == self.workspace_id)
-        )
-        if not admin:
-            query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
-        match scope:
-            case None:
-                pass
-            case "created":
-                query = query.where(tables.conversation.c.member_id == member_id)
-            case _:
-                raise ValueError(f"unknown artifact scope filter: {scope}")
-        if q:
-            query = query.where(
-                sa.or_(
-                    tables.shared_artifact.c.filename.ilike(f"%{q}%"),
-                    tables.shared_artifact.c.subject.ilike(f"%{q}%"),
-                )
-            )
-        if media is not None:
-            query = query.where(_media_predicate(tables.shared_artifact.c.media_type, media))
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    page_query(
-                        query,
-                        cursor,
-                        limit,
-                        created_at=tables.shared_artifact.c.created_at,
-                        ident=tables.shared_artifact.c.id,
-                    )
-                )
-            ).all()
-        sources = await self._conversation_sources(tuple({row.conversation_id for row in rows}))
-        return page_of(
-            rows,
-            cursor,
-            limit,
-            render=lambda row: ListedArtifact(
-                id=row.id,
-                artifact=SharedArtifact(
-                    blob_key=row.blob_key,
-                    filename=row.filename,
-                    subject=row.subject,
-                    media_type=row.media_type,
-                    size_bytes=row.size_bytes,
-                    preview_blob_key=row.preview_blob_key,
-                    preview_media_type=row.preview_media_type,
-                    preview_size_bytes=row.preview_size_bytes,
-                ),
-                created_at=row.created_at,
-                owner_email=row.email,
-                origin=row.surface_label or (row.surface if row.surface != "web" else None),
-                turn_id=row.turn_id,
-                conversation_id=row.conversation_id,
-                surface=row.surface,
-                source=sources.get(row.conversation_id),
-            ),
-            position=lambda row: (
-                row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
-                str(row.id),
-            ),
-        )
-
     async def recent_object_changes(self, limit: int) -> tuple[ObjectChange, ...]:
         """The workspace's most recent object-change journal rows, newest first — the admin audit
         read of every create/update/delete the object verbs recorded. Reads the core journal
@@ -2721,7 +3044,8 @@ class SurfaceContext:
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
-        source = (await self._conversation_sources((conversation_id,))).get(conversation_id)
+        found = await ConversationDirectory(self.workspace_id).sources((conversation_id,))
+        source = found.get(conversation_id)
         return tuple(
             ListedArtifact(
                 id=row.id,
@@ -2745,151 +3069,6 @@ class SurfaceContext:
             )
             for row in rows
         )
-
-    async def list_scheduled_runs(
-        self,
-        member_id: UUID,
-        *,
-        limit: int,
-        cursor: "ListingCursor | None" = None,
-        agent_id: UUID | None = None,
-        turn_id: UUID | None = None,
-    ) -> "ListingPage[ScheduledRun]":
-        """One keyset page of the turns that fired on their own — scheduled admissions — newest
-        first, reporting into conversations whose content this reader reads: the workspace-shared
-        ones and their own. A run's reply is transcript content, so the page never widens for an
-        admin the way `readable_conversation` never answers them a private conversation without a
-        recorded disclosure, or a room at all — a feed aggregates, and an aggregate of what each
-        row would refuse is still refused. A turn still going is not yet a run — it has no reply
-        to report — so only terminal turns list, and each carries its terminal reply and the files
-        it shared, so a feed renders output and previews without a second walk.
-
-        A run reports by sharing a file — the fire asks for exactly that act — so a run that ended
-        well and shared none published nothing and is no row here; its conversation holds it. A
-        failure is always a row, because how a fire went wrong is itself the report. `limit`
-        therefore counts rows a feed draws, and the page's `older` cursor promises a row behind
-        it. `turn_id` narrows the page to one run — a permalink's read — under the same fence, so
-        a run outside the audience reads as an empty page."""
-        query = self._scheduled_runs(member_id, agent_id)
-        if turn_id is not None:
-            query = query.where(tables.turn.c.id == turn_id)
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    page_query(
-                        query,
-                        cursor,
-                        limit,
-                        created_at=tables.turn.c.created_at,
-                        ident=tables.turn.c.id,
-                    )
-                )
-            ).all()
-            files = (
-                await connection.execute(
-                    sa.select(tables.shared_artifact)
-                    .where(
-                        tables.shared_artifact.c.workspace_id == self.workspace_id,
-                        tables.shared_artifact.c.turn_id.in_(tuple(row.id for row in rows)),
-                    )
-                    .order_by(
-                        tables.shared_artifact.c.created_at, tables.shared_artifact.c.blob_key
-                    )
-                )
-            ).all()
-        shared: dict[UUID, list[SharedArtifact]] = {}
-        for file in files:
-            shared.setdefault(file.turn_id, []).append(
-                SharedArtifact(
-                    blob_key=file.blob_key,
-                    filename=file.filename,
-                    subject=file.subject,
-                    media_type=file.media_type,
-                    size_bytes=file.size_bytes,
-                    preview_blob_key=file.preview_blob_key,
-                    preview_media_type=file.preview_media_type,
-                    preview_size_bytes=file.preview_size_bytes,
-                )
-            )
-        sources = await self._conversation_sources(tuple({row.conversation_id for row in rows}))
-        return page_of(
-            rows,
-            cursor,
-            limit,
-            render=lambda row: ScheduledRun(
-                turn_id=row.id,
-                conversation_id=row.conversation_id,
-                agent_id=row.agent_id,
-                fired_at=(
-                    row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC)
-                ),
-                status=row.status,
-                text=TerminalFrame.model_validate(row.terminal).text,
-                idempotency_key=row.idempotency_key,
-                surface=row.surface,
-                source=sources.get(row.conversation_id),
-                artifacts=tuple(shared.get(row.id, ())),
-            ),
-            position=lambda row: (
-                row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
-                str(row.id),
-            ),
-        )
-
-    async def count_scheduled_runs_since(
-        self,
-        member_id: UUID,
-        since: datetime,
-        *,
-        agent_id: UUID | None = None,
-    ) -> int:
-        """How many runs this reader's feed holds that fired at or after `since` — the rows
-        `list_scheduled_runs` would page, under the same audience fence, counted instead of read.
-        A feed sizes its newest page by a span of time rather than a fixed number of rows with
-        this, and reads no reply or file to do it."""
-        query = (
-            self._scheduled_runs(member_id, agent_id)
-            .with_only_columns(sa.func.count())
-            .where(tables.turn.c.created_at >= since)
-        )
-        async with workspace_tx() as connection:
-            return int((await connection.execute(query)).scalar_one())
-
-    def _scheduled_runs(self, member_id: UUID, agent_id: UUID | None) -> sa.Select[Any]:
-        reported = (
-            sa.select(tables.shared_artifact.c.turn_id)
-            .where(
-                tables.shared_artifact.c.workspace_id == self.workspace_id,
-                tables.shared_artifact.c.turn_id == tables.turn.c.id,
-            )
-            .exists()
-        )
-        query = (
-            sa.select(
-                tables.turn.c.id,
-                tables.turn.c.conversation_id,
-                tables.turn.c.agent_id,
-                tables.turn.c.status,
-                tables.turn.c.idempotency_key,
-                tables.turn.c.terminal,
-                tables.turn.c.created_at,
-                tables.conversation.c.surface,
-            )
-            .select_from(
-                tables.turn.join(
-                    tables.conversation,
-                    tables.turn.c.conversation_id == tables.conversation.c.id,
-                )
-            )
-            .where(
-                tables.turn.c.workspace_id == self.workspace_id,
-                tables.turn.c.admission_source == SCHEDULED_ADMISSION,
-                tables.turn.c.terminal.is_not(None),
-                sa.or_(tables.turn.c.status != "done", reported),
-                tables.conversation.c.audience.in_(readable_audiences(member_id)),
-            )
-        )
-        return query if agent_id is None else query.where(tables.turn.c.agent_id == agent_id)
 
     async def agent_turn_statuses(
         self, agent_ids: Sequence[UUID], member_id: UUID
@@ -3319,287 +3498,18 @@ class SurfaceContext:
         participation: Literal["mine", "others"] | None = None,
         search: str | None = None,
     ) -> tuple[ListedConversation, ...]:
-        """One agent's conversations as the portal lists them, newest activity first and bounded:
-        the member's own plus the workspace-shared ones, every one of the agent's for an admin.
-        `surface` narrows to one surface's conversations in the query, before the bound, so a
-        member's rows are never displaced by another surface's newer traffic under the cap.
-        `participation` narrows the same way to one side of the member: `mine` is the ones they
-        are in — `_participated` defines that — and `others` the readable ones somebody else spoke
-        and they did not. A rail reads both, one bound each; an agent's directory reads neither.
-        Each entry carries `readable` (content this viewer reads now) and `disclosable` (an admin
-        may acknowledge and read another member's private one — `record_transcript_access` is the
-        act). Subagent conversations are absent: they are the agent's own work on a request,
-        listed nested under the turn that spawned them, never beside it. `conversation_id` selects
-        one exact row before the bound for a durable permalink.
-
-        Newest activity is the last turn, and creation only where no turn has landed yet, so the
-        top of the page is what moved most recently rather than what was opened most recently.
-        Creation breaks a tie under it, which is what two conversations opened together and never
-        spoken in are.
-
-        The opening words and the speakers are two further reads over the page's ids, never one
-        per row: what a conversation is about and who is in it are facts of its turns, and only a
-        turn read can answer them. Both reads are narrowed to the rows this viewer may read, so an
-        unreadable row's content is never fetched, let alone carried."""
-        activity = (
-            sa.select(
-                tables.turn.c.conversation_id,
-                sa.func.count().label("turn_count"),
-                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
-            )
-            .where(tables.turn.c.workspace_id == self.workspace_id)
-            .group_by(tables.turn.c.conversation_id)
-            .subquery()
+        """One agent's conversations as the portal lists them — `ConversationDirectory.list`,
+        bound to this surface's workspace."""
+        return await ConversationDirectory(self.workspace_id).list(
+            agent_id,
+            member_id,
+            admin=admin,
+            limit=limit,
+            surface=surface,
+            conversation_id=conversation_id,
+            participation=participation,
+            search=search,
         )
-        query = (
-            sa.select(
-                tables.conversation.c.id,
-                tables.conversation.c.surface,
-                tables.conversation.c.queue_key,
-                tables.conversation.c.audience,
-                tables.conversation.c.surface_label,
-                tables.conversation.c.title,
-                tables.member.c.email,
-                tables.conversation.c.created_at,
-                activity.c.turn_count,
-                activity.c.last_turn_at,
-            )
-            .select_from(
-                tables.conversation.outerjoin(
-                    tables.member, tables.member.c.id == tables.conversation.c.member_id
-                ).outerjoin(activity, activity.c.conversation_id == tables.conversation.c.id)
-            )
-            .where(
-                tables.conversation.c.workspace_id == self.workspace_id,
-                tables.conversation.c.agent_id == agent_id,
-                tables.conversation.c.surface != SUBAGENT_SURFACE,
-            )
-            .order_by(
-                sa.func.coalesce(activity.c.last_turn_at, tables.conversation.c.created_at).desc(),
-                tables.conversation.c.created_at.desc(),
-            )
-            .limit(limit)
-        )
-        if surface is not None:
-            query = query.where(tables.conversation.c.surface == surface)
-        if conversation_id is not None:
-            query = query.where(tables.conversation.c.id == conversation_id)
-        match participation:
-            case "mine":
-                query = query.where(self._participated(member_id))
-            case "others":
-                query = query.where(self._others(member_id))
-            case None:
-                pass
-        if not admin:
-            query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
-        if search:
-            query = query.where(self._matches(search, member_id))
-        async with workspace_tx() as connection:
-            rows = (await connection.execute(query)).all()
-        if not rows:
-            return ()
-        readable = readable_audiences(member_id)
-        content = [row.id for row in rows if row.audience in readable]
-        sources = await self._conversation_sources(content)
-        speakers = await self._conversation_speakers(content)
-        mine = str(conversation_audience(member_id))
-        return tuple(
-            ListedConversation(
-                summary=ConversationSummary(
-                    id=row.id,
-                    surface=row.surface,
-                    queue_key=row.queue_key,
-                    member_email=row.email,
-                    created_at=row.created_at,
-                    turn_count=row.turn_count or 0,
-                    last_turn_at=row.last_turn_at,
-                ),
-                audience=row.audience,
-                surface_label=row.surface_label,
-                readable=row.audience in readable,
-                disclosable=admin
-                and row.audience != mine
-                and audience_member(parse_audience(row.audience)) is not None,
-                title=row.title or "" if row.audience in readable else "",
-                source=sources.get(row.id),
-                speakers=speakers.get(row.id, ()),
-            )
-            for row in rows
-        )
-
-    def _spoken(self, member_id: UUID | None) -> sa.ColumnElement[bool]:
-        """Whether the conversation holds a member turn — this member's where one is named, any
-        member's where none is.
-
-        Correlated on the row being listed rather than grouped over the workspace: `turn_spoken`
-        indexes exactly this lookup, so each candidate costs one seek instead of every turn in the
-        workspace being reduced to a speaker table the bound then throws most of away."""
-        speaker = (
-            tables.turn.c.speaker_member_id.is_not(None)
-            if member_id is None
-            else tables.turn.c.speaker_member_id == member_id
-        )
-        return (
-            sa.select(sa.literal(1))
-            .where(
-                tables.turn.c.workspace_id == self.workspace_id,
-                tables.turn.c.conversation_id == tables.conversation.c.id,
-                speaker,
-            )
-            .correlate(tables.conversation)
-            .exists()
-        )
-
-    def _participated(self, member_id: UUID) -> sa.ColumnElement[bool]:
-        """Whether this member is in the conversation: it is bound to them, or they spoke a turn of
-        it. Answering in another member's thread counts — the member was there, and a rail that
-        drops it hides work they did. A conversation an extension opened — a trigger run, a review,
-        an agent's own errand — carries no member and holds no member turn, so it is in nobody's."""
-        return sa.or_(
-            tables.conversation.c.member_id == member_id,
-            self._spoken(member_id),
-        )
-
-    def _others(self, member_id: UUID) -> sa.ColumnElement[bool]:
-        """The complement, over the conversations a member turn stands in: somebody spoke, and it
-        was not this member, and the row is not bound to them either.
-
-        `is_distinct_from` carries the binding test because `member_id` is null on exactly the rows
-        this group is made of — a shared thread belongs to no member — and `member_id <> :me` is
-        null there, which a `where` reads as false. Negating the participation predicate whole
-        would empty the group in silence."""
-        return sa.and_(
-            tables.conversation.c.member_id.is_distinct_from(member_id),
-            sa.not_(self._spoken(member_id)),
-            self._spoken(None),
-        )
-
-    def _matches(self, search: str, member_id: UUID) -> sa.ColumnElement[bool]:
-        """Whether a conversation answers to `search`. It narrows in the query, ahead of the bound,
-        because a term applied after one is a filter over the page the bound already cut — the
-        conversation the member is looking for is the one that fell off it.
-
-        What a row states about itself is matched for whoever may list it: the origin the surface
-        named, and the member it belongs to. What the conversation holds — what it is called, and
-        who has spoken in it — is matched only where this member may read that content, the same
-        gate `readable` puts on carrying it. Otherwise an admin's search would answer which words
-        stand in another member's private thread, which reading it would have audited."""
-        speaker = tables.member.alias("search_speaker")
-        spoke = (
-            sa.select(sa.literal(1))
-            .select_from(tables.turn.join(speaker, speaker.c.id == tables.turn.c.speaker_member_id))
-            .where(
-                tables.turn.c.workspace_id == self.workspace_id,
-                tables.turn.c.conversation_id == tables.conversation.c.id,
-                speaker.c.email.icontains(search, autoescape=True),
-            )
-            .correlate(tables.conversation)
-            .exists()
-        )
-        return sa.or_(
-            tables.conversation.c.surface_label.icontains(search, autoescape=True),
-            tables.member.c.email.icontains(search, autoescape=True),
-            sa.and_(
-                tables.conversation.c.audience.in_(readable_audiences(member_id)),
-                sa.or_(tables.conversation.c.title.icontains(search, autoescape=True), spoke),
-            ),
-        )
-
-    async def _conversation_sources(self, listed: Sequence[UUID]) -> dict[UUID, str | None]:
-        if not listed:
-            return {}
-        opening = (
-            sa.select(
-                tables.turn.c.conversation_id,
-                sa.func.min(tables.turn.c.seq).label("seq"),
-            )
-            .where(
-                tables.turn.c.workspace_id == self.workspace_id,
-                tables.turn.c.conversation_id.in_(listed),
-            )
-            .group_by(tables.turn.c.conversation_id)
-            .subquery()
-        )
-        query = (
-            sa.select(tables.turn.c.conversation_id, tables.turn.c.context)
-            .select_from(
-                tables.turn.join(
-                    opening,
-                    sa.and_(
-                        tables.turn.c.conversation_id == opening.c.conversation_id,
-                        tables.turn.c.seq == opening.c.seq,
-                    ),
-                )
-            )
-            .where(tables.turn.c.workspace_id == self.workspace_id)
-        )
-        async with workspace_tx() as connection:
-            rows = (await connection.execute(query)).all()
-        return {
-            row.conversation_id: (
-                None if row.context is None else TurnContext.model_validate(row.context).source
-            )
-            for row in rows
-        }
-
-    async def _conversation_speakers(
-        self, listed: Sequence[UUID]
-    ) -> dict[UUID, tuple[ConversationSpeaker, ...]]:
-        if not listed:
-            return {}
-        said = (
-            sa.select(
-                tables.turn.c.conversation_id,
-                tables.turn.c.seq,
-                tables.turn.c.context,
-                tables.member.c.email,
-                sa.func.row_number()
-                .over(
-                    partition_by=(tables.turn.c.conversation_id, tables.turn.c.speaker_member_id),
-                    order_by=tables.turn.c.seq,
-                )
-                .label("said_rank"),
-            )
-            .select_from(
-                tables.turn.join(
-                    tables.member, tables.member.c.id == tables.turn.c.speaker_member_id
-                )
-            )
-            .where(
-                tables.turn.c.workspace_id == self.workspace_id,
-                tables.turn.c.conversation_id.in_(listed),
-            )
-            .subquery()
-        )
-        first = (
-            sa.select(
-                said.c.conversation_id,
-                said.c.context,
-                said.c.email,
-                sa.func.row_number()
-                .over(partition_by=said.c.conversation_id, order_by=said.c.seq)
-                .label("speaker_rank"),
-            )
-            .where(said.c.said_rank == 1)
-            .subquery()
-        )
-        query = (
-            sa.select(first.c.conversation_id, first.c.context, first.c.email)
-            .where(first.c.speaker_rank <= MAX_CONVERSATION_SPEAKERS)
-            .order_by(first.c.conversation_id, first.c.speaker_rank)
-        )
-        async with workspace_tx() as connection:
-            rows = (await connection.execute(query)).all()
-        spoke: dict[UUID, list[ConversationSpeaker]] = {}
-        for row in rows:
-            context = None if row.context is None else TurnContext.model_validate(row.context)
-            spoke.setdefault(row.conversation_id, []).append(
-                ConversationSpeaker(
-                    email=row.email, sender=None if context is None else context.sender
-                )
-            )
-        return {conversation_id: tuple(who) for conversation_id, who in spoke.items()}
 
     async def readable_conversation(
         self, conversation_id: UUID, agent_id: UUID, member_id: UUID, *, admin: bool = False

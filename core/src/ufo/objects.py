@@ -181,7 +181,11 @@ class _ObjectCursor(BaseModel):
 
 
 def object_page(rows: tuple[ObjectRow, ...], query: ObjectListQuery) -> ObjectPage:
-    """Apply the shared search/filter/order/page semantics to one kind's lightweight rows."""
+    """Apply the shared search/filter/order/page semantics to one kind's lightweight rows.
+
+    Free-text search scans every string field except `url` and `*_url`: a link is an address, not
+    text, and a signed one carries its expiry and signature, so a numeric search would otherwise
+    match every row that mints a link."""
     reserved = {"name", "summary"}
     collisions = reserved.intersection(field for row in rows for field in row.fields)
     if collisions:
@@ -219,8 +223,8 @@ def object_page(rows: tuple[ObjectRow, ...], query: ObjectListQuery) -> ObjectPa
             or query.query.casefold() in row.summary.casefold()
             or any(
                 query.query.casefold() in value.casefold()
-                for value in row.fields.values()
-                if isinstance(value, str)
+                for name, value in row.fields.items()
+                if isinstance(value, str) and name != "url" and not name.endswith("_url")
             )
         )
         and all(value(row, name) == expected for name, expected in query.filters.items())

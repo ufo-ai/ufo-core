@@ -49,6 +49,8 @@ const {
 /** What the store calls a consolidated summary: a cluster of facts the consolidator collapsed into
  *  one item. It is the only memory written to be read whole, so it is what a page opens on. */
 const SUMMARY_CLASS = "semantic";
+
+const NOT_FOUND = 404;
 /** What an item the store filed on its own is classed as, before any consolidation. */
 const ATOM_CLASS = "fact";
 const MEMBER_PREFIX = "member/";
@@ -68,6 +70,12 @@ const MEMBER_KIND = "member";
  *  above it — and the reader would meet the same sentence twice on one page. */
 const NEWEST_FIRST =
   "item_class=" + ATOM_CLASS + "&order_by=written&order=desc";
+/** The overview's read: the consolidator's summaries, which carry `item_class=semantic` — the
+ *  class axis, not a memory kind — newest first. A deploy that runs without memory registers no
+ *  `memory` kind at all and answers the listing with a 404, which the band states as memory being
+ *  absent rather than as a fault. */
+const OVERVIEW_READ =
+  "/objects/" + MEMORY_KIND + "?item_class=" + SUMMARY_CLASS + "&order_by=written&order=desc";
 /** How many rows a topic holds behind its fold before the Memory tab is the better place to
  *  keep reading. */
 const TOPIC_ROWS = 24;
@@ -137,19 +145,10 @@ const MEMBER_TOPICS: TopicSpec[] = [
   { memoryKind: "fact", title: "Facts", note: "What is known about you." },
 ];
 
-type Match = {
-  text: string;
-  kind: string;
-  ref: string | null;
-  created_at: string | null;
-  subject: string | null;
-};
-
-type MemoryPayload = { available: boolean; matches: Match[] };
-
 type MemoryObject = {
   name: string;
   summary: string;
+  text?: string;
   subject: string;
   memory_kind: string;
   written: string | null;
@@ -446,10 +445,7 @@ function Workspace({
 }) {
   const [reloads, setReloads] = useState(0);
   const { present, report, updated } = usePresence();
-  const summary = usePanelRead<MemoryPayload>(
-    "/workspace/memory?kind=" + SUMMARY_CLASS,
-    reloads,
-  );
+  const summary = usePanelRead<ObjectsPayload>(OVERVIEW_READ, reloads);
   const members = usePanelRead<MembersPayload>(
     "/objects/" + MEMBER_KIND,
     reloads,
@@ -588,10 +584,7 @@ function Member({
     "/objects/" + MEMBER_KIND,
     reloads,
   );
-  const summary = usePanelRead<MemoryPayload>(
-    "/workspace/memory?kind=" + SUMMARY_CLASS,
-    reloads,
-  );
+  const summary = usePanelRead<ObjectsPayload>(OVERVIEW_READ, reloads);
   const found =
     members.phase === "ready"
       ? (distinct(members.payload.objects).find((row) => row.name === id) ??
@@ -685,19 +678,17 @@ function Overview({
   scope,
   onPresent,
 }: {
-  state: ReturnType<typeof usePanelRead<MemoryPayload>>;
+  state: ReturnType<typeof usePanelRead<ObjectsPayload>>;
   scope: Scope;
   onPresent: (id: string, drawn: boolean, newest: string | null) => void;
 }) {
   const matches =
-    state.phase === "ready" && state.payload.available
-      ? inScope(state.payload.matches, scope)
-      : [];
-  const absent = state.phase === "ready" && !state.payload.available;
-  const drawn = matches.length > 0 || absent || state.phase === "failed";
+    state.phase === "ready" ? inScope(distinct(state.payload.objects), scope) : [];
+  const absent = state.phase === "failed" && state.status === NOT_FOUND;
+  const drawn = matches.length > 0 || state.phase === "failed";
   const newest =
     matches
-      .map((match) => match.created_at)
+      .map((row) => row.written)
       .filter((at): at is string => at !== null)
       .sort()
       .at(-1) ?? null;
@@ -705,13 +696,6 @@ function Overview({
     onPresent("overview", drawn, newest);
   }, [onPresent, drawn, newest]);
   if (state.phase === "loading") return null;
-  if (state.phase === "failed") {
-    return (
-      <Band id="overview" title="Overview" note={overviewNote(state, scope)}>
-        <Panel state={state}>{() => null}</Panel>
-      </Band>
-    );
-  }
   if (absent) {
     return (
       <Band id="overview" title="Overview" note={overviewNote(state, scope)}>
@@ -719,11 +703,18 @@ function Overview({
       </Band>
     );
   }
+  if (state.phase === "failed") {
+    return (
+      <Band id="overview" title="Overview" note={overviewNote(state, scope)}>
+        <Panel state={state}>{() => null}</Panel>
+      </Band>
+    );
+  }
   if (matches.length === 0) return null;
   return (
     <Band id="overview" title="Overview" note={overviewNote(state, scope)}>
-      {matches.map((match) => (
-        <p key={match.ref ?? match.text}>{match.text}</p>
+      {matches.map((row) => (
+        <p key={row.name}>{row.text ?? row.summary}</p>
       ))}
     </Band>
   );
@@ -732,16 +723,16 @@ function Overview({
 /** How current the account is, stamped once over the whole of it: what a reader is deciding is
  *  whether to trust this page at all, which the oldest line on it cannot answer. */
 function overviewNote(
-  state: ReturnType<typeof usePanelRead<MemoryPayload>>,
+  state: ReturnType<typeof usePanelRead<ObjectsPayload>>,
   scope: Scope,
 ): string {
   const written =
     scope === "shared"
       ? "Written from the workspace's facts once enough of them agree."
       : "Written from your facts once enough of them agree.";
-  if (state.phase !== "ready" || !state.payload.available) return written;
-  const stamps = inScope(state.payload.matches, scope)
-    .map((match) => match.created_at)
+  if (state.phase !== "ready") return written;
+  const stamps = inScope(distinct(state.payload.objects), scope)
+    .map((row) => row.written)
     .filter((at): at is string => at !== null)
     .sort();
   const last = stamps.at(-1);

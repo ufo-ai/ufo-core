@@ -8,6 +8,7 @@ turn, on the subjects their own conversation carries. Surfaces create conversati
 mutation is refused."""
 
 from dataclasses import dataclass
+from typing import Literal
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -16,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
+from ufo.ext.surface import ConversationDirectory, ListedConversation
 from ufo.kinds.agents import AGENT_KIND
 from ufo.models.interface import TextBlock
 from ufo.object_name import ObjectRef
@@ -34,6 +36,7 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
+from ufo.schema.records import EXTENSION_SURFACE_PREFIX, PORTAL_SURFACE
 from ufo.tools.context import ToolContext
 from ufo.turns.audience import audience_subjects, conversation_audience
 from ufo.turns.transcript import TranscriptDecodeError, decode, transcript_key
@@ -41,6 +44,8 @@ from ufo.workspace import ws_current
 
 CONVERSATION_KIND = "conversation"
 TRANSCRIPT_WORKSPACE_DIR = "transcripts"
+CONVERSATION_MINE_LIMIT = 100
+CONVERSATION_OTHERS_LIMIT = 25
 CONVERSATIONS_ARE_SURFACE_MADE = (
     "conversations are created by surfaces and closed by retention, never authored"
 )
@@ -72,6 +77,45 @@ class ConversationObjects:
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ConversationSpec] | None:
         row = await self._find(ctx.read_subjects, name)
         return None if row is None else _detail(row)
+
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        """The selected agent's conversations as the portal's rail reads them: the member's own
+        beside the readable ones colleagues are in, `mine` saying which, newest activity first
+        under `last_at`. Read as the member whatever their standing — an admin's rail is their own
+        work, never every private conversation in the workspace, so `admin` deliberately never
+        widens this listing. A machine lane sharing a chat surface — a homepage seed's
+        conversation, the portal's prepared-intent queue — holds no member-admitted turn and is
+        absent; so is a conversation with no title yet, a nameless row leading to an empty
+        screen. `portal` says whether the web chat transport carries the row — the portal's own
+        surface and the extension-opened ones its composer answers — as a declared filter, because
+        a filter must narrow the page before it is cut: cut first, a run of newer rows from other
+        surfaces renders an empty chat list."""
+        directory = ConversationDirectory(ws_current().workspace_id)
+        agent_id = object_agent_id()
+        sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
+            ("mine", CONVERSATION_MINE_LIMIT),
+            ("others", CONVERSATION_OTHERS_LIMIT),
+        )
+        rows: list[ObjectRow] = []
+        for participation, limit in sides:
+            for entry in await directory.list(
+                agent_id,
+                member_id,
+                admin=False,
+                limit=limit,
+                participation=participation,
+                member_admitted=True,
+            ):
+                if entry.title:
+                    rows.append(_member_row(entry, mine=participation == "mine"))
+        return object_page(tuple(rows), query)
 
     async def member_detail(
         self,
@@ -209,6 +253,27 @@ def _visible(subjects: frozenset[str]) -> sa.Select:
     )
 
 
+def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
+    speakers = [who.sender or who.email for who in entry.speakers]
+    stamp = entry.summary.last_turn_at or entry.summary.created_at
+    return ObjectRow(
+        name=str(entry.summary.id),
+        summary=entry.title,
+        fields={
+            "title": entry.title,
+            "mine": mine,
+            "speaker": None if mine or not speakers else speakers[0],
+            "surface": entry.summary.surface,
+            "surface_label": entry.surface_label,
+            "portal": (
+                entry.summary.surface == PORTAL_SURFACE
+                or entry.summary.surface.startswith(EXTENSION_SURFACE_PREFIX)
+            ),
+            "last_at": stamp.isoformat(),
+        },
+    )
+
+
 def _row(row: sa.Row) -> ObjectRow:
     origin = (
         f"{row.surface} conversation"
@@ -254,11 +319,15 @@ CONVERSATION_OBJECT = ObjectKind(
         "Filter or order a listing on `surface` and on `surface_label`, the surface's own name for "
         "where the conversation runs — a Slack channel as `#general`, a Slack DM as `Direct "
         "message`. A conversation whose surface names no origin carries no `surface_label`. "
+        "A member listing also carries `title`, `mine`, `speaker`, and `last_at` — order by "
+        "`last_at` desc for the newest activity first. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."
     ),
     spec_model=ConversationSpec,
     store=ConversationObjects(),
-    list_fields=frozenset({"surface", "surface_label"}),
+    list_fields=frozenset(
+        {"surface", "surface_label", "title", "mine", "speaker", "portal", "last_at"}
+    ),
     agent_target_verbs=frozenset({"list", "get"}),
 )

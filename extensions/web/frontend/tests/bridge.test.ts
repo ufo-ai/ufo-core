@@ -51,16 +51,21 @@ afterEach(() => {
 });
 
 test("the endpoint table admits its rows and their fills, and nothing else", () => {
-  expect(endpointFor("GET", "api/chats")).toBeTruthy();
+  expect(endpointFor("GET", "api/agents")).toBeTruthy();
   expect(endpointFor("GET", "objects/scheduled_task")).toBeTruthy();
   expect(endpointFor("GET", "objects/scheduled_task?paused=false")).toBeTruthy();
   expect(endpointFor("GET", "/agents/" + AGENT_ID + "/transcript")).toBeTruthy();
   expect(endpointFor("POST", "objects/scheduled_task")).toBeTruthy();
   expect(endpointFor("POST", "credentials")).toBeTruthy();
   expect(endpointFor("POST", "agents/" + AGENT_ID + "/chat?conversation=new")).toBeTruthy();
+  expect(endpointFor("GET", "api/chats?conversation=" + AGENT_ID)).toBeTruthy();
   // Not a row, the wrong method for one, the wrong depth, or a traversal in a filled segment.
   expect(endpointFor("GET", "workspace/usage")).toBeNull();
-  expect(endpointFor("POST", "api/chats")).toBeNull();
+  expect(endpointFor("GET", "workspace/radar")).toBeNull();
+  expect(endpointFor("GET", "workspace/artifacts")).toBeNull();
+  expect(endpointFor("GET", "workspace/memory")).toBeNull();
+  expect(endpointFor("GET", "workspace/team")).toBeNull();
+  expect(endpointFor("POST", "api/agents")).toBeNull();
   expect(endpointFor("GET", "objects")).toBeNull();
   expect(endpointFor("GET", "objects/../secrets")).toBeNull();
   expect(endpointFor("DELETE", "objects/scheduled_task/nightly")).toBeNull();
@@ -115,9 +120,9 @@ test("a tabled GET is forwarded and its payload returned", async () => {
   vi.stubGlobal("fetch", fetchMock);
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
-  deliver({ ufo: "call", id: "r1", method: "GET", path: "api/chats" }, iframe.contentWindow);
+  deliver({ ufo: "call", id: "r1", method: "GET", path: "api/agents" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(1));
-  expect(fetchMock.mock.calls[0][0]).toBe("/surface/web/api/chats");
+  expect(fetchMock.mock.calls[0][0]).toBe("/surface/web/api/agents");
   expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "GET" });
   expect(posted[0]).toEqual({
     ufo: "data",
@@ -136,7 +141,7 @@ test("a call off the table is refused without a fetch", async () => {
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
   deliver({ ufo: "call", id: "r2", method: "GET", path: "workspace/usage" }, iframe.contentWindow);
-  deliver({ ufo: "call", id: "r3", method: "PUT", path: "api/chats" }, iframe.contentWindow);
+  deliver({ ufo: "call", id: "r3", method: "PUT", path: "api/agents" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(2));
   expect(fetchMock).not.toHaveBeenCalled();
   expect(posted[0]).toMatchObject({ ufo: "data", id: "r2", ok: false });
@@ -298,7 +303,7 @@ test("a form on a row that takes none is refused without a fetch", async () => {
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
   deliver(
-    { ufo: "call", id: "f2", method: "GET", path: "api/chats", form: [] },
+    { ufo: "call", id: "f2", method: "GET", path: "api/agents", form: [] },
     iframe.contentWindow,
   );
   await vi.waitFor(() => expect(posted).toHaveLength(1));
@@ -320,7 +325,7 @@ test("a body of the wrong shape for its row is refused without a fetch", async (
     iframe.contentWindow,
   );
   deliver(
-    { ufo: "call", id: "b3", method: "GET", path: "api/chats", body: { extra: true } },
+    { ufo: "call", id: "b3", method: "GET", path: "api/agents", body: { extra: true } },
     iframe.contentWindow,
   );
   await vi.waitFor(() => expect(posted).toHaveLength(3));
@@ -359,8 +364,8 @@ test("a call with no usable id is dropped without a reply or a throw", async () 
   vi.stubGlobal("fetch", fetchMock);
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
-  deliver({ ufo: "call", method: "GET", path: "api/chats" }, iframe.contentWindow);
-  deliver({ ufo: "call", id: "", method: "GET", path: "api/chats" }, iframe.contentWindow);
+  deliver({ ufo: "call", method: "GET", path: "api/agents" }, iframe.contentWindow);
+  deliver({ ufo: "call", id: "", method: "GET", path: "api/agents" }, iframe.contentWindow);
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(posted).toHaveLength(0);
   expect(fetchMock).not.toHaveBeenCalled();
@@ -398,7 +403,7 @@ test("the doubly framed site's own window is answered directly", async () => {
   const { site, posted } = nestedSite(iframe);
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
   deliver({ ufo: "ready" }, site);
-  deliver({ ufo: "call", id: "r9", method: "GET", path: "api/chats" }, site);
+  deliver({ ufo: "call", id: "r9", method: "GET", path: "api/agents" }, site);
   await vi.waitFor(() => expect(posted).toHaveLength(2));
   expect(posted[0]).toEqual({
     ufo: "init",

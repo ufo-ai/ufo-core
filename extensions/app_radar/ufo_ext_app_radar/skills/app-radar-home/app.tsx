@@ -13,7 +13,6 @@ const {
   Markdown,
   Moment,
   ObjectDetail,
-  Pager,
   Panel,
   PanelBlank,
   PanelEmpty,
@@ -88,7 +87,45 @@ type DigestPoint = { text: string; actor: string };
  *  carries none yet, and stands on its task's name until it does. */
 type DigestWritten = { title: string; summary: string; points: DigestPoint[] };
 
-type RadarPayload = { runs: RadarRun[]; older?: string | null; newer?: string | null };
+type ReportRow = {
+  name: string;
+  agent_id: string;
+  conversation: string;
+  fired_at: string;
+  status: string;
+  task: string | null;
+  surface: string;
+  source: string | null;
+  text: string;
+  entry: DigestWritten | null;
+  artifacts: RadarArtifact[];
+};
+
+type ReportsPayload = { objects: ReportRow[]; next_cursor: string | null };
+
+/** One report as the detail route answers it: the listing row's fields ride in `status`, beside
+ *  the name the permalink carries. The detail resolves the turn directly — a report older than
+ *  the feed's own window still answers its permalink — and its row names the firing agent. */
+type ReportDetail = { name: string; status: Omit<ReportRow, "name"> };
+
+/** One listing row as the feed reads it: the report kind's own fields, folded back into the run
+ *  the stories are written over — the digest rides whole in the row's `entry` field, because a
+ *  flat `summary` would collide with the listing row's own. */
+function toRun(row: ReportRow): RadarRun {
+  return {
+    turn_id: row.name,
+    conversation_id: row.conversation,
+    agent_id: row.agent_id,
+    fired_at: row.fired_at,
+    status: row.status,
+    task: row.task,
+    surface: row.surface,
+    source: row.source,
+    text: row.text,
+    entry: row.entry,
+    artifacts: row.artifacts,
+  };
+}
 
 /** A run that ended well needs no mark beside its own reply; the other endings are stated. */
 const STATUS_NOTES: Record<string, string> = {
@@ -250,54 +287,79 @@ function Feed({
   onName: (run: string, name: string) => void;
 }) {
   const opens = place.opens ?? [];
+  const agents = useAgents();
   const pinned = pin === undefined ? null : pin.slice(RUN_PREFIX.length);
-  const params = new URLSearchParams();
-  if (pinned) params.set("turn", pinned);
-  else if (place.after) params.set("after", place.after);
-  const state = usePanelRead<RadarPayload>(
-    "/workspace/radar" + (params.size ? "?" + params.toString() : ""),
+  const after = place.after ?? "";
+  const owner = agents.find((agent) => agent.app === "radar") ?? agents[0];
+  const detail = usePanelRead<ReportDetail>(
+    pinned && owner ? "/objects/report/" + pinned + "?agent=" + owner.id : null,
   );
+  const feedParams = new URLSearchParams({ order_by: "fired_at", order: "desc" });
+  if (after) feedParams.set("cursor", after);
+  const state = usePanelRead<ReportsPayload>(
+    pinned ? null : "/objects/report?" + feedParams.toString(),
+  );
+  if (pinned) {
+    if (detail.phase === "failed" && detail.status === 404)
+      return <PanelBlank body="This report does not exist or is not shared with you." />;
+    return (
+      <Panel state={detail} shape="cards">
+        {(payload) => (
+          <>
+            <ol className="m-0 flex list-none flex-col p-0">
+              <Story
+                run={toRun({
+                  ...payload.status,
+                  name: payload.name,
+                  agent_id: payload.status.agent_id || (owner?.id ?? ""),
+                })}
+                opens={opens}
+                from={pin}
+                onPlace={onPlace}
+                onName={onName}
+              />
+            </ol>
+            <ReadNext pinned={pinned} />
+          </>
+        )}
+      </Panel>
+    );
+  }
   return (
     <Panel state={state} shape="cards">
       {(payload) => {
-        if (!payload.runs.length)
+        const runs = payload.objects.map(toRun);
+        if (!runs.length && !after)
           return (
-            <PanelBlank
-              body={
-                pinned
-                  ? "This report does not exist or is not shared with you."
-                  : "Each scheduled run reports here: the reply it closed with and the files it shared."
-              }
-            />
-          );
-        if (pinned)
-          return (
-            <>
-              <ol className="m-0 flex list-none flex-col p-0">
-                {payload.runs.map((run) => (
-                  <Story
-                    key={run.turn_id}
-                    run={run}
-                    opens={opens}
-                    from={pin}
-                    onPlace={onPlace}
-                    onName={onName}
-                  />
-                ))}
-              </ol>
-              <ReadNext pinned={pinned} />
-            </>
+            <PanelBlank body="Each scheduled run reports here: the reply it closed with and the files it shared." />
           );
         return (
           <>
             <ol className="m-0 flex list-none flex-col p-0">
-              {payload.runs.map((run) => (
+              {runs.map((run) => (
                 <Entry key={run.turn_id} run={run} opens={opens} from={pin} onPlace={onPlace} />
               ))}
             </ol>
-            <div className="mt-4xl">
-              <Pager payload={payload} onPlace={onPlace} />
-            </div>
+            {payload.next_cursor || after ? (
+              <div className="flex gap-xs">
+                {payload.next_cursor ? (
+                  <button
+                    className={cn(buttonVariants({ variant: "row" }))}
+                    onClick={() => onPlace({ after: payload.next_cursor ?? undefined })}
+                  >
+                    Older reports
+                  </button>
+                ) : null}
+                {after ? (
+                  <button
+                    className={cn(buttonVariants({ variant: "row" }))}
+                    onClick={() => onPlace({ after: undefined })}
+                  >
+                    Newest reports
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
           </>
         );
       }}
@@ -322,10 +384,13 @@ const READ_NEXT = 3;
  *  second read of the same projection. A reader who reaches the foot of a document has waited out
  *  the document; the list under it costs them nothing they were waiting on. */
 function ReadNext({ pinned }: { pinned: string }) {
-  const state = usePanelRead<RadarPayload>("/workspace/radar");
+  const state = usePanelRead<ReportsPayload>("/objects/report?order_by=fired_at&order=desc");
   const agents = useAgents();
   if (state.phase !== "ready") return null;
-  const rest = state.payload.runs.filter((run) => run.turn_id !== pinned).slice(0, READ_NEXT);
+  const rest = state.payload.objects
+    .map(toRun)
+    .filter((run) => run.turn_id !== pinned)
+    .slice(0, READ_NEXT);
   if (!rest.length) return null;
   return (
     <section className="mt-6xl flex flex-col gap-md">

@@ -15,9 +15,11 @@ import {
   holdRailShut,
   holdRailSort,
   holdSidebar,
+  chatRows,
   mergeChats,
   type ChatRow,
   type ChatsPayload,
+  type ConversationsPayload,
   type RailShown,
   type RailSort,
 } from "@/lib/rail";
@@ -97,24 +99,51 @@ export function useRail(): RailState {
  *  would otherwise put the older rows back. */
 let reads = 0;
 
-/** Read the rail. The rows already standing are kept while it runs and kept if it fails: a member
- *  reading a conversation should not lose the list of them because one read did not answer. A
- *  refused session states nothing here, because sign-in answers it. */
+/** How many rows one rail read gathers before it stops walking. The listing pages, so a rail
+ *  read follows the continuation until the walk is done or this many rows stand — comfortably
+ *  past what the sidebar can usefully show, stated so a workspace with thousands of
+ *  conversations costs a bounded number of reads. */
+const RAIL_ROWS_MAX = 300;
+
+/** Read the rail: walk the listing's continuation, gathering pages until the walk is done or
+ *  `RAIL_ROWS_MAX` rows stand. The rows already standing are kept while it runs and kept if it
+ *  fails: a member reading a conversation should not lose the list of them because one read did
+ *  not answer. A refused session states nothing here, because sign-in answers it. */
 export function readRail(): void {
   const read = ++reads;
   update((held) => ({ ...held, phase: "loading" }));
-  void getJson<ChatsPayload>("/api/chats").then((result) => {
+  void walkRail(read);
+}
+
+async function walkRail(read: number): Promise<void> {
+  const gathered: ChatRow[] = [];
+  let cursor = "";
+  for (;;) {
+    const params = new URLSearchParams({ order_by: "last_at", order: "desc" });
+    if (cursor) params.set("cursor", cursor);
+    const result = await getJson<ConversationsPayload>(
+      "/objects/conversation?" + params.toString(),
+    );
     if (read !== reads) return;
-    update((held) => ({
-      ...held,
-      ...(result.ok
-        ? { phase: "ready" as const, rows: mergeChats(result.payload.chats, held.rows) }
-        : { phase: "failed" as const }),
-      ...(result.ok || result.status === 401
-        ? {}
-        : { fault: { title: "Conversations did not refresh.", description: result.message } }),
-    }));
-  });
+    if (!result.ok) {
+      update((held) => ({
+        ...held,
+        phase: "failed" as const,
+        ...(result.status === 401
+          ? {}
+          : { fault: { title: "Conversations did not refresh.", description: result.message } }),
+      }));
+      return;
+    }
+    gathered.push(...chatRows(result.payload));
+    cursor = result.payload.next_cursor ?? "";
+    if (!cursor || gathered.length >= RAIL_ROWS_MAX) break;
+  }
+  update((held) => ({
+    ...held,
+    phase: "ready" as const,
+    rows: mergeChats(gathered, held.rows),
+  }));
 }
 
 /** The conversations a read is out for. An outstanding read is not an outcome, so it is not state a

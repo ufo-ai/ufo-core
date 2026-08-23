@@ -27,7 +27,7 @@ from ufo.blob import BlobNotFound, FilesystemBlobStore
 from ufo.cli import _seed_target
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
-from ufo.ext.loader import skill_registry
+from ufo.ext.loader import member_object_registry, skill_registry
 from ufo.hub import InProcessHub
 from ufo.onboard.seed import (
     CHAT_ROW_PREFIX,
@@ -116,6 +116,7 @@ def _mount(blob: FilesystemBlobStore, tmp_path: Path) -> FastAPI:
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         skills=skill_registry((web_manifest(),)),
         member_skill_listing=no_member_skills,
+        objects=member_object_registry((web_manifest(),)),
     )
     return app
 
@@ -147,9 +148,12 @@ class Seeded:
         return answer.status_code, (answer.json() if answer.status_code == 200 else {})
 
     async def rail(self) -> list[dict]:
-        answer = await self.client.get("/surface/web/api/chats", headers=self.headers)
+        answer = await self.client.get(
+            "/surface/web/objects/conversation?order_by=last_at&order=desc",
+            headers=self.headers,
+        )
         assert answer.status_code == 200
-        return answer.json()["chats"]
+        return answer.json()["objects"]
 
     async def chat_rows(self, extension: str = WEB_EXTENSION) -> tuple[str, ...]:
         with ws(self.workspace_id):

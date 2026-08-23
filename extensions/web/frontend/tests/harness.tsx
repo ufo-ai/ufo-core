@@ -16,6 +16,7 @@ import {
   type WorkspaceTab,
   WORKSPACE_TABS,
 } from "@/lib/route";
+import type { ChatRow } from "@/lib/rail";
 
 /** The shell's own providers, so a view mounted alone draws what it draws inside the app. A tooltip
  *  reads its delay from a provider above it and raises without one. */
@@ -177,6 +178,7 @@ export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
   const table: Record<string, Route> = {
     "/api/chats": () => json({ chats: [] }),
+    "/objects/conversation$": () => json({ objects: [] }),
     "/api/agents/status": () => json({ statuses: [] }),
     "/connector-catalog": () => json({ providers: [], after: null }),
     "/homepage": () => json({ state: "none" }),
@@ -285,6 +287,22 @@ export const CHAT_ROW = {
 };
 
 export const json = (payload: unknown) => Response.json(payload);
+
+type RailRow = ChatRow;
+
+/** One rail row as the conversation kind's index answers it: the same fields under the object
+ *  row's shape, named by the conversation id. */
+export const conversationObject = ({ conversation_id, ...row }: RailRow) => ({
+  name: conversation_id,
+  ...row,
+});
+
+/** The two reads a seeded rail row answers: the conversation index the rail reads, and the
+ *  permalink resolve that names the same rows one at a time. */
+export const chatsOnWire = (rows: RailRow[]): Record<string, Route> => ({
+  "/objects/conversation$": () => json({ objects: rows.map(conversationObject) }),
+  "/api/chats": () => json({ chats: rows }),
+});
 
 export const NO_RUNS =
   "Each scheduled run reports here: the reply it closed with and the files it shared.";

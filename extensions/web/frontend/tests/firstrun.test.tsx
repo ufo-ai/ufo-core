@@ -4,17 +4,7 @@ import { beforeEach, expect, onTestFinished, test, vi } from "vitest";
 
 import { App } from "@/App";
 
-import {
-  AGENT,
-  AGENT_ID,
-  CONVO_ID,
-  MEMBER,
-  TURN_ID,
-  json,
-  useStreamFake,
-  wire,
-  type Route,
-} from "./harness";
+import { AGENT, AGENT_ID, chatsOnWire, CONVO_ID, json, MEMBER, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -55,7 +45,7 @@ beforeEach(() => {
 /** The first run's own reads, plus whatever the case wires over them. */
 function open(routes: Record<string, Route> = {}, member = ADMIN, payload = FIRST_RUN) {
   const wired = wire({
-    "/api/chats": () => json({ chats: [] }),
+    ...chatsOnWire([]),
     "/workspace/first-run": () => json(payload),
     ...routes,
   });

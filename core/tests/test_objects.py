@@ -54,8 +54,8 @@ from ufo.kinds.agents import (
 )
 from ufo.kinds.artifacts import (
     ARTIFACT_KIND,
-    ARTIFACT_OBJECT,
     ArtifactObjects,
+    artifact_object,
     artifact_object_names,
 )
 from ufo.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
@@ -588,6 +588,31 @@ def test_object_page_rejects_undeclared_row_fields() -> None:
         object_page(rows, ObjectListQuery())
 
 
+def test_object_page_search_skips_link_fields() -> None:
+    """A signed link carries its expiry and signature, so a numeric search would match every row
+    that mints one — search reads text fields, never `url` or `*_url`."""
+    fields = frozenset({"subject", "url", "preview_url"})
+    rows = (
+        ObjectRow(
+            name="report-q3",
+            summary="quarterly numbers",
+            fields={
+                "subject": "revenue",
+                "url": "https://app.example.com/artifacts/a/b?exp=1774000000&sig=abc177",
+                "preview_url": "https://app.example.com/artifacts/a/b.png?exp=1774000000",
+            },
+        ),
+    )
+
+    by_expiry = object_page(rows, ObjectListQuery(query="177", supported_fields=fields))
+    by_subject = object_page(rows, ObjectListQuery(query="revenue", supported_fields=fields))
+    by_name = object_page(rows, ObjectListQuery(query="report-q3", supported_fields=fields))
+
+    assert by_expiry.rows == ()
+    assert [row.name for row in by_subject.rows] == ["report-q3"]
+    assert [row.name for row in by_name.rows] == ["report-q3"]
+
+
 def test_member_owned_kinds_gate_through_the_shared_base() -> None:
     """A member-owned kind cannot hand-roll its own visibility/ownership gate — it subclasses the
     core base that owns it. The connector and source kinds are the reference members; a future
@@ -610,11 +635,11 @@ def test_the_portals_member_reads_are_an_opt_in_a_kind_declares_by_type() -> Non
     assert isinstance(CONNECTOR_GRANT_OBJECT.store, MemberListable)
     assert isinstance(CredentialObjects(slots=()), MemberListable)
     assert isinstance(MEMBER_OBJECT.store, MemberListable)
-    assert isinstance(ARTIFACT_OBJECT.store, MemberListable)
+    assert isinstance(artifact_object().store, MemberListable)
     assert isinstance(MEMORY_OBJECT.store, MemberListable)
     assert isinstance(SKILL_OBJECT.store, MemberListable)
     assert isinstance(CONVERSATION_OBJECT.store, MemberReadable)
-    assert not isinstance(CONVERSATION_OBJECT.store, MemberListable)
+    assert isinstance(CONVERSATION_OBJECT.store, MemberListable)
     assert not isinstance(AGENT_OBJECT.store, MemberReadable)
     assert not isinstance(AGENT_OBJECT.store, MemberListable)
     assert not isinstance(PAGE_OBJECT.store, MemberReadable)
@@ -1792,6 +1817,11 @@ async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
     assert datetime.fromisoformat(rows[alpha]["shared_at"]).replace(tzinfo=UTC) == datetime(
         2026, 7, 3, tzinfo=UTC
     )
+    assert rows[alpha]["media"] == "document"
+    assert rows[alpha]["media_type"] == "text/plain"
+    assert rows[alpha]["mine"] is False
+    assert rows[alpha]["url"] is None
+    assert rows[alpha]["preview_url"] is None
     assert [row["name"] for row in by_conversation["objects"]] == [beta]
     assert [row["name"] for row in newest_first["objects"]] == [beta, alpha]
 
@@ -1998,6 +2028,82 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
                         {"user_description": OBJECT_NARRATION, "kind": ARTIFACT_KIND, "name": name}
                     ),
                 )
+
+
+async def test_a_name_read_answers_past_the_listing_window(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan window bounds the unfiltered browse alone: a file whose shares all fell past
+    the newest-N window leaves the plain listing, while a search or a column filter narrows the
+    query before the window and still answers it, its name reads whole, and a delete removes
+    every version — a bounded page must never make a named thing unreachable or half-deleted."""
+    monkeypatch.setattr(artifacts, "ARTIFACT_SCAN_LIMIT", 2)
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        turn = await _turn_row(workspace_id)
+        name = f"{turn.conversation_id.hex[:8]}-report-txt"
+        ctx, _ = await _workspace_context(turn, tmp_path)
+        await ctx.sandbox.bash("printf 'v1' > report.txt")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        await ctx.sandbox.bash("printf 'v2' > report.txt")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        later = await _turn_row(workspace_id, agent_id=turn.agent_id)
+        later_ctx, _ = await _workspace_context(later, tmp_path)
+        await later_ctx.sandbox.bash("printf 'c1' > chart.txt")
+        await _text(tools, "share_file", later_ctx, files=[{"file_path": "chart.txt"}])
+        await later_ctx.sandbox.bash("printf 'c2' > chart.txt")
+        await _text(tools, "share_file", later_ctx, files=[{"file_path": "chart.txt"}])
+        async with workspace_tx() as connection:
+            report_keys = (
+                (
+                    await connection.execute(
+                        sa.select(tables.shared_artifact.c.blob_key).where(
+                            tables.shared_artifact.c.workspace_id == workspace_id,
+                            tables.shared_artifact.c.filename == "report.txt",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(report_keys) == 2
+
+        listing = json.loads(
+            await _agent_text(turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND)
+        )
+        assert [row["filename"] for row in listing["objects"]] == ["chart.txt"]
+        searched = json.loads(
+            await _agent_text(
+                turn.agent_id, tools, "object_list", ctx, kind=ARTIFACT_KIND, query="report"
+            )
+        )
+        assert [row["filename"] for row in searched["objects"]] == ["report.txt"]
+        narrowed = json.loads(
+            await _agent_text(
+                turn.agent_id,
+                tools,
+                "object_list",
+                ctx,
+                kind=ARTIFACT_KIND,
+                filters={"conversation": str(turn.conversation_id)},
+            )
+        )
+        assert {row["filename"] for row in narrowed["objects"]} == {"report.txt"}
+        fetched = yaml.safe_load(
+            await _agent_text(
+                turn.agent_id, tools, "object_get", ctx, kind=ARTIFACT_KIND, name=name
+            )
+        )
+        assert fetched["spec"]["filename"] == "report.txt"
+        deleted = json.loads(
+            await _agent_text(
+                turn.agent_id, tools, "object_delete", ctx, kind=ARTIFACT_KIND, name=name
+            )
+        )
+        assert deleted["spec"]["filename"] == "report.txt"
+        for blob_key in report_keys:
+            assert not await ctx.blob.exists(blob_key)
 
 
 async def test_artifact_over_the_copy_bound_reports_no_workspace_path(db: None) -> None:
@@ -3544,3 +3650,176 @@ async def test_an_agent_write_refuses_off_reasoning_for_a_required_reasoning_mod
             None,
             expected_generation=None,
         )
+
+
+async def _rail_conversation(
+    workspace_id: UUID,
+    agent_id: UUID,
+    *,
+    title: str | None,
+    audience: Audience,
+    member_id: UUID | None,
+    speaker_member_id: UUID | None,
+    admission: str,
+    moved_at: datetime,
+    surface: str = "cli",
+    surface_label: str | None = None,
+) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=surface,
+                surface_label=surface_label,
+                queue_key=f"rail-{conversation_id.hex[:8]}",
+                member_id=member_id,
+                title=title,
+                audience=str(audience),
+                created_at=moved_at,
+                updated_at=moved_at,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound=title or "hello",
+                admission_source=admission,
+                speaker_member_id=speaker_member_id,
+                created_at=moved_at,
+                updated_at=moved_at,
+            )
+        )
+    return conversation_id
+
+
+async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
+    """The member listing is the rail: the member's own conversations beside the readable ones
+    colleagues are in, `mine` and `speaker` computed for the viewer, machine lanes (a scheduled
+    seed, the prepared-intent queue) and nameless rows absent, and an admin's read never widened
+    past their own reach."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        mine_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ship the plan",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+        )
+        shared_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Bob thread",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=bob,
+            admission="member",
+            moved_at=datetime(2026, 8, 2, tzinfo=UTC),
+            surface="slack",
+            surface_label="#ops",
+        )
+        await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Build your homepage",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=None,
+            admission="scheduled",
+            moved_at=datetime(2026, 8, 3, tzinfo=UTC),
+            surface="web",
+        )
+        await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title='{"verb": "apply"}',
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="intent",
+            moved_at=datetime(2026, 8, 4, tzinfo=UTC),
+            surface="web",
+        )
+        await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title=None,
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 5, tzinfo=UTC),
+            surface="web",
+        )
+        private_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Bob private",
+            audience=conversation_audience(bob),
+            member_id=bob,
+            speaker_member_id=bob,
+            admission="member",
+            moved_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+        query = ObjectListQuery(
+            order_by="last_at",
+            order="desc",
+            supported_fields=CONVERSATION_OBJECT.list_fields,
+        )
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None, member_id=alice, admin=False, query=query
+            )
+            widened = await CONVERSATION_OBJECT.store.member_page(
+                None, member_id=alice, admin=True, query=query
+            )
+            bob_page = await CONVERSATION_OBJECT.store.member_page(
+                None, member_id=bob, admin=False, query=query
+            )
+            portal_only = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=alice,
+                admin=False,
+                query=ObjectListQuery(
+                    order_by="last_at",
+                    order="desc",
+                    filters={"portal": True},
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    assert [row.name for row in page.rows] == [str(shared_id), str(mine_id)]
+    shared_row, mine_row = page.rows
+    assert mine_row.fields["title"] == "Ship the plan"
+    assert mine_row.fields["mine"] is True
+    assert mine_row.fields["speaker"] is None
+    assert mine_row.fields["surface"] == "web"
+    assert mine_row.fields["surface_label"] is None
+    assert mine_row.fields["portal"] is True
+    assert isinstance(mine_row.fields["last_at"], str)
+    assert shared_row.fields["mine"] is False
+    assert shared_row.fields["speaker"] == f"{bob.hex[:8]}@x.test"
+    assert shared_row.fields["surface"] == "slack"
+    assert shared_row.fields["surface_label"] == "#ops"
+    assert shared_row.fields["portal"] is False
+    assert [row.name for row in widened.rows] == [row.name for row in page.rows]
+    bob_rows = {row.name: row for row in bob_page.rows}
+    assert set(bob_rows) == {str(shared_id), str(private_id)}
+    assert bob_rows[str(shared_id)].fields["mine"] is True
+    assert bob_rows[str(shared_id)].fields["speaker"] is None
+    assert [row.name for row in portal_only.rows] == [str(mine_id)]

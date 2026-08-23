@@ -45,9 +45,14 @@ from ufo.db import workspace_tx
 from ufo.ext.surface import (
     OPERATOR_EMAIL_DOMAIN,
     TERMINAL_TURN_STATUSES,
+    ScheduledRun,
+    SharedArtifact,
     SurfaceInstallationAccess,
     TurnTailer,
     retitle_conversation,
+    scheduled_runs,
+    shared_artifact_link,
+    shared_artifact_preview_link,
     summarize_conversation_title,
 )
 from ufo.hub import LiveFrame
@@ -1052,6 +1057,47 @@ class ExtensionContext:
             blob_key,
             size_bytes,
             workspace_id=self.workspace_id,
+        )
+
+    def artifact_link(self, artifact: SharedArtifact) -> str | None:
+        """A TTL download link for a file a turn shared, or None when this deploy mints no artifact
+        links — minted here for the reason `image_preview_url` is: the deploy secret lives on this
+        context, and an extension composing a member listing never holds it."""
+        return shared_artifact_link(
+            self.artifact_token_secret, self.public_base_url, self.workspace_id, artifact
+        )
+
+    def artifact_preview_link(self, artifact: SharedArtifact) -> str | None:
+        """A signed raster-preview link for a file a turn shared, or None when its type, size, or
+        delivery is ineligible."""
+        return shared_artifact_preview_link(
+            self.artifact_token_secret, self.public_base_url, self.workspace_id, artifact
+        )
+
+    async def scheduled_runs(
+        self,
+        member_id: UUID,
+        *,
+        agent_id: UUID | None,
+        limit: int,
+        turn_id: UUID | None = None,
+        subjects: frozenset[str] | None = None,
+    ) -> tuple[ScheduledRun, ...]:
+        """The newest turns that fired on their own and this member reads — terminal scheduled
+        admissions reporting into conversations whose content the member's audiences read, each
+        carrying its terminal reply and the files it shared. `agent_id` narrows to one agent's
+        fires and `turn_id` to one run, the permalink read; `limit` bounds the page, newest first.
+        The read an extension's object kind builds a member listing from: the fence is the
+        reader's own audiences and never widens for an admin. `subjects` narrows it further to a
+        turn's own room — the turn path's fence, so an externally shared room is never handed
+        workspace content its audience does not carry."""
+        return await scheduled_runs(
+            self.workspace_id,
+            member_id,
+            limit=limit,
+            agent_id=agent_id,
+            turn_id=turn_id,
+            subjects=subjects,
         )
 
     def home_url(self, fragment: str = "") -> str | None:

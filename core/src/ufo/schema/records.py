@@ -49,6 +49,8 @@ SCHEDULED_ADMISSION: TurnAdmissionSource = "scheduled"
 INTENT_ADMISSION: TurnAdmissionSource = "intent"
 SPAWN_RESULT_KEY_PREFIX = "subagent-result:"
 SUBAGENT_SURFACE = "subagent"
+PORTAL_SURFACE = "web"
+EXTENSION_SURFACE_PREFIX = "extension:"
 
 TABLER_ICON_MAX_LENGTH = 64
 TABLER_ICON_PATTERN = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*"

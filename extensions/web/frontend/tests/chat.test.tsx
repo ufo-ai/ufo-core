@@ -8,23 +8,7 @@ import type { EarlierMessages } from "@/lib/earlier";
 import { conversationSlotHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
 
-import {
-  AGENT,
-  AGENT_ID,
-  ARRIVAL_ID,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
-  SECOND,
-  SECOND_ID,
-  StreamFake,
-  TURN_ID,
-  json,
-  saying,
-  useStreamFake,
-  wire,
-  type Route,
-} from "./harness";
+import { AGENT, AGENT_ID, ARRIVAL_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -39,7 +23,7 @@ afterEach(() => {
 });
 
 const transcript = (payload: unknown = { messages: [] }) => ({
-  "/api/chats": () => json({ chats: [CHAT_ROW] }),
+  ...chatsOnWire([CHAT_ROW]),
   "/transcript": () => json(payload),
   "/slots": () =>
     json({
@@ -2775,7 +2759,7 @@ test("switching conversations remounts the log so scroll state never leaks acros
     title: "The second thread",
   };
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW, other] }),
+    ...chatsOnWire([CHAT_ROW, other]),
     "/transcript": () => json({ messages: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
@@ -2805,7 +2789,7 @@ test("switching conversations remounts the log so scroll state never leaks acros
 test("the log opens pinned: loading a transcript lands at the bottom untouched", async () => {
   let release: (value: Response) => void = () => {};
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () => new Promise<Response>((resolve) => (release = resolve)),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });

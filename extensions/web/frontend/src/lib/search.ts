@@ -57,13 +57,13 @@ const SITE_KIND = "site";
  *  the record's own place is under that agent, not under the member who searched. */
 type FoundObject = { name: string; agent_id: string };
 
-/** What a hit needs of a file: its own id, which the card it opens is keyed by, what it is called,
- *  and what it is. */
-type FoundFile = { id: string; filename: string; media_type: string };
+/** What a hit needs of a file's object row: its name, which the card it opens is keyed by, what
+ *  it is called, and what it is. */
+type FoundArtifact = { name: string; filename: string; media_type: string };
 
 type Found = {
   conversations: { conversations: Conversation[] };
-  artifacts: { artifacts: FoundFile[] };
+  artifacts: { objects: FoundArtifact[] };
   memory: { matches: { text: string; kind: string; ref: string | null }[] };
   objects: { objects: FoundObject[] };
 };
@@ -134,11 +134,11 @@ export async function searchEverywhere(
     group<"artifacts">(
       "Artifacts",
       IconFile,
-      ["/workspace/artifacts" + query(wanted)],
+      ["/objects/artifact" + query(wanted, { order_by: "shared_at", order: "desc" })],
       (payload) =>
-        payload.artifacts.map((entry) => ({
-          key: entry.id,
-          hash: artifactsApp ? agentHash(artifactsApp.id, { opens: [entry.id] }) : "",
+        payload.objects.map((entry) => ({
+          key: entry.name,
+          hash: artifactsApp ? agentHash(artifactsApp.id, { opens: [entry.name] }) : "",
           primary: entry.filename,
           fact: entry.media_type,
         })),

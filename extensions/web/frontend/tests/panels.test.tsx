@@ -6,32 +6,7 @@ import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 
-import {
-  destination,
-  fact,
-  heldConversation,
-  json,
-  openAgentSettings,
-  openConversation,
-  opened,
-  pick,
-  pressRow,
-  refusedNotice,
-  useStreamFake,
-  wire,
-  AGENT,
-  AGENT_ID,
-  CHAT_ROW,
-  CONVO_ID,
-  FRESH,
-  MEMBER,
-  PlacedWorkspace,
-  SECOND,
-  SECOND_ID,
-  SETTINGS,
-  StreamFake,
-  TURN_ID,
-} from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 beforeEach(() => {
   useStreamFake();
 });
@@ -853,13 +828,10 @@ test("an app opens on the conversation that moved last, and an address names ano
   });
   location.hash = "#/agents/" + AGENT_ID;
   wire({
-    "/api/chats": () =>
-      json({
-        chats: [
-          { ...CHAT_ROW, title: "Newest thread" },
-          { ...CHAT_ROW, conversation_id: older, title: "Older thread" },
-        ],
-      }),
+    ...chatsOnWire([
+      { ...CHAT_ROW, title: "Newest thread" },
+      { ...CHAT_ROW, conversation_id: older, title: "Older thread" },
+    ]),
     "/conversations$": () =>
       json({
         conversations: [listed(CONVO_ID, "Newest thread"), listed(older, "Older thread")],
@@ -905,13 +877,10 @@ test("an app with no page opens its newest conversation whole, with no lane besi
   });
   location.hash = "#/agents/" + AGENT_ID;
   wire({
-    "/api/chats": () =>
-      json({
-        chats: [
-          { ...CHAT_ROW, title: "Newest thread" },
-          { ...CHAT_ROW, conversation_id: older, title: "Older thread" },
-        ],
-      }),
+    ...chatsOnWire([
+      { ...CHAT_ROW, title: "Newest thread" },
+      { ...CHAT_ROW, conversation_id: older, title: "Older thread" },
+    ]),
     "/conversations$": () =>
       json({
         conversations: [listed(CONVO_ID, "Newest thread"), listed(older, "Older thread")],
@@ -929,7 +898,7 @@ test("an app with no page opens its newest conversation whole, with no lane besi
 test("the app pane starts a conversation where it stands, without leaving for the chat screen", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/homepage": () => json({ state: "none" }),
     "/transcript": () => json({ messages: [] }),
   });
@@ -951,7 +920,7 @@ test("New starts a fresh conversation while the address still names one", async 
   const held = "44444444-4444-4444-8444-444444444444";
   location.hash = "#/agents/" + AGENT_ID + "?open=" + held;
   wire({
-    "/api/chats": () => json({ chats: [{ ...CHAT_ROW, conversation_id: held }] }),
+    ...chatsOnWire([{ ...CHAT_ROW, conversation_id: held }]),
     "/conversations$": () =>
       json({
         conversations: [

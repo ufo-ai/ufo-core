@@ -59,14 +59,14 @@ afterEach(() => {
 test("a portal fetch rides the bridge and comes back as the surface's own response", async () => {
   const runtime = await connected((message) => {
     expect(message.method).toBe("GET");
-    expect(message.path).toBe("/api/chats");
+    expect(message.path).toBe("/objects/conversation");
     window.postMessage(
       {
         ufo: "data",
         id: message.id,
         ok: true,
         status: 200,
-        body: JSON.stringify({ chats: [] }),
+        body: JSON.stringify({ objects: [] }),
         refusal: null,
         fault: null,
       },
@@ -74,9 +74,9 @@ test("a portal fetch rides the bridge and comes back as the surface's own respon
     );
   });
   runtime.installShims();
-  const res = await fetch("/surface/web/api/chats");
+  const res = await fetch("/surface/web/objects/conversation");
   expect(res.status).toBe(200);
-  expect(await res.json()).toEqual({ chats: [] });
+  expect(await res.json()).toEqual({ objects: [] });
 });
 
 test("a refused call reads as a refusal response, marked so the reader shows its sentence", async () => {

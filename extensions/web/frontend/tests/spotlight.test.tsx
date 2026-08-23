@@ -4,25 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import {
-  AGENT,
-  AGENT_ID,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
-  SECOND,
-  SECOND_ID,
-  SITE_KIND,
-  StreamFake,
-  TASK_KIND,
-  TRIGGER_KIND,
-  TURN_ID,
-  json,
-  objectIndex,
-  owned,
-  useStreamFake,
-  wire,
-} from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "";
@@ -49,7 +31,7 @@ const FOUND_CONVERSATION = {
 };
 
 const FOUND_FILE = {
-  id: "f1",
+  name: "conv1-deploy-plan-md",
   filename: "deploy-plan.md",
   subject: null,
   media_type: "text/markdown",
@@ -98,7 +80,7 @@ function everything() {
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
     "/slots": () => json({ slots: [] }),
     "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
-    "/workspace/artifacts": () => json({ artifacts: [FOUND_FILE] }),
+    "/objects/artifact": () => json({ objects: [FOUND_FILE] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [FOUND_MEMORY] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, [FOUND_TASK]),
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
@@ -110,7 +92,7 @@ function everything() {
 function nothing() {
   return wire({
     "/slots": () => json({ slots: [] }),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/objects/artifact": () => json({ objects: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
@@ -174,7 +156,7 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   expect(headings()).toEqual(["Actions", "Conversations", "Artifacts", "Memory", "Tasks"]);
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
-  expect(asked.some((url) => url.includes("/workspace/artifacts"))).toBe(true);
+  expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
   expect(asked.some((url) => url.includes("/workspace/memory"))).toBe(true);
   expect(asked.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(true);
   expect(asked.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(true);
@@ -199,7 +181,7 @@ test("every memory match stands, though they all open the one memory screen", as
   const second = { ...FOUND_MEMORY, text: "deploys are announced in #ops", ref: "memory/2" };
   wire({
     "/slots": () => json({ slots: [] }),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/objects/artifact": () => json({ objects: [] }),
     "/workspace/memory": () =>
       json({ available: true, kinds: [], matches: [FOUND_MEMORY, second] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
@@ -240,7 +222,7 @@ test("two agents' same-named records both stand, each opening its own", async ()
   wire({
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
     "/slots": () => json({ slots: [] }),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/objects/artifact": () => json({ objects: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, [FOUND_TASK, second]),
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
@@ -268,7 +250,7 @@ test("a read that fails states so under its own heading, and the others still an
   wire({
     "/slots": () => json({ slots: [] }),
     "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
-    "/workspace/artifacts": () => new Response("nope", { status: 503 }),
+    "/objects/artifact": () => new Response("nope", { status: 503 }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
@@ -378,7 +360,7 @@ test("the term is said to the agent, by the composer on the screen it lands on",
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "deploy" }),
     "/slots": () => json({ slots: [] }),
     "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/objects/artifact": () => json({ objects: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
@@ -405,7 +387,7 @@ test("the term is said to the agent the row names, from another agent's start sc
   const { calls } = wire({
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
     "/slots": () => json({ slots: [] }),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/objects/artifact": () => json({ objects: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),
@@ -436,10 +418,10 @@ test("the term is said to the agent the row names, from another agent's start sc
  *  there — into the thread they were leaving, over the draft they left in it. */
 test("the term founds a new conversation, though the member was reading another", async () => {
   const { calls } = wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/slots": () => json({ slots: [] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
-    "/workspace/artifacts": () => json({ artifacts: [] }),
+    "/objects/artifact": () => json({ objects: [] }),
     "/workspace/memory": () => json({ available: true, kinds: [], matches: [] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, []),
     ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, []),

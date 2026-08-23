@@ -64,6 +64,7 @@ from ufo.ext.surface import (
     member_message_text,
     mint_marker,
     record_transcript_access,
+    scheduled_runs,
     writeback_workspaces,
 )
 from ufo.hub import InProcessHub
@@ -1942,102 +1943,6 @@ async def test_shared_artifacts_reads_a_turns_files_deterministically(db: None, 
     assert await foreign.shared_artifacts(turn_id) == ()
 
 
-async def test_artifact_listing_carries_the_conversation_owner_email(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
-    owner_id = await _seed_member_row(workspace_id, "owner@example.com")
-    artifact = SharedArtifact(
-        blob_key="artifacts/x/report.pdf",
-        filename="report.pdf",
-        subject=None,
-        media_type="application/pdf",
-        size_bytes=3,
-    )
-    await _seed_turn(
-        workspace_id,
-        "C8:1.0",
-        "done",
-        "files",
-        artifacts=(artifact,),
-        member_id=owner_id,
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    page = await context.list_artifacts(owner_id, admin=False, limit=10)
-    assert [entry.owner_email for entry in page.rows] == ["owner@example.com"]
-
-
-async def test_artifact_listing_carries_the_conversations_surface_and_thread_source(
-    db: None, tmp_path
-) -> None:
-    workspace_id, _, _ = await _seed()
-    member_id = await _seed_member_row(workspace_id, "m@example.com")
-    artifact = SharedArtifact(
-        blob_key="artifacts/x/chart.png",
-        filename="chart.png",
-        subject=None,
-        media_type="image/png",
-        size_bytes=3,
-    )
-    await _seed_turn(
-        workspace_id,
-        "C1:1700000000.000100",
-        "done",
-        "files",
-        artifacts=(artifact,),
-        surface="slack",
-        member_id=member_id,
-        context=TurnContext(sender="Mel Okafor (m@example.com)", source=OPENING_PERMALINK),
-    )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    page = await context.list_artifacts(member_id, admin=False, limit=10)
-    assert [(entry.surface, entry.source) for entry in page.rows] == [("slack", OPENING_PERMALINK)]
-    conversation_rows = await context.list_conversation_artifacts(
-        page.rows[0].conversation_id, limit=10
-    )
-    assert [(entry.surface, entry.source) for entry in conversation_rows] == [
-        ("slack", OPENING_PERMALINK)
-    ]
-
-
-async def test_artifact_listing_narrows_to_the_created_scope(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
-    member_id = await _seed_member_row(workspace_id, "m@example.com")
-    other_id = await _seed_member_row(workspace_id, "n@example.com")
-    records = (
-        ("mine.pdf", member_id),
-        ("private.pdf", other_id),
-        ("workspace.pdf", None),
-    )
-    for filename, owner in records:
-        artifact = SharedArtifact(
-            blob_key=f"artifacts/x/{filename}",
-            filename=filename,
-            subject=None,
-            media_type="application/pdf",
-            size_bytes=3,
-        )
-        await _seed_turn(
-            workspace_id,
-            f"S:{filename}",
-            "done",
-            "files",
-            artifacts=(artifact,),
-            member_id=owner,
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    def names(page) -> set[str]:
-        return {entry.artifact.filename for entry in page.rows}
-
-    created = await context.list_artifacts(member_id, admin=False, limit=10, scope="created")
-    assert names(created) == {"mine.pdf"}
-    admin_created = await context.list_artifacts(member_id, admin=True, limit=10, scope="created")
-    assert names(admin_created) == {"mine.pdf"}
-    unscoped = await context.list_artifacts(member_id, admin=True, limit=10)
-    assert names(unscoped) == {"mine.pdf", "private.pdf", "workspace.pdf"}
-    with pytest.raises(ValueError, match="unknown artifact scope filter"):
-        await context.list_artifacts(member_id, admin=False, limit=10, scope="shared")
-
-
 def _shared_page(name: str) -> SharedArtifact:
     return SharedArtifact(
         blob_key=f"artifacts/{name}/report.md",
@@ -2048,14 +1953,13 @@ def _shared_page(name: str) -> SharedArtifact:
     )
 
 
-async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
-    db: None, tmp_path
-) -> None:
+async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(db: None) -> None:
     """The runs page lists only terminal scheduled admissions whose conversation content the
     reader reads — the shared conversations' runs and their own. A run's reply is transcript
     content, so another member's private conversation and a room never list, whoever asks; a turn
     still going has no reply and never lists either — and each run carries its key, terminal text,
-    and shared files whole, previews included."""
+    and shared files whole, previews included. `turn_id` pins the read to one run under the
+    same fence."""
     workspace_id, agent_id, _ = await _seed()
     member_id = await _seed_member_row(workspace_id, "m@example.com")
     other_id = await _seed_member_row(workspace_id, "n@example.com")
@@ -2107,10 +2011,9 @@ async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
         workspace_id, "R5", "running", "", (_shared_page("R5"),), admission_source="scheduled"
     )
     await _seed_turn(workspace_id, "R3", "done", "typed", (_shared_page("R3"),))
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    page = await context.list_scheduled_runs(member_id, limit=10)
-    assert [run.turn_id for run in page.rows] == [shared_run]
-    run = page.rows[0]
+    listed = await scheduled_runs(workspace_id, member_id, limit=10)
+    assert [run.turn_id for run in listed] == [shared_run]
+    run = listed[0]
     assert (run.status, run.text) == ("done", "the digest")
     assert run.idempotency_key is not None
     assert run.idempotency_key.startswith("11111111-1111-4111-8111-111111111111:")
@@ -2118,45 +2021,24 @@ async def test_scheduled_runs_carry_output_and_files_and_hold_the_audience(
     assert run.agent_id == agent_id
     assert [artifact.filename for artifact in run.artifacts] == ["brief.pdf", "chart.png"]
     assert run.artifacts[0].preview_blob_key == "artifacts/x/brief.png"
-    assert page.older is None and page.newer is None
-    own_page = await context.list_scheduled_runs(other_id, limit=10)
-    assert {run.turn_id for run in own_page.rows} == {shared_run, private_run}
-    foreign = await context.list_scheduled_runs(other_id, limit=10, agent_id=uuid4())
-    assert foreign.rows == ()
-    narrowed = await context.list_scheduled_runs(other_id, limit=10, agent_id=agent_id)
-    assert {run.turn_id for run in narrowed.rows} == {shared_run, private_run}
+    own = await scheduled_runs(workspace_id, other_id, limit=10)
+    assert {run.turn_id for run in own} == {shared_run, private_run}
+    foreign = await scheduled_runs(workspace_id, other_id, limit=10, agent_id=uuid4())
+    assert foreign == ()
+    narrowed = await scheduled_runs(workspace_id, other_id, limit=10, agent_id=agent_id)
+    assert {run.turn_id for run in narrowed} == {shared_run, private_run}
+    pinned = await scheduled_runs(workspace_id, member_id, limit=1, turn_id=shared_run)
+    assert [run.turn_id for run in pinned] == [shared_run]
+    fenced = await scheduled_runs(workspace_id, member_id, limit=1, turn_id=private_run)
+    assert fenced == ()
 
 
-async def test_scheduled_runs_page_by_keyset_without_repeats(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
-    member_id = await _seed_member_row(workspace_id, "m@example.com")
-    fired = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
-    seeded = {
-        await _seed_turn(
-            workspace_id,
-            f"P{index}",
-            "done",
-            str(index),
-            (_shared_page(f"P{index}"),),
-            admission_source="scheduled",
-            created_at=fired + timedelta(minutes=index),
-        )
-        for index in range(3)
-    }
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    first = await context.list_scheduled_runs(member_id, limit=2)
-    assert len(first.rows) == 2 and first.older is not None
-    rest = await context.list_scheduled_runs(member_id, limit=2, cursor=first.older)
-    walked = [run.turn_id for run in (*first.rows, *rest.rows)]
-    assert len(walked) == 3 and set(walked) == seeded
-    back = await context.list_scheduled_runs(member_id, limit=2, cursor=rest.newer)
-    assert [run.turn_id for run in back.rows] == [run.turn_id for run in first.rows]
-
-
-async def test_scheduled_runs_page_only_the_runs_that_reported(db: None, tmp_path) -> None:
-    """A run that ended well and shared no file reported nothing, so it is no row of this feed: it
-    neither fills a page nor counts toward one. Quiet runs between two reports therefore cannot
-    spend a page, and every page of the walk carries rows while rows remain behind it."""
+async def test_scheduled_runs_bound_newest_first_and_list_only_the_runs_that_reported(
+    db: None,
+) -> None:
+    """A run that ended well and shared no file reported nothing, so it is no row of this feed —
+    quiet fires between two reports cost the reader nothing — and `limit` takes the newest rows
+    of what remains."""
     workspace_id, _, _ = await _seed()
     member_id = await _seed_member_row(workspace_id, "m@example.com")
     midnight = datetime(2026, 8, 15, tzinfo=UTC)
@@ -2183,54 +2065,10 @@ async def test_scheduled_runs_page_only_the_runs_that_reported(db: None, tmp_pat
         )
         if status != "done" or files:
             reported.append(turn_id)
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert await context.count_scheduled_runs_since(member_id, midnight) == len(reported)
-    walked: list[UUID] = []
-    page = await context.list_scheduled_runs(member_id, limit=1)
-    while True:
-        assert page.rows != ()
-        walked.extend(run.turn_id for run in page.rows)
-        if page.older is None:
-            break
-        page = await context.list_scheduled_runs(member_id, limit=1, cursor=page.older)
-    assert walked == list(reversed(reported))
-
-
-async def test_scheduled_run_count_holds_the_page_fence_and_the_span(db: None, tmp_path) -> None:
-    """The count answers over exactly the rows the page lists: terminal scheduled admissions of
-    conversations the reader reads, from the moment asked for onward. A run before that moment, a
-    run of another member's private conversation, a running turn, and a member's own typed turn
-    are all absent, and `agent_id` narrows the count as it narrows the page."""
-    workspace_id, agent_id, _ = await _seed()
-    member_id = await _seed_member_row(workspace_id, "m@example.com")
-    other_id = await _seed_member_row(workspace_id, "n@example.com")
-    midnight = datetime(2026, 8, 15, tzinfo=UTC)
-    for key, status, source, member, fired in (
-        ("N1", "done", "scheduled", None, midnight),
-        ("N2", "failed", "scheduled", None, midnight + timedelta(hours=9)),
-        ("N3", "done", "scheduled", None, midnight - timedelta(microseconds=1)),
-        ("N4", "done", "scheduled", other_id, midnight + timedelta(hours=10)),
-        ("N5", "running", "scheduled", None, midnight + timedelta(hours=11)),
-        ("N6", "done", "internal", None, midnight + timedelta(hours=12)),
-    ):
-        await _seed_turn(
-            workspace_id,
-            key,
-            status,
-            key,
-            (_shared_page(key),),
-            member_id=member,
-            admission_source=source,
-            created_at=fired,
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert await context.count_scheduled_runs_since(member_id, midnight) == 2
-    assert await context.count_scheduled_runs_since(other_id, midnight) == 3
-    assert await context.count_scheduled_runs_since(member_id, midnight - timedelta(days=1)) == 3
-    assert await context.count_scheduled_runs_since(other_id, midnight, agent_id=agent_id) == 3
-    assert await context.count_scheduled_runs_since(other_id, midnight, agent_id=uuid4()) == 0
-    page = await context.list_scheduled_runs(member_id, limit=10)
-    assert len(page.rows) == 3
+    whole = await scheduled_runs(workspace_id, member_id, limit=10)
+    assert [run.turn_id for run in whole] == list(reversed(reported))
+    newest = await scheduled_runs(workspace_id, member_id, limit=2)
+    assert [run.turn_id for run in newest] == list(reversed(reported))[:2]
 
 
 async def test_workspace_candidates_rotate_and_recover_from_cursor_deletion_and_restart(

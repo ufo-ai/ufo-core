@@ -30,7 +30,12 @@ from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
 from ufo.kinds.conversations import CONVERSATION_KIND
-from ufo.media.artifact_url import artifact_url_expiry, mint_artifact_url
+from ufo.media.artifact_url import (
+    artifact_url_expiry,
+    mint_artifact_url,
+    mint_image_preview_url,
+)
+from ufo.media.image_previews import raster_image_media_type
 from ufo.object_name import ObjectRef
 from ufo.object_scope import object_agent_id
 from ufo.objects import (
@@ -47,6 +52,7 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
+from ufo.schema.records import TurnContext
 from ufo.tools.context import ToolContext
 from ufo.turns.audience import audience_subjects, conversation_audience
 from ufo.workspace import ws_current
@@ -56,12 +62,36 @@ ARTIFACTS_ARE_SHARED = (
     "artifacts exist only by sharing — write the file in the workspace and share_file it"
 )
 ARTIFACT_WORKSPACE_DIR = "artifacts"
+ARTIFACT_SCAN_LIMIT = 500
 NAME_SLUG_MAX = 40
 SUMMARY_MAX = 100
 NAME_FALLBACK_SLUG = "artifact"
 CONVERSATION_PREFIX_HEX = 8
 COLLISION_DIGEST_HEX = 8
+WEB_SURFACE = "web"
+MEDIA_IMAGE_PREFIX = "image/"
+MEDIA_DOCUMENT_PREFIXES = ("text/", "application/vnd.openxmlformats-officedocument")
+MEDIA_DOCUMENT_TYPES = frozenset({"application/pdf", "application/msword"})
 _SLUG_RUN = re.compile(r"[^a-z0-9]+")
+
+
+def artifact_media(media_type: str) -> str:
+    """The coarse category a listing filters files by — `image`, `document`, or `other` — so
+    `media=image` is an exact match over a declared field rather than a bespoke query grammar."""
+    lowered = media_type.lower()
+    if lowered.startswith(MEDIA_IMAGE_PREFIX):
+        return "image"
+    if lowered.startswith(MEDIA_DOCUMENT_PREFIXES) or lowered in MEDIA_DOCUMENT_TYPES:
+        return "document"
+    return "other"
+
+
+def _document_media() -> sa.ColumnElement[bool]:
+    lowered = sa.func.lower(tables.shared_artifact.c.media_type)
+    return sa.or_(
+        *(lowered.like(prefix + "%") for prefix in MEDIA_DOCUMENT_PREFIXES),
+        lowered.in_(MEDIA_DOCUMENT_TYPES),
+    )
 
 
 def artifact_object_names(shares: Iterable[tuple[UUID, str]]) -> dict[tuple[UUID, str], str]:
@@ -110,11 +140,16 @@ class ArtifactObjects:
     grouped by the sharing conversation and filename — each group's newest share is the object's
     current version. `status` is where get's workspace copy happens: the seam calls `status` only
     on `object_get`, so `apply` and `delete` fetching the current spec never write into the
-    workspace as a side effect."""
+    workspace as a side effect. The deploy's link minting rides construction — a listing row
+    publishes the signed download and preview links the portal draws, and a deploy that mints no
+    artifact links lists the same rows with null links."""
+
+    public_base_url: str | None = None
+    artifact_token_secret: str = ""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        groups = await self._groups(ctx.read_subjects)
-        return object_page(tuple(_row(name, shares) for name, shares in groups), query)
+        rows = await self._rows(ctx.read_subjects, ctx.acting_member_id, query)
+        return object_page(rows, query)
 
     async def member_page(
         self,
@@ -125,12 +160,14 @@ class ArtifactObjects:
         query: ObjectListQuery,
     ) -> ObjectPage:
         """The shared files a signed-in member reads outside a turn: the rows `list` renders, over
-        the same two scopes it reads under — the selected agent, bound by the caller, and the
-        subjects a member's own conversation carries (their own and the workspace-shared). A file
-        shared into a room, or into another member's private conversation, is absent here for
-        everyone, an admin included."""
-        groups = await self._groups(audience_subjects(conversation_audience(member_id)))
-        return object_page(tuple(_row(name, shares) for name, shares in groups), query)
+        the selected agent bound by the caller. Every reader — an admin included — reads the
+        subjects their own conversation carries, their own and the workspace-shared: a shared
+        file is conversation content, and content reads fence on readable audiences for everyone,
+        so a file shared into a room or into another member's private conversation is absent."""
+        rows = await self._rows(
+            audience_subjects(conversation_audience(member_id)), member_id, query
+        )
+        return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ArtifactSpec] | None:
         shares = await self._find(ctx.read_subjects, name)
@@ -145,12 +182,14 @@ class ArtifactObjects:
         admin: bool,
     ) -> MemberObject[ArtifactSpec] | None:
         """One shared file as the portal reads it — the row `list` renders beside the detail `get`
-        reads, on the same agent and subjects `member_page` lists under. Bytes stay behind the
-        turn: the workspace copy and the download link `status` mints are not this read."""
+        reads, on the same agent and reach `member_page` lists under. Bytes stay behind the
+        turn: the workspace copy `status` writes is not this read, though the row carries the same
+        signed links the listing publishes."""
         shares = await self._find(audience_subjects(conversation_audience(member_id)), name)
         if shares is None:
             return None
-        return MemberObject(row=_row(name, shares), detail=_detail(shares))
+        sources = await self._sources((shares[0].conversation_id,))
+        return MemberObject(row=self._row(name, shares, member_id, sources), detail=_detail(shares))
 
     async def status(
         self,
@@ -246,47 +285,92 @@ class ArtifactObjects:
             tables.conversation.c.audience.in_(ctx.read_subjects),
         )
 
-    async def _find(self, subjects: frozenset[str], name: str) -> tuple[sa.Row, ...] | None:
-        matched = [
-            shares for candidate, shares in await self._groups(subjects) if candidate == name
-        ]
-        return matched[0] if matched else None
+    async def _rows(
+        self, subjects: frozenset[str], viewer: UUID | None, query: ObjectListQuery
+    ) -> tuple[ObjectRow, ...]:
+        groups = await self._groups(subjects, viewer, query)
+        sources = await self._sources(
+            tuple({shares[0].conversation_id for _name, shares in groups})
+        )
+        return tuple(self._row(name, shares, viewer, sources) for name, shares in groups)
 
-    async def _groups(self, subjects: frozenset[str]) -> Sequence[tuple[str, tuple[sa.Row, ...]]]:
+    async def _find(self, subjects: frozenset[str], name: str) -> tuple[sa.Row, ...] | None:
+        """One named group whole. The name resolves against every identity the fence admits —
+        bounded by the workspace's distinct files rather than its shares — and the group's rows
+        arrive with no window, so a name read, a detail, or a delete answers the file whole even
+        when its newest share fell past the listing's scan."""
+        names = await self._identities(subjects)
+        identity = next((candidate for candidate, held in names.items() if held == name), None)
+        if identity is None:
+            return None
+        conversation_id, filename = identity
+        query = self._shares(subjects).where(
+            tables.turn.c.conversation_id == conversation_id,
+            tables.shared_artifact.c.filename == filename,
+        )
         async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.shared_artifact.c.turn_id,
-                        tables.shared_artifact.c.blob_key,
-                        tables.shared_artifact.c.filename,
-                        tables.shared_artifact.c.subject,
-                        tables.shared_artifact.c.media_type,
-                        tables.shared_artifact.c.size_bytes,
-                        tables.shared_artifact.c.preview_blob_key,
-                        tables.shared_artifact.c.created_at,
-                        tables.turn.c.conversation_id,
-                        tables.conversation.c.audience,
-                    )
-                    .select_from(
-                        tables.shared_artifact.join(
-                            tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
-                        ).join(
-                            tables.conversation,
-                            tables.turn.c.conversation_id == tables.conversation.c.id,
-                        )
-                    )
-                    .where(
-                        tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
-                        tables.turn.c.agent_id == object_agent_id(),
-                        tables.conversation.c.audience.in_(subjects),
+            rows = (await connection.execute(query)).all()
+        if not rows:
+            return None
+        return tuple(sorted(rows, key=lambda r: (r.created_at, r.blob_key), reverse=True))
+
+    async def _groups(
+        self, subjects: frozenset[str], viewer: UUID | None, query: ObjectListQuery
+    ) -> Sequence[tuple[str, tuple[sa.Row, ...]]]:
+        """The reader's shares grouped per file, off the newest `ARTIFACT_SCAN_LIMIT` share rows
+        their fence admits AFTER the read's own narrowing — the search and the column-expressible
+        filters run in the query, so the window bounds matching shares and an old file still
+        answers a search or a filtered listing; only an unfiltered browse is windowed to the
+        newest shares. `object_page` re-checks every filter over the rows regardless, so the
+        vocabulary stays core's and anything a column cannot express is narrowed there. `_find`
+        keeps answering any name whole, off its own unwindowed path. Names come off the whole
+        identity set, so a file is called the same thing on and off the shelf."""
+        narrowed = self._shares(subjects)
+        if query.query:
+            like = f"%{query.query}%"
+            narrowed = narrowed.where(
+                sa.or_(
+                    tables.shared_artifact.c.filename.ilike(like),
+                    tables.shared_artifact.c.subject.ilike(like),
+                )
+            )
+        conversation = query.filters.get("conversation")
+        if isinstance(conversation, str):
+            try:
+                narrowed = narrowed.where(tables.turn.c.conversation_id == UUID(conversation))
+            except ValueError:
+                narrowed = narrowed.where(sa.false())
+        if query.filters.get("mine") is True and viewer is not None:
+            narrowed = narrowed.where(tables.conversation.c.member_id == viewer)
+        match query.filters.get("media"):
+            case "image":
+                narrowed = narrowed.where(
+                    sa.func.lower(tables.shared_artifact.c.media_type).like(
+                        MEDIA_IMAGE_PREFIX + "%"
                     )
                 )
-            ).all()
+            case "document":
+                narrowed = narrowed.where(_document_media())
+            case "other":
+                narrowed = narrowed.where(
+                    sa.not_(
+                        sa.func.lower(tables.shared_artifact.c.media_type).like(
+                            MEDIA_IMAGE_PREFIX + "%"
+                        )
+                    ),
+                    sa.not_(_document_media()),
+                )
+            case _:
+                pass
+        windowed = narrowed.order_by(
+            tables.shared_artifact.c.created_at.desc(), tables.shared_artifact.c.id.desc()
+        ).limit(ARTIFACT_SCAN_LIMIT)
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(windowed)).all()
         by_identity: dict[tuple[UUID, str], list[sa.Row]] = {}
         for row in rows:
             by_identity.setdefault((row.conversation_id, row.filename), []).append(row)
-        names = artifact_object_names(by_identity)
+        names = await self._identities(subjects)
         groups = [
             (
                 names[identity],
@@ -296,19 +380,169 @@ class ArtifactObjects:
         ]
         return sorted(groups, key=lambda pair: pair[0])
 
+    async def _identities(self, subjects: frozenset[str]) -> dict[tuple[UUID, str], str]:
+        """Every distinct (conversation, filename) the fence admits, named. A name disambiguates
+        collisions against the whole set, never a window of it, so the same file answers one name
+        however it was reached."""
+        query = (
+            sa.select(tables.turn.c.conversation_id, tables.shared_artifact.c.filename)
+            .distinct()
+            .select_from(
+                tables.shared_artifact.join(
+                    tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                ).join(
+                    tables.conversation,
+                    tables.turn.c.conversation_id == tables.conversation.c.id,
+                )
+            )
+            .where(
+                tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
+                tables.turn.c.agent_id == object_agent_id(),
+                tables.conversation.c.audience.in_(subjects),
+            )
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return artifact_object_names((row.conversation_id, row.filename) for row in rows)
 
-def _row(name: str, shares: tuple[sa.Row, ...]) -> ObjectRow:
-    latest = shares[0]
-    return ObjectRow(
-        name=name,
-        summary=_summary(shares),
-        fields={
-            "filename": latest.filename,
-            "subject": latest.subject or "",
-            "conversation": str(latest.conversation_id),
-            "shared_at": latest.created_at.isoformat(),
-        },
-    )
+    def _shares(self, subjects: frozenset[str]) -> sa.Select:
+        return (
+            sa.select(
+                tables.shared_artifact.c.turn_id,
+                tables.shared_artifact.c.blob_key,
+                tables.shared_artifact.c.filename,
+                tables.shared_artifact.c.subject,
+                tables.shared_artifact.c.media_type,
+                tables.shared_artifact.c.size_bytes,
+                tables.shared_artifact.c.preview_blob_key,
+                tables.shared_artifact.c.preview_media_type,
+                tables.shared_artifact.c.preview_size_bytes,
+                tables.shared_artifact.c.created_at,
+                tables.turn.c.conversation_id,
+                tables.conversation.c.audience,
+                tables.conversation.c.surface,
+                tables.conversation.c.surface_label,
+                tables.conversation.c.member_id.label("owner_member_id"),
+                tables.member.c.email.label("owner_email"),
+            )
+            .select_from(
+                tables.shared_artifact.join(
+                    tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                )
+                .join(
+                    tables.conversation,
+                    tables.turn.c.conversation_id == tables.conversation.c.id,
+                )
+                .outerjoin(tables.member, tables.conversation.c.member_id == tables.member.c.id)
+            )
+            .where(
+                tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
+                tables.turn.c.agent_id == object_agent_id(),
+                tables.conversation.c.audience.in_(subjects),
+            )
+        )
+
+    async def _sources(self, conversation_ids: Sequence[UUID]) -> dict[UUID, str | None]:
+        """Each conversation's opening source — the permalink its first turn arrived from — read
+        the way the surface reads it: the minimum-seq turn's context, None when it carried none."""
+        if not conversation_ids:
+            return {}
+        opening = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                sa.func.min(tables.turn.c.seq).label("seq"),
+            )
+            .where(
+                tables.turn.c.workspace_id == ws_current().workspace_id,
+                tables.turn.c.conversation_id.in_(conversation_ids),
+            )
+            .group_by(tables.turn.c.conversation_id)
+            .subquery()
+        )
+        query = (
+            sa.select(tables.turn.c.conversation_id, tables.turn.c.context)
+            .select_from(
+                tables.turn.join(
+                    opening,
+                    sa.and_(
+                        tables.turn.c.conversation_id == opening.c.conversation_id,
+                        tables.turn.c.seq == opening.c.seq,
+                    ),
+                )
+            )
+            .where(tables.turn.c.workspace_id == ws_current().workspace_id)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return {
+            row.conversation_id: (
+                None if row.context is None else TurnContext.model_validate(row.context).source
+            )
+            for row in rows
+        }
+
+    def _row(
+        self,
+        name: str,
+        shares: tuple[sa.Row, ...],
+        viewer: UUID | None,
+        sources: dict[UUID, str | None],
+    ) -> ObjectRow:
+        latest = shares[0]
+        return ObjectRow(
+            name=name,
+            summary=_summary(shares),
+            fields={
+                "filename": latest.filename,
+                "subject": latest.subject or "",
+                "conversation": str(latest.conversation_id),
+                "shared_at": latest.created_at.isoformat(),
+                "media": artifact_media(latest.media_type),
+                "media_type": latest.media_type,
+                "size_bytes": latest.size_bytes,
+                "owner_email": latest.owner_email,
+                "origin": latest.surface_label
+                or (latest.surface if latest.surface != WEB_SURFACE else None),
+                "surface": latest.surface,
+                "source": sources.get(latest.conversation_id),
+                "mine": viewer is not None and latest.owner_member_id == viewer,
+                "url": self._download_url(latest),
+                "preview_url": self._preview_url(latest),
+            },
+        )
+
+    def _download_url(self, latest: sa.Row) -> str | None:
+        if not self.artifact_token_secret or not self.public_base_url:
+            return None
+        path = mint_artifact_url(
+            self.artifact_token_secret,
+            latest.blob_key,
+            artifact_url_expiry(datetime.now(UTC)),
+            workspace_id=ws_current().workspace_id,
+        )
+        return f"{self.public_base_url.rstrip('/')}{path}"
+
+    def _preview_url(self, latest: sa.Row) -> str | None:
+        """A signed raster-preview link, or None when its type, size, or delivery is ineligible —
+        the picture blob a share rasterized when it has one, the file's own bytes when it is
+        already an image, and the declared type must agree with the key it names."""
+        if latest.preview_blob_key is not None:
+            blob_key = latest.preview_blob_key
+            declared = latest.preview_media_type
+            size_bytes = latest.preview_size_bytes
+        else:
+            blob_key = latest.blob_key
+            declared = latest.media_type
+            size_bytes = latest.size_bytes
+        if raster_image_media_type(blob_key) != declared:
+            return None
+        return mint_image_preview_url(
+            self.artifact_token_secret,
+            self.public_base_url,
+            blob_key,
+            size_bytes,
+            workspace_id=ws_current().workspace_id,
+        )
 
 
 def _detail(shares: tuple[sa.Row, ...]) -> ObjectDetail[ArtifactSpec]:
@@ -339,35 +573,67 @@ def _summary(shares: tuple[sa.Row, ...]) -> str:
     )[:SUMMARY_MAX]
 
 
-ARTIFACT_OBJECT = ObjectKind(
-    name=ARTIFACT_KIND,
-    description=(
-        "A file shared out of a turn by share_file, one object per conversation and filename — "
-        "re-shares in the same conversation are versions: list this agent's shared files, "
-        "get one to copy its latest bytes back into the workspace, delete to remove every "
-        "stored version. Create and update are refused — share_file is the producer."
-    ),
-    guidance=(
-        "Files shared with members by share_file, one object per conversation and filename, "
-        "named <conversation-prefix>-<filename-slug> (3f2a9c1b-report-txt; the share result "
-        "carries the name), so one session's artifacts share a prefix and the same filename "
-        "from different sessions stays distinct. Re-sharing a filename in the same conversation "
-        "adds a version — get, status, and the workspace copy reflect the latest share. Reads stay "
-        "inside the selected agent and acting audience. Listings filter and order on `filename`, "
-        "`subject`, `conversation`, and `shared_at` — filter on a conversation id for that "
-        "session's files, or order by `shared_at` desc for the most recent. "
-        "object_get copies the latest bytes back into the conversation workspace at "
-        "artifacts/<name>/<filename> — the way to reuse a file an earlier turn produced — its "
-        "status carries a fresh member download link (valid one hour), the share time, the "
-        "sharing turn, and the version count, and its `created_in` link names the sharing "
-        "conversation; a file over 32 MiB is not copied "
-        "(workspace_path is null) and is fetched via the link instead. Create and update are "
-        "refused: an artifact exists by sharing a produced file, so write the file in the "
-        "workspace and share_file it. Delete removes the record and stored bytes of every "
-        "version; existing download links stop serving."
-    ),
-    spec_model=ArtifactSpec,
-    store=ArtifactObjects(),
-    list_fields=frozenset({"filename", "subject", "conversation", "shared_at"}),
-    agent_target_verbs=frozenset({"list", "get", "delete"}),
-)
+def artifact_object(
+    *, public_base_url: str | None = None, artifact_token_secret: str = ""
+) -> ObjectKind:
+    """The artifact kind bound to this deploy's link minting: listing rows publish the signed
+    download and preview links the portal draws, so the kind is constructed where the deploy's
+    public base and artifact secret are known — a deploy that mints no links lists the same rows
+    with null links."""
+    return ObjectKind(
+        name=ARTIFACT_KIND,
+        description=(
+            "A file shared out of a turn by share_file, one object per conversation and filename — "
+            "re-shares in the same conversation are versions: list this agent's shared files, "
+            "get one to copy its latest bytes back into the workspace, delete to remove every "
+            "stored version. Create and update are refused — share_file is the producer."
+        ),
+        guidance=(
+            "Files shared with members by share_file, one object per conversation and filename, "
+            "named <conversation-prefix>-<filename-slug> (3f2a9c1b-report-txt; the share result "
+            "carries the name), so one session's artifacts share a prefix and the same filename "
+            "from different sessions stays distinct. Re-sharing a filename in the same "
+            "conversation "
+            "adds a version — get, status, and the workspace copy reflect the latest share. Reads "
+            "stay "
+            "inside the selected agent and acting audience. Listings filter and order on "
+            "`filename`, `subject`, `conversation`, `shared_at`, `media` (image, document, or "
+            "other), `media_type`, `size_bytes`, `owner_email`, `origin`, `surface`, `source`, "
+            "and `mine` — filter on a conversation id for that "
+            "session's files, media=image for pictures, mine=true for files from your own "
+            "conversations, or order by `shared_at` desc for the most recent; each row also "
+            "carries signed `url` and `preview_url` links when the deploy mints them. "
+            "object_get copies the latest bytes back into the conversation workspace at "
+            "artifacts/<name>/<filename> — the way to reuse a file an earlier turn produced — its "
+            "status carries a fresh member download link (valid one hour), the share time, the "
+            "sharing turn, and the version count, and its `created_in` link names the sharing "
+            "conversation; a file over 32 MiB is not copied "
+            "(workspace_path is null) and is fetched via the link instead. Create and update are "
+            "refused: an artifact exists by sharing a produced file, so write the file in the "
+            "workspace and share_file it. Delete removes the record and stored bytes of every "
+            "version; existing download links stop serving."
+        ),
+        spec_model=ArtifactSpec,
+        store=ArtifactObjects(
+            public_base_url=public_base_url, artifact_token_secret=artifact_token_secret
+        ),
+        list_fields=frozenset(
+            {
+                "filename",
+                "subject",
+                "conversation",
+                "shared_at",
+                "media",
+                "media_type",
+                "size_bytes",
+                "owner_email",
+                "origin",
+                "surface",
+                "source",
+                "mine",
+                "url",
+                "preview_url",
+            }
+        ),
+        agent_target_verbs=frozenset({"list", "get", "delete"}),
+    )

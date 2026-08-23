@@ -24,16 +24,7 @@ import {
   type WorkspacePlace,
 } from "@/lib/route";
 
-import {
-  goTo,
-  json,
-  useStreamFake,
-  wire,
-  AGENT,
-  CHAT_ROW,
-  CONVO_ID,
-  MEMBER,
-} from "./harness";
+import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, goTo, json, MEMBER, useStreamFake, wire } from "./harness";
 
 const OLDER = {
   id: "a1",
@@ -125,6 +116,7 @@ function serve() {
         });
       }
       if (url.includes("/workspace/usage")) return json(NO_USAGE);
+      if (url.includes("/objects/conversation")) return json({ objects: [] });
       if (url.includes("/api/chats")) return json({ chats: [] });
       if (url.includes("/transcript")) return json({ messages: [] });
       return new Response("file body");
@@ -485,7 +477,7 @@ test("a conversation permalink that is not a lowercase uuid names no route", () 
 test("the conversation a sign-in carried through opens, and the hash names it", async () => {
   history.replaceState(null, "", location.pathname + "?c=" + CONVO_ID);
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () => json({ messages: [] }),
     "/slots": () => json({ slots: [] }),
   });
@@ -641,6 +633,7 @@ test("a placement from a pane the member already left never writes its dead plac
           ],
         });
       }
+      if (url.includes("/objects/conversation")) return json({ objects: [] });
       if (url.includes("/api/chats")) return json({ chats: [] });
       if (url.includes("/transcript")) return json({ messages: [] });
       return json({ members: [], can_add: false, domain: null });
@@ -670,6 +663,7 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
       if (url.includes("/workspace/memory")) {
         return json({ available: true, kinds: ["fact"], matches: [] });
       }
+      if (url.includes("/objects/conversation")) return json({ objects: [] });
       if (url.includes("/api/chats")) return json({ chats: [] });
       return json({ messages: [] });
     }),
@@ -724,6 +718,7 @@ test("an intent resolving after the member leaves never rewrites where they went
           ],
         });
       }
+      if (url.includes("/objects/conversation")) return json({ objects: [] });
       if (url.includes("/api/chats")) return json({ chats: [] });
       if (url.includes("/transcript")) return json({ messages: [] });
       return json({ members: [], can_add: false, domain: null });

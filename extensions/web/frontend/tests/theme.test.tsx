@@ -11,18 +11,7 @@ import { BRAND_MARKS } from "@/lib/brandMark";
 import { Notice } from "@/kernel/panel";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 
-import {
-  CHAT_ROW,
-  CONVO_ID,
-  AGENT,
-  MEMBER,
-  StreamFake,
-  TURN_ID,
-  json,
-  saying,
-  useStreamFake,
-  wire,
-} from "./harness";
+import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 const BRAND = join(import.meta.dirname, "..", "..", "..", "..", "assets", "brand");
@@ -449,7 +438,7 @@ test("the field surface is drawn by the field primitives and by nothing else", (
 
 test("replies read as a document and member bubbles stay bubbles", async () => {
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () =>
       json({ messages: [{ role: "user", text: "mine" }, { role: "assistant", text: "reply" }] }),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "mine" }),

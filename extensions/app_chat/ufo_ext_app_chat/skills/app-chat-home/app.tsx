@@ -15,7 +15,6 @@ const {
   cn,
   founded,
   getJson,
-  isPortalChat,
   mountApp,
   navigate,
   onPlaced,
@@ -42,26 +41,48 @@ function wantedIn(place: WorkspacePlace): string | null {
   return target === "new" ? COMPOSE : target;
 }
 
+type ConversationRow = {
+  name: string;
+  agent_id: string;
+  agent_name: string;
+  title: string;
+  surface: string;
+  last_at: string;
+};
+
+/** The permalink resolve's row shape — a conversation the listing's own window no longer carries,
+ *  or one held by an agent the listing never fans over, still opens by its address. */
+type ResolvedChat = {
+  conversation_id: string;
+  agent_id: string;
+  agent_name: string;
+  title: string;
+  surface: string;
+  last_at: string;
+};
+
 type Shown =
   | { kind: "loading" }
   | { kind: "missing" }
   | { kind: "compose" }
-  | { kind: "list"; rows: ChatRow[] }
-  | { kind: "open"; row: ChatRow };
+  | { kind: "list"; rows: ConversationRow[]; walk: string | null }
+  | { kind: "open"; row: ConversationRow };
 
 function ChatApp({
-  open,
+  arrived,
   appId,
   member,
   agents,
 }: {
-  open: string | null;
+  arrived: WorkspacePlace;
   appId: string;
   member: Member;
   agents: Agent[];
 }) {
   const mainAgent = useMainAgent();
-  const [wanted, setWanted] = useState<string | null>(open);
+  const [at, setAt] = useState<WorkspacePlace>(arrived);
+  const wanted = wantedIn(at);
+  const after = at.after ?? "";
   const [shown, setShown] = useState<Shown>({ kind: "loading" });
   useEffect(() => {
     if (wanted === COMPOSE) {
@@ -69,30 +90,66 @@ function ChatApp({
       return;
     }
     let live = true;
-    setShown({ kind: "loading" });
-    void getJson<{ chats: ChatRow[] }>("/api/chats").then((answer) => {
+    setShown((held) => (wanted === null && held.kind === "list" ? held : { kind: "loading" }));
+    const params = new URLSearchParams({ order_by: "last_at", order: "desc", portal: "true" });
+    if (after) params.set("cursor", after);
+    void getJson<{ objects: ConversationRow[]; next_cursor: string | null }>(
+      "/objects/conversation?" + params.toString(),
+    ).then(async (answer) => {
       if (!live) return;
       if (!answer.ok) {
         setShown({ kind: "missing" });
         return;
       }
-      const rows = answer.payload.chats.filter((entry) => isPortalChat(entry.surface));
+      const rows = answer.payload.objects;
       if (wanted === null) {
-        setShown({ kind: "list", rows });
+        setShown({ kind: "list", rows, walk: answer.payload.next_cursor });
         return;
       }
-      const row = rows.find((entry) => entry.conversation_id === wanted);
-      setShown(row ? { kind: "open", row } : { kind: "missing" });
+      const row = rows.find((entry) => entry.name === wanted);
+      if (row) {
+        setShown({ kind: "open", row });
+        return;
+      }
+      const sought = await getJson<{ chats: ResolvedChat[] }>(
+        "/api/chats?conversation=" + wanted,
+      );
+      if (!live) return;
+      const held = sought.ok ? sought.payload.chats[0] : undefined;
+      setShown(
+        held
+          ? {
+              kind: "open",
+              row: {
+                name: held.conversation_id,
+                agent_id: held.agent_id,
+                agent_name: held.agent_name,
+                title: held.title,
+                surface: held.surface,
+                last_at: held.last_at,
+              },
+            }
+          : { kind: "missing" },
+      );
     });
     return () => {
       live = false;
     };
-  }, [wanted]);
-  useEffect(() => onPlaced((at) => setWanted(wantedIn(at))), []);
+  }, [wanted, after]);
+  useEffect(() => onPlaced(setAt), []);
   const place = useCallback(
     (target: string | null) => {
-      setWanted(target);
-      navigate(agentHash(appId, target === null ? {} : { opens: [target] }));
+      const next = target === null ? {} : { opens: [target] };
+      setAt(next);
+      navigate(agentHash(appId, next));
+    },
+    [appId],
+  );
+  const turn = useCallback(
+    (token: string | undefined) => {
+      const next = token === undefined ? {} : { after: token };
+      setAt(next);
+      navigate(agentHash(appId, next));
     },
     [appId],
   );
@@ -131,10 +188,10 @@ function ChatApp({
             ) : (
               <ul className="m-0 flex list-none flex-col gap-px p-0">
                 {shown.rows.map((row) => (
-                  <li key={row.conversation_id}>
+                  <li key={row.name}>
                     <button
                       type="button"
-                      onClick={() => place(row.conversation_id)}
+                      onClick={() => place(row.name)}
                       className={cn(
                         "flex h-(--size-row) w-full items-center gap-md rounded-row border-0",
                         "bg-transparent px-sm text-left text-inherit hover:bg-fill",
@@ -152,6 +209,34 @@ function ChatApp({
                 ))}
               </ul>
             )}
+            {shown.walk || after ? (
+              <div className="flex gap-xs">
+                {shown.walk ? (
+                  <button
+                    type="button"
+                    className={cn(
+                      "rounded-row border-0 bg-transparent px-sm py-xs text-left",
+                      "text-inherit hover:bg-fill",
+                    )}
+                    onClick={() => turn(shown.walk ?? undefined)}
+                  >
+                    Older conversations
+                  </button>
+                ) : null}
+                {after ? (
+                  <button
+                    type="button"
+                    className={cn(
+                      "rounded-row border-0 bg-transparent px-sm py-xs text-left",
+                      "text-inherit hover:bg-fill",
+                    )}
+                    onClick={() => turn(undefined)}
+                  >
+                    Newest conversations
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </Page>
       </Pane>
@@ -163,10 +248,10 @@ function ChatApp({
       ({ id: shown.row.agent_id, name: shown.row.agent_name, model: "" } as Agent);
     return (
       <ChatPane
-        key={shown.row.conversation_id}
+        key={shown.row.name}
         agent={agent}
         member={member}
-        conversationId={shown.row.conversation_id}
+        conversationId={shown.row.name}
         title={shown.row.title}
         onActivity={() => {}}
       />
@@ -189,5 +274,5 @@ function ChatApp({
 }
 
 mountApp(document.getElementById("root")!, (init, agents) => (
-  <ChatApp open={wantedIn(init.place)} appId={init.agentId} member={init.member} agents={agents} />
+  <ChatApp arrived={init.place} appId={init.agentId} member={init.member} agents={agents} />
 ));

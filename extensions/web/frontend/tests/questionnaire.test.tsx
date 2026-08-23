@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, CHAT_ROW, CONVO_ID, MEMBER, TURN_ID, json, useStreamFake, wire } from "./harness";
+import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -16,7 +16,7 @@ const ASKED = { question: "Which?", options: [{ label: "left" }, { label: "right
 /** The turn's ask as the transcript carries it, with every answer the member sends recorded. */
 function asking(question: Record<string, unknown>, posts: RequestInit[] = []) {
   wire({
-    "/api/chats": () => json({ chats: [CHAT_ROW] }),
+    ...chatsOnWire([CHAT_ROW]),
     "/transcript": () =>
       json({
         messages: [
