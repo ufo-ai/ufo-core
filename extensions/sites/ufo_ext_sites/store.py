@@ -94,8 +94,8 @@ class SourceManifest(BaseModel):
     @field_validator("root")
     @classmethod
     def _rooted(cls, root: str) -> str:
-        if not root.startswith("sites/") or not root.endswith("/"):
-            raise ValueError(f"source root {root!r} must be a sites/ key prefix")
+        if not root.startswith(("sites/", "apps/")) or not root.endswith("/"):
+            raise ValueError(f"source root {root!r} must be a sites/ or apps/ key prefix")
         return root
 
     @field_validator("files")

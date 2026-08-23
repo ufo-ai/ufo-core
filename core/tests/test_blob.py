@@ -449,8 +449,10 @@ async def test_fleet_store_admits_only_fleet_namespaces(tmp_path: Path) -> None:
     store = FleetBlobStore(backend=backend)
     await store.put("static/web/assets/index-abc123.js", b"js")
     await store.put("term/op/o1", b"payload")
+    await store.put("apps/9f3a1c2b/radar/index.html", b"<!doctype html>")
     assert await store.get("static/web/assets/index-abc123.js") == b"js"
     assert await backend.get("static/web/assets/index-abc123.js") == b"js"
+    assert await store.get("apps/9f3a1c2b/radar/index.html") == b"<!doctype html>"
     with pytest.raises(ValueError):
         await store.put("conversations/c1/messages.json", b"hello")
     with pytest.raises(ValueError):

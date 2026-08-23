@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import httpx
 import pytest
@@ -59,6 +59,7 @@ from ufo.sandbox.ingress_token import (
     INGRESS_VIEW_PATH,
     IngressClaims,
     IngressTokenKind,
+    ShippedClaim,
     mint_ingress_token,
     verify_ingress_token,
 )
@@ -2002,3 +2003,120 @@ async def test_a_socket_to_a_stored_site_is_refused(
     assert refused.value.response.status_code == 502
     assert refused.value.response.body == SITE_HAS_NO_SOCKET.encode()
     assert socket_origin.handshakes == []
+
+
+JAVASCRIPT_MEDIA_TYPES = frozenset({"text/javascript", "application/javascript"})
+"""What `mimetypes.guess_type` returns for a `.js` name — `text/javascript` off Python's own table,
+`application/javascript` where a host's `/etc/mime.types` overrides it. Both run a module script."""
+SHIPPED_SLUG = "radar"
+SHIPPED_DIGEST = "9f3a1c2b4d5e6f70"
+SHIPPED_ETAG = f'"{SHIPPED_DIGEST}"'
+SHIPPED_INDEX = b'<!doctype html><script type="module" src="app.7c2b.js"></script>'
+SHIPPED_APP = b"mountApp()"
+SHIPPED_BRIDGE = b"connectBridge()"
+SHIPPED_FILES = {
+    f"{SHIPPED_SLUG}/index.html": (SHIPPED_INDEX, "text/html"),
+    f"{SHIPPED_SLUG}/app.7c2b.js": (SHIPPED_APP, "text/javascript"),
+    "bridge.js": (SHIPPED_BRIDGE, "text/javascript"),
+}
+
+
+async def _seed_shipped_bundle(
+    blobs: FilesystemBlobStore,
+    digest: str,
+    files: dict[str, tuple[bytes, str]],
+) -> None:
+    """Publish a precompiled apps tree the way the frontend build leaves one: one atomic tree under
+    the deploy-wide fleet prefix `apps/<digest>/`, keys `<slug>/index.html`, `<slug>/app.<h>.js`
+    and the `_shared/kit.<h>.js` chunk every app imports. No workspace prefix, no hosted_site row,
+    and no manifest — the ingress enumerates the tree by listing it, and the digest is the etag."""
+    for path, (data, _media_type) in files.items():
+        await blobs.put(f"apps/{digest}/{path}", data)
+
+
+async def _open_shipped(
+    client: httpx.AsyncClient,
+    workspace_id: UUID,
+    anchor: UUID,
+    slug: str,
+    digest: str,
+    port: int = 8000,
+) -> None:
+    """Arrive at a shipped page the way its frame does: a view token carrying the shipped reference
+    beside the synthetic anchor, traded for the session cookie the client's jar then carries."""
+    token = mint_ingress_token(
+        IngressClaims(
+            workspace_id=workspace_id,
+            conversation_id=anchor,
+            port=port,
+            expires_at=int(datetime.now(UTC).timestamp()) + 900,
+            shipped=ShippedClaim(slug=slug, digest=digest),
+        ),
+        INGRESS_VIEW_KIND,
+    )
+    got = await client.get(f"{_origin(anchor, port)}{INGRESS_VIEW_PATH}/{token}")
+    assert got.status_code == 303, got.text
+
+
+async def test_a_shipped_bundle_serves_row_less_from_the_fleet_store(db, stored_ingress) -> None:
+    """The crux of the shipped model: no hosted_site row and no conversation row exist, the carrier
+    raises on any dial, and the bytes come from the deploy-wide fleet prefix — yet the page answers,
+    with the digest as its etag and the frame-ancestors CSP a workspace site carries. The synthetic
+    anchor scopes the origin; the shipped claim names the deploy-wide bytes. The slug's own index
+    answers `/`, its app bundle answers `/app.<h>.js`, and a tree file outside the slug subdir —
+    `bridge.js` — answers at its own path, proving a sibling resolves without the slug prefix."""
+    client, blobs = stored_ingress
+    workspace_id = uuid4()
+    anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
+    await _seed_shipped_bundle(blobs, SHIPPED_DIGEST, SHIPPED_FILES)
+    await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
+
+    index = await client.get(f"{_origin(anchor)}/")
+    assert index.status_code == 200
+    assert index.content == SHIPPED_INDEX
+    assert index.headers["content-type"].startswith("text/html")
+    assert index.headers["content-length"] == str(len(SHIPPED_INDEX))
+    assert index.headers["etag"] == SHIPPED_ETAG
+    assert index.headers["cache-control"] == STORED_SITE_CACHE
+    assert index.headers["x-content-type-options"] == "nosniff"
+    assert index.headers[CONTENT_SECURITY_POLICY].startswith(FRAME_ANCESTORS_DIRECTIVE)
+
+    app = await client.get(f"{_origin(anchor)}/app.7c2b.js")
+    assert (app.status_code, app.content) == (200, SHIPPED_APP)
+    assert app.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
+
+    bridge = await client.get(f"{_origin(anchor)}/bridge.js")
+    assert (bridge.status_code, bridge.content) == (200, SHIPPED_BRIDGE)
+    assert bridge.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
+
+
+async def test_a_shipped_bundle_unknown_path_is_404(db, stored_ingress) -> None:
+    client, blobs = stored_ingress
+    workspace_id = uuid4()
+    anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
+    await _seed_shipped_bundle(blobs, SHIPPED_DIGEST, SHIPPED_FILES)
+    await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
+    missing = await client.get(f"{_origin(anchor)}/nope.js")
+    assert (missing.status_code, missing.text) == (404, NOT_FOUND)
+
+
+async def test_a_shipped_bundle_revalidates_by_digest(db, stored_ingress) -> None:
+    client, blobs = stored_ingress
+    workspace_id = uuid4()
+    anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
+    await _seed_shipped_bundle(blobs, SHIPPED_DIGEST, SHIPPED_FILES)
+    await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
+    fresh = await client.get(f"{_origin(anchor)}/", headers={"if-none-match": SHIPPED_ETAG})
+    assert fresh.status_code == 304
+    assert fresh.content == b""
+
+
+async def test_a_shipped_bundle_whose_digest_is_gone_is_404(db, stored_ingress) -> None:
+    """A digest naming no published bundle — the window a redeploy retired it in — answers 404 for
+    the refresh to heal, never an error mid-serve."""
+    client, _ = stored_ingress
+    workspace_id = uuid4()
+    anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
+    await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, "deadbeefdeadbeef")
+    got = await client.get(f"{_origin(anchor)}/")
+    assert got.status_code == 404

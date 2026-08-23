@@ -105,6 +105,7 @@ from ufo.sandbox.ingress_token import (
     INGRESS_VIEW_PATH,
     INGRESS_VIEW_TTL_SECONDS,
     IngressClaims,
+    ShippedClaim,
     mint_ingress_token,
 )
 from ufo.sandbox.terminal import TerminalOp
@@ -1691,6 +1692,15 @@ class SurfaceContext:
         `agent_skills` and this names the shared part."""
         return self._skills.index()
 
+    def deploy_skill_files(self, name: str) -> dict[str, bytes] | None:
+        """One deploy-tier skill's bundled asset files by name, keyed by their skill-relative path,
+        or None when this deploy loads no such skill — the bytes a surface publishes as an app's
+        served page (`index.html`, `app.js`, `app.tsx`), never the `SKILL.md` body. Deploy tier
+        only (`by_name`), so the answer is the same for every workspace and every reader; a member's
+        saved skills, which vary per workspace, are never reached here."""
+        skill = self._skills.by_name.get(name)
+        return None if skill is None else dict(skill.files)
+
     @property
     def models(self) -> tuple[str, ...]:
         """The model ids this deploy's registry serves, `auto` first — the closed set a portal
@@ -1901,7 +1911,15 @@ class SurfaceContext:
             self._artifact_token_secret, self._public_base_url, self.workspace_id, artifact
         )
 
-    def ingress_url(self, conversation_id: UUID, port: int, entry_path: str) -> str | None:
+    def ingress_url(
+        self,
+        conversation_id: UUID,
+        port: int,
+        entry_path: str,
+        *,
+        shipped_slug: str | None = None,
+        shipped_digest: str | None = None,
+    ) -> str | None:
         """The URL that opens one conversation's sandbox port in a browser at `entry_path`, or None
         when the ingress is unconfigured (no `[sandbox] ingress_public_url`) — the surface then
         serves no site. The port gets its own signed origin, and the view token the ingress trades
@@ -1915,16 +1933,30 @@ class SurfaceContext:
         because `sign_token` emits `base64url.base64url` and neither half holds a `/`. The root
         appends nothing, so the link a site is ordinarily handed out as keeps its shape. It is
         quoted rather than trusted: this caller decodes it out of its own URL, so re-encoding is
-        what round-trips a space or a literal `?` in a filename instead of splitting the URL."""
+        what round-trips a space or a literal `?` in a filename instead of splitting the URL.
+
+        `shipped_slug`/`shipped_digest`, when both given, redirect the ingress from the
+        conversation's own stored/dialed bytes to a deploy-wide precompiled app bundle in the fleet
+        store under `apps/<digest>/`, of which the slug names one app's subtree. The conversation
+        and port stay the page's synthetic per-workspace anchor — they scope the origin and its
+        session cookie to the workspace — while the shipped claim names the row-less deploy-wide
+        bytes: this is the producer half of the ingress's shipped-serving path, whose bytes are
+        workspace-independent."""
         if not self._ingress_public_url:
             return None
         base = urlsplit(self._ingress_public_url)
+        shipped = (
+            ShippedClaim(slug=shipped_slug, digest=shipped_digest)
+            if shipped_slug is not None and shipped_digest is not None
+            else None
+        )
         token = mint_ingress_token(
             IngressClaims(
                 workspace_id=self.workspace_id,
                 conversation_id=conversation_id,
                 port=port,
                 expires_at=int(datetime.now(UTC).timestamp()) + INGRESS_VIEW_TTL_SECONDS,
+                shipped=shipped,
             ),
             INGRESS_VIEW_KIND,
         )

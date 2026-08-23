@@ -974,6 +974,7 @@ class WorkspaceAgent(BaseModel):
     name: str
     owner_member_id: UUID | None = None
     tools: tuple[str, ...] | None = None
+    provisioned_by: str | None = None
 
 
 class MemberContextRecord(BaseModel):
@@ -1125,6 +1126,7 @@ class ExtensionContext:
                         tables.agent.c.name,
                         tables.agent.c.owner_member_id,
                         tables.agent.c.tools,
+                        tables.agent.c.provisioned_by,
                     )
                     .where(tables.agent.c.workspace_id == self.workspace_id)
                     .order_by(tables.agent.c.created_at, tables.agent.c.id)
@@ -1136,6 +1138,7 @@ class ExtensionContext:
                 name=row.name,
                 owner_member_id=row.owner_member_id,
                 tools=None if row.tools is None else tuple(row.tools),
+                provisioned_by=row.provisioned_by,
             )
             for row in rows
         )

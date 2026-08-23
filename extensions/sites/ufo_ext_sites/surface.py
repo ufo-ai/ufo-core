@@ -47,7 +47,7 @@ brand's generic card, naming nothing."""
 import hashlib
 import html
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ufo.sdk.bearer import verify_token
 from ufo.sdk.http import (
@@ -69,7 +69,14 @@ FRAME_PATH = "/surface/sites"
 WORKSPACE_CLAIM = "ws"
 CONVERSATION_CLAIM = "conversation"
 NAME_CLAIM = "name"
+SLUG_CLAIM = "slug"
+DIGEST_CLAIM = "digest"
+AGENT_CLAIM = "agent"
 CSRF_CLAIM = "csrf"
+
+APP_PORT_FLOOR = 20000
+APP_PORT_SPAN = 20000
+SHIPPED_ANCHOR_LABEL = "ufo-shipped-app"
 TOKEN_PARAM = "site_token"
 PATH_PARAM = "site_path"
 CARD_HASH_PARAM = "card_hash"
@@ -160,6 +167,79 @@ def site_url(
     return f"{public_base_url.rstrip('/')}{FRAME_PATH}/{token}"
 
 
+def serve_port(conversation_id: UUID) -> int:
+    """The port a conversation's site serves on, derived from the conversation so it is stable
+    across redeploys (the site's origin hangs off `(conversation, port)`). Per-conversation rather
+    than one fixed port because the local carrier's sandboxes share the host's port namespace — on
+    one fixed port every deploy killed the previous conversation's server and every dial reached
+    whoever deployed last. Container carriers are indifferent: any port works inside a namespace.
+
+    It lives here, beside `site_label` and `ingress_url`, because the port is half a site's origin:
+    the deploy tools and the shipped-frame render both derive it, and the origin math has one home
+    rather than a copy in each."""
+    return APP_PORT_FLOOR + conversation_id.int % APP_PORT_SPAN
+
+
+def shipped_anchor(workspace_id: UUID, slug: str) -> UUID:
+    """The synthetic conversation a shipped app page's origin hangs off — computed, never a row, so
+    the page serves without one. One per `(workspace, app)`, so each workspace's shipped page owns
+    its own origin and its cookies and storage stay scoped to it, and a fork reuses the same anchor
+    as its `hosted_site.conversation_id` so the browser origin is identical before and after."""
+    return uuid5(NAMESPACE_URL, f"{SHIPPED_ANCHOR_LABEL}:{workspace_id}:{slug}")
+
+
+@dataclass(frozen=True)
+class ShippedAddress:
+    """What a shipped-frame token names: the workspace to bind, the app agent to gate on, the app
+    slug whose deploy-wide bundle serves, and the bundle digest that bundle is."""
+
+    workspace_id: UUID
+    agent_id: UUID
+    slug: str
+    digest: str
+
+
+def shipped_site_url(
+    public_base_url: str | None, workspace_id: UUID, agent_id: UUID, slug: str, digest: str
+) -> str | None:
+    """The hosted link for a workspace's shipped app page: the frame route on the deploy's public
+    base, carrying the shipped address whole. The token carries the agent so the frame gates the
+    visit on the agent's visibility, and the slug and digest so it resolves the deploy-wide bytes —
+    no `hosted_site` row is read for it. None when the deploy configures no `[connect]
+    public_base_url` — the homepage read then answers as if no page exists, the same absence a
+    deploy that hosts nothing shows."""
+    if not public_base_url:
+        return None
+    token = mint_surface_token(
+        SURFACE_SITES,
+        {
+            WORKSPACE_CLAIM: str(workspace_id),
+            AGENT_CLAIM: str(agent_id),
+            SLUG_CLAIM: slug,
+            DIGEST_CLAIM: digest,
+        },
+    )
+    return f"{public_base_url.rstrip('/')}{FRAME_PATH}/{token}"
+
+
+def shipped_address(token: str) -> ShippedAddress | None:
+    """The shipped address a token proves, or None when its signature, surface, or claims do not
+    hold — a normal site token (no `agent`/`slug`/`digest`) reads as None here, and a shipped one
+    reads as None in `site_address`, so the two token shapes never collide."""
+    claims = verify_surface_token(SURFACE_SITES, token)
+    if claims is None:
+        return None
+    try:
+        return ShippedAddress(
+            workspace_id=UUID(claims[WORKSPACE_CLAIM]),
+            agent_id=UUID(claims[AGENT_CLAIM]),
+            slug=claims[SLUG_CLAIM],
+            digest=claims[DIGEST_CLAIM],
+        )
+    except (KeyError, ValueError):
+        return None
+
+
 def site_card_url(public_base_url: str | None, token: str, digest: str) -> str | None:
     """The public address of one site's share card: the anonymous route on the deploy's public base,
     carrying the site's own token and the digest of the card's bytes.
@@ -188,10 +268,15 @@ def site_address(token: str) -> SiteAddress | None:
 
 async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None:
     """The workspace the requested site's token names — resolved before any row is read, because a
-    public viewer carries no cookie to scope by. An unverifiable token answers with the frame's own
-    404 rather than a 401, so a forged address and an unauthorized one are indistinguishable."""
-    address = site_address(request.path_params.get(TOKEN_PARAM, ""))
-    return _not_found() if address is None else address.workspace_id
+    public viewer carries no cookie to scope by. A shipped app page's token names its workspace the
+    same way, with no row behind it. An unverifiable token answers with the frame's own 404 rather
+    than a 401, so a forged address and an unauthorized one are indistinguishable."""
+    token = request.path_params.get(TOKEN_PARAM, "")
+    address = site_address(token)
+    if address is not None:
+        return address.workspace_id
+    shipped = shipped_address(token)
+    return _not_found() if shipped is None else shipped.workspace_id
 
 
 async def frame(ctx: SurfaceContext, request: Request) -> Response:
@@ -201,7 +286,11 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
     page of a site rather than only its front door — the site's own paths live at the embedded
     origin and are reachable from outside no other way. A deep link proves no more than the bare
     one: both pass the same gate — the agent's visibility for a homepage, the row's own for any
-    other site."""
+    other site. A shipped app page's token carries no row; it renders through `_shipped_frame`,
+    gated the same way a homepage is."""
+    shipped = shipped_address(request.path_params[TOKEN_PARAM])
+    if shipped is not None:
+        return await _shipped_frame(ctx, request, shipped)
     site = await _resolve(ctx, request)
     if site is None:
         return _not_found()
@@ -255,6 +344,55 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
             site, embedded, frame_path, csrf, share, bare=site.homepage_agent_id is not None
         )
     )
+
+
+async def _shipped_frame(
+    ctx: SurfaceContext, request: Request, shipped: ShippedAddress
+) -> Response:
+    """Render a workspace's shipped app page: no `hosted_site` row, gated on the app agent's
+    visibility exactly as a bound homepage is, and embedded from the deploy-wide bundle in the fleet
+    store rather than any workspace's own source. The origin is the synthetic per-workspace anchor,
+    so the page keeps its own cookies and storage and a later fork lands on the same origin. It
+    renders `bare` — no header — because the portal frames it as the agent's own page.
+
+    A shipped page follows its agent and has no public level of its own, so an unauthenticated
+    viewer is always sent to sign in, and the head names the brand's generic card, not the page."""
+    share = _share_tags(None, None, None)
+    viewer = await _viewer(ctx, request)
+    if viewer is None:
+        return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE, share))
+    agent = next((a for a in await ctx.list_agents() if a.id == shipped.agent_id), None)
+    if agent is None:
+        return _not_found()
+    if (
+        agent.visibility != "workspace"
+        and viewer != agent.owner_member_id
+        and not await _viewer_is_admin(ctx, viewer)
+    ):
+        return _not_found()
+    anchor = shipped_anchor(shipped.workspace_id, shipped.slug)
+    embedded = ctx.ingress_url(
+        anchor,
+        serve_port(anchor),
+        f"/{request.path_params.get(PATH_PARAM, '')}",
+        shipped_slug=shipped.slug,
+        shipped_digest=shipped.digest,
+    )
+    return HTMLResponse(_shipped_frame_page(agent.name, embedded, share))
+
+
+def _shipped_frame_page(title: str, embedded: str | None, share: str) -> str:
+    """The shipped page inside the portal's pane: bare, transparent, the fleet bundle at its own
+    origin freshly addressed every render. A deploy with no ingress configured has no origin to
+    embed and says so instead of framing nothing — the same fallback the row-backed frame draws."""
+    site_view = (
+        f'<iframe src="{html.escape(embedded, quote=True)}" '
+        f'title="{html.escape(title, quote=True)}" referrerpolicy=no-referrer '
+        f'sandbox="{IFRAME_SANDBOX}" allow="fullscreen"></iframe>'
+        if embedded is not None
+        else f"<main><p>{UNCONFIGURED_BODY}</p></main>"
+    )
+    return _page(html.escape(title), _STYLE + _FRAME_STYLE + _BARE_STYLE, site_view, share)
 
 
 async def share_card(ctx: SurfaceContext, request: Request) -> Response:

@@ -66,7 +66,7 @@ from ufo_ext_sites.store import (
     Visibility,
     site_name,
 )
-from ufo_ext_sites.surface import site_url
+from ufo_ext_sites.surface import serve_port, site_url
 
 WEBSITE_TOOL = "website"
 START_SERVER_TOOL = "start_server"
@@ -74,18 +74,7 @@ DEPLOY_WEBSITE_TOOL = "deploy_website"
 PUBLISH_WEBSITE_TOOL = "publish_website"
 SET_HOMEPAGE_TOOL = "set_homepage"
 
-APP_PORT_FLOOR = 20000
-APP_PORT_SPAN = 20000
 START_SERVER_PORT = 5000
-
-
-def serve_port(conversation_id: UUID) -> int:
-    """The port a conversation's site serves on, derived from the conversation so it is stable
-    across redeploys (the site's origin hangs off `(conversation, port)`). Per-conversation rather
-    than one fixed port because the local carrier's sandboxes share the host's port namespace — on
-    one fixed port every deploy killed the previous conversation's server and every dial reached
-    whoever deployed last. Container carriers are indifferent: any port works inside a namespace."""
-    return APP_PORT_FLOOR + conversation_id.int % APP_PORT_SPAN
 
 
 READINESS_TIMEOUT_SECONDS = 30

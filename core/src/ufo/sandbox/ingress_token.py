@@ -37,29 +37,43 @@ class IngressTokenError(ValueError):
 
 
 @dataclass(frozen=True)
+class ShippedClaim:
+    """A token's optional shipped-bundle reference: the app slug and current bundle digest whose
+    precompiled bytes this origin serves, from the fleet store rather than any workspace's own. The
+    conversation and port the claims also carry are the page's synthetic per-workspace anchor —
+    they scope the origin and cookie to the workspace; these name the deploy-wide bytes."""
+
+    slug: str
+    digest: str
+
+
+@dataclass(frozen=True)
 class IngressClaims:
     """What a verified token grants: one workspace's conversation, and the one sandbox port its
-    bearer may reach, until it expires."""
+    bearer may reach, until it expires. `shipped`, when present, redirects the serve from the
+    conversation's own stored/dialed bytes to a deploy-wide precompiled app bundle in the fleet
+    store — the anchor and port still scope the origin and its session cookie to the workspace."""
 
     workspace_id: UUID
     conversation_id: UUID
     port: int
     expires_at: int
+    shipped: ShippedClaim | None = None
 
 
 def mint_ingress_token(claims: IngressClaims, kind: IngressTokenKind) -> str:
     """Sign `claims` as one hop's token. The kind is signed with them, so the hop a token was minted
     for is the only hop that accepts it."""
-    payload = json.dumps(
-        {
-            "kind": kind,
-            "ws": str(claims.workspace_id),
-            "conversation": str(claims.conversation_id),
-            "port": claims.port,
-            "exp": claims.expires_at,
-        }
-    ).encode()
-    return sign_token(ingress_secret().encode(), payload)
+    body: dict[str, object] = {
+        "kind": kind,
+        "ws": str(claims.workspace_id),
+        "conversation": str(claims.conversation_id),
+        "port": claims.port,
+        "exp": claims.expires_at,
+    }
+    if claims.shipped is not None:
+        body["shipped"] = {"slug": claims.shipped.slug, "digest": claims.shipped.digest}
+    return sign_token(ingress_secret().encode(), json.dumps(body).encode())
 
 
 def verify_ingress_token(token: str, now: datetime, kind: IngressTokenKind) -> IngressClaims:
@@ -72,13 +86,19 @@ def verify_ingress_token(token: str, now: datetime, kind: IngressTokenKind) -> I
     if not isinstance(payload, dict) or payload.get("kind") != kind:
         raise IngressTokenError("ingress token is invalid")
     try:
+        shipped = payload.get("shipped")
         claims = IngressClaims(
             workspace_id=UUID(str(payload.get("ws"))),
             conversation_id=UUID(str(payload.get("conversation"))),
             port=int(payload.get("port", 0)),
             expires_at=int(payload.get("exp", 0)),
+            shipped=(
+                ShippedClaim(slug=str(shipped["slug"]), digest=str(shipped["digest"]))
+                if isinstance(shipped, dict)
+                else None
+            ),
         )
-    except (TypeError, ValueError) as error:
+    except (TypeError, ValueError, KeyError) as error:
         raise IngressTokenError("ingress token is invalid") from error
     if not 0 < claims.port < 65536:
         raise IngressTokenError("ingress token is invalid")

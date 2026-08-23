@@ -184,3 +184,19 @@ the site kind's `object_get` materializes the deployed source into the reading
 conversation's sandbox (its status names the `source_path`), and a homepage
 redeploy from another conversation updates the bound row in place — same origin, same link, no
 fork. `publish_website` backends stay sandbox-served. All flagged, none blocks the prototype.
+
+## Shipped app pages (PR A) — as-built
+
+Row-less, auto-updating app homepages served from one deploy-wide fleet bundle. Where the build
+diverged from the intended design (the code is authoritative):
+
+| Design | As built | Why |
+|---|---|---|
+| the extension mints the shipped ingress token | the **producer lives in core**: `SurfaceContext.ingress_url` gains `shipped_slug`/`shipped_digest`, and `deploy_skill_files(name)` reads a deploy-tier skill's page bytes | the SDK gate (`gates.py`) forbids an extension importing `ufo.sandbox.ingress_token`, so the token can only be minted through a core surface — the producer half the foundation left unbuilt. `WorkspaceAgent` also gains `provisioned_by` so the seed sweep can tell an app agent apart |
+| shipped url resolves direct-to-ingress | the homepage read hands a **sites-frame link** (`shipped_site_url` → a `SURFACE_SITES` token carrying `{ws, agent, slug, digest}`); the sites `frame` recognizes it, gates on the app agent's visibility, and mints the shipped-claim ingress url for the inner iframe | a stable frame link re-mints a fresh 900s view token per render (a baked view url would 403 on a reload past its TTL), and re-gates every visit — the same shape and robustness every homepage link already has |
+| kit-over-bridge + vite precompile | shipped serves the **existing skill files unchanged** (`index.html`/`app.js`/`app.tsx` per slug + one shared `bridge.js`), assembled by `apps_bundle` and published under `apps/<digest>/` with an `apps/current` pointer | PR A is serving-only; the kit-over-bridge rework and babel precompile are PR B, layered on this |
+| fork = anchor-continuity upsert; reset = delete row; `object_get` materializes shipped source from the fleet | the **existing** `deploy_website`+`set_homepage` founds the forked homepage row (the read's forked-row step then serves it) and object-`delete` unhosts it back to shipped; the app agent gets the current source from its **mounted home skill**, not a fleet materialize | the fork already works through the standing tools; anchor-continuity (preserving cookies across the first edit) and fleet-source `object_get` are deferred, so a fork lands a new per-conversation origin |
+| the five manifests' first-turn prompt lines go | manifests and SKILL.md are **left unchanged**; seeding is turned off mechanically — `seed_homepages` marks an app agent `shipped` (settled, no turn), so the candidate query settles | standing rule: prompt text is the owner's, and a prompt/skill edit is gated on ablation — the stale first-turn line is inert without a seed turn, and editing it is a separate, ablated change |
+
+Deferred with this unit (flagged, not blocking): anchor-continuity fork upsert; `object_get` fleet
+materialize; the manifest prompt/SKILL.md rewrite; and the security-debt hardening RFC 0039 lists.

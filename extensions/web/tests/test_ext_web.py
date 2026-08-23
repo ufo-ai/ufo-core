@@ -24,6 +24,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
 from PIL import Image
 from pydantic import BaseModel, ValidationError
+from ufo_ext_app_chat.manifest import manifest as app_chat_manifest
+from ufo_ext_app_radar.manifest import manifest as app_radar_manifest
 from ufo_ext_composio.client import BANNED
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_index_default import DefaultIndex
@@ -9378,6 +9380,159 @@ async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools
             )
         ).scalars()
         assert list(seeded) == [main_agent]
+
+
+async def _seed_app_agent(workspace_id: UUID, slug: str) -> UUID:
+    """One app agent as an `app_<slug>` provision creates it — ownerless, workspace-visible, the
+    full provenance the agent check requires."""
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=slug,
+                prompt="the app",
+                model="claude-opus-4-8",
+                visibility="workspace",
+                provisioned_by=f"app_{slug}",
+                provisioned_name=slug,
+                provisioned_version="0.1.0",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id
+
+
+async def test_homepage_seed_marks_an_app_agent_shipped_without_a_turn(db: None) -> None:
+    """A shipped app agent needs no seed turn — its homepage is the deploy-wide bundle. The sweep
+    marks it settled rather than skipping it unmarked, so the candidate query stops returning the
+    workspace (an unmarked agent it never builds would keep it due forever), and no seed
+    conversation is opened for it. The generic seed path still runs for the main agent."""
+    workspace_id, main_agent = await _seed_workspace()
+    await _seed_member(workspace_id, "seed-app-admin@example.com", admin=True)
+    app_agent = await _seed_app_agent(workspace_id, "radar")
+    dbos = _SeedDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    candidates = unseeded_agent_workspaces(EXTENSION_WEB, web_surface.HOMEPAGE_SEED_PREFIX)
+    assert workspace_id in await candidates()
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx)
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
+    assert markers[f"{web_surface.HOMEPAGE_SEED_PREFIX}{app_agent}"] == "shipped"
+    assert workspace_id not in await candidates()
+    async with workspace_tx() as connection:
+        seeded = (
+            await connection.execute(
+                sa.select(tables.conversation.c.agent_id).where(
+                    tables.conversation.c.queue_key.startswith("homepage/")
+                )
+            )
+        ).scalars()
+    assert list(seeded) == [main_agent]
+
+
+async def test_publish_assets_writes_the_apps_tree_under_its_digest(tmp_path) -> None:
+    """The apps bundle publishes under its content digest, skip-if-present (content addressed →
+    present is correct), so a repeat publish leaves an already-written file untouched."""
+    fleet = FleetBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    tree = {"radar/index.html": b"<html>", "radar/app.js": b"//r", "bridge.js": b"//b"}
+    digest = "abc123abc123abc1"
+    await web_surface._publish_assets(fleet, (tree, digest))
+    for path, body in tree.items():
+        assert await fleet.get(f"apps/{digest}/{path}") == body
+    await fleet.put(f"apps/{digest}/radar/index.html", b"<edited>")
+    await web_surface._publish_assets(fleet, (tree, digest))
+    assert await fleet.get(f"apps/{digest}/radar/index.html") == b"<edited>"
+
+
+@pytest.fixture
+async def web_apps(
+    db: None,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[AsyncClient, UUID, UUID, FleetBlobStore]]:
+    """The web surface mounted with the app home skills in its deploy tier and one app agent seeded,
+    so the homepage read resolves a row-less shipped page and the portal publish assembles the apps
+    bundle from real skill bytes."""
+    config, hub, blob, sandboxes = dbos_runtime
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    monkeypatch.setattr(web_surface, "_ASSET_PUBLISH", None)
+    dbos_client = replay_safe_client(config.database.system_url)
+    workspace_id, _main = await _seed_workspace()
+    app_agent = await _seed_app_agent(workspace_id, "radar")
+    manifests = (
+        web_manifest(),
+        sites_manifest(),
+        report_digest_manifest(),
+        app_radar_manifest(),
+        app_chat_manifest(),
+    )
+    app = FastAPI()
+    app.state.blob = blob
+    app.state.artifact_token_secret = SECRET
+    app.include_router(artifacts_router)
+    _mount_shared_surfaces(
+        app,
+        manifests,
+        CredentialStore(fernet=CREDENTIAL_FERNET),
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        SECRET,
+        "https://web",
+        None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        connectors=ConnectorRegistry(entries={}, resolver=CatalogResolver()),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
+        surface_model=lambda _name: SURFACE_MODEL[0],
+        skills=skill_registry(manifests),
+        member_skill_listing=lambda: member_skill_listing(
+            (skill_create_manifest(),),
+            CredentialStore(fernet=CREDENTIAL_FERNET),
+            DefaultIndex(transaction=workspace_tx),
+            StubEmbed(),
+        ),
+        objects=member_object_registry(
+            manifests, public_base_url="https://web", artifact_token_secret=SECRET
+        ),
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://web") as client:
+        yield client, workspace_id, app_agent, FleetBlobStore(backend=blob.backend)
+    dbos_client.destroy()
+
+
+async def test_homepage_read_serves_a_row_less_shipped_app_page(
+    web_apps: tuple[AsyncClient, UUID, UUID, "FleetBlobStore"],
+) -> None:
+    """An app agent with no forked hosted_site row resolves to the shipped page: the read answers
+    `set` with a frame link and a digest-derived generation, the portal publish has landed the apps
+    bundle under `apps/<digest>/` with the app's own index and the shared bridge, and the served
+    generation is that digest's fold — so the link names the bytes just published."""
+    client, workspace_id, app_agent, fleet = web_apps
+    _member_id, token = await _seed_member(workspace_id, "shipped@example.com")
+    # The shipped homepage read publishes the bundle before it hands out the link.
+    read = await client.get(
+        f"/surface/web/agents/{app_agent}/homepage",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert read.status_code == 200
+    payload = read.json()
+    assert payload["state"] == "set"
+    assert payload["url"].startswith("https://web/surface/sites/")
+    assert set(payload) == {"state", "url", "deploy_generation"}
+    keys = {entry.key for entry in await fleet.list(web_surface.APPS_STORE_PREFIX)}
+    digests = {key.split("/")[1] for key in keys}
+    assert len(digests) == 1
+    digest = digests.pop()
+    assert f"apps/{digest}/radar/index.html" in keys
+    assert f"apps/{digest}/bridge.js" in keys
+    assert payload["deploy_generation"] == int(digest[:13], 16)
 
 
 async def test_homepage_seed_leaves_a_refused_agent_unmarked_and_retries(db: None) -> None:

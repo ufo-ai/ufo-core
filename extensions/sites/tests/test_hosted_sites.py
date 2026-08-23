@@ -33,6 +33,7 @@ import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.manifest import manifest as sites_manifest
@@ -67,7 +68,13 @@ from ufo_ext_sites.surface import (
     SITE_CARD_PATH,
     UNCONFIGURED_BODY,
     VISIBILITY_BADGES,
+    ShippedAddress,
     SiteHostingUnconfigured,
+    serve_port,
+    shipped_address,
+    shipped_anchor,
+    shipped_site_url,
+    site_address,
     site_card_url,
     site_token,
     site_url,
@@ -79,7 +86,6 @@ from ufo_ext_sites.tools import (
     PREVIEW_WIDTH,
     PUBLISH_WEBSITE_TOOL,
     SET_HOMEPAGE_TOOL,
-    serve_port,
 )
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import (
@@ -105,6 +111,7 @@ from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.ingress_token import (
     INGRESS_VIEW_KIND,
     INGRESS_VIEW_PATH,
+    ShippedClaim,
     verify_ingress_token,
 )
 from ufo.sandbox.local import LocalCarrier
@@ -2824,6 +2831,95 @@ async def test_a_homepage_frame_follows_the_agent_and_renders_bare(
     assert (await client.get(link, headers=_cookie(admin_token))).status_code == 200
 
 
+SHIPPED_DIGEST = "deadbeefdeadbeef"
+
+
+async def _seed_app_agent(
+    workspace: Workspace, slug: str, *, visibility: str = "workspace"
+) -> UUID:
+    """One app agent as an `app_<slug>` provision would create it — ownerless, with the full
+    provenance the `agent_provenance` check requires — the row a shipped page's frame gates on."""
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace.id,
+                name=slug,
+                prompt="the app",
+                model="claude-opus-4-8",
+                visibility=visibility,
+                provisioned_by=f"app_{slug}",
+                provisioned_name=slug,
+                provisioned_version="0.1.0",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id
+
+
+def test_a_shipped_url_round_trips_and_never_collides_with_a_site_token() -> None:
+    """The shipped frame link carries its whole address in the token — workspace, app agent, slug,
+    digest — and reads back as exactly that. A shipped token is not a site token and a site token is
+    not a shipped one, so the two frame paths never resolve each other's address. No public base,
+    no link."""
+    ws_id, agent_id = uuid4(), uuid4()
+    url = shipped_site_url(PUBLIC_BASE_URL, ws_id, agent_id, "radar", SHIPPED_DIGEST)
+    assert url is not None and url.startswith(f"{PUBLIC_BASE_URL}{FRAME_PATH}/")
+    token = url.rpartition("/")[2]
+    assert shipped_address(token) == ShippedAddress(ws_id, agent_id, "radar", SHIPPED_DIGEST)
+    assert site_address(token) is None
+    assert shipped_address(site_token(ws_id, uuid4(), "dash")) is None
+    assert shipped_site_url(None, ws_id, agent_id, "radar", SHIPPED_DIGEST) is None
+
+
+async def test_a_shipped_app_frame_gates_on_the_agent_and_embeds_the_fleet_bundle(
+    deployment: Deployment,
+) -> None:
+    """A shipped app page has no hosted_site row: the frame resolves the agent from the token, gates
+    on its visibility exactly as a bound homepage does, renders bare, and embeds the deploy-wide
+    bundle from the fleet store — the ingress view token it mints carries the shipped claim and the
+    synthetic per-workspace anchor, and an unconfigured ingress embeds nothing rather than crash."""
+    client, workspace = deployment.client, deployment.workspace
+    _other_id, other_token = await _seed_member(workspace, OTHER_EMAIL)
+    _admin_id, admin_token = await _seed_member(workspace, ADMIN_EMAIL, is_admin=True)
+    app_agent = await _seed_app_agent(workspace, "radar")
+    url = shipped_site_url(PUBLIC_BASE_URL, workspace.id, app_agent, "radar", SHIPPED_DIGEST)
+    assert url is not None
+
+    anonymous = await client.get(url)
+    assert anonymous.status_code == 200
+    assert "not signed in to the workspace" in anonymous.text
+    assert "<iframe" not in anonymous.text
+
+    opened = await client.get(url, headers=_cookie(other_token))
+    assert opened.status_code == 200
+    assert "<header>" not in opened.text
+    embedded = _embedded(opened.text)
+    assert INGRESS_HOST in embedded
+    claims = verify_ingress_token(
+        embedded.rpartition(f"{INGRESS_VIEW_PATH}/")[2], datetime.now(UTC), INGRESS_VIEW_KIND
+    )
+    anchor = shipped_anchor(workspace.id, "radar")
+    assert (claims.conversation_id, claims.port) == (anchor, serve_port(anchor))
+    assert claims.shipped == ShippedClaim(slug="radar", digest=SHIPPED_DIGEST)
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == app_agent)
+            .values(visibility="private")
+        )
+    assert (await client.get(url, headers=_cookie(other_token))).status_code == 404
+    assert (await client.get(url, headers=_cookie(admin_token))).status_code == 200
+
+    unhosted = await deployment.unhosted.get(url, headers=_cookie(admin_token))
+    assert unhosted.status_code == 200
+    assert "<iframe" not in unhosted.text
+    assert UNCONFIGURED_BODY in unhosted.text
+
+
 async def test_site_rows_carry_homepage_agent(db: None) -> None:
     """The kind row carries `homepage_agent` only on the bound site — the declared field the portal
     reads and filters the binding through — so a browse holds every other site and nothing else,
@@ -2878,6 +2974,18 @@ def _manifest_json(conversation_id: UUID, name: str, token: str) -> str:
     return SourceManifest(
         root=f"sites/{conversation_id}/{name}/{token}/", files=listing
     ).model_dump_json()
+
+
+def test_a_source_root_must_be_a_sites_or_apps_prefix() -> None:
+    """`_rooted` admits both serving families — `sites/` for a workspace fork, `apps/` for a shipped
+    bundle — and refuses a root that ends elsewhere or does not end at a prefix, so a manifest can
+    never name bytes outside a deploy's own trees."""
+    files = {"index.html": SiteFile(size=1, media_type="text/html", sha256="ab" * 32)}
+    assert SourceManifest(root="sites/c/site/tok/", files=files).root == "sites/c/site/tok/"
+    assert SourceManifest(root="apps/9f3a/radar/", files=files).root == "apps/9f3a/radar/"
+    for bad in ("workspaces/x/", "apps/9f3a/radar", "../apps/x/", "apps"):
+        with pytest.raises(ValidationError):
+            SourceManifest(root=bad, files=files)
 
 
 async def test_a_deploy_promotes_its_source_and_keeps_the_previous_deploys(db: None) -> None:

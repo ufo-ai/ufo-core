@@ -26,7 +26,7 @@ S3_MULTIPART_PART_BYTES = 8 * 1024 * 1024
 BLOB_LIST_MAX_KEYS = 10_000
 BLOB_ROOT_SETTING = "blob.root"
 WORKSPACE_KEY_PREFIX = "workspaces/"
-FLEET_KEY_PREFIXES = ("static/", "term/")
+FLEET_KEY_PREFIXES = ("static/", "term/", "apps/")
 S3_VIRTUAL_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
 S3_PATH_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "path"})
 

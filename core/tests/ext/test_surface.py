@@ -80,6 +80,7 @@ from ufo.sandbox.ingress_token import (
     INGRESS_VIEW_PATH,
     INGRESS_VIEW_TTL_SECONDS,
     IngressTokenError,
+    ShippedClaim,
     verify_ingress_token,
 )
 from ufo.sandbox.local import LocalCarrier
@@ -94,6 +95,7 @@ from ufo.schema.records import (
     ToolIntent,
     TurnContext,
 )
+from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 from ufo.sources.backend import binding_name
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
@@ -1860,6 +1862,52 @@ def test_ingress_url_is_none_without_a_configured_base(tmp_path) -> None:
     site rather than inventing a hostname."""
     context = _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path))
     assert replace(context, _ingress_public_url=None).ingress_url(uuid4(), 8000, "/") is None
+
+
+def test_ingress_url_carries_the_shipped_claim(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped producer half: with both `shipped_slug` and `shipped_digest`, the minted view
+    token carries the shipped reference the ingress reads to serve deploy-wide bytes, while the
+    label still names the anchor `(conversation, port)` so the origin stays workspace-scoped. Absent
+    either half, the token carries no shipped claim and the ingress serves the conversation's own
+    bytes — the row-backed path is unchanged."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
+    workspace_id, anchor = uuid4(), uuid4()
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    url = context.ingress_url(
+        anchor, 20001, "/", shipped_slug="radar", shipped_digest="deadbeefdeadbeef"
+    )
+    assert url is not None
+    label, _, _host = urlsplit(url).netloc.partition(".")
+    assert parse_site_label(label) == (anchor, 20001)
+    token = urlsplit(url).path.removeprefix(f"{INGRESS_VIEW_PATH}/")
+    claims = verify_ingress_token(token, datetime.now(UTC), INGRESS_VIEW_KIND)
+    assert claims.shipped == ShippedClaim(slug="radar", digest="deadbeefdeadbeef")
+    plain = context.ingress_url(anchor, 20001, "/")
+    assert plain is not None
+    plain_token = urlsplit(plain).path.removeprefix(f"{INGRESS_VIEW_PATH}/")
+    assert verify_ingress_token(plain_token, datetime.now(UTC), INGRESS_VIEW_KIND).shipped is None
+
+
+def test_deploy_skill_files_reads_the_deploy_tier(tmp_path) -> None:
+    """A surface reads a deploy-tier skill's bundled files by name — the bytes a shipped app page is
+    served as — and gets None for a name this deploy loads no skill under. The `SKILL.md` body is
+    not among them: only the mounted asset files."""
+    skill = RuntimeSkill(
+        name="app-radar-home",
+        description="",
+        instructions="",
+        files=(("index.html", b"<html></html>"), ("app.js", b"//app")),
+        raw_skill_md="# home",
+    )
+    context = replace(
+        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _skills=SkillRegistry(by_name={"app-radar-home": skill}),
+    )
+    assert context.deploy_skill_files("app-radar-home") == {
+        "index.html": b"<html></html>",
+        "app.js": b"//app",
+    }
+    assert context.deploy_skill_files("app-nope-home") is None
 
 
 async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_path) -> None:

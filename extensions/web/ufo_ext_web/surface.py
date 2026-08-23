@@ -37,6 +37,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, JsonValue, ValidationError
+from ufo_ext_sites.surface import shipped_site_url
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import audience_subjects, conversation_audience
@@ -311,28 +312,73 @@ STATIC_STORE_PREFIX = "static/web/"
 STORED_ASSET_NAME = re.compile(r"assets/[A-Za-z0-9._-]+")
 STORED_ASSETS_MAX = 64
 
+APPS_STORE_PREFIX = "apps/"
+APP_HOME_SKILL = re.compile(r"app-(?P<slug>[a-z0-9]+)-home")
+APP_BRIDGE_SKILL = "app-bridge"
+APP_PAGE_FILES = ("index.html", "app.js", "app.tsx")
+BRIDGE_FILE = "bridge.js"
+
 _ASSET_PUBLISH: asyncio.Task[None] | None = None
 _STORED_ASSETS: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
 
 
-async def _publish_assets(blob: BlobStore) -> None:
+def apps_bundle(ctx: SurfaceContext) -> tuple[dict[str, bytes], str]:
+    """The deploy-wide apps bundle and its digest, assembled from the app home skills' page files.
+
+    One atomic tree — each app's `<slug>/index.html`, `<slug>/app.js`, `<slug>/app.tsx` and the one
+    shared `bridge.js` at the root — served row-less to every unforked workspace. The slug is the
+    app's home-skill name (`app-radar-home` → `radar`); `app-bridge` contributes the shared client.
+    The digest is `sha256` over the sorted `(path, bytes)` of the whole tree, first 16 hex: content
+    derived, so it is identical on every pod, names the fleet key prefix `apps/<digest>/`, and folds
+    to the `deploy_generation` the homepage read reports. Recomputed per call rather than held — the
+    inputs are a handful of small deploy-constant files, and the publish's own skip-if-present makes
+    a repeat cheap — so nothing stale survives a registry that changed between test cases."""
+    tree: dict[str, bytes] = {}
+    for name, _description in ctx.deploy_skills:
+        match = APP_HOME_SKILL.fullmatch(name)
+        if match is None:
+            continue
+        files = ctx.deploy_skill_files(name) or {}
+        for page in APP_PAGE_FILES:
+            body = files.get(page)
+            if body is not None:
+                tree[f"{match['slug']}/{page}"] = body
+    bridge = (ctx.deploy_skill_files(APP_BRIDGE_SKILL) or {}).get(BRIDGE_FILE)
+    if bridge is not None:
+        tree[BRIDGE_FILE] = bridge
+    digest = sha256(
+        b"".join(f"{path}\x00".encode() + body for path, body in sorted(tree.items()))
+    ).hexdigest()[:16]
+    return tree, digest
+
+
+async def _publish_assets(blob: BlobStore, apps: tuple[dict[str, bytes], str]) -> None:
     for name, (body, _media_type) in STATIC_ASSETS.items():
         key = STATIC_STORE_PREFIX + name
         if not await blob.exists(key):
             await blob.put(key, body)
+    tree, digest = apps
+    for path, body in tree.items():
+        key = f"{APPS_STORE_PREFIX}{digest}/{path}"
+        if not await blob.exists(key):
+            await blob.put(key, body)
 
 
-def _assets_published(blob: BlobStore) -> "asyncio.Task[None]":
+def _assets_published(blob: BlobStore, apps: tuple[dict[str, bytes], str]) -> "asyncio.Task[None]":
     """This process's one publish of its built assets into the shared store (RFC 0031): every pod
     writes its own set before it serves its first page, so a hash a page names is in the store
     before any pod is asked for it — the causal order that makes a mixed-version roll harmless.
     Keys carry Vite's content hash, so a key present is a key already correct and is skipped. A
     failed publish fails the page that awaited it and is replaced here, so the next page retries
-    rather than serving a reference nothing can answer."""
+    rather than serving a reference nothing can answer.
+
+    The apps bundle rides the same publish: each digest-named file skipped when present (content
+    addressed → present is correct), so a shipped page's bytes are in the store under
+    `apps/<digest>/` before the homepage read hands out a link naming that digest."""
     global _ASSET_PUBLISH
     task = _ASSET_PUBLISH
     if task is None or (task.done() and task.exception() is not None):
-        task = asyncio.create_task(_publish_assets(blob))
+        task = asyncio.create_task(_publish_assets(blob, apps))
         _ASSET_PUBLISH = task
     return task
 
@@ -377,7 +423,7 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     and no page is ever stale while looking current."""
     if PORTAL_HTML is None:
         raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
-    await _assets_published(ctx.fleet_blob)
+    await _assets_published(ctx.fleet_blob, apps_bundle(ctx))
     return HTMLResponse(PORTAL_HTML, headers={"cache-control": "no-store"})
 
 
@@ -569,6 +615,10 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     workspace-visible agent's homepage (main is born one) reaches every member at once, a private
     agent's reaches its owner and admins, and flipping the agent object's visibility is what
     widens the page — no site row is rewritten.
+    A shipped app agent (one an `app_*` extension provisioned) is marked settled without a turn:
+    its homepage is the deploy-wide bundle served row-less, so it needs no build. Marking it rather
+    than skipping it is what lets the candidate query settle — an unmarked agent it never builds
+    would keep the workspace due forever.
     An agent whose allowlist withholds the site tools is marked
     settled rather than handed a turn it cannot finish — chat is its recovery if the allowlist
     grows — and an ownerless agent in a workspace with no seated admin waits, unmarked, for one.
@@ -587,6 +637,9 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     for agent in agents:
         key = f"{HOMEPAGE_SEED_PREFIX}{agent.id}"
         if key in marked:
+            continue
+        if _app_slug(agent.provisioned_by) is not None:
+            await ctx.store.put(key, "shipped")
             continue
         if agent.tools is not None and not set(HOMEPAGE_TOOLS) <= set(agent.tools):
             await ctx.store.put(key, "withheld-tools")
@@ -739,15 +792,20 @@ async def _audience_for(
     return member_id, email, await web_audience(ctx, web_extension(), email)
 
 
+APP_PROVISION = re.compile(r"app_(?P<slug>[a-z0-9]+)")
+
+
 def _app_slug(provisioned_by: str | None) -> str | None:
     """The slug an app extension shipped this agent under — `app_radar` provisions `radar` — or
     None for every other agent. The slug is the section identity: extension names are unique where
     the deploy is assembled, where an agent's own name is a member-visible string provisioning
     suffixes on collision (`radar-app-radar`), so a route bound to the name dies in exactly the
-    workspace that already had one."""
-    if provisioned_by is None or not provisioned_by.startswith("app_"):
+    workspace that already had one. The `[a-z0-9]+` class is the one `APP_HOME_SKILL` reads a slug
+    with, so the provision name and the home-skill name resolve to the identical slug or to none."""
+    if provisioned_by is None:
         return None
-    return provisioned_by.removeprefix("app_")
+    match = APP_PROVISION.fullmatch(provisioned_by)
+    return None if match is None else match["slug"]
 
 
 async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
@@ -4024,20 +4082,47 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
         admin=True,
         query=ObjectListQuery(filters={"homepage_agent": str(agent_id)}),
     )
-    if page is None:
-        return JSONResponse({"state": "none"})
-    bound = next((row for row in page.rows if "site_url" in row.fields), None)
-    if bound is None:
-        return JSONResponse(
-            {"state": "building"} if await _seeding_homepage(ctx, agent_id) else {"state": "none"}
-        )
-    return JSONResponse(
-        {
-            "state": "set",
-            "url": bound.fields["site_url"],
-            "deploy_generation": bound.fields.get("deploy_generation", 0),
-        }
+    bound = (
+        next((row for row in page.rows if "site_url" in row.fields), None)
+        if page is not None
+        else None
     )
+    if bound is not None:
+        return JSONResponse(
+            {
+                "state": "set",
+                "url": bound.fields["site_url"],
+                "deploy_generation": bound.fields.get("deploy_generation", 0),
+            }
+        )
+    shipped = await _shipped_homepage(ctx, summary)
+    if shipped is not None:
+        return shipped
+    return JSONResponse(
+        {"state": "building"} if await _seeding_homepage(ctx, agent_id) else {"state": "none"}
+    )
+
+
+async def _shipped_homepage(ctx: SurfaceContext, summary: AgentSummary) -> Response | None:
+    """The shipped-app homepage for an app-slug agent with no forked row, or None for any other
+    agent — the second step of the homepage resolution, tried after a forked row and before the
+    seed path. The page is row-less: the current apps bundle is published (so the bytes are in the
+    fleet store before the link is handed out), and the read answers with a frame link carrying the
+    synthetic anchor's shipped claim (slug + current digest). `deploy_generation` is the digest
+    folded to a JS-safe int, so `AgentPane` remounts onto the new bundle the moment a deploy changes
+    it. None where the agent carries no app slug, its slug is not in the bundle, or the deploy hosts
+    no reachable link — each falling through to the seed/none answer the caller draws."""
+    slug = _app_slug(summary.provisioned_by)
+    if slug is None:
+        return None
+    tree, digest = apps_bundle(ctx)
+    if f"{slug}/index.html" not in tree:
+        return None
+    await _assets_published(ctx.fleet_blob, (tree, digest))
+    url = shipped_site_url(ctx.public_base_url, ctx.workspace_id, summary.id, slug, digest)
+    if url is None:
+        return None
+    return JSONResponse({"state": "set", "url": url, "deploy_generation": int(digest[:13], 16)})
 
 
 async def _seeding_homepage(ctx: SurfaceContext, agent_id: UUID) -> bool:

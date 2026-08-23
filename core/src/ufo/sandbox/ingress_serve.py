@@ -5,6 +5,7 @@ filters."""
 
 import asyncio
 import json
+import mimetypes
 import os
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -29,6 +30,7 @@ from websockets.typing import Subprotocol
 from ufo.blob import (
     BlobNotFound,
     FilesystemBlobStore,
+    FleetBlobStore,
     S3BlobStore,
     WorkspaceBlobStore,
     blob_store_for,
@@ -46,6 +48,7 @@ from ufo.sandbox.ingress_token import (
     INGRESS_VIEW_PATH,
     IngressClaims,
     IngressTokenError,
+    ShippedClaim,
     ingress_secret,
     mint_ingress_token,
     verify_ingress_token,
@@ -414,7 +417,15 @@ class IngressServe:
         bumps its row, so a cached manifest would keep answering the retired bytes at the same URL
         for its whole TTL. The row read costs what the dial path's own conversation read costs. A
         manifest that does not parse is this deploy's own write gone wrong and raises rather than
-        serving something else."""
+        serving something else.
+
+        A `shipped` claim redirects the read to a deploy-wide app bundle in the fleet store: no
+        conversation row exists for a shipped page, so the files are enumerated from the fleet tree
+        under `apps/<digest>/` instead of the `hosted_site` row. The bytes are the same for every
+        workspace — the session cookie still scoped the workspace claim, and the digest names
+        immutable content, so serving them row-less leaks nothing a workspace owns."""
+        if claims.shipped is not None:
+            return await self._shipped_manifest(claims.shipped)
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -437,6 +448,36 @@ class IngressServe:
                 sha256=entry["sha256"],
             )
             for path, entry in manifest["files"].items()
+        }
+
+    async def _shipped_manifest(self, shipped: ShippedClaim) -> dict[str, StoredFile] | None:
+        """The precompiled app bundle a shipped claim names, from the fleet store: every file of
+        the deploy-wide apps tree under `apps/<digest>/`, keyed by the request path that reaches
+        it. A file inside the claim's own slug subdir answers a root-relative request — so
+        `apps/<digest>/<slug>/index.html` is `/` and `apps/<digest>/<slug>/app.<h>.js` is
+        `/app.<h>.js` — while a file outside the slug subdir (`apps/<digest>/bridge.js`, the bridge
+        client every app shares) answers at its own path, `/bridge.js`, so one copy serves every
+        app. None when the digest names no published tree — a race against a redeploy that retired
+        it — answering 404 for the refresh to heal.
+
+        The etag is the digest itself: the tree is content-addressed, so a byte change anywhere is a
+        new digest carried in a new token, and a held copy of any file revalidates against it.
+        Enumerated by one bounded `list`, not a published manifest — the digest supplies the etag a
+        bare listing could not, and the sizes and media types are all the listing and the filenames
+        already carry. The keys stay fleet keys, read in `_serve_stored` from the fleet store."""
+        prefix = f"apps/{shipped.digest}/"
+        entries = await FleetBlobStore(backend=self.blob).list(prefix)
+        if not entries:
+            return None
+        slug_prefix = f"{shipped.slug}/"
+        return {
+            entry.key.removeprefix(prefix).removeprefix(slug_prefix): StoredFile(
+                key=entry.key,
+                size_bytes=entry.size_bytes,
+                media_type=mimetypes.guess_type(entry.key)[0] or "application/octet-stream",
+                sha256=shipped.digest,
+            )
+            for entry in entries
         }
 
     async def _dial_site(self, claims: IngressClaims) -> DialTarget | SiteRefusal:
@@ -480,6 +521,10 @@ class IngressServe:
         files = await self._stored_manifest(authorized)
         if files is not None:
             return await self._serve_stored(request, authorized, files, path)
+        if authorized.shipped is not None:
+            # A shipped bundle lives only in the fleet store; a `None` manifest is the digest gone,
+            # not a sandbox to dial — 404 for the portal's remount on the new digest to heal.
+            return Response(NOT_FOUND, status_code=404, media_type="text/plain")
         dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
             return Response(dialed.message, status_code=dialed.status, media_type="text/plain")
@@ -574,8 +619,11 @@ class IngressServe:
         headers["content-length"] = str(stored.size_bytes)
         if request.method == "HEAD":
             return Response(status_code=200, headers=headers, media_type=stored.media_type)
-        with ws(claims.workspace_id):
-            chunks = WorkspaceBlobStore(backend=self.blob).get_stream(stored.key)
+        if claims.shipped is not None:
+            chunks = FleetBlobStore(backend=self.blob).get_stream(stored.key)
+        else:
+            with ws(claims.workspace_id):
+                chunks = WorkspaceBlobStore(backend=self.blob).get_stream(stored.key)
         try:
             first = await anext(chunks)
         except StopAsyncIteration:
@@ -759,7 +807,7 @@ class IngressServe:
         authorized = self._authorized(websocket)
         if isinstance(authorized, SiteRefusal):
             return await self._refuse(websocket, authorized)
-        if await self._stored_manifest(authorized) is not None:
+        if await self._stored_manifest(authorized) is not None or authorized.shipped is not None:
             return await self._refuse(websocket, SiteRefusal(502, SITE_HAS_NO_SOCKET))
         dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
