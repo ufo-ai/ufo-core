@@ -1,6 +1,7 @@
 name: Nightly evals
 
-# Every registered capability, scenario, and arc suite, once a night.
+# Every registered capability, scenario, and arc suite, on dispatch. The recurring cadence is the
+# eval-findings-daily scheduled task in the testing product, so the cron stays commented out.
 # `.github/scripts/nightly_eval_matrix.py` reads `evals.registry.TASKS` and splits it into shards,
 # so a suite that is added, renamed, or bound to a pack moves through the sweep with no list here
 # to keep in step. One shard is one job: a GitHub-hosted runner stops a job at six hours, and the
@@ -21,8 +22,8 @@ name: Nightly evals
 # `mcp_atlas_100`) are not here.
 
 on:
-  schedule:
-    - cron: '0 3 * * *'
+  # schedule:
+  #   - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       smoke:
