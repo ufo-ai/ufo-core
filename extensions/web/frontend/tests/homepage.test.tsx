@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 
@@ -52,11 +52,122 @@ test("a set homepage frames the bound site beside the conversation", async () =>
   expect(frame.tagName).toBe("IFRAME");
   expect(frame.getAttribute("src")).toBe(HOMEPAGE_URL);
   expect(frame.hasAttribute("sandbox")).toBe(false);
+  // What shows through a frame whose page is still arriving is the pane's own background, in the
+  // portal's color-scheme — never a browser's default white canvas.
+  expect(frame.className).toContain("bg-surface");
+  expect(frame.className).toContain("[color-scheme:light_dark]");
+  expect(frame.parentElement!.className).toContain("bg-surface");
   // The page heads itself, so the pane draws no band and no title of its own over it — only the
   // shell's two acts, floating in the page's gutter.
   expect(screen.queryByRole("heading", { name: "Assistant" })).toBeNull();
   expect(screen.getByRole("button", { name: "Settings for Assistant" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Chat with Assistant" })).toBeTruthy();
+});
+
+/** A redeploy remounts the page at the same URL, and the swap must never show the arriving copy's
+ *  blank document: the standing frame holds the screen until the fresh one has loaded, the two
+ *  cross-fade, and the replaced copy leaves once the fade is over. The bridge is the arriving
+ *  frame's from the moment it mounts, so the page's own ready reaches the shell before the fade
+ *  finishes. */
+test("a redeploy keeps the standing page until the fresh frame loads, then swaps", async () => {
+  let generation = 1;
+  location.hash = "#/agents/" + AGENT_ID;
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json({ ...SET, deploy_generation: generation }),
+  });
+  vi.useFakeTimers();
+  try {
+    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const first = screen.getByTitle("Assistant homepage");
+    expect(first.className).toContain("opacity-0");
+    fireEvent.load(first);
+    expect(first.className).toContain("opacity-100");
+
+    generation = 2;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const both = screen.getAllByTitle("Assistant homepage");
+    expect(both.length).toBe(2);
+    expect(both[0]).toBe(first);
+    expect(first.className).toContain("opacity-100");
+    expect(both[1].className).toContain("opacity-0");
+    expect(both[1].className).toContain("pointer-events-none");
+
+    const answered: unknown[] = [];
+    vi.spyOn(both[1] as HTMLIFrameElement, "contentWindow", "get").mockReturnValue({
+      postMessage: (message: unknown) => void answered.push(message),
+    } as unknown as Window);
+    fireEvent(
+      window,
+      new MessageEvent("message", {
+        data: { ufo: "ready" },
+        source: (both[1] as HTMLIFrameElement).contentWindow,
+      }),
+    );
+    expect(answered.some((message) => (message as { ufo?: string }).ufo === "init")).toBe(true);
+
+    fireEvent.load(both[1]);
+    expect(both[1].className).toContain("opacity-100");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(document.contains(first)).toBe(false);
+    expect(screen.getAllByTitle("Assistant homepage").length).toBe(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+/** Two redeploys racing: a load from the copy already being replaced promotes nothing, so the
+ *  member never watches superseded bytes fade in over the page they had. */
+test("a load from a frame already being replaced does not resurrect it", async () => {
+  let generation = 1;
+  location.hash = "#/agents/" + AGENT_ID;
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json({ ...SET, deploy_generation: generation }),
+  });
+  vi.useFakeTimers();
+  try {
+    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const first = screen.getByTitle("Assistant homepage");
+    fireEvent.load(first);
+
+    generation = 2;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const both = screen.getAllByTitle("Assistant homepage");
+    expect(both.length).toBe(2);
+
+    fireEvent.load(first);
+    expect(screen.getAllByTitle("Assistant homepage").length).toBe(2);
+    expect(first.className).toContain("opacity-100");
+    expect(both[1].className).toContain("opacity-0");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(document.contains(both[1])).toBe(true);
+    expect(both[1].className).toContain("opacity-0");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 /** The conversation stands in a lane of the screen's own track, and a lane is headed by its own
@@ -76,13 +187,10 @@ test("the conversation beside a page is headed by the lane it stands in", async 
   expect(conversation.querySelector('[data-slot="header"]')).toBeNull();
 });
 
-/** A page standing alone is the app whole, so the app's conversations stand only once the member
- *  has opened one over it — and they stand between the page and the conversation they open, which
- *  is the order the member walked. */
-/** The right-side chat is the shell's own, and it heads itself with a New act and a menu of the
- *  app's directive conversations — the way between them without the middle lane, whose list the
- *  sidebar already draws. */
-test("the right-side chat heads itself with New and the conversation menu", async () => {
+/** An app has one editing conversation — the chat the member directs it in — so the right-side
+ *  chat's band carries no act to start another and no menu to switch: the toggle opens the one
+ *  there is, and the sidebar is the list of the rest. */
+test("the right-side chat carries no New act and no conversation menu", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open({
     "/homepage": () => json(SET),
@@ -95,11 +203,55 @@ test("the right-side chat heads itself with New and the conversation menu", asyn
 
   await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
-  expect(await screen.findByRole("button", { name: "New" })).toBeTruthy();
-  await userEvent.click(
-    await screen.findByRole("button", { name: "Conversations with Assistant" }),
-  );
-  expect(await screen.findByRole("menuitem", { name: /./ })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "New" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Conversations with Assistant" })).toBeNull();
+});
+
+/** The toggle opens the editing conversation: the newest the rail carries for this app, whatever
+ *  order the app's own index answers in. */
+test("the chat toggle opens the newest directive conversation", async () => {
+  const newer = "66666666-6666-4666-8666-666666666666";
+  location.hash = "#/agents/" + AGENT_ID;
+  open({
+    "/homepage": () => json(SET),
+    "/api/chats": () =>
+      json({
+        chats: [
+          CHAT_ROW,
+          {
+            ...CHAT_ROW,
+            conversation_id: newer,
+            title: "Bold titles",
+            last_at: "2026-08-09T09:00:00.000Z",
+          },
+        ],
+      }),
+    "/conversations$": () =>
+      json({
+        conversations: [LISTED, { ...LISTED, id: newer, description: "Bold titles" }],
+      }),
+  });
+
+  await screen.findByTitle("Assistant homepage");
+  await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
+
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + newer);
+});
+
+/** An app nobody has directed yet has no editing conversation, so the toggle opens the composer —
+ *  and the send that founds one makes it the editing chat from then on. */
+test("the chat toggle opens the composer when no directive conversation exists", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  open({
+    "/homepage": () => json(SET),
+  });
+
+  await screen.findByTitle("Assistant homepage");
+  await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
+
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
+  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
 });
 
 test("a homepage being built draws the page's shape rather than the page", async () => {

@@ -57,6 +57,11 @@ output "app_s3_role_arn" {
   value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.app_s3_role_name}"
 }
 
+output "ingress_s3_role_arn" {
+  description = "IRSA role annotated on the ufo-ingress ServiceAccount for read-only blob access."
+  value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.ingress_s3_role_name}"
+}
+
 output "gateway_ses_role_arn" {
   description = "Deterministic ufo-gateway IRSA ARN; hosted manifest keys must be plan-known."
   value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.gateway_ses_role_name}"

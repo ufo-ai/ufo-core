@@ -10,13 +10,20 @@ the rendered frame are. The ingress URL the frame embeds is really minted, and i
 verifies."""
 
 import asyncio
+import hashlib
 import json
+import os
 import re
+import shlex
+import subprocess
+import sys
+import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from subprocess import CompletedProcess
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
@@ -37,10 +44,13 @@ from ufo_ext_sites.share_card import (
     CARD_NAME,
     CARD_WIDTH,
 )
+from ufo_ext_sites.source import CLAIM_TREE_PROG
 from ufo_ext_sites.store import (
     HostedSite,
     HostedSites,
     NotTheSiteCreator,
+    SiteFile,
+    SourceManifest,
     UnhostNeedsASpeaker,
     hosted_site,
 )
@@ -64,6 +74,7 @@ from ufo_ext_sites.surface import (
 )
 from ufo_ext_sites.tools import (
     DEPLOY_WEBSITE_TOOL,
+    ENUMERATE_PROG,
     PREVIEW_HEIGHT,
     PREVIEW_WIDTH,
     PUBLISH_WEBSITE_TOOL,
@@ -89,6 +100,7 @@ from ufo.hub import InProcessHub
 from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
 from ufo.media.image_previews import ImagePreviewGrant
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
+from ufo.sandbox import containment
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.ingress_token import (
     INGRESS_VIEW_KIND,
@@ -123,6 +135,18 @@ OTHER_EMAIL = "other@example.com"
 ADMIN_EMAIL = "admin@example.com"
 TOOL_NARRATION = "putting the site online"
 SITE = "marketing"
+SOURCE_LISTING = {"index.html": {"size": 18, "sha256": "ab" * 32}}
+SOURCE_BYTES = b"<html>site</html>"
+
+
+def _listed_source() -> ExecResult:
+    return ExecResult(stdout=json.dumps(SOURCE_LISTING), stderr="", exit_code=0)
+
+
+def _source_store() -> WorkspaceBlobStore:
+    return WorkspaceBlobStore(
+        backend=FilesystemBlobStore(root=Path(tempfile.mkdtemp(prefix="site-blob-")))
+    )
 
 
 @dataclass
@@ -142,10 +166,18 @@ class FakeSandbox:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if program is ENUMERATE_PROG:
+            return _listed_source()
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def write_file(self, path: str, content: bytes) -> None:
         return None
+
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        async def bytes_of() -> AsyncIterator[bytes]:
+            yield SOURCE_BYTES
+
+        return bytes_of()
 
 
 def _png(color: str) -> bytes:
@@ -182,6 +214,8 @@ class ShootingSandbox:
         return ExecResult(stdout=str(len(self.png)), stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if program is ENUMERATE_PROG:
+            return _listed_source()
         return ExecResult(stdout=self.digest, stderr="", exit_code=0)
 
     async def write_file(self, path: str, content: bytes) -> None:
@@ -371,7 +405,7 @@ def _tool(
     tool = next(entry for entry in tools if entry.name == name)
     return tool, ToolContext(
         sandbox=FakeSandbox(),
-        blob=blob or WorkspaceBlobStore(backend=FilesystemBlobStore(root=Path("/nonexistent"))),
+        blob=blob or _source_store(),
         turn=Turn(
             id=uuid4(),
             workspace_id=uuid4(),
@@ -1254,13 +1288,14 @@ async def test_the_site_kind_reads_and_regates_a_hosted_site(db: None) -> None:
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
-    hosted = await _deploy(workspace, conversation_id, audience, creator_id)
+    blob = _source_store()
+    hosted = await _deploy(workspace, conversation_id, audience, creator_id, blob=blob)
     name = str(hosted["site"])
     assert name == site_object_name(conversation_id, SITE)
 
     with ws(workspace.id):
         listed = await _verb("object_list", workspace, conversation_id, creator_id, kind=SITE_KIND)
-        fetched = await _get(workspace, conversation_id, creator_id, name)
+        fetched = await _get(workspace, conversation_id, creator_id, name, blob=blob)
         applied = await _verb(
             "object_apply",
             workspace,
@@ -1943,16 +1978,21 @@ async def _verb(
     workspace: Workspace,
     conversation_id: UUID,
     speaker_member_id: UUID | None,
+    blob: WorkspaceBlobStore | None = None,
     **args: object,
 ) -> dict[str, object]:
-    tool, ctx = _tool(verb, conversation_audience(speaker_member_id))
+    tool, ctx = _tool(verb, conversation_audience(speaker_member_id), blob=blob)
     return await _dispatch(tool, _bind(ctx, workspace, conversation_id, speaker_member_id), **args)
 
 
 async def _get(
-    workspace: Workspace, conversation_id: UUID, speaker_member_id: UUID, name: str
+    workspace: Workspace,
+    conversation_id: UUID,
+    speaker_member_id: UUID,
+    name: str,
+    blob: WorkspaceBlobStore | None = None,
 ) -> dict[str, object]:
-    tool, ctx = _tool("object_get", conversation_audience(speaker_member_id))
+    tool, ctx = _tool("object_get", conversation_audience(speaker_member_id), blob=blob)
     result = await tool.handler(
         _bind(ctx, workspace, conversation_id, speaker_member_id),
         tool.input_model.model_validate(
@@ -2012,7 +2052,15 @@ class FailingSandbox:
         return ExecResult(stdout="", stderr="port never opened", exit_code=1)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if program is ENUMERATE_PROG:
+            return _listed_source()
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        async def bytes_of() -> AsyncIterator[bytes]:
+            yield SOURCE_BYTES
+
+        return bytes_of()
 
 
 async def test_a_build_that_never_comes_up_leaves_the_members_site_alone(db: None) -> None:
@@ -2120,7 +2168,15 @@ class StoppedShotSandbox:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if program is ENUMERATE_PROG:
+            return _listed_source()
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        async def bytes_of() -> AsyncIterator[bytes]:
+            yield SOURCE_BYTES
+
+        return bytes_of()
 
 
 async def test_a_deploy_stopped_inside_the_shot_has_already_moved_the_ports_row(db: None) -> None:
@@ -2171,9 +2227,17 @@ class RefusedShotSandbox:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if program is ENUMERATE_PROG:
+            return _listed_source()
         if args[0].endswith(".png"):
             return ExecResult(stdout="", stderr="that path is not contained", exit_code=1)
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        async def bytes_of() -> AsyncIterator[bytes]:
+            yield SOURCE_BYTES
+
+        return bytes_of()
 
 
 async def test_a_shot_path_the_guard_refuses_still_hosts_the_site(db: None) -> None:
@@ -2299,6 +2363,7 @@ async def test_sites_slot_rejects_stale_visibility_and_recreated_row_grants(db: 
             "workspace",
             SHARED_AUDIENCE,
             True,
+            manifest=None,
         )
         context = ConversationSlotContext(
             ext=context_for("sites", frozenset()),
@@ -2326,6 +2391,7 @@ async def test_sites_slot_rejects_stale_visibility_and_recreated_row_grants(db: 
             "workspace",
             SHARED_AUDIENCE,
             True,
+            manifest=None,
         )
         assert recreated.generation != registered.generation
         assert (await SITES_SLOT.read(context)).sites == ()
@@ -2341,8 +2407,12 @@ async def test_set_homepage_binds_one_row_per_agent(db: None) -> None:
 
     with ws(workspace.id):
         sites = HostedSites(workspace.id, workspace_tx)
-        await sites.register(first, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True)
-        await sites.register(second, "status", 8000, owner_id, "workspace", SHARED_AUDIENCE, True)
+        await sites.register(
+            first, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True, manifest=None
+        )
+        await sites.register(
+            second, "status", 8000, owner_id, "workspace", SHARED_AUDIENCE, True, manifest=None
+        )
 
         bound = await sites.set_homepage(workspace.agent_id, first, "about")
         moved = await sites.set_homepage(workspace.agent_id, second, "status")
@@ -2363,12 +2433,19 @@ async def test_a_redeploy_keeps_the_binding(db: None) -> None:
     with ws(workspace.id):
         sites = HostedSites(workspace.id, workspace_tx)
         await sites.register(
-            conversation_id, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True
+            conversation_id,
+            "about",
+            8000,
+            owner_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
         )
         await sites.set_homepage(workspace.agent_id, conversation_id, "about")
 
         redeployed = await sites.register(
-            conversation_id, "about", 8000, owner_id, None, SHARED_AUDIENCE, True
+            conversation_id, "about", 8000, owner_id, None, SHARED_AUDIENCE, True, manifest=None
         )
 
         assert redeployed.homepage_agent_id == workspace.agent_id
@@ -2407,7 +2484,14 @@ async def test_unhost_clears_the_binding(db: None) -> None:
     with ws(workspace.id):
         sites = HostedSites(workspace.id, workspace_tx)
         await sites.register(
-            conversation_id, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True
+            conversation_id,
+            "about",
+            8000,
+            owner_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
         )
         await sites.set_homepage(workspace.agent_id, conversation_id, "about")
         await sites.unregister(conversation_id, "about")
@@ -2415,7 +2499,14 @@ async def test_unhost_clears_the_binding(db: None) -> None:
         assert await sites.read(conversation_id, "about") is None
         assert await sites.set_homepage(workspace.agent_id, conversation_id, "about") is None
         await sites.register(
-            conversation_id, "status", 8001, owner_id, "workspace", SHARED_AUDIENCE, True
+            conversation_id,
+            "status",
+            8001,
+            owner_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
         )
         rebound = await sites.set_homepage(workspace.agent_id, conversation_id, "status")
         assert rebound is not None and rebound.homepage_agent_id == workspace.agent_id
@@ -2432,8 +2523,12 @@ async def test_the_index_holds_one_homepage_per_agent(db: None) -> None:
 
     with ws(workspace.id):
         sites = HostedSites(workspace.id, workspace_tx)
-        await sites.register(first, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True)
-        await sites.register(second, "status", 8000, owner_id, "workspace", SHARED_AUDIENCE, True)
+        await sites.register(
+            first, "about", 8000, owner_id, "workspace", SHARED_AUDIENCE, True, manifest=None
+        )
+        await sites.register(
+            second, "status", 8000, owner_id, "workspace", SHARED_AUDIENCE, True, manifest=None
+        )
         await sites.set_homepage(workspace.agent_id, first, "about")
 
         with pytest.raises(IntegrityError):
@@ -2603,18 +2698,19 @@ async def test_binding_a_private_agent_reports_private(db: None) -> None:
 
 async def test_a_bound_site_leaves_the_shared_listing_and_answers_by_name(db: None) -> None:
     """A homepage is the agent's page, not a site the workspace shares: binding takes the row out
-    of every browse — its creator's as well as another member's — and out of another member's
-    reach entirely, while an ordinary workspace site beside it goes on standing in both. The row
-    stays addressable for its creator, who reads the agent's level rather than the dormant column,
-    a read naming the binding still answers it, and an apply naming another level refuses toward
-    the agent object."""
+    of every browse — its creator's as well as another member's — while an ordinary workspace
+    site beside it goes on standing in both. By name the row answers the agent's audience the way
+    the frame does, so any member who may open a workspace agent's page may read its site object —
+    the edit flow every such member may direct starts with that read — a read naming the binding
+    still lists it, and an apply naming another level refuses toward the agent object."""
     workspace = await _seed_workspace()
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     other_id, _other_token = await _seed_member(workspace, TEAMMATE_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
     shared_conversation = await _seed_conversation(workspace, audience, creator_id)
-    hosted = await _deploy(workspace, conversation_id, audience, creator_id)
+    blob = _source_store()
+    hosted = await _deploy(workspace, conversation_id, audience, creator_id, blob=blob)
     await _deploy(
         workspace,
         shared_conversation,
@@ -2622,6 +2718,7 @@ async def test_a_bound_site_leaves_the_shared_listing_and_answers_by_name(db: No
         creator_id,
         site="handbook",
         visibility="workspace",
+        blob=blob,
     )
     name = str(hosted["site"])
     tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
@@ -2638,9 +2735,9 @@ async def test_a_bound_site_leaves_the_shared_listing_and_answers_by_name(db: No
             kind=SITE_KIND,
             filters={"homepage_agent": str(workspace.agent_id)},
         )
-        fetched = await _get(workspace, conversation_id, creator_id, name)
-        with pytest.raises(UnknownObject):
-            await _get(workspace, conversation_id, other_id, name)
+        fetched = await _get(workspace, conversation_id, creator_id, name, blob=blob)
+        others_read = await _get(workspace, conversation_id, other_id, name, blob=blob)
+        assert others_read["spec"] == {"visibility": "workspace"}
         with pytest.raises(ValueError, match="follows the agent"):
             await _verb(
                 "object_apply",
@@ -2730,7 +2827,8 @@ async def test_a_homepage_frame_follows_the_agent_and_renders_bare(
 async def test_site_rows_carry_homepage_agent(db: None) -> None:
     """The kind row carries `homepage_agent` only on the bound site — the declared field the portal
     reads and filters the binding through — so a browse holds every other site and nothing else,
-    and the filtered read holds the bound one alone."""
+    and the filtered read holds the bound one alone. The filter takes `mine` beside an agent id,
+    because nothing tells a turn its own agent id."""
     workspace = await _seed_workspace()
     member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(member_id)
@@ -2751,6 +2849,14 @@ async def test_site_rows_carry_homepage_agent(db: None) -> None:
             kind=SITE_KIND,
             filters={"homepage_agent": str(workspace.agent_id)},
         )
+        mine = await _verb(
+            "object_list",
+            workspace,
+            first,
+            member_id,
+            kind=SITE_KIND,
+            filters={"homepage_agent": "mine"},
+        )
 
     (row,) = listed["objects"]
     assert row["name"] == site_object_name(first, SITE)
@@ -2758,3 +2864,490 @@ async def test_site_rows_carry_homepage_agent(db: None) -> None:
     (only,) = filtered["objects"]
     assert only["name"] == str(bound["site"])
     assert only["homepage_agent"] == str(workspace.agent_id)
+    (own,) = mine["objects"]
+    assert own["name"] == str(bound["site"])
+
+
+def _manifest_json(conversation_id: UUID, name: str, token: str) -> str:
+    listing = {
+        path: SiteFile(
+            size=entry["size"], media_type="text/html; charset=utf-8", sha256=entry["sha256"]
+        )
+        for path, entry in SOURCE_LISTING.items()
+    }
+    return SourceManifest(
+        root=f"sites/{conversation_id}/{name}/{token}/", files=listing
+    ).model_dump_json()
+
+
+async def test_a_deploy_promotes_its_source_and_keeps_the_previous_deploys(db: None) -> None:
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    blob = _source_store()
+
+    await _deploy(workspace, conversation_id, audience, member_id, blob=blob)
+    (row,) = await _stored(workspace)
+    first = SourceManifest.model_validate_json(row.source_manifest)
+    assert sorted(first.files) == ["index.html"]
+    assert first.files["index.html"].media_type == "text/html; charset=utf-8"
+    assert first.files["index.html"].sha256 == "ab" * 32
+    with ws(workspace.id):
+        assert [entry.key for entry in await blob.list(first.root)] == [f"{first.root}index.html"]
+        assert await blob.get(f"{first.root}index.html") == SOURCE_BYTES
+
+    await _deploy(workspace, conversation_id, audience, member_id, blob=blob)
+    (row,) = await _stored(workspace)
+    second = SourceManifest.model_validate_json(row.source_manifest)
+    assert second.root != first.root
+    with ws(workspace.id):
+        assert [entry.key for entry in await blob.list(first.root)] == [f"{first.root}index.html"]
+        assert [entry.key for entry in await blob.list(second.root)] == [f"{second.root}index.html"]
+
+
+async def test_a_publish_over_a_static_deploy_sheds_the_stored_source(db: None) -> None:
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(member_id)
+    conversation_id = await _seed_conversation(workspace, audience, member_id)
+    blob = _source_store()
+    await _deploy(workspace, conversation_id, audience, member_id, blob=blob)
+    (row,) = await _stored(workspace)
+    root = SourceManifest.model_validate_json(row.source_manifest).root
+
+    tool, ctx = _tool(PUBLISH_WEBSITE_TOOL, audience, blob=blob)
+    with ws(workspace.id):
+        await _dispatch(
+            tool,
+            _bind(ctx, workspace, conversation_id, member_id),
+            project_path="/workspace/app",
+            dist_path="dist",
+            app_name=SITE,
+            run_command="node server.js",
+        )
+        (row,) = await _stored(workspace)
+        assert row.source_manifest is None
+        assert [entry.key for entry in await blob.list(root)] == [f"{root}index.html"]
+
+
+async def test_the_registry_redeploys_a_stored_source_in_place(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    conversation_id = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+    with ws(workspace.id):
+        sites = HostedSites(workspace.id, workspace_tx)
+        before = await sites.register(
+            conversation_id,
+            "home",
+            8000,
+            owner_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+            manifest=_manifest_json(conversation_id, "home", "aa"),
+        )
+        await sites.set_homepage(workspace.agent_id, conversation_id, "home")
+        bound = await sites.homepage(workspace.agent_id)
+        assert bound is not None and bound.name == "home"
+        assert await sites.homepage(uuid4()) is None
+
+        replacement = _manifest_json(conversation_id, "home", "bb")
+        redeployed = await sites.redeploy(conversation_id, "home", replacement)
+        assert redeployed is not None
+        assert redeployed.deploy_generation > before.deploy_generation
+        assert redeployed.source_manifest == replacement
+        assert redeployed.port == before.port
+        assert redeployed.creator_member_id == owner_id
+        assert redeployed.homepage_agent_id == workspace.agent_id
+        assert await sites.redeploy(conversation_id, "vanished", replacement) is None
+
+
+async def test_an_edit_from_another_conversation_redeploys_the_bound_homepage_in_place(
+    db: None,
+) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(owner_id)
+    seed_conversation = await _seed_conversation(workspace, audience, owner_id)
+    blob = _source_store()
+    deployed = await _deploy(
+        workspace, seed_conversation, audience, owner_id, site="home", blob=blob
+    )
+    with ws(workspace.id):
+        await _verb(
+            SET_HOMEPAGE_TOOL,
+            workspace,
+            seed_conversation,
+            owner_id,
+            site=str(deployed["site"]),
+        )
+    (row,) = await _stored(workspace)
+    old_root = SourceManifest.model_validate_json(row.source_manifest).root
+    old_generation = row.deploy_generation
+
+    chat_conversation = await _seed_conversation(workspace, audience, owner_id)
+    payload = await _deploy(
+        workspace, chat_conversation, audience, owner_id, site="home", blob=blob
+    )
+
+    (row,) = await _stored(workspace)
+    assert row.conversation_id == seed_conversation
+    assert row.deploy_generation > old_generation
+    new_root = SourceManifest.model_validate_json(row.source_manifest).root
+    assert new_root != old_root
+    assert str(seed_conversation) in new_root
+    assert payload["site"] == site_object_name(seed_conversation, "home")
+    assert payload["site_url"] == site_url(PUBLIC_BASE_URL, workspace.id, seed_conversation, "home")
+    with ws(workspace.id):
+        assert [entry.key for entry in await blob.list(old_root)] == [f"{old_root}index.html"]
+        assert [entry.key for entry in await blob.list(new_root)] == [f"{new_root}index.html"]
+
+    third_conversation = await _seed_conversation(workspace, audience, owner_id)
+    renamed = await _deploy(
+        workspace,
+        third_conversation,
+        audience,
+        owner_id,
+        site=site_object_name(seed_conversation, "home"),
+        blob=blob,
+    )
+    (row,) = await _stored(workspace)
+    assert row.conversation_id == seed_conversation
+    assert renamed["site"] == site_object_name(seed_conversation, "home")
+
+
+async def test_a_homepage_redeploy_refuses_speakerless_and_visibility_turns(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(owner_id)
+    seed_conversation = await _seed_conversation(workspace, audience, owner_id)
+    blob = _source_store()
+    deployed = await _deploy(
+        workspace, seed_conversation, audience, owner_id, site="home", blob=blob
+    )
+    with ws(workspace.id):
+        await _verb(
+            SET_HOMEPAGE_TOOL,
+            workspace,
+            seed_conversation,
+            owner_id,
+            site=str(deployed["site"]),
+        )
+    chat_conversation = await _seed_conversation(workspace, audience, owner_id)
+
+    with pytest.raises(RuntimeError, match="only a member speaking"):
+        await _deploy(workspace, chat_conversation, audience, None, site="home", blob=blob)
+    with pytest.raises(ValueError, match="redeploy without a visibility argument"):
+        await _deploy(
+            workspace,
+            chat_conversation,
+            audience,
+            owner_id,
+            site="home",
+            visibility="public",
+            blob=blob,
+        )
+    (row,) = await _stored(workspace)
+    assert row.conversation_id == seed_conversation
+
+
+async def test_object_get_materializes_the_stored_source(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(owner_id)
+    seed_conversation = await _seed_conversation(workspace, audience, owner_id)
+    blob = _source_store()
+    deployed = await _deploy(
+        workspace, seed_conversation, audience, owner_id, site="home", blob=blob
+    )
+    with ws(workspace.id):
+        await _verb(
+            SET_HOMEPAGE_TOOL,
+            workspace,
+            seed_conversation,
+            owner_id,
+            site=str(deployed["site"]),
+        )
+    (row,) = await _stored(workspace)
+
+    name = site_object_name(seed_conversation, "home")
+    chat_conversation = await _seed_conversation(workspace, audience, owner_id)
+    with ws(workspace.id):
+        fetched = await _get(workspace, chat_conversation, owner_id, name, blob=blob)
+    assert fetched["status"]["source_path"] == f"/workspace/sites/{name}"
+    assert fetched["status"]["files"] == ["index.html"]
+    assert fetched["status"]["deploy_generation"] == row.deploy_generation
+    assert fetched["status"]["homepage_agent"] == str(workspace.agent_id)
+
+
+async def test_object_get_gates_a_stranger_and_skips_a_serverful_app(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    teammate_id, _teammate = await _seed_member(workspace, TEAMMATE_EMAIL)
+    audience = conversation_audience(owner_id)
+    conversation_id = await _seed_conversation(workspace, audience, owner_id)
+    blob = _source_store()
+    deployed = await _deploy(workspace, conversation_id, audience, owner_id, site="docs", blob=blob)
+
+    with ws(workspace.id):
+        with pytest.raises(UnknownObject):
+            await _get(workspace, conversation_id, teammate_id, str(deployed["site"]), blob=blob)
+
+    app_conversation = await _seed_conversation(workspace, audience, owner_id)
+    tool, ctx = _tool(PUBLISH_WEBSITE_TOOL, audience, blob=blob)
+    with ws(workspace.id):
+        published = await _dispatch(
+            tool,
+            _bind(ctx, workspace, app_conversation, owner_id),
+            project_path="/workspace/app",
+            dist_path="dist",
+            app_name="apphost",
+            run_command="node server.js",
+        )
+        served = await _get(
+            workspace, app_conversation, owner_id, str(published["site"]), blob=blob
+        )
+    assert served["status"]["source_path"] is None
+    assert served["status"]["files"] == []
+
+
+@dataclass
+class WorkingSandbox:
+    """A sandbox whose written files persist, so the materialization stamp round-trips."""
+
+    files: dict[str, bytes] = field(default_factory=dict)
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        if command.startswith("cat "):
+            held = self.files.get(shlex.split(command)[1], b"")
+            return ExecResult(stdout=held.decode(), stderr="", exit_code=0)
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if program is ENUMERATE_PROG:
+            return _listed_source()
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def write_file(self, path: str, content: bytes) -> None:
+        self.files[path] = content
+
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        async def bytes_of() -> AsyncIterator[bytes]:
+            yield SOURCE_BYTES
+
+        return bytes_of()
+
+
+async def test_a_repeat_object_get_inside_one_generation_transfers_nothing(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(owner_id)
+    seed_conversation = await _seed_conversation(workspace, audience, owner_id)
+    blob = _source_store()
+    deployed = await _deploy(
+        workspace, seed_conversation, audience, owner_id, site="home", blob=blob
+    )
+    name = str(deployed["site"])
+    chat_conversation = await _seed_conversation(workspace, audience, owner_id)
+    working = WorkingSandbox()
+    tool, ctx = _tool("object_get", audience, blob=blob)
+    bound = replace(_bind(ctx, workspace, chat_conversation, owner_id), sandbox=working)
+    page = f"/workspace/sites/{name}/index.html"
+
+    with ws(workspace.id):
+        await _dispatch_get(tool, bound, name)
+        assert working.files[page] == SOURCE_BYTES
+        working.files[page] = b"work in progress"
+        await _dispatch_get(tool, bound, name)
+        assert working.files[page] == b"work in progress"
+        await _deploy(workspace, seed_conversation, audience, owner_id, site="home", blob=blob)
+        await _dispatch_get(tool, bound, name)
+        assert working.files[page] == SOURCE_BYTES
+
+
+async def _dispatch_get(tool: ToolDef, ctx: ToolContext, name: str) -> None:
+    await tool.handler(
+        ctx,
+        tool.input_model.model_validate(
+            {"user_description": TOOL_NARRATION, "kind": SITE_KIND, "name": name}
+        ),
+    )
+
+
+async def test_a_homepage_redeploy_unhosts_what_its_scratch_server_displaces(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(owner_id)
+    seed_conversation = await _seed_conversation(workspace, audience, owner_id)
+    blob = _source_store()
+    deployed = await _deploy(
+        workspace, seed_conversation, audience, owner_id, site="home", blob=blob
+    )
+    with ws(workspace.id):
+        await _verb(
+            SET_HOMEPAGE_TOOL,
+            workspace,
+            seed_conversation,
+            owner_id,
+            site=str(deployed["site"]),
+        )
+    chat_conversation = await _seed_conversation(workspace, audience, owner_id)
+    tool, ctx = _tool(PUBLISH_WEBSITE_TOOL, audience, blob=blob)
+    with ws(workspace.id):
+        await _dispatch(
+            tool,
+            _bind(ctx, workspace, chat_conversation, owner_id),
+            project_path="/workspace/app",
+            dist_path="dist",
+            app_name="apphost",
+            run_command="node server.js",
+        )
+        await _deploy(workspace, chat_conversation, audience, owner_id, site="home", blob=blob)
+
+    stored = {site.name: site for site in await _stored(workspace)}
+    assert "apphost" not in stored
+    assert stored["home"].conversation_id == seed_conversation
+    assert stored["home"].source_manifest is not None
+
+
+@dataclass(frozen=True)
+class OvergrownSandbox:
+    """A sandbox whose source tree fails the deploy caps — and whose serve must never run."""
+
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
+    )
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        raise AssertionError("a refused deploy must never reach the serve")
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if program is ENUMERATE_PROG:
+            return ExecResult(stdout="", stderr="dist holds more than 1000 files", exit_code=1)
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+
+async def test_an_overgrown_source_refuses_before_anything_serves(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(owner_id)
+    conversation_id = await _seed_conversation(workspace, audience, owner_id)
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
+    bound = replace(_bind(ctx, workspace, conversation_id, owner_id), sandbox=OvergrownSandbox())
+
+    with ws(workspace.id), pytest.raises(RuntimeError, match="more than"):
+        await _dispatch(
+            tool,
+            bound,
+            project_path="/workspace/dist",
+            site_name="pricing",
+            entry_point="index.html",
+        )
+    assert await _stored(workspace) == ()
+
+
+async def test_unhosting_by_object_delete_keeps_the_stored_source(db: None) -> None:
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(owner_id)
+    conversation_id = await _seed_conversation(workspace, audience, owner_id)
+    blob = _source_store()
+    deployed = await _deploy(workspace, conversation_id, audience, owner_id, blob=blob)
+    (row,) = await _stored(workspace)
+    root = SourceManifest.model_validate_json(row.source_manifest).root
+
+    with ws(workspace.id):
+        await _verb(
+            "object_delete",
+            workspace,
+            conversation_id,
+            owner_id,
+            blob=blob,
+            kind=SITE_KIND,
+            name=str(deployed["site"]),
+        )
+        assert await _stored(workspace) == ()
+        assert [entry.key for entry in await blob.list(root)] == [f"{root}index.html"]
+
+
+def test_the_claim_program_takes_a_planted_link_without_following_it(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"host bytes")
+    workspace = tmp_path / "workspace"
+    (workspace / "sites" / "home").mkdir(parents=True)
+    planted = workspace / "sites" / "home" / "index.html"
+    planted.symlink_to(outside)
+    guard_home = str(Path(containment.__file__).parent)
+
+    stale = workspace / "sites" / "home" / "dropped.html"
+    stale.write_bytes(b"a page a newer deploy removed")
+    claimed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            CLAIM_TREE_PROG,
+            str(workspace),
+            str(workspace / "sites" / "home"),
+            str(planted),
+            str(workspace / "sites" / "home" / "assets" / "app.js"),
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": guard_home},
+    )
+
+    assert claimed.returncode == 0, claimed.stderr
+    assert not planted.is_symlink()
+    assert planted.read_bytes() == b""
+    assert outside.read_bytes() == b"host bytes"
+    assert not stale.exists()
+    assert (workspace / "sites" / "home" / "assets" / "app.js").read_bytes() == b""
+
+
+def test_the_enumeration_program_lists_and_bounds_the_source_tree(tmp_path: Path) -> None:
+    site = tmp_path / "dist"
+    (site / "assets").mkdir(parents=True)
+    (site / "index.html").write_bytes(b"<html></html>")
+    (site / "assets" / "app.js").write_bytes(b"0123456789")
+    (site / "twin.html").symlink_to(site / "index.html")
+    guard_home = str(Path(containment.__file__).parent)
+
+    def enumerate_site(project: Path, max_files: str, max_bytes: str) -> CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                ENUMERATE_PROG,
+                str(project),
+                str(tmp_path),
+                max_files,
+                max_bytes,
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": guard_home},
+        )
+
+    listed = enumerate_site(site, "10", "1000")
+    assert listed.returncode == 0, listed.stderr
+    files = json.loads(listed.stdout)
+    assert set(files) == {"index.html", "assets/app.js"}
+    assert files["assets/app.js"]["size"] == 10
+    assert files["assets/app.js"]["sha256"] == hashlib.sha256(b"0123456789").hexdigest()
+
+    over_files = enumerate_site(site, "1", "1000")
+    assert over_files.returncode == 1
+    assert "more than 1 files" in over_files.stderr
+
+    over_bytes = enumerate_site(site, "10", "5")
+    assert over_bytes.returncode == 1
+    assert "more than 5 bytes" in over_bytes.stderr
+
+    (tmp_path / "void").mkdir()
+    empty = enumerate_site(tmp_path / "void", "10", "5")
+    assert empty.returncode == 1
+    assert "no files to host" in empty.stderr

@@ -12,10 +12,23 @@ CLUSTER_SERVICES_TEMPLATE = (
     Path(__file__).resolve().parents[2] / "infra/templates/cluster-services.yaml.tpl"
 )
 PLATFORM_SECRETS = Path(__file__).resolve().parents[2] / "infra/modules/platform/secrets.tf"
-APP_S3_MODULE = IAM_MODULE.read_text().split('module "irsa_app_s3" {', maxsplit=1)[1]
+
+
+def _terraform_block(header: str) -> str:
+    """One top-level block of the IAM module. Bounded at its closing brace, so an assertion about
+    one role cannot be satisfied by the next role's text."""
+    return IAM_MODULE.read_text().split(header, maxsplit=1)[1].split("\n}\n", maxsplit=1)[0]
+
+
+APP_S3_MODULE = _terraform_block('module "irsa_app_s3" {')
 PROXY_DEPLOYMENT = (
     HOSTED_TEMPLATE.read_text()
     .split("kind: Deployment\nmetadata:\n  name: ufo-sandbox-proxy", maxsplit=1)[1]
+    .split("---", maxsplit=1)[0]
+)
+INGRESS_DEPLOYMENT = (
+    HOSTED_TEMPLATE.read_text()
+    .split("kind: Deployment\nmetadata:\n  name: ufo-ingress", maxsplit=1)[1]
     .split("---", maxsplit=1)[0]
 )
 SERVE_DEPLOYMENT = (
@@ -56,6 +69,7 @@ def _document(documents: list[dict[str, object]], kind: str, name: str) -> dict[
 def test_app_s3_trusts_serve_in_every_ufo_namespace() -> None:
     assert 'assume_role_condition_test = "StringLike"' in APP_S3_MODULE
     assert 'namespace_service_accounts = ["ufo-*:ufo-serve"]' in APP_S3_MODULE
+    assert "ufo-ingress" not in APP_S3_MODULE
 
 
 def test_app_s3_role_name_is_plan_known_and_shared() -> None:
@@ -70,6 +84,46 @@ def test_app_s3_role_name_is_plan_known_and_shared() -> None:
         'value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:'
         'role/${local.app_s3_role_name}"' in (platform / "outputs.tf").read_text()
     )
+
+
+def test_ingress_reads_the_blob_bucket_under_a_read_only_role() -> None:
+    """The ingress streams a stored site's bytes out of the blob store, so it needs a credential for
+    that bucket — and it is the internet-facing reverse proxy, so it gets the narrowest one that
+    serves a byte: GetObject plus the bucket-level reads, never PutObject or DeleteObject. Sharing
+    ufo-serve's ServiceAccount would hand this pod the whole read-write grant that promotes a
+    deploy, so the split is pinned at both ends — its own SA, its own IRSA role, its own policy."""
+    platform = Path(__file__).resolve().parents[2] / "infra/modules/platform"
+    assert re.search(
+        r'ingress_s3_role_name\s+= "\$\{local\.name\}-ingress-s3"',
+        (platform / "main.tf").read_text(),
+    )
+    assert (
+        'value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:'
+        'role/${local.ingress_s3_role_name}"' in (platform / "outputs.tf").read_text()
+    )
+    for config in (TESTING_CONFIG, PROD_CONFIG):
+        assert (
+            "ingress_role_arn                 = module.platform.ingress_s3_role_arn"
+            in config.read_text()
+        )
+
+    role = _terraform_block('module "irsa_ingress_s3" {')
+    assert "role_name        = local.ingress_s3_role_name" in role
+    assert 'assume_role_condition_test = "StringLike"' in role
+    assert 'namespace_service_accounts = ["ufo-*:ufo-ingress"]' in role
+
+    policy = _terraform_block('data "aws_iam_policy_document" "ingress_s3" {')
+    assert 'actions   = ["s3:GetObject"]' in policy
+    assert 'resources = ["${aws_s3_bucket.blob.arn}/*"]' in policy
+    assert 'actions   = ["s3:ListBucket", "s3:GetBucketLocation"]' in policy
+    assert "s3:PutObject" not in policy
+    assert "s3:DeleteObject" not in policy
+
+    account = _document(_documents(False), "ServiceAccount", "ufo-ingress")
+    assert account["metadata"]["annotations"] == {"eks.amazonaws.com/role-arn": "value"}
+    assert "eks.amazonaws.com/role-arn: ${ingress_role_arn}" in HOSTED_TEMPLATE.read_text()
+    assert "serviceAccountName: ufo-ingress" in INGRESS_DEPLOYMENT
+    assert "ufo-serve" not in INGRESS_DEPLOYMENT.split("containers:", maxsplit=1)[0]
 
 
 def test_cache_outputs_are_plan_known() -> None:

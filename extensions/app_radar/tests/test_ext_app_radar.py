@@ -10,6 +10,7 @@ def test_app_radar_ships_one_workspace_agent() -> None:
     assert manifest.name == "app_radar"
     assert [provision.name for provision in manifest.agents] == ["radar"]
     provision = manifest.agents[0]
+    assert provision.icon == "radar"
     assert provision.spec.visibility == "workspace"
     assert "app-radar-home" in provision.spec.prompt
     assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-radar-home"}

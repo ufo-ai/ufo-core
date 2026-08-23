@@ -18,11 +18,15 @@ Deploy or redeploy it:
 
 1. Stage the page and the bridge client in one workspace directory:
    `mkdir -p site && cp .skills/app-chat-home/index.html .skills/app-chat-home/app.js .skills/app-chat-home/app.tsx .skills/app-bridge/bridge.js site/`
-2. `deploy_website` with that `site` directory.
+2. `deploy_website` with that `site` directory and `site_name` `chat-home`.
 3. `set_homepage` with the site name from the deploy result (only needed the first time; the
    binding stays across later redeploys of the same site).
 
-To change the page, edit `site/app.tsx` — it is plain TSX over the `UfoAppKit` exports (React and
-its hooks, the portal's components, `SectionApp`, `mountApp`, `getJson`, `navigate`) — and
-`deploy_website` again. Restage from the skill when the member wants the page reset to the shipped
-screen.
+To change the page: `object_list` kind `site` with filter `homepage_agent` set to `mine` — the
+one row is your homepage — then `object_get` that row's name: the read materializes the deployed
+source into the sandbox directory its status names as `source_path`. Edit `app.tsx` there — plain
+TSX over the `UfoAppKit` exports (React and its hooks, the portal's components, `SectionApp`,
+`mountApp`, `getJson`, `navigate`) — and `deploy_website` that directory. Never edit a copy
+already on disk without a fresh `object_get`: it can be stale from an earlier deploy, and
+deploying it discards the member's newer page. Restage from the skill only when the member wants
+the page reset to the shipped screen.

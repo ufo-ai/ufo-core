@@ -86,7 +86,7 @@ from ufo.kinds.agent_setup import AgentSetup, pending_setup
 from ufo.kinds.governance import prompt_digest
 from ufo.listings import page_of, page_query
 from ufo.media.artifact_url import (
-    ARTIFACT_URL_TTL_SECONDS,
+    artifact_url_expiry,
     mint_artifact_url,
     mint_image_preview_url,
 )
@@ -1435,7 +1435,7 @@ class SurfaceContext:
         member of the workspace that shared it."""
         if not self._artifact_token_secret or not self._public_base_url:
             return None
-        expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+        expires_at = artifact_url_expiry(datetime.now(UTC))
         path = mint_artifact_url(
             self._artifact_token_secret,
             artifact.blob_key,

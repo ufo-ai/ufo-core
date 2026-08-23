@@ -41,7 +41,12 @@ from ufo.objects import ObjectKind
 from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.sandbox.session import Carrier
 from ufo.sandbox.terminal import TerminalTransport
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import (
+    TABLER_ICON_MAX_LENGTH,
+    TABLER_ICON_PATTERN,
+    Agent,
+    Turn,
+)
 from ufo.search import SearchProvider
 from ufo.skills.runtime import RuntimeSkill, SkillCard
 from ufo.sources.sync import PageChange, SourceBackend
@@ -515,6 +520,7 @@ class HookSpec:
 
 
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$")
+AGENT_ICON_RE = re.compile(rf"^{TABLER_ICON_PATTERN}$")
 SETUP_TOOLS = ("load_skill", "connect_account", "object_apply")
 
 
@@ -528,16 +534,23 @@ class AgentProvision:
     It sits here rather than on `AgentSpec` because the spec is what `object_apply agent` writes: an
     allowlist may name a primitive held back from ordinary turns, so it is shipped, never typed.
     `setup` names the grants a member must still make for the agent to work, and what the
-    main agent should do to obtain them."""
+    main agent should do to obtain them.
+    `icon` names the portal mark the created row draws — a tabler outline slug or one of the
+    portal's own pack, never a URL or markup; unset, the row is dealt one from the pack."""
 
     name: str
     spec: AgentSpec
     tools: tuple[str, ...] | None = None
     setup: AgentSetup = field(default_factory=AgentSetup)
+    icon: str | None = None
 
     def __post_init__(self) -> None:
         if not AGENT_NAME_RE.match(self.name):
             raise ValueError(f"agent provision name {self.name!r} is not an object name")
+        if self.icon is not None and (
+            len(self.icon) > TABLER_ICON_MAX_LENGTH or not AGENT_ICON_RE.match(self.icon)
+        ):
+            raise ValueError(f"agent provision {self.name!r} icon {self.icon!r} names no mark")
         if not (self.spec.prompt or "").strip():
             raise ValueError(f"agent provision {self.name!r} has no prompt")
         if not self.setup.connectors or self.tools is None:

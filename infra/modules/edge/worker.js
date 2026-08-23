@@ -6,6 +6,8 @@ const FLEET_TTL_MS = 300_000;
 const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const PAGE_CACHE = "public, max-age=600";
 const SITE_CARD_PREFIX = "/surface/sites/share/site/";
+const ARTIFACT_PREFIX = "/artifacts/";
+const ARTIFACT_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const WAITLIST_SENDER = "__WAITLIST_SENDER__";
 
 const LANDING_HTML = "__LANDING_HTML__";
@@ -135,6 +137,20 @@ async function siteCard(url) {
   return served;
 }
 
+async function artifactBytes(request, url) {
+  const key = new Request(`${url.origin}${url.pathname}${url.search}`);
+  const cached = await caches.default.match(key);
+  if (cached) return cached;
+  const served = await fetch(request);
+  const directive = served.headers.get("cache-control") ?? "";
+  const size = Number(served.headers.get("content-length"));
+  const bounded = Number.isFinite(size) && size > 0 && size <= ARTIFACT_CACHE_MAX_BYTES;
+  if (served.status === 200 && directive.includes("public") && bounded) {
+    await caches.default.put(key, served.clone());
+  }
+  return served;
+}
+
 async function landing(request, env, url) {
   if (!CLI_UA.test(request.headers.get("user-agent") ?? "")) {
     const bounce = secure(url);
@@ -192,6 +208,9 @@ export default {
     }
     if (request.method === "GET" && url.pathname.startsWith(SITE_CARD_PREFIX)) {
       return siteCard(url);
+    }
+    if (request.method === "GET" && url.pathname.startsWith(ARTIFACT_PREFIX)) {
+      return artifactBytes(request, url);
     }
     switch (url.pathname) {
       case "/":

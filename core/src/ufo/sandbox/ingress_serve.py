@@ -1,8 +1,10 @@
 """Composition root for the sandbox ingress — the egress proxy's inbound twin: one process for
-every workspace, serving each sandbox port at its own signed origin, owner DSN with explicit
-workspace filters."""
+every workspace, serving each site at its own signed origin — a stored site's bytes straight from
+the blob store, a dialed site's off its live sandbox port — owner DSN with explicit workspace
+filters."""
 
 import asyncio
+import json
 import os
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -24,6 +26,13 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 from websockets.typing import Subprotocol
 
+from ufo.blob import (
+    BlobNotFound,
+    FilesystemBlobStore,
+    S3BlobStore,
+    WorkspaceBlobStore,
+    blob_store_for,
+)
 from ufo.config import load_config
 from ufo.db import init_db, verify_db_reachable, workspace_tx
 from ufo.ext.loader import load_manifests
@@ -115,6 +124,16 @@ built site serves — so a hit would never reach this process and never see the 
 agent-authored code that typically sets no cache header at all, so this cannot be left to the
 origin, and an origin that asks for `public, max-age=…` must not be able to override it: the
 directive is set, and the origin's own is dropped."""
+STORED_SITE_CACHE = "private, no-cache"
+"""What a stored site's bytes carry instead of `UNCACHEABLE`. `private` keeps every shared cache
+refused for `UNCACHEABLE`'s own reason — authorization is a cookie checked per request, and a
+shared hit would answer without the check. `no-cache` rather than `no-store` because these bytes
+have what a dialed site's never do: a digest. The viewer's own browser may hold a copy it must
+revalidate on every use, the `etag` answer runs the same session gate as a full response — so a
+held copy never outlives its authorization — and the digest moves on every redeploy, so the same
+URL never serves retired bytes."""
+STORED_SITE_METHODS = ("GET", "HEAD")
+STORED_SITE_INDEX = "index.html"
 WEBSOCKET_HANDSHAKE_HEADERS = frozenset(
     {
         "sec-websocket-key",
@@ -176,6 +195,8 @@ SESSION_ENDED = "This site needs a fresh link. Open it again in chat."
 SITE_GONE = "This site is no longer hosted. Ask the agent that built it to put it back up."
 SITE_NOT_ANSWERING = "This site is not answering."
 FOREIGN_ORIGIN = "This connection did not come from the site it addresses."
+NOT_FOUND = "Not found."
+SITE_HAS_NO_SOCKET = "This site is static and speaks no socket protocol."
 
 
 @dataclass(frozen=True)
@@ -189,17 +210,36 @@ class SiteRefusal:
     message: str
 
 
+HOSTED_SITE = sa.table(
+    "hosted_site",
+    sa.column("workspace_id", sa.Uuid()),
+    sa.column("conversation_id", sa.Uuid()),
+    sa.column("port", sa.Integer()),
+    sa.column("source_manifest", sa.Text()),
+)
+"""The sites extension's registry, read by name the way extension tables are read elsewhere in
+core, always under an explicit workspace filter because this process runs on the owner DSN.
+`source_manifest` is the serving mode: a row carrying one is a stored site whose bytes come from
+the blob store, a row without one — and a label with no row at all — is dialed."""
+
+
 @dataclass(frozen=True)
-class DialedSite:
-    claims: IngressClaims
-    target: DialTarget
+class StoredFile:
+    """One file of a stored site: the workspace-relative blob key its bytes live under, the size
+    and digest its deploy measured, and the media type its responses are typed by."""
+
+    key: str
+    size_bytes: int
+    media_type: str
+    sha256: str
 
 
 @dataclass(frozen=True)
 class IngressServe:
     """Read which site a request addresses off its own Host, authorize the viewer against that
-    origin's session cookie, resolve the conversation's live sandbox, dial the addressed port
-    through the carrier, and stream the exchange both ways — never buffering a body whole.
+    origin's session cookie, and serve the site the way its row says it is served: a stored site's
+    bytes stream from the blob store with no sandbox in the path, a dialed site's port is resolved
+    through the carrier and the exchange streamed both ways — never buffering a body whole.
 
     A site owning its origin is what makes the label load-bearing rather than cosmetic: the
     conversation and port come from the hostname, so the site's `/`-rooted assets and redirects
@@ -210,6 +250,9 @@ class IngressServe:
     base_host: str
     carrier: Carrier
     client: httpx.AsyncClient
+    blob: FilesystemBlobStore | S3BlobStore
+    """The deploy's blob backend, wrapped per request into the addressed workspace's own store —
+    a stored site's bytes are read from here and its sandbox is never dialed."""
     frame_ancestor: str
     """The one deploy-wide source expression a hosted site may be framed by — the app origin, where
     the frame page that reads a site lives — or `'none'` when no app base is configured. Framing is
@@ -334,15 +377,14 @@ class IngressServe:
         except SiteLabelError:
             return None
 
-    async def _dial_site(self, connection: HTTPConnection) -> DialedSite | SiteRefusal:
-        """The whole gate in front of a site's own server: which site this connection's Host
-        addresses, whether its session cookie authorizes that very site, and the live target the
-        addressed port is reachable at.
-
-        Shared by both protocols the ingress serves, because a socket that authorized differently
-        from the proxy would be a second door into the same bytes — and the weaker of two doors is
-        the one that decides. It takes an `HTTPConnection` rather than a `Request` for exactly that
-        reason: a WebSocket handshake carries the same Host, cookies, and claims, and is gated by
+    def _authorized(self, connection: HTTPConnection) -> IngressClaims | SiteRefusal:
+        """The gate in front of a site, shared by both protocols and both serving modes: which
+        site this connection's Host addresses, and whether its session cookie authorizes that very
+        site. A socket that authorized differently from the proxy would be a second door into the
+        same bytes, and a stored site that authorized differently from a dialed one would be the
+        same door wedged open — so the answer is computed once, here, and what serves an
+        authorized viewer is decided after. It takes an `HTTPConnection` rather than a `Request`
+        because a WebSocket handshake carries the same Host, cookies, and claims, and is gated by
         this same code rather than by a copy of it."""
         site = self._site(connection)
         if site is None:
@@ -357,6 +399,43 @@ class IngressServe:
             return SiteRefusal(403, SESSION_ENDED)
         if (claims.conversation_id, claims.port) != site:
             return SiteRefusal(403, WRONG_SITE)
+        return claims
+
+    async def _stored_manifest(self, claims: IngressClaims) -> dict[str, StoredFile] | None:
+        """The stored site the claims address, as its manifest's files keyed by site path — or
+        None where the row is absent or carries no manifest, which is the dial path. Read per
+        request rather than cached: the portal remounts a homepage frame the moment a redeploy
+        bumps its row, so a cached manifest would keep answering the retired bytes at the same URL
+        for its whole TTL. The row read costs what the dial path's own conversation read costs. A
+        manifest that does not parse is this deploy's own write gone wrong and raises rather than
+        serving something else."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(HOSTED_SITE.c.source_manifest).where(
+                        HOSTED_SITE.c.workspace_id == claims.workspace_id,
+                        HOSTED_SITE.c.conversation_id == claims.conversation_id,
+                        HOSTED_SITE.c.port == claims.port,
+                    )
+                )
+            ).one_or_none()
+        if row is None or row.source_manifest is None:
+            return None
+        manifest = json.loads(row.source_manifest)
+        root = manifest["root"]
+        return {
+            path: StoredFile(
+                key=f"{root}{path}",
+                size_bytes=entry["size"],
+                media_type=entry["media_type"],
+                sha256=entry["sha256"],
+            )
+            for path, entry in manifest["files"].items()
+        }
+
+    async def _dial_site(self, claims: IngressClaims) -> DialTarget | SiteRefusal:
+        """The live target the addressed port is reachable at, for a site whose bytes are served
+        by the conversation's own sandbox."""
         with ws(claims.workspace_id):
             stored = await self._stored_handle(claims.workspace_id, claims.conversation_id)
             container_id = None if stored is None else sandbox_handle_id(self.backend, stored)
@@ -372,7 +451,7 @@ class IngressServe:
                 conversation_id=claims.conversation_id, container_id=container_id
             )
             try:
-                target = await self.carrier.dial(handle, claims.port)
+                return await self.carrier.dial(handle, claims.port)
             except SandboxUnreachable as error:
                 warn(
                     "ingress.dial_failed",
@@ -380,29 +459,35 @@ class IngressServe:
                     error=repr(error),
                 )
                 return SiteRefusal(503, SITE_GONE)
-        return DialedSite(claims=claims, target=target)
 
     async def _proxy(self, request: Request, path: str) -> Response:
-        dialed = await self._dial_site(request)
+        authorized = self._authorized(request)
+        if isinstance(authorized, SiteRefusal):
+            return Response(
+                authorized.message, status_code=authorized.status, media_type="text/plain"
+            )
+        files = await self._stored_manifest(authorized)
+        if files is not None:
+            return await self._serve_stored(request, authorized, files, path)
+        dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
             return Response(dialed.message, status_code=dialed.status, media_type="text/plain")
-        target = dialed.target
-        scheme = "https" if target.tls else "http"
-        url = self._upstream_url(scheme, target.host, path, request.scope["query_string"])
+        scheme = "https" if dialed.tls else "http"
+        url = self._upstream_url(scheme, dialed.host, path, request.scope["query_string"])
         framed = any(header in request.headers for header in BODY_FRAMING_HEADERS)
         upstream_request = httpx.Request(
             request.method,
             url,
-            headers=self._upstream_headers(request, target.headers),
+            headers=self._upstream_headers(request, dialed.headers),
             content=request.stream() if framed else None,
         )
-        with ws(dialed.claims.workspace_id):
+        with ws(authorized.workspace_id):
             try:
                 upstream = await self.client.send(upstream_request, stream=True)
             except httpx.HTTPError as error:
                 log_error(
                     "ingress.upstream_failed",
-                    conversation_id=str(dialed.claims.conversation_id),
+                    conversation_id=str(authorized.conversation_id),
                     error=repr(error),
                 )
                 return Response(SITE_NOT_ANSWERING, status_code=502, media_type="text/plain")
@@ -413,7 +498,7 @@ class IngressServe:
                     background=BackgroundTask(upstream.aclose),
                 )
                 response.headers["cache-control"] = UNCACHEABLE
-                ancestors = await self._frame_ancestors(dialed.claims.workspace_id)
+                ancestors = await self._frame_ancestors(authorized.workspace_id)
                 response.headers[CONTENT_SECURITY_POLICY] = (
                     f"{FRAME_ANCESTORS_DIRECTIVE} {ancestors}"
                 )
@@ -437,6 +522,70 @@ class IngressServe:
                 raise
         return response
 
+    async def _serve_stored(
+        self, request: Request, claims: IngressClaims, files: dict[str, StoredFile], path: str
+    ) -> Response:
+        """One file of a stored site, straight from the blob store — no sandbox dial, so the site
+        answers whatever became of the sandbox that deployed it. The deploy promoted the site's
+        directory into the store and wrote the manifest onto the row, so the manifest is the
+        site's whole filesystem: a request path either names one of its files — or the index under
+        it — or nothing. The lookup is a dict membership, never a path resolved against a root, so
+        a traversal has nothing to traverse: `../anything` is a string no manifest key equals, and
+        it misses. GET and HEAD are the whole protocol a directory of files speaks; anything else
+        is refused rather than forwarded, because there is nothing behind this to forward to.
+
+        The session gate has already run when this is reached, so a 304 is exactly as authorized
+        as a 200 — which is what lets these bytes say `no-cache` where the dial path must say
+        `no-store`: every revalidation runs the cookie check, and the digest it revalidates
+        against moves on every redeploy. A blob the manifest names but the store no longer holds
+        is the window where a redeploy retired the root between the row read and this read, and it
+        answers 404 for the refresh to heal rather than erroring mid-stream."""
+        if request.method not in STORED_SITE_METHODS:
+            return Response(status_code=405, headers={"allow": ", ".join(STORED_SITE_METHODS)})
+        trimmed = path.strip("/")
+        candidates = (
+            (STORED_SITE_INDEX,) if not trimmed else (trimmed, f"{trimmed}/{STORED_SITE_INDEX}")
+        )
+        stored = next((files[name] for name in candidates if name in files), None)
+        if stored is None:
+            return Response(NOT_FOUND, status_code=404, media_type="text/plain")
+        ancestors = await self._frame_ancestors(claims.workspace_id)
+        etag = f'"{stored.sha256}"'
+        headers = {
+            "cache-control": STORED_SITE_CACHE,
+            "etag": etag,
+            "x-content-type-options": "nosniff",
+            CONTENT_SECURITY_POLICY: f"{FRAME_ANCESTORS_DIRECTIVE} {ancestors}",
+        }
+        held = request.headers.get("if-none-match", "")
+        if etag in {mark.strip() for mark in held.split(",")}:
+            return Response(status_code=304, headers=headers)
+        headers["content-length"] = str(stored.size_bytes)
+        if request.method == "HEAD":
+            return Response(status_code=200, headers=headers, media_type=stored.media_type)
+        with ws(claims.workspace_id):
+            chunks = WorkspaceBlobStore(backend=self.blob).get_stream(stored.key)
+        try:
+            first = await anext(chunks)
+        except StopAsyncIteration:
+            return Response(b"", status_code=200, headers=headers, media_type=stored.media_type)
+        except BlobNotFound:
+            return Response(NOT_FOUND, status_code=404, media_type="text/plain")
+        return StreamingResponse(
+            self._stored_body(first, chunks),
+            status_code=200,
+            headers=headers,
+            media_type=stored.media_type,
+        )
+
+    async def _stored_body(self, first: bytes, rest: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        """The stored bytes, with the first chunk already read: pulling it before the response is
+        built is what turns a vanished blob into a clean 404 instead of a stream that dies after
+        the 200 went out."""
+        yield first
+        async for chunk in rest:
+            yield chunk
+
     async def _frame_ancestors(self, workspace_id: UUID) -> str:
         """The `frame-ancestors` value for one workspace's responses: the app origin, then one
         origin per hosted site of that workspace. `'none'` stays alone — with no app base there is
@@ -450,18 +599,12 @@ class IngressServe:
         cached = self.frame_ancestors_cache.get(workspace_id)
         if cached is not None and now < cached[0]:
             return cached[1]
-        hosted_site = sa.table(
-            "hosted_site",
-            sa.column("workspace_id", sa.Uuid()),
-            sa.column("conversation_id", sa.Uuid()),
-            sa.column("port", sa.Integer()),
-        )
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(hosted_site.c.conversation_id, hosted_site.c.port)
+                    sa.select(HOSTED_SITE.c.conversation_id, HOSTED_SITE.c.port)
                     .distinct()
-                    .where(hosted_site.c.workspace_id == workspace_id)
+                    .where(HOSTED_SITE.c.workspace_id == workspace_id)
                 )
             ).all()
         ancestors = " ".join(
@@ -602,17 +745,22 @@ class IngressServe:
         subprotocol the viewer is told is the one the site chose, not an echo of what was asked."""
         if not self._same_origin(websocket):
             return await self._refuse(websocket, SiteRefusal(403, FOREIGN_ORIGIN))
-        dialed = await self._dial_site(websocket)
+        authorized = self._authorized(websocket)
+        if isinstance(authorized, SiteRefusal):
+            return await self._refuse(websocket, authorized)
+        if await self._stored_manifest(authorized) is not None:
+            return await self._refuse(websocket, SiteRefusal(502, SITE_HAS_NO_SOCKET))
+        dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
             return await self._refuse(websocket, dialed)
-        scheme = "wss" if dialed.target.tls else "ws"
-        url = self._upstream_url(scheme, dialed.target.host, path, websocket.scope["query_string"])
+        scheme = "wss" if dialed.tls else "ws"
+        url = self._upstream_url(scheme, dialed.host, path, websocket.scope["query_string"])
         offered = [Subprotocol(name) for name in websocket.scope.get("subprotocols") or []]
-        with ws(dialed.claims.workspace_id):
+        with ws(authorized.workspace_id):
             try:
                 upstream = await connect(
                     url,
-                    additional_headers=self._upstream_headers(websocket, dialed.target.headers),
+                    additional_headers=self._upstream_headers(websocket, dialed.headers),
                     subprotocols=offered or None,
                     max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
                     compression=None,
@@ -621,7 +769,7 @@ class IngressServe:
             except (OSError, WebSocketException, TimeoutError) as error:
                 log_error(
                     "ingress.socket_refused",
-                    conversation_id=str(dialed.claims.conversation_id),
+                    conversation_id=str(authorized.conversation_id),
                     error=repr(error),
                 )
                 return await self._refuse(websocket, SiteRefusal(502, SITE_NOT_ANSWERING))
@@ -639,7 +787,7 @@ class IngressServe:
                     # needs is the terminal state, which is the same whatever the class was.
                     log_error(
                         "ingress.socket_failed",
-                        conversation_id=str(dialed.claims.conversation_id),
+                        conversation_id=str(authorized.conversation_id),
                         error=repr(error),
                     )
                     await self._end(websocket, WEBSOCKET_CLOSE_UPSTREAM_GONE, SITE_NOT_ANSWERING)
@@ -792,6 +940,7 @@ def run() -> None:
         base_host=ingress_base_host(config.sandbox.ingress_public_url),
         carrier=select_carrier(config, manifests)[0],
         client=upstream_client(),
+        blob=blob_store_for(config.blob),
         frame_ancestor=ingress_frame_ancestor(config.connect.public_base_url),
         site_scheme=ingress_base.scheme,
         site_port_suffix=f":{ingress_base.port}" if ingress_base.port else "",

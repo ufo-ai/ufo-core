@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import socket
 import threading
@@ -22,6 +23,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.typing import Origin, Subprotocol
 
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import dispose_db, workspace_tx
 from ufo.sandbox import ingress_serve
@@ -36,9 +38,12 @@ from ufo.sandbox.ingress_serve import (
     LINK_NOT_VALID,
     NO_FRAME_ANCESTOR,
     NO_SITE_HERE,
+    NOT_FOUND,
     SESSION_ENDED,
     SITE_GONE,
+    SITE_HAS_NO_SOCKET,
     SITE_NOT_ANSWERING,
+    STORED_SITE_CACHE,
     UNCACHEABLE,
     WEBSOCKET_MAX_MESSAGE_BYTES,
     WRONG_SITE,
@@ -237,7 +242,9 @@ async def _seed_conversation(handle: str | None) -> tuple[UUID, UUID]:
     return workspace_id, conversation_id
 
 
-async def _seed_hosted_site(workspace_id: UUID, conversation_id: UUID, port: int) -> None:
+async def _seed_hosted_site(
+    workspace_id: UUID, conversation_id: UUID, port: int, source_manifest: str | None = None
+) -> None:
     hosted_site = sa.table(
         "hosted_site",
         sa.column("workspace_id", sa.Uuid()),
@@ -247,6 +254,7 @@ async def _seed_hosted_site(workspace_id: UUID, conversation_id: UUID, port: int
         sa.column("visibility", sa.Text()),
         sa.column("creator_member_id", sa.Uuid()),
         sa.column("generation", sa.Uuid()),
+        sa.column("source_manifest", sa.Text()),
         sa.column("created_at", sa.DateTime(timezone=True)),
         sa.column("updated_at", sa.DateTime(timezone=True)),
     )
@@ -260,6 +268,7 @@ async def _seed_hosted_site(workspace_id: UUID, conversation_id: UUID, port: int
                 visibility="workspace",
                 creator_member_id=uuid4(),
                 generation=uuid4(),
+                source_manifest=source_manifest,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -302,8 +311,16 @@ async def _open(
     return got.cookies[INGRESS_SESSION_COOKIE]
 
 
+UNREAD_BLOBS = FilesystemBlobStore(root=Path("blob-root-never-read"))
+"""The store for every ingress these tests dial a sandbox through: the dial path reads no blob, so
+the root needs to exist for no test — a read through it is itself the failure."""
+
+
 def _server(
-    carrier: Carrier, upstream: httpx.AsyncClient, frame_ancestor: str = APP_ORIGIN
+    carrier: Carrier,
+    upstream: httpx.AsyncClient,
+    frame_ancestor: str = APP_ORIGIN,
+    blob: FilesystemBlobStore = UNREAD_BLOBS,
 ) -> IngressServe:
     """Annotated as the `Carrier` it stands in for, with no suppression: a stub that drifts from the
     protocol it fakes stops standing in for the dependency, and mypy is what catches the drift."""
@@ -312,6 +329,7 @@ def _server(
         base_host=BASE_HOST,
         carrier=carrier,
         client=upstream,
+        blob=blob,
         frame_ancestor=frame_ancestor,
         site_scheme="https",
         site_port_suffix="",
@@ -1743,3 +1761,220 @@ def test_the_ingress_refuses_to_bind_when_its_database_is_unreachable(
             ingress_serve.run()
     finally:
         asyncio.run(dispose_db())
+
+
+STORED_SITE_NAME = "app-home"
+INDEX_BYTES = b"<!doctype html><h1>stored</h1>"
+APP_JS_BYTES = b"console.log('stored')"
+DOCS_BYTES = b"<p>docs</p>"
+STORED_FILES = {
+    "index.html": (INDEX_BYTES, "text/html"),
+    "assets/app.js": (APP_JS_BYTES, "text/javascript"),
+    "docs/index.html": (DOCS_BYTES, "text/html"),
+}
+
+
+def _stored_etag(data: bytes) -> str:
+    return f'"{hashlib.sha256(data).hexdigest()}"'
+
+
+async def _seed_stored_site(
+    blobs: FilesystemBlobStore,
+    workspace_id: UUID,
+    conversation_id: UUID,
+    files: dict[str, tuple[bytes, str]],
+    port: int = 8000,
+) -> None:
+    """Register a stored site the way a deploy leaves one: file bytes under a tokened root in the
+    workspace's own blob prefix, and the manifest naming them on the row."""
+    root = f"sites/{conversation_id}/{STORED_SITE_NAME}/{uuid4().hex}/"
+    named: dict[str, dict[str, object]] = {}
+    for path, (data, media_type) in files.items():
+        await blobs.put(f"workspaces/{workspace_id}/{root}{path}", data)
+        named[path] = {
+            "size": len(data),
+            "media_type": media_type,
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    await _seed_hosted_site(
+        workspace_id,
+        conversation_id,
+        port,
+        source_manifest=json.dumps({"root": root, "files": named}),
+    )
+
+
+@dataclass(frozen=True)
+class _NeverDialCarrier(_StubCarrier):
+    """A stored site never dials: the carrier being reached at all is the failure under test."""
+
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        raise AssertionError("a stored site dialed the sandbox")
+
+
+@pytest.fixture
+async def stored_ingress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[httpx.AsyncClient, FilesystemBlobStore]]:
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    blobs = FilesystemBlobStore(root=tmp_path / "blobs")
+    async with upstream_client() as upstream:
+        server = _server(_NeverDialCarrier(port=0), upstream, blob=blobs)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            yield client, blobs
+
+
+async def test_a_stored_site_is_served_from_the_store_and_never_dials(db, stored_ingress) -> None:
+    """The whole point: the conversation has no sandbox handle at all and the carrier raises on
+    any dial, yet the site answers — bytes, type, length, digest, and the same frame-ancestors a
+    dialed response carries. Durability of a stored site is the store's, not the sandbox's."""
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    await _open(client, workspace_id, conversation_id)
+    got = await client.get(f"{_origin(conversation_id)}/")
+    assert got.status_code == 200
+    assert got.content == INDEX_BYTES
+    assert got.headers["content-type"].startswith("text/html")
+    assert got.headers["content-length"] == str(len(INDEX_BYTES))
+    assert got.headers["etag"] == _stored_etag(INDEX_BYTES)
+    assert got.headers["cache-control"] == STORED_SITE_CACHE
+    assert got.headers["x-content-type-options"] == "nosniff"
+    assert _framers(got) == [f"{APP_ORIGIN} {_origin(conversation_id, 8000)}"]
+
+
+async def test_a_stored_sites_nested_asset_and_directory_index_are_served(
+    db, stored_ingress
+) -> None:
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    await _open(client, workspace_id, conversation_id)
+    asset = await client.get(f"{_origin(conversation_id)}/assets/app.js")
+    assert (asset.status_code, asset.content) == (200, APP_JS_BYTES)
+    assert asset.headers["content-type"].startswith("text/javascript")
+    for entry in ("/docs", "/docs/"):
+        indexed = await client.get(f"{_origin(conversation_id)}{entry}")
+        assert (indexed.status_code, indexed.content) == (200, DOCS_BYTES), entry
+
+
+async def test_a_path_a_stored_site_does_not_name_is_404(db, stored_ingress) -> None:
+    """The manifest is the site's whole filesystem, so a miss is a miss whatever its shape — a
+    dotted escape is a string no manifest key equals, with no root anywhere for it to walk."""
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    await _open(client, workspace_id, conversation_id)
+    missing = await client.get(f"{_origin(conversation_id)}/nope.js")
+    assert (missing.status_code, missing.text) == (404, NOT_FOUND)
+    escape = await client.get(f"{_origin(conversation_id)}/%2e%2e/index.html")
+    assert escape.status_code == 404
+
+
+async def test_a_stored_site_revalidates_by_digest(db, stored_ingress) -> None:
+    """`no-cache` is the contract that every held copy comes back through this process: a matching
+    digest answers 304 with no body — after the same session gate a 200 runs — and a stale one gets
+    the bytes again."""
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    await _open(client, workspace_id, conversation_id)
+    etag = _stored_etag(INDEX_BYTES)
+    unchanged = await client.get(f"{_origin(conversation_id)}/", headers={"if-none-match": etag})
+    assert unchanged.status_code == 304
+    assert unchanged.content == b""
+    assert unchanged.headers["etag"] == etag
+    assert unchanged.headers["cache-control"] == STORED_SITE_CACHE
+    listed = await client.get(
+        f"{_origin(conversation_id)}/", headers={"if-none-match": f'"stale", {etag}'}
+    )
+    assert listed.status_code == 304
+    moved = await client.get(f"{_origin(conversation_id)}/", headers={"if-none-match": '"stale"'})
+    assert (moved.status_code, moved.content) == (200, INDEX_BYTES)
+
+
+async def test_a_stored_site_answers_head_with_the_description_alone(db, stored_ingress) -> None:
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    await _open(client, workspace_id, conversation_id)
+    head = await client.head(f"{_origin(conversation_id)}/assets/app.js")
+    assert head.status_code == 200
+    assert head.content == b""
+    assert head.headers["content-length"] == str(len(APP_JS_BYTES))
+    assert head.headers["etag"] == _stored_etag(APP_JS_BYTES)
+
+
+async def test_a_stored_site_takes_no_method_but_get_and_head(db, stored_ingress) -> None:
+    """A directory of files speaks GET and HEAD and nothing else — there is no server behind this
+    to forward a POST to, so the refusal is the ingress's own."""
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    await _open(client, workspace_id, conversation_id)
+    for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS"):
+        refused = await client.request(method, f"{_origin(conversation_id)}/")
+        assert refused.status_code == 405, method
+        assert refused.headers["allow"] == "GET, HEAD"
+
+
+async def test_a_stored_site_still_gates_on_the_session(db, stored_ingress) -> None:
+    """Stored bytes answer to the same door as dialed ones: no session, no read — the store is
+    never touched for an unauthorized viewer."""
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    got = await client.get(f"{_origin(conversation_id)}/")
+    assert (got.status_code, got.text) == (403, SESSION_ENDED)
+
+
+async def test_a_manifest_naming_a_vanished_blob_is_404(db, stored_ingress) -> None:
+    """The window where a redeploy retired the old root between the row read and the blob read:
+    answered as a miss for the refresh to heal, never a 200 that dies mid-stream."""
+    client, _blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    manifest = {
+        "root": f"sites/{conversation_id}/{STORED_SITE_NAME}/{uuid4().hex}/",
+        "files": {"index.html": {"size": 5, "media_type": "text/html", "sha256": "0" * 64}},
+    }
+    await _seed_hosted_site(
+        workspace_id, conversation_id, port=8000, source_manifest=json.dumps(manifest)
+    )
+    await _open(client, workspace_id, conversation_id)
+    got = await client.get(f"{_origin(conversation_id)}/")
+    assert (got.status_code, got.text) == (404, NOT_FOUND)
+
+
+async def test_a_hosted_row_without_a_manifest_still_dials(db, ingress) -> None:
+    """The dial path is what a manifest-less row keeps, byte for byte: proxied bytes, `no-store`,
+    and the sandbox actually reached."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _seed_hosted_site(workspace_id, conversation_id, port=8000)
+    await _open(ingress, workspace_id, conversation_id)
+    got = await ingress.get(f"{_origin(conversation_id)}/index.html")
+    assert got.status_code == 200
+    assert got.json()["path"] == "/index.html"
+    assert got.headers.get_list("cache-control") == [UNCACHEABLE]
+
+
+async def test_a_socket_to_a_stored_site_is_refused(
+    db, socket_ingress: int, socket_origin: _SocketOrigin
+) -> None:
+    """A stored site has no server, so it speaks no socket protocol — refused on the handshake
+    with its own sentence, and nothing upstream ever sees one."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    manifest = {"root": f"sites/{conversation_id}/{STORED_SITE_NAME}/{uuid4().hex}/", "files": {}}
+    await _seed_hosted_site(
+        workspace_id, conversation_id, port=8000, source_manifest=json.dumps(manifest)
+    )
+    with pytest.raises(InvalidStatus) as refused:
+        async with _socket(
+            socket_ingress,
+            conversation_id,
+            "/hmr",
+            session=_session(workspace_id, conversation_id),
+        ):
+            pass
+    assert refused.value.response.status_code == 502
+    assert refused.value.response.body == SITE_HAS_NO_SOCKET.encode()
+    assert socket_origin.handshakes == []

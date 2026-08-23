@@ -505,6 +505,7 @@ spec:
 %{ endif }
       terminationGracePeriodSeconds: ${termination_grace_period_seconds}
       enableServiceLinks: false
+      serviceAccountName: ufo-ingress
       containers:
         - name: ingress
           image: ${bundle_image}
@@ -636,6 +637,16 @@ metadata:
   namespace: ${namespace}
   annotations:
     eks.amazonaws.com/role-arn: ${serve_role_arn}
+---
+# The ingress reads the same blob bucket to answer a stored site, so the namespace holds two blob
+# identities: serve's is read-write and promotes a deploy into the store, this one only reads.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ufo-ingress
+  namespace: ${namespace}
+  annotations:
+    eks.amazonaws.com/role-arn: ${ingress_role_arn}
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -150,17 +150,20 @@ class AgentProvisioning:
         reach here; the unique provision identity settles which one writes. An `IntegrityError`
         here would leave the turn path, and fail a member's turn for a write that was not theirs."""
         spec = provision.spec
-        taken = (
-            (
-                await connection.execute(
-                    sa.select(tables.agent.c.icon).where(
-                        tables.agent.c.workspace_id == workspace_id
+        icon = provision.icon
+        if icon is None:
+            taken = (
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.icon).where(
+                            tables.agent.c.workspace_id == workspace_id
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
+            icon = auto_agent_icon(name, taken)
         insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
         await connection.execute(
             insert(tables.agent)
@@ -168,7 +171,7 @@ class AgentProvisioning:
                 id=uuid4(),
                 workspace_id=workspace_id,
                 name=name,
-                icon=auto_agent_icon(name, taken),
+                icon=icon,
                 prompt=spec.prompt,
                 model=spec.model,
                 reasoning=spec.reasoning,

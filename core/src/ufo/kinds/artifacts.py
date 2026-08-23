@@ -30,7 +30,7 @@ from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, JsonValue
 from ufo.kinds.conversations import CONVERSATION_KIND
-from ufo.media.artifact_url import ARTIFACT_URL_TTL_SECONDS, mint_artifact_url
+from ufo.media.artifact_url import artifact_url_expiry, mint_artifact_url
 from ufo.object_name import ObjectRef
 from ufo.object_scope import object_agent_id
 from ufo.objects import (
@@ -182,7 +182,7 @@ class ArtifactObjects:
             await ctx.sandbox.write_file(path, data)
         url: str | None = None
         if ctx.artifact_token_secret:
-            expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+            expires_at = artifact_url_expiry(datetime.now(UTC))
             url = mint_artifact_url(
                 ctx.artifact_token_secret,
                 latest.blob_key,

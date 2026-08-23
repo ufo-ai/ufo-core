@@ -19,9 +19,12 @@ from ufo.db import workspace_tx
 from ufo.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
     ARTIFACT_MEDIA_TYPES,
+    ARTIFACT_URL_BUCKET_SECONDS,
+    ARTIFACT_URL_TTL_SECONDS,
     ArtifactUrlError,
     ArtifactUrlExpired,
     artifact_media_type,
+    artifact_url_expiry,
     mint_artifact_url,
     verify_artifact_url,
 )
@@ -102,6 +105,27 @@ def test_mint_and_verify_agree_on_a_round_trip() -> None:
     assert claims.expires_at == expires
     assert claims.workspace_id == workspace_id
     assert claims.preview is None
+
+
+def test_expiry_buckets_hold_urls_still_between_mints() -> None:
+    """Two mints inside one bucket carry the same `exp`, so the whole signed URL is byte-identical
+    and a browser or the edge can answer the second fetch from cache; validity never dips below the
+    TTL and never exceeds it by more than one bucket."""
+    inside = datetime.fromtimestamp(1_000_000, tz=UTC)
+    later = datetime.fromtimestamp(1_000_030, tz=UTC)
+    assert artifact_url_expiry(inside) == artifact_url_expiry(later)
+    for moment in (1_000_000, 997_200, 997_201, 1_000_799):
+        expiry = artifact_url_expiry(datetime.fromtimestamp(moment, tz=UTC))
+        assert expiry % ARTIFACT_URL_BUCKET_SECONDS == 0
+        validity = expiry - moment
+        assert ARTIFACT_URL_TTL_SECONDS < validity
+        assert validity <= ARTIFACT_URL_TTL_SECONDS + ARTIFACT_URL_BUCKET_SECONDS
+    key = f"{ARTIFACT_KEY_PREFIX}{uuid4()}/report.txt"
+    workspace_id = uuid4()
+    expiry = artifact_url_expiry(datetime.now(UTC))
+    assert mint_artifact_url(SECRET, key, expiry, workspace_id=workspace_id) == mint_artifact_url(
+        SECRET, key, expiry, workspace_id=workspace_id
+    )
 
 
 def test_the_workspace_claim_rides_the_query_inside_the_signature() -> None:
@@ -266,7 +290,7 @@ async def test_artifact_download_serves_attachments_under_their_real_type(
     assert response.headers["content-type"].startswith(media_type)
     assert response.headers["content-disposition"].startswith("attachment")
     assert response.headers["x-content-type-options"] == "nosniff"
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == "public, max-age=600"
 
 
 async def test_artifact_preview_serves_a_validated_raster_inline(
@@ -286,7 +310,7 @@ async def test_artifact_preview_serves_a_validated_raster_inline(
     assert shown.content == raster
     assert shown.headers["content-type"] == "image/png"
     assert shown.headers["x-content-type-options"] == "nosniff"
-    assert shown.headers["cache-control"] == "private, no-store"
+    assert shown.headers["cache-control"] == "public, max-age=600"
     assert "content-disposition" not in shown.headers
 
 
@@ -513,6 +537,7 @@ async def test_an_expired_url_redirects_a_member_to_a_fresh_grant(
     )
     response = await client.get(expired, headers=_session_cookie(workspace_id))
     assert response.status_code == 303
+    assert response.headers["cache-control"] == "private, no-store"
     fresh = response.headers["location"]
     assert urlsplit(fresh).path == urlsplit(expired).path
     followed = await client.get(fresh)

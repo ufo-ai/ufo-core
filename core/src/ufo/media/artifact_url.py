@@ -14,7 +14,13 @@ member-refresh path, which re-scopes it to the owning workspace. The filename ri
 signature: it re-joins the signed artifact id to address the one blob stored under it, so a
 renamed segment addresses nothing and 404s. `mint_artifact_url` signs and `verify_artifact_url`
 checks the same values, so a round-trip agrees by construction: the `share_file` builtin mints,
-core's artifact route verifies, and both read the one deploy secret."""
+core's artifact route verifies, and both read the one deploy secret.
+
+Expiry is quantized: `artifact_url_expiry` answers the smallest bucket boundary at least the TTL
+away, so every mint of one artifact within a bucket is a byte-identical URL. A URL that holds still
+between reads is what lets the browser and the edge answer a repeat fetch from cache — a per-second
+expiry made every mint unique and every poll a refetch — and quantizing up keeps the stated TTL as
+the validity floor."""
 
 import mimetypes
 from dataclasses import dataclass
@@ -35,6 +41,7 @@ from ufo.media.image_previews import (
 
 ARTIFACT_KEY_PREFIX = "artifacts/"
 ARTIFACT_URL_TTL_SECONDS = 3600
+ARTIFACT_URL_BUCKET_SECONDS = 3600
 FALLBACK_MEDIA_TYPE = "application/octet-stream"
 ARTIFACT_MEDIA_TYPES = {
     ".diff": "text/x-patch",
@@ -47,6 +54,16 @@ ARTIFACT_MEDIA_TYPES = {
 
 class ArtifactUrlError(ValueError):
     """A download URL is malformed, tampered, expired, or outside the artifact namespace."""
+
+
+def artifact_url_expiry(now: datetime) -> int:
+    """The `exp` a mint carries: the smallest `ARTIFACT_URL_BUCKET_SECONDS` boundary at least
+    `ARTIFACT_URL_TTL_SECONDS` past `now`, so mints of one artifact within a bucket agree on the
+    whole URL and a repeat fetch is a cache's to answer. Validity lands in
+    (`ARTIFACT_URL_TTL_SECONDS`, `ARTIFACT_URL_TTL_SECONDS + ARTIFACT_URL_BUCKET_SECONDS`]."""
+    return (
+        (int(now.timestamp()) + ARTIFACT_URL_TTL_SECONDS) // ARTIFACT_URL_BUCKET_SECONDS + 1
+    ) * ARTIFACT_URL_BUCKET_SECONDS
 
 
 @dataclass(frozen=True)
@@ -134,7 +151,7 @@ def mint_image_preview_url(
     media_type = raster_image_media_type(blob_key)
     if media_type is None or size_bytes is None or size_bytes > IMAGE_PREVIEW_MAX_BYTES:
         return None
-    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+    expires_at = artifact_url_expiry(datetime.now(UTC))
     path = mint_artifact_url(
         secret,
         blob_key,

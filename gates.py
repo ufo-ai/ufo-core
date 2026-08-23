@@ -29,6 +29,7 @@ RAW_BLOB_BOOT_MODULES = frozenset(
         CORE_SRC / "serve.py",
         CORE_SRC / "cli.py",
         CORE_SRC / "proxy_serve.py",
+        CORE_SRC / "sandbox" / "ingress_serve.py",
         Path("evals/__main__.py"),
         Path("evals/issue_recall/materialize.py"),
         Path("evals/memory_100/materialize.py"),

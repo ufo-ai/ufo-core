@@ -584,6 +584,44 @@ def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
     )
 
 
+async def test_ufo_app_bench_rework_pulls_the_source_between_deploys() -> None:
+    case = BENCH_CASES[3]
+    assert "pull-before-redeploy" in case.digest_tag
+    page = b"<main>Built app</main>"
+    files = {
+        "daily-brief-rework-interactive.html": page,
+        "daily-brief-rework-static.html": page,
+        "daily-brief-rework-audit.json": _measured(),
+        **{f"daily-brief-rework-{scheme}.png": _png() for scheme in SCHEMES},
+    }
+    base = _built_screen(files)
+    reworked = replace(
+        base,
+        calls=(
+            *base.calls,
+            ToolInvocation("object_get", {"kind": "site"}, "read", has_result=True),
+            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
+        ),
+    )
+    unpulled = replace(
+        base,
+        calls=(
+            *base.calls,
+            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
+        ),
+    )
+
+    pulled = await case.grader(reworked)
+    once = await case.grader(base)
+    skipped = await case.grader(unpulled)
+
+    assert pulled.passed, pulled.reason
+    assert not once.passed
+    assert "second" in once.reason
+    assert not skipped.passed
+    assert "object_get" in skipped.reason
+
+
 async def test_ufo_app_bench_rejects_a_second_whole_site_build() -> None:
     base = _built_screen({})
     delegated = replace(
@@ -672,9 +710,14 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
 async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
     page = b"<main>Built app</main>"
 
-    assert [case.name for case in BENCH_CASES] == ["kanban-board", "call-notes", "daily-brief"]
+    assert [case.name for case in BENCH_CASES] == [
+        "kanban-board",
+        "call-notes",
+        "daily-brief",
+        "daily-brief-rework",
+    ]
     assert UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS == 900.0
-    for case in BENCH_CASES:
+    for case in BENCH_CASES[:3]:
         assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in case.digest_tag
         assert "interactive-homepage" in case.digest_tag
         shots = {f"{case.name}-{scheme}.png": _png() for scheme in SCHEMES}

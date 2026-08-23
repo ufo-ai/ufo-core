@@ -24,11 +24,11 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
-    ARTIFACT_URL_TTL_SECONDS,
     ArtifactClaims,
     ArtifactUrlError,
     ArtifactUrlExpired,
     artifact_media_type,
+    artifact_url_expiry,
     mint_artifact_url,
     verify_artifact_url,
 )
@@ -40,14 +40,19 @@ router = APIRouter()
 
 ARTIFACT_TARGET_PARAM = "a"
 EXPIRED_DETAIL = "The download link expired. Ask the agent to share the file again."
-UNCACHED = {
+ARTIFACT_CACHE_SECONDS = 600
+SERVED_HEADERS = {
     "x-content-type-options": "nosniff",
-    "cache-control": "private, no-store",
-    # The grant is the whole gate: a signed URL serves whoever holds it, and an app page — a
-    # framed site on its own origin — reads artifact bytes with fetch, which needs the origin
-    # stated where a plain download does not.
+    # The grant is the whole gate: a signed URL serves whoever holds it, so a cache keyed on the
+    # exact URL — query and all — answers only what the signature already grants, and the window
+    # sits well inside the shortest remaining validity a bucketed mint can carry. `public` is what
+    # licenses the edge worker's stored copy; a refusal or redirect never says it.
+    "cache-control": f"public, max-age={ARTIFACT_CACHE_SECONDS}",
+    # An app page — a framed site on its own origin — reads artifact bytes with fetch, which needs
+    # the origin stated where a plain download does not.
     "access-control-allow-origin": "*",
 }
+UNCACHED = "private, no-store"
 
 
 @router.get("/" + ARTIFACT_KEY_PREFIX + "{artifact_id}/{filename}")
@@ -66,8 +71,10 @@ async def download(
     streams out in bounded chunks — the bytes never buffer whole, so a large or concurrent fetch
     can't spike memory — under the real media type its filename names, always as an attachment;
     only a signed preview claim renders inline, after the bytes prove to be the raster type and
-    size it declares. `nosniff` holds the browser to the declared type and `no-store` keeps any
-    cache from answering with the grant unchecked."""
+    size it declares. `nosniff` holds the browser to the declared type. Served bytes are briefly
+    publicly cacheable: the signed URL is itself the whole grant, so a cache answering a repeat of
+    the exact URL answers only what the signature grants, for a window inside the grant's remaining
+    validity — refusals and redirects stay `no-store`."""
     blob: WorkspaceBlobStore = request.app.state.blob
     secret: str = request.app.state.artifact_token_secret
     try:
@@ -90,7 +97,9 @@ async def download(
                 )
             except InvalidImagePreview as error:
                 raise HTTPException(415, str(error)) from error
-            return Response(content=data, media_type=claims.preview.media_type, headers=UNCACHED)
+            return Response(
+                content=data, media_type=claims.preview.media_type, headers=SERVED_HEADERS
+            )
         body = blob.get_stream(claims.blob_key)
     encoded = quote(claims.filename, safe="")
     headers = {
@@ -99,7 +108,7 @@ async def download(
             if encoded == claims.filename
             else f"attachment; filename*=UTF-8''{encoded}"
         ),
-        **UNCACHED,
+        **SERVED_HEADERS,
     }
     return StreamingResponse(
         body,
@@ -152,12 +161,13 @@ async def _refreshed_for_member(
             ).scalar_one_or_none()
     if member is None or owner != workspace:
         raise _refusal(request)
-    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+    expires_at = artifact_url_expiry(datetime.now(UTC))
     return RedirectResponse(
         mint_artifact_url(
             secret, claims.blob_key, expires_at, workspace_id=workspace, preview=claims.preview
         ),
         status_code=303,
+        headers={"cache-control": UNCACHED},
     )
 
 

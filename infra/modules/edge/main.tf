@@ -142,3 +142,13 @@ resource "cloudflare_workers_route" "site_cards" {
   pattern = "app.${var.hostname}/surface/sites/share/site/*"
   script  = cloudflare_workers_script.edge.script_name
 }
+
+# An artifact URL's query is its whole grant, so the worker stores a served response under the exact
+# signed URL and answers repeats of it from the edge — previews the portal draws on every poll stop
+# re-reading S3 per request. Only 200s the origin marked public are stored; refusals and the
+# member-refresh redirect say no-store and pass straight through.
+resource "cloudflare_workers_route" "artifact_bytes" {
+  zone_id = var.zone_id
+  pattern = "app.${var.hostname}/artifacts/*"
+  script  = cloudflare_workers_script.edge.script_name
+}

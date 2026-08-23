@@ -12,6 +12,7 @@ def test_app_chat_ships_one_workspace_agent() -> None:
     assert manifest.name == "app_chat"
     assert [provision.name for provision in manifest.agents] == ["chat"]
     provision = manifest.agents[0]
+    assert provision.icon == "message-circle"
     assert provision.spec.visibility == "workspace"
     assert "app-chat-home" in provision.spec.prompt
     # tools None gives the member-facing set, so the homepage seed job can build and bind the page.

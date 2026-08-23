@@ -2,10 +2,11 @@
 
 A site is `(workspace, conversation, name)` — the conversation that built it owns the name, so two
 conversations may each serve a `dashboard` and neither takes the other's link. The row carries the
-sandbox port its bytes come from, who created it, the visibility every viewer is gated on, and the
-picture of the page its last deploy captured; re-deploying the same name updates the port and keeps
-whatever visibility the site already has, so a member's choice in the frame survives the next
-deploy.
+sandbox port its bytes come from, who created it, the visibility every viewer is gated on, the
+picture of the page its last deploy captured, and — for a static deploy — the manifest of the
+source promoted into the blob store, which is what the ingress serves and what outlives the
+sandbox; re-deploying the same name updates the port and keeps whatever visibility the site
+already has, so a member's choice in the frame survives the next deploy.
 
 The registry is reached from two places that hold no common context — a tool handler through its
 `ExtensionContext` and the frame through its `SurfaceContext` — so it takes the transaction and the
@@ -23,6 +24,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.sdk.audience import (
@@ -31,6 +33,7 @@ from ufo.sdk.audience import (
     audience_member,
     parse_audience,
 )
+from ufo.sdk.sandbox import ContainmentError, contained_relative
 from ufo.sdk.tools import StoredPreview
 
 type Visibility = Literal["private", "workspace", "public"]
@@ -43,6 +46,7 @@ PORT_HELD_BY_ANOTHER_MEMBER = (
     "theirs: deploy under that site's name to update it, or ask them to unhost it"
 )
 SITE_NAME_MAX = 48
+SOURCE_PATH_ANCHOR = "/site-source"
 _NAME_RUN = re.compile(r"[^a-z0-9]+")
 
 _metadata = sa.MetaData()
@@ -62,9 +66,56 @@ hosted_site = sa.Table(
     sa.Column("preview_size_bytes", sa.Integer, nullable=True),
     sa.Column("share_card_blob_key", sa.Text, nullable=True),
     sa.Column("share_card_hash", sa.Text, nullable=True),
+    sa.Column("source_manifest", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 )
+
+
+class SiteFile(BaseModel):
+    """One file of a site's stored source: its size, the media type it serves as, and the digest of
+    its bytes — the ETag a read answers with."""
+
+    size: int
+    media_type: str
+    sha256: str
+
+
+class SourceManifest(BaseModel):
+    """The stored source a static deploy promoted into the blob store: the workspace-relative key
+    prefix its files live under, and every file by its site-relative path. The prefix carries a
+    per-deploy token, so each deploy's keys are immutable and the previous deploy's are the retire
+    step's to delete. A row with no manifest serves off its sandbox port instead — a published app
+    with its own server."""
+
+    root: str
+    files: dict[str, SiteFile]
+
+    @field_validator("root")
+    @classmethod
+    def _rooted(cls, root: str) -> str:
+        if not root.startswith("sites/") or not root.endswith("/"):
+            raise ValueError(f"source root {root!r} must be a sites/ key prefix")
+        return root
+
+    @field_validator("files")
+    @classmethod
+    def _pathed(cls, files: dict[str, SiteFile]) -> dict[str, SiteFile]:
+        """Every path must already be the plain relative form the guard's lexical tier resolves it
+        to — a path that normalizes to something else (a leading slash, a dot segment, an escape)
+        is refused rather than rewritten, since the manifest's keys are what a read is answered
+        by."""
+        for path in files:
+            refusal = f"source path {path!r} is not a plain site-relative path"
+            if path.startswith("/") or "\\" in path or any(char < " " for char in path):
+                raise ValueError(refusal)
+            try:
+                resolved = contained_relative(path, SOURCE_PATH_ANCHOR)
+            except ContainmentError as escape:
+                raise ValueError(refusal) from escape
+            if resolved != f"{SOURCE_PATH_ANCHOR}/{path}":
+                raise ValueError(refusal)
+        return files
 
 
 PORT_UNHOST_NEEDS_A_SPEAKER = (
@@ -147,6 +198,7 @@ class HostedSite:
     preview_size_bytes: int | None
     share_card_blob_key: str | None
     share_card_hash: str | None
+    source_manifest: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -167,6 +219,8 @@ class HostedSites:
         visibility: Visibility | None,
         audience: Audience,
         may_unhost: bool,
+        *,
+        manifest: str | None,
     ) -> HostedSite:
         """Register the site a deploy just left running and return the row it resolves by. A port
         serves one origin, so any other site on this conversation's port is retired first —
@@ -186,7 +240,11 @@ class HostedSites:
         `deploy_generation` is a clock stamp held strictly above whatever the row already carries,
         never a counter: a counter dies with its row, so a name unhosted and deployed again would
         repeat values its earlier life used — and the portal, which remounts the homepage frame when
-        this value changes, would keep showing the old bytes at the same URL."""
+        this value changes, would keep showing the old bytes at the same URL.
+
+        `manifest` is the stored-source manifest a static deploy promoted, or None for a deploy
+        serving off its sandbox port — written either way, so the column always states how the
+        current deploy serves and a publish over a former static deploy sheds the stale source."""
         stamp = time.time_ns() // 1_000
         async with self.transaction() as connection:
             displaced = await self._refuse(
@@ -202,6 +260,7 @@ class HostedSites:
                 )
             values: dict[str, object] = {
                 "port": port,
+                "source_manifest": manifest,
                 "updated_at": sa.func.now(),
                 "deploy_generation": sa.case(
                     (
@@ -236,6 +295,7 @@ class HostedSites:
                         creator_member_id=creator_member_id,
                         generation=uuid4(),
                         deploy_generation=stamp,
+                        source_manifest=manifest,
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
@@ -244,6 +304,49 @@ class HostedSites:
         if registered is None:
             raise RuntimeError(f"site {name!r} vanished as it was registered")
         return registered
+
+    async def redeploy(self, conversation_id: UUID, name: str, manifest: str) -> HostedSite | None:
+        """Replace one site's stored source in place, returning the updated row, or None when the
+        site is already gone. Nothing else moves — port, creator, visibility and binding stay — so
+        a deploy directed from another conversation updates the very page the member's link opens
+        rather than founding a fork. The `deploy_generation` stamp answers to the same
+        strictly-above rule as `register`'s, which is what remounts the portal's frame."""
+        stamp = time.time_ns() // 1_000
+        async with self.transaction() as connection:
+            await connection.execute(
+                sa.update(hosted_site)
+                .where(
+                    hosted_site.c.workspace_id == self.workspace_id,
+                    hosted_site.c.conversation_id == conversation_id,
+                    hosted_site.c.name == name,
+                )
+                .values(
+                    source_manifest=manifest,
+                    updated_at=sa.func.now(),
+                    deploy_generation=sa.case(
+                        (
+                            hosted_site.c.deploy_generation >= stamp,
+                            hosted_site.c.deploy_generation + 1,
+                        ),
+                        else_=stamp,
+                    ),
+                )
+            )
+            return await self._read(connection, conversation_id, name)
+
+    async def homepage(self, agent_id: UUID) -> HostedSite | None:
+        """The one site bound as this agent's homepage, or None — at most one, held by the partial
+        unique index."""
+        async with self.transaction() as connection:
+            row = (
+                await connection.execute(
+                    self._columns().where(
+                        hosted_site.c.workspace_id == self.workspace_id,
+                        hosted_site.c.homepage_agent_id == agent_id,
+                    )
+                )
+            ).one_or_none()
+        return None if row is None else _site(row)
 
     async def set_preview(self, conversation_id: UUID, name: str, preview: StoredPreview) -> None:
         """Write the picture a deploy photographed of its page onto the site's row.
@@ -426,15 +529,16 @@ class HostedSites:
         creator_member_id: UUID,
         visibility: Visibility | None,
         may_unhost: bool,
-    ) -> None:
-        """Raise whatever `register` would raise for these arguments, writing nothing.
+    ) -> HostedSite | None:
+        """Raise whatever `register` would raise for these arguments, writing nothing, and answer
+        the site this registration would displace — whose stored source is the deploy's to retire.
 
         A deploy serves before it registers, and serving kills whatever holds the port — the
         member's own site, in a container their turns share. So the caller asks here first, while
         that site is still up, and `register` asks again inside the write: one set of refusals, one
         answer, checked where a refusal is free and enforced where the row is decided."""
         async with self.transaction() as connection:
-            await self._refuse(
+            return await self._refuse(
                 connection, conversation_id, name, port, creator_member_id, visibility, may_unhost
             )
 
@@ -514,6 +618,7 @@ class HostedSites:
             hosted_site.c.preview_size_bytes,
             hosted_site.c.share_card_blob_key,
             hosted_site.c.share_card_hash,
+            hosted_site.c.source_manifest,
             hosted_site.c.created_at,
             hosted_site.c.updated_at,
         )
@@ -539,6 +644,7 @@ def _site(row: sa.Row) -> HostedSite:
         preview_size_bytes=row.preview_size_bytes,
         share_card_blob_key=row.share_card_blob_key,
         share_card_hash=row.share_card_hash,
+        source_manifest=row.source_manifest,
         created_at=_aware(row.created_at),
         updated_at=_aware(row.updated_at),
     )

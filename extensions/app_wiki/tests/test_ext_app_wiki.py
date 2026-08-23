@@ -10,6 +10,7 @@ def test_app_wiki_ships_one_workspace_agent() -> None:
     assert manifest.name == "app_wiki"
     assert [provision.name for provision in manifest.agents] == ["wiki"]
     provision = manifest.agents[0]
+    assert provision.icon == "book"
     assert provision.spec.visibility == "workspace"
     assert "app-wiki-home" in provision.spec.prompt
     assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-wiki-home"}

@@ -227,6 +227,7 @@ data "kubectl_file_documents" "hosted" {
     client_version                   = local.client_version
     e2b_templates                    = var.e2b_templates
     serve_role_arn                   = module.platform.app_s3_role_arn
+    ingress_role_arn                 = module.platform.ingress_s3_role_arn
     workload_ha                      = false
     prestop_seconds                  = local.prestop_seconds
     termination_grace_period_seconds = local.prestop_seconds + local.request_shutdown_seconds + local.graceful_shutdown_seconds + 60

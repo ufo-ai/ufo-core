@@ -51,7 +51,9 @@ OTHER_EXTENSION = "other"
 MEMBER_PROMPT = "A prompt this workspace wrote for itself."
 
 
-def _provision(name: str = PROVISIONED_AGENT_NAME, **overrides: object) -> AgentProvision:
+def _provision(
+    name: str = PROVISIONED_AGENT_NAME, icon: str | None = None, **overrides: object
+) -> AgentProvision:
     spec = AgentSpec(
         model="auto",
         reasoning="auto",
@@ -62,6 +64,7 @@ def _provision(name: str = PROVISIONED_AGENT_NAME, **overrides: object) -> Agent
         name=name,
         spec=spec.model_copy(update=overrides),
         tools=("sample_echo", *SETUP_TOOLS),
+        icon=icon,
     )
 
 
@@ -197,6 +200,21 @@ async def test_the_shipped_visibility_reaches_the_created_row(
     assert [outcome.result for outcome in outcomes] == [CREATED]
     assert created is not None
     assert created.visibility == "workspace"
+
+
+async def test_the_shipped_icon_reaches_the_created_row(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declared mark is the one the portal draws the app with, so the row carries it rather
+    than one dealt from the pack."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    manifest = _manifest(OTHER_EXTENSION, _provision(icon="radar"))
+    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert [outcome.result for outcome in outcomes] == [CREATED]
+    assert created is not None
+    assert created.icon == "radar"
 
 
 async def test_a_member_edit_survives_the_next_application(
@@ -395,6 +413,11 @@ def test_a_provision_refuses_a_name_that_is_not_an_object_name() -> None:
 def test_a_provision_refuses_an_empty_prompt() -> None:
     with pytest.raises(ValueError, match="no prompt"):
         _provision(prompt="  ")
+
+
+def test_a_provision_refuses_an_icon_that_names_no_mark() -> None:
+    with pytest.raises(ValueError, match="names no mark"):
+        _provision(icon="Not A Mark")
 
 
 def _tool(name: str, *, profile_only: bool = False) -> ToolDef:

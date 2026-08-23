@@ -67,11 +67,16 @@ INFORMATION_FACT_COUNTS = {
     "kanban-board": 18,
     "call-notes": 14,
     "daily-brief": 15,
+    "daily-brief-rework": 15,
 }
 MEMBER_QUERIES = {
     "kanban-board": "Build your interactive project board homepage for the ops team.",
     "call-notes": "Build your interactive internal notes homepage for one customer call.",
     "daily-brief": "Build your interactive daily brief homepage for the team.",
+    "daily-brief-rework": (
+        "Build your interactive daily brief homepage for the team. Once it is live, make the "
+        "headline row bolder and redeploy the page."
+    ),
 }
 
 
@@ -440,6 +445,31 @@ def _qa_efficiency_scorer() -> Grader:
     )
 
 
+def _pull_before_redeploy_scorer() -> Grader:
+    """The edit half of the home skills: a change to an already-deployed page pulls the deployed
+    source before it deploys again, never reworking whatever the sandbox already holds."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        names = tuple(call.name for call in output.calls)
+        deploys = tuple(index for index, name in enumerate(names) if name == "deploy_website")
+        if len(deploys) < 2:
+            return CapabilityVerdict(
+                False, f"used deploy_website {len(deploys)} time(s); the rework needs a second"
+            )
+        pulls = tuple(
+            index
+            for index, call in enumerate(output.calls)
+            if call.name == "object_get" and call.succeeded
+        )
+        if not any(deploys[0] < pull < deploys[-1] for pull in pulls):
+            return CapabilityVerdict(
+                False, "the rework must object_get the site between the deploys, before editing"
+            )
+        return CapabilityVerdict(True, "pulled the deployed source before the rework's deploy")
+
+    return DescribedGrader("the rework pulls the deployed source before deploying again", grade)
+
+
 def _screen(name: str, information_inventory: str) -> CapabilityCase:
     return CapabilityCase(
         name,
@@ -485,5 +515,38 @@ CASES = (
         "the brief's date or scope, current status or metrics, material changes, priorities or "
         "follow-ups, and source context; the exact layout, labels, and item count are the "
         "builder's choice",
+    ),
+    CapabilityCase(
+        "daily-brief-rework",
+        MEMBER_QUERIES["daily-brief-rework"],
+        combine(
+            skill_scorer(SITE_SKILL, HOUSE_STYLE_SKILL),
+            required_tools_scorer(
+                ("deploy_website", "set_homepage", "object_get"),
+                (("deploy_website", "set_homepage"),),
+            ),
+            _direct_application_build_scorer(),
+            _pull_before_redeploy_scorer(),
+            _captured_artifact_scorer("-interactive.html"),
+            _captured_artifact_scorer("-static.html"),
+            _captured_artifact_scorer(".json", _measured_screen),
+            _captured_artifact_scorer(
+                ".json", lambda content: _interaction_screen("daily-brief-rework", content)
+            ),
+            _screen_images_scorer(),
+        ),
+        visual_rubric=(
+            *HOUSE_CRITERIA,
+            _information_criterion(
+                "daily-brief-rework",
+                "the brief's date or scope, current status or metrics, material changes, "
+                "priorities or follow-ups, and source context; the exact layout, labels, and "
+                "item count are the builder's choice",
+            ),
+        ),
+        digest_tag=(
+            f"ufo-app-bench:daily-brief-rework:pull-before-redeploy:wait-{WORKFLOW_WAIT_SECONDS:g}"
+        ),
+        artifact_probe=_AppBenchProbe("daily-brief-rework"),
     ),
 )

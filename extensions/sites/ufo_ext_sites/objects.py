@@ -9,15 +9,16 @@ private, and only the creator may change who can open it — a workspace admin m
 private but never widen one. A site bound as an agent's homepage answers to the agent instead: its
 effective visibility is the agent's, its own column lies dormant until unbind, and an apply naming
 another level is refused toward the agent object. It is the agent's page rather than a site the
-workspace shares, so it is never a shared row and never browsed: it answers its creator and
-workspace admins by name — the two who may unhost it — and stands in a listing only where the read
-names its binding. Create is refused naming `deploy_website`: a
+workspace shares, so it is disclosed at the agent's level and never browsed: it answers the agent's
+own audience by name — the edit flow any of them may direct starts with that read — while unhosting
+stays with its creator and workspace admins, and it stands in a listing only where the read names
+its binding. Create is refused naming `deploy_website`: a
 site exists by serving a port, and only a deploy knows which port. Delete unregisters it, and the
 link stops resolving."""
 
 import hashlib
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 from uuid import UUID
 
@@ -33,6 +34,7 @@ from ufo.sdk.objects import (
     ObjectKind,
     ObjectLink,
     ObjectListQuery,
+    ObjectPage,
     ObjectRef,
     OwnedRow,
     VerbNotSupported,
@@ -40,6 +42,7 @@ from ufo.sdk.objects import (
 )
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sites.share_card import draw_from_stored_shot
+from ufo_ext_sites.source import materialize_source
 from ufo_ext_sites.store import (
     SITE_VISIBILITY_GATE,
     HostedSite,
@@ -60,7 +63,9 @@ HOMEPAGE_FOLLOWS_AGENT = (
     "object's visibility instead"
 )
 HOMEPAGE_FIELD = "homepage_agent"
+HOMEPAGE_MINE = "mine"
 CONVERSATION_DIGEST_HEX = 12
+UNRETIRED_CHARS = 500
 
 
 class SiteSpec(BaseModel):
@@ -135,9 +140,10 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
     visit, read here through the one registry both surfaces write.
 
     A homepage-bound row is not a site the workspace shares: the page is the agent's, disclosed by
-    the agent object and gated per visit on the agent's visibility, so the row is never shared and
-    never browsed. It stays addressable by name for its creator and workspace admins — the two who
-    may unhost it — and stands in a listing only where the read names its binding."""
+    the agent object and gated per visit on the agent's visibility, so the row carries the agent's
+    disclosure rather than its own and is never browsed. It answers the agent's audience by name,
+    unhosting stays with its creator and workspace admins, and it stands in a listing only where
+    the read names its binding."""
 
     kind_name: ClassVar[str] = SITE_KIND
     mutate_gate: ClassVar[str] = VISIBILITY_GATE
@@ -151,6 +157,18 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
     def _listed(self, row: OwnedRow[GeneratedObjectOwner], query: ObjectListQuery) -> bool:
         return HOMEPAGE_FIELD not in row.fields or HOMEPAGE_FIELD in query.filters
 
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
+        """`homepage_agent` takes `mine` beside an agent id: nothing tells a turn its own agent
+        id, so the sentinel is how an agent addresses its own binding, resolved here where the
+        turn is in hand — the same viewer-relative reading the `mine` row field carries
+        elsewhere."""
+        if query.filters.get(HOMEPAGE_FIELD) == HOMEPAGE_MINE:
+            query = replace(
+                query,
+                filters={**query.filters, HOMEPAGE_FIELD: str(ctx.turn.agent_id)},
+            )
+        return await super().list(ctx, query)
+
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
@@ -162,10 +180,10 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
         return tuple(
             OwnedRow(
                 name=name,
-                summary=_summary(site, effective_visibility(site, agents)),
+                summary=_summary(site, (effective := effective_visibility(site, agents))),
                 owner=GeneratedObjectOwner(
                     member_id=site.creator_member_id,
-                    shared=site.homepage_agent_id is None and site.visibility != "private",
+                    shared=effective != "private",
                     generation=site.generation,
                 ),
                 fields={
@@ -257,7 +275,7 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
         site = await self._find(ctx.ext, name)
         if site is None:
             return None
-        return {
+        status: dict[str, JsonValue] = {
             "site_name": site.name,
             "port": site.port,
             "creator_member_id": str(site.creator_member_id),
@@ -267,7 +285,18 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                 site.conversation_id,
                 site.name,
             ),
+            "deploy_generation": site.deploy_generation,
+            "homepage_agent": (
+                None if site.homepage_agent_id is None else str(site.homepage_agent_id)
+            ),
+            "source_path": None,
+            "files": [],
         }
+        if site.source_manifest is not None:
+            dest, files = await materialize_source(ctx, site, name)
+            status["source_path"] = dest
+            status["files"] = list(files)
+        return status
 
     async def _apply_owned(
         self,
@@ -339,11 +368,13 @@ SITE_OBJECT = ObjectKind(
         "id for the sites it hosts, or order by `created_at` desc for the newest. "
         "A site bound as an agent's homepage by set_homepage is the agent's page rather than one "
         "the workspace shares: it is absent from listings unless the read filters on "
-        "`homepage_agent` — that agent's id, carried by the bound site alone — and its visibility "
+        "`homepage_agent` — an agent's id, or `mine` for your own binding — and its visibility "
         "follows the agent's, so an apply naming another level is refused. "
-        "object_get returns its visibility, and its status carries the hosted site_url, the "
-        "sandbox port serving it, and its creator; the `created_in` link names the conversation "
-        "that built it. Apply a manifest whose spec changes only `visibility` — private (creator "
+        "object_get returns its visibility, and its status carries the hosted site_url, its "
+        "creator, and — for a deployed static site — its stored source, materialized into the "
+        "sandbox at the status's source_path: edit there and deploy_website that directory to "
+        "update the page. The `created_in` link names the conversation that built it. Apply a "
+        "manifest whose spec changes only `visibility` — private (creator "
         "and admins), workspace (any signed-in member), or public (anyone with the link) — the "
         "same act "
         "the member can perform in the site's own frame. Create and any other spec change are "

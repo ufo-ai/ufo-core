@@ -4382,6 +4382,7 @@ async def test_site_index_answers_through_the_kinds_own_gate(
             "workspace",
             conversation_audience(member_m),
             True,
+            manifest=None,
         )
         await sites.register(
             conversation_id,
@@ -4391,6 +4392,7 @@ async def test_site_index_answers_through_the_kinds_own_gate(
             "private",
             conversation_audience(member_m),
             True,
+            manifest=None,
         )
     path = f"/surface/web/objects/site?agent={agent_id}"
     m_view = (await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})).json()
@@ -4431,9 +4433,9 @@ async def test_an_app_homepage_is_no_site_the_index_lists(
 ) -> None:
     """An app's homepage is the app's own page, not an artifact a member made and shared, so it
     stands in no browse of the workspace's sites — not its creator's, not an admin's — while an
-    ordinary workspace site beside it stands in both. It is not a shared row either: a member who
-    neither deployed it nor administers the workspace cannot read it by name. The pane that draws
-    the app reads it by naming the binding, which is the one read that still answers it."""
+    ordinary workspace site beside it stands in both. By name it answers the agent's audience the
+    way the frame does: any member who may open a workspace agent's page may read its site object,
+    which is where the edit flow every such member may direct begins."""
     client, workspace_id, agent_id = web
     creator_id, creator_token = await _seed_member(workspace_id, "app-builder@example.com")
     _member_id, member_token = await _seed_member(workspace_id, "app-member@example.com")
@@ -4455,6 +4457,7 @@ async def test_an_app_homepage_is_no_site_the_index_lists(
             "workspace",
             conversation_audience(creator_id),
             True,
+            manifest=None,
         )
         await sites.register(
             conversation_id,
@@ -4464,6 +4467,7 @@ async def test_an_app_homepage_is_no_site_the_index_lists(
             "workspace",
             conversation_audience(creator_id),
             True,
+            manifest=None,
         )
         assert await sites.set_homepage(agent_id, conversation_id, "home") is not None
     path = f"/surface/web/objects/site?agent={agent_id}"
@@ -4475,8 +4479,8 @@ async def test_an_app_homepage_is_no_site_the_index_lists(
     detail = f"/surface/web/objects/site/{name}?agent={agent_id}"
     read = await client.get(detail, headers={"cookie": f"{SESSION_COOKIE}={creator_token}"})
     assert read.status_code == 200
-    hidden = await client.get(detail, headers={"cookie": f"{SESSION_COOKIE}={member_token}"})
-    assert hidden.status_code == 404
+    read = await client.get(detail, headers={"cookie": f"{SESSION_COOKIE}={member_token}"})
+    assert read.status_code == 200
     opened = await client.get(
         f"/surface/web/agents/{agent_id}/homepage",
         headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
@@ -4506,6 +4510,7 @@ async def test_an_index_longer_than_a_page_walks_on_the_cursor_it_returns(
                 "workspace",
                 conversation_audience(member_m),
                 True,
+                manifest=None,
             )
     cookie = {"cookie": f"{SESSION_COOKIE}={token_m}"}
     base = f"/surface/web/objects/site?agent={agent_id}"
@@ -4546,6 +4551,7 @@ async def test_a_site_detail_carries_its_conversation_link_and_refuses_a_hidden_
             "private",
             conversation_audience(member_m),
             True,
+            manifest=None,
         )
     name = site_object_name(conversation_id, "draft")
     path = f"/surface/web/objects/site/{name}?agent={agent_id}"
@@ -4589,6 +4595,7 @@ async def test_a_link_opens_only_where_its_own_row_answers_this_member(
             "workspace",
             conversation_audience(member_m),
             True,
+            manifest=None,
         )
     path = (
         f"/surface/web/objects/site/{site_object_name(conversation_id, 'landing')}?agent={agent_id}"
@@ -9210,7 +9217,14 @@ async def test_homepage_read_carries_the_bound_site(
     with ws(workspace_id):
         sites = HostedSites(workspace_id, workspace_tx)
         await sites.register(
-            conversation_id, "home", 8000, member_id, "workspace", SHARED_AUDIENCE, True
+            conversation_id,
+            "home",
+            8000,
+            member_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
         )
         assert await sites.set_homepage(agent_id, conversation_id, "home") is not None
     read = await client.get(
@@ -9306,7 +9320,14 @@ async def test_homepage_read_hands_over_a_bound_page_whatever_the_agent_is_doing
     with ws(workspace_id):
         sites = HostedSites(workspace_id, workspace_tx)
         await sites.register(
-            conversation_id, "home", 8000, member_id, "workspace", SHARED_AUDIENCE, True
+            conversation_id,
+            "home",
+            8000,
+            member_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
         )
         assert await sites.set_homepage(agent_id, conversation_id, "home") is not None
         ctx = context_for(EXTENSION_WEB, frozenset(), member_context_read=True)
@@ -9367,7 +9388,14 @@ async def test_homepage_read_follows_the_agents_visibility(
     with ws(workspace_id):
         sites = HostedSites(workspace_id, workspace_tx)
         await sites.register(
-            conversation_id, "own", 8000, creator_id, "private", SHARED_AUDIENCE, True
+            conversation_id,
+            "own",
+            8000,
+            creator_id,
+            "private",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
         )
         assert await sites.set_homepage(agent_id, conversation_id, "own") is not None
     for token in (creator_token, member_token, admin_token):
@@ -9397,7 +9425,14 @@ async def test_homepage_read_follows_the_agents_visibility(
     with ws(workspace_id):
         sites = HostedSites(workspace_id, workspace_tx)
         await sites.register(
-            private_conversation, "own", 8001, owner_id, "private", SHARED_AUDIENCE, True
+            private_conversation,
+            "own",
+            8001,
+            owner_id,
+            "private",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
         )
         assert await sites.set_homepage(private_agent, private_conversation, "own") is not None
     path = f"/surface/web/agents/{private_agent}/homepage"
@@ -12538,6 +12573,7 @@ async def test_sites_slot_preserves_private_site_visibility_on_a_shared_conversa
                 visibility,
                 SHARED_AUDIENCE,
                 True,
+                manifest=None,
             )
 
     async def refuse_workspace_scan(_sites: HostedSites) -> tuple[()]:

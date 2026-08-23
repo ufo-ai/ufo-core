@@ -455,7 +455,7 @@ def _frame_page(
         else f"<main><p>{UNCONFIGURED_BODY}</p></main>"
     )
     if bare:
-        return _page(html.escape(site.name), _STYLE + _FRAME_STYLE, site_view, share)
+        return _page(html.escape(site.name), _STYLE + _FRAME_STYLE + _BARE_STYLE, site_view, share)
     return _page(
         html.escape(site.name),
         _STYLE + _FRAME_STYLE,
@@ -494,6 +494,10 @@ _FRAME_STYLE = (
     "select,button{font:inherit;font-size:13px;padding:2px 6px}"
     "iframe{flex:1;width:100%;border:0}"
 )
+_BARE_STYLE = "body{background:transparent}"
+"""A bare frame paints nothing of its own: it stands inside the portal's pane, whose themed
+background must show through until the embedded site draws — `Canvas` here is the white flash a
+member sees on every homepage load."""
 
 SITES_SURFACE = SurfaceSpec(
     name=SURFACE_SITES,

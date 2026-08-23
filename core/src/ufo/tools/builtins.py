@@ -54,8 +54,8 @@ from ufo.kinds.artifacts import artifact_object_names
 from ufo.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
-    ARTIFACT_URL_TTL_SECONDS,
     artifact_media_type,
+    artifact_url_expiry,
     mint_artifact_url,
 )
 from ufo.o11y import log
@@ -867,7 +867,7 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
     object_names = artifact_object_names(
         [(row.conversation_id, row.filename) for row in identities]
     )
-    expires_at = int(datetime.now(UTC).timestamp()) + ARTIFACT_URL_TTL_SECONDS
+    expires_at = artifact_url_expiry(datetime.now(UTC))
     return ToolResult(
         content=(
             TextContent(

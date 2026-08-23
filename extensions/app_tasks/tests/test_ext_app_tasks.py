@@ -10,6 +10,7 @@ def test_app_tasks_ships_one_workspace_agent() -> None:
     assert manifest.name == "app_tasks"
     assert [provision.name for provision in manifest.agents] == ["tasks"]
     provision = manifest.agents[0]
+    assert provision.icon == "clock-play"
     assert provision.spec.visibility == "workspace"
     assert "app-tasks-home" in provision.spec.prompt
     assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-tasks-home"}
