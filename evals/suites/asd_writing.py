@@ -1022,8 +1022,8 @@ MERGE_FACTS = (
     "The main branch of metalcraftai/ufo is guarded by ruleset 18681839 rather than classic branch "
     "protection, so /branches/main/protection returns 404.",
     'The ruleset requires five contexts: test, checks, rls, deployment, and "ufo review".',
-    "The test context is an aggregator that posts only after all six test shards and the three "
-    "integration jobs finish.",
+    "The test context is an aggregator that posts only after every lane the triage job selected "
+    "for the change has finished; a push to main selects every lane.",
     'The "ufo review" commit status is not posted automatically and must be created with a '
     "gh api call.",
 )

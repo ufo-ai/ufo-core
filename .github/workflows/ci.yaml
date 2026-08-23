@@ -10,9 +10,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Lane selection: a pull request runs only the lanes its changed paths touch; a push to main
+  # runs everything, so a wrong lane decision is caught at merge, never shipped. The filters are
+  # deliberately coarse — whole top-level directories plus one markdown rule — and every rule errs
+  # toward running: `not_docs_md` is a negation, so any file that is not docs markdown lights the
+  # widest lane, and cross-cutting inputs (`.github/`, `testsupport/`, any top-level file) light
+  # them all. Gating happens per job, never via `on.paths`: this workflow produces required
+  # contexts (`test`, `checks`, `rls`), and a workflow filtered out at the trigger never posts
+  # them, blocking the PR forever — a job skipped by `if:` posts skipped, which satisfies the
+  # ruleset. The `test` job asserts each lane's conclusion against the decision made here, so a
+  # lane selected to run that skips anyway fails the gate.
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      checks: ${{ github.event_name != 'pull_request' || steps.filter.outputs.not_docs_md == 'true' }}
+      control: ${{ github.event_name != 'pull_request' || steps.filter.outputs.control == 'true' }}
+      wheel: ${{ github.event_name != 'pull_request' || steps.filter.outputs.wheel == 'true' }}
+    steps:
+      # On pull_request the action reads changed files from the API, so no checkout. On push the
+      # outputs above are already true, so the step never runs — and never fails a main build.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            not_docs_md:
+              - '!docs/**/*.md'
+            control:
+              - 'servers/**'
+              - 'testsupport/**'
+              - '.github/**'
+              - '*'
+            wheel:
+              - 'core/**'
+              - 'extensions/**'
+              - 'packs/**'
+              - 'evals/**'
+              - 'sandbox/**'
+              - 'infra/**'
+              - 'assets/**'
+              - 'dev/**'
+              - 'scripts/**'
+              - 'testsupport/**'
+              - '.github/**'
+              - '*'
+
   # Static checks — no database. Runs concurrently with `test` on its own runner, so mypy and the
-  # rot-guard never sit on the test job's critical path.
+  # rot-guard never sit on the test job's critical path. Skipped only when the whole diff is docs
+  # markdown: gates.py reads Rust, HTML, and portal TS sources, so its input set is the repo.
   checks:
+    needs: triage
+    if: needs.triage.outputs.checks == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -30,6 +82,8 @@ jobs:
   # apart from `checks` so npm and mypy never sit on each other's critical path; the required
   # `test` job asserts its result.
   wheel:
+    needs: triage
+    if: needs.triage.outputs.wheel == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -159,6 +213,8 @@ jobs:
   # meaning against a fake — and each test takes a database of its own, so the connecting role owns
   # the cluster. The RLS half runs in the `rls` job below, on its own cluster.
   control-test:
+    needs: triage
+    if: needs.triage.outputs.control == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -196,15 +252,20 @@ jobs:
     if: github.event_name == 'push'
     uses: ./.github/workflows/integration.yaml
 
+  # Every assertion states the exact conclusion the triage decision implies, so a lane selected to
+  # run that skips anyway — a broken `if:`, a dropped need — goes red here instead of merging
+  # green. The triage assertion is first and unconditional: a failed triage leaves its outputs
+  # empty, every expectation would collapse to skipped, and the gate would pass with no coverage.
   test:
     if: always()
-    needs: [test-shard, control-test, integration, wheel]
+    needs: [triage, test-shard, control-test, integration, wheel]
     runs-on: ubuntu-latest
     steps:
+      - run: test "${{ needs.triage.result }}" = success
       - run: test "${{ needs.test-shard.result }}" = success
-      - run: test "${{ needs.control-test.result }}" = success
+      - run: test "${{ needs.control-test.result }}" = "${{ needs.triage.outputs.control == 'true' && 'success' || 'skipped' }}"
       - run: test "${{ needs.integration.result }}" = "${{ github.event_name == 'push' && 'success' || 'skipped' }}"
-      - run: test "${{ needs.wheel.result }}" = success
+      - run: test "${{ needs.wheel.result }}" = "${{ needs.triage.outputs.wheel == 'true' && 'success' || 'skipped' }}"
 
   # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel suite's
   # :5541, nor `control-test`'s :5549). It CREATEs roles and databases, applies RLS policies, and
@@ -214,6 +275,8 @@ jobs:
   # jobs write the same `ufo_serve` and `ufo_control` rows. This is the gate the U1 / ufo_dbos /
   # serve-role bugs slipped past.
   rls:
+    needs: triage
+    if: needs.triage.outputs.control == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
