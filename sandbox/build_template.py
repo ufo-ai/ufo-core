@@ -94,12 +94,14 @@ class DaytonaSizing:
     disk_gb: int
 
 
-# The resources a tier's Daytona snapshot fixes — cpu and memory mirror the E2B tiers, and disk is
-# the axis Daytona adds (its default 3 GiB outgrows on a repository checkout plus a toolchain).
+# The resources a tier's Daytona snapshot fixes — disk is the axis Daytona adds (its default 3 GiB
+# outgrows on a repository checkout plus a toolchain), and `large` is the provider's own ceiling
+# exactly as E2B's large is E2B's build ceiling: Daytona caps a sandbox at 4 vCPU / 8 GiB until the
+# organization limit is raised, and the digest-named snapshot makes a later bump a republish.
 DAYTONA_TIERS: dict[str, DaytonaSizing] = {
     "small": DaytonaSizing(cpu=2, memory_gb=2, disk_gb=10),
     "medium": DaytonaSizing(cpu=4, memory_gb=4, disk_gb=10),
-    "large": DaytonaSizing(cpu=8, memory_gb=8, disk_gb=10),
+    "large": DaytonaSizing(cpu=4, memory_gb=8, disk_gb=10),
 }
 if tuple(DAYTONA_TIERS) != SANDBOX_SIZES:
     raise RuntimeError("DAYTONA_TIERS must define exactly the sizes SANDBOX_SIZES declares")

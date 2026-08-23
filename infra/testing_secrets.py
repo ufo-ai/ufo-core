@@ -12,6 +12,7 @@ AWS_REGION = "us-east-1"
 DEPLOYMENT_ID_ENV = "TESTING_DEPLOYMENT_ID"
 SECRET_ID_ENV = "TESTING_API_KEYS_SECRET_ID"
 SECRET_INPUTS = {
+    "daytona-api-key": "DAYTONA_API_KEY",
     "perplexity-api-key": "PERPLEXITY_API_KEY",
     "spectrum-project-id": "SPECTRUM_PROJECT_ID",
     "spectrum-project-secret": "SPECTRUM_PROJECT_SECRET",
@@ -26,7 +27,6 @@ REQUIRED_PROPERTIES = frozenset(SECRET_INPUTS) | {
     "anthropic-api-key",
     "browserbase-api-key",
     "datadog-api-key",
-    "daytona-api-key",
     "e2b-api-key",
     "turbopuffer-api-key",
 }

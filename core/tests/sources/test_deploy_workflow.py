@@ -634,6 +634,7 @@ def test_testing_deploy_writes_provider_credentials_before_apply() -> None:
         "name": "Write testing runtime secrets",
         "if": "github.event_name != 'pull_request'",
         "env": {
+            "DAYTONA_API_KEY": "${{ secrets.DAYTONA_API_KEY }}",
             "PERPLEXITY_API_KEY": "${{ secrets.PERPLEXITY_API_KEY }}",
             "SPECTRUM_PROJECT_ID": "${{ secrets.TESTING_SPECTRUM_PROJECT_ID }}",
             "SPECTRUM_PROJECT_SECRET": "${{ secrets.TESTING_SPECTRUM_PROJECT_SECRET }}",
