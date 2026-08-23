@@ -771,7 +771,9 @@ def test_authorization_expansions_co_deploy_but_contractions_split() -> None:
             )
     # Fail closed: no diff supplied means expand-vs-contract is unknown, so enforce the split.
     with pytest.raises(ValueError, match="contract IAM only after"):
-        gate.validate_deploy_change(("infra/modules/platform/ses.tf", "control/src/email.rs"))
+        gate.validate_deploy_change(
+            ("infra/modules/platform/ses.tf", "servers/control/src/email.rs")
+        )
 
 
 def test_select_step_executes_the_gate_across_triggers(tmp_path: Path) -> None:
@@ -1103,7 +1105,7 @@ def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> N
     assert download["if"] == (
         "github.event_name != 'pull_request' && needs.client.result == 'success'"
     )
-    assert download["with"]["path"] == "control/clientbin"
+    assert download["with"]["path"] == "servers/control/clientbin"
     push = _step("rollout", "Push the client binaries for this tree")
     assert push["if"] == "github.event_name != 'pull_request' && needs.client.result == 'success'"
     assert push["env"] == {"CLIENT_TREE": "${{ needs.changes.outputs.client_tree }}"}
@@ -1125,14 +1127,14 @@ def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> N
     assert gateway_download["if"] == (
         "steps.select.outputs.work == 'build' && needs.client.result == 'success'"
     )
-    assert gateway_download["with"]["path"] == "control/clientbin"
+    assert gateway_download["with"]["path"] == "servers/control/clientbin"
     reuse = _step("gateway", "Reuse the pushed client binaries")
     assert reuse["if"] == "steps.select.outputs.work == 'build' && needs.client.result == 'skipped'"
-    assert "docker cp clientbin:/clientbin/. control/clientbin" in reuse["run"]
+    assert "docker cp clientbin:/clientbin/. servers/control/clientbin" in reuse["run"]
     build = next(
         step for step in gateway_steps if step.get("uses") == "docker/build-push-action@v6"
     )
-    assert build["with"]["context"] == "control"
+    assert build["with"]["context"] == "servers/control"
     assert (
         gateway_steps.index(gateway_download)
         < gateway_steps.index(reuse)
@@ -1203,9 +1205,9 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
     images = jobs["images"]
     assert isinstance(images, dict)
     assert images["strategy"]["matrix"]["include"] == [
-        {"repository": "ufo-cache", "dir": "cache"},
-        {"repository": "ufo-egress", "dir": "egress"},
-        {"repository": "ufo-preview", "dir": "preview"},
+        {"repository": "ufo-cache", "dir": "servers/cache"},
+        {"repository": "ufo-egress", "dir": "servers/egress"},
+        {"repository": "ufo-preview", "dir": "servers/preview"},
     ]
     build = next(
         step for step in images["steps"] if step.get("uses") == "docker/build-push-action@v6"
@@ -1233,7 +1235,7 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
     )
     aws.chmod(0o755)
     tree = subprocess.run(
-        ["git", "rev-parse", "HEAD:cache"],
+        ["git", "rev-parse", "HEAD:servers/cache"],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -1253,7 +1255,7 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
                 "PATH": f"{tmp_path}:{os.environ['PATH']}",
                 "GITHUB_OUTPUT": str(output),
                 "REPOSITORY": "ufo-cache",
-                "DIR": "cache",
+                "DIR": "servers/cache",
                 "IMAGE_TAG": "shortsha0",
                 "TREE": tree,
                 "REPO_EXIT": repo_exit,
@@ -4313,7 +4315,7 @@ def test_the_client_target_set_is_one_set_everywhere() -> None:
         assert isinstance(client, dict)
         return {entry["target"] for entry in client["strategy"]["matrix"]["include"]}
 
-    gateway = (ROOT / "control" / "src" / "gateway.rs").read_text()
+    gateway = (ROOT / "servers" / "control" / "src" / "gateway.rs").read_text()
     literal = re.search(r"CLIENT_TARGETS: &\[&str\] = &\[(.*?)\];", gateway, re.DOTALL)
     assert literal
     served = set(re.findall(r'"([^"]+)"', literal.group(1)))

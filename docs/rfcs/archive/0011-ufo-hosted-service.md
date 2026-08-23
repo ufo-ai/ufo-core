@@ -65,7 +65,7 @@ plane and infra join it:
 ```
 ufo/
   core/ extensions/ packs/ docs/ spec.md …   ← selfhost-core, merged with full history
-  control/                                    ← selfhost-k8s, subtree with history
+  servers/control/                                    ← selfhost-k8s, subtree with history
     src/ufo_control/                          ← + the rls arm, the members write, the gateway role (§4)
     charts/ufo-tenant/
   extensions/ufo/                             ← the member surface (§4)
@@ -75,7 +75,7 @@ ufo/
 Mechanics: `git init` → `git fetch <selfhost-core> && git merge --allow-unrelated-histories` →
 `git subtree add --prefix control <selfhost-k8s> main` → metalcraft pieces arrive by **copy-adapt**
 (no history; salvaged code arrives as if written here). One uv workspace; `gates.py`, ruff, and
-the test suites run at the root. The hand-mirrored contract collapses: `control/` deletes its
+the test suites run at the root. The hand-mirrored contract collapses: `servers/control/` deletes its
 `contract.py` and imports the runtime's `DeployRequest` — one definition, one shape. After `ufo`
 main is green, `selfhost-core` and `selfhost-k8s` are archived read-only; all development moves
 here.
@@ -112,7 +112,7 @@ believing it owns the database, `_sole_workspace_id()` still returns exactly one
 never learns RLS exists. This is metalcraft's shipped pattern with `workspace_id` as the tenant
 key instead of `namespace`.
 
-**Roles** (provisioned by `control/`'s `postgres.py`, replacing the `NotImplementedError` arm):
+**Roles** (provisioned by `servers/control/`'s `postgres.py`, replacing the `NotImplementedError` arm):
 
 | Role | Kind | Rights | Used by |
 |---|---|---|---|
@@ -154,7 +154,7 @@ seam bug fixed in core's scope — and both are producer+consumer complete in th
 
 | Seam | Change | Producer / consumer |
 |---|---|---|
-| `[database] system_url` | optional explicit field on `DatabaseConfig`; the `_dbos` derivation becomes its default (`config.py:19-30`) | `control/render.py` writes it per tenant / `serve.py:120,146` + `cli.py:131-142` read it |
+| `[database] system_url` | optional explicit field on `DatabaseConfig`; the `_dbos` derivation becomes its default (`config.py:19-30`) | `servers/control/render.py` writes it per tenant / `serve.py:120,146` + `cli.py:131-142` read it |
 | `ufoctl init --workspace-id` | optional; `Onboarding` uses the supplied uuid for the workspace row (`onboarding.py:148-167`, `cli.py:68-91`) | control plane mints the uuid, pins the GUC to it, passes it to the init Job / the workspace INSERT must equal the GUC or RLS `WITH CHECK` rejects it |
 
 **Schema gap**: `mem_page` gains `workspace_id` (memory extension migration `0004`, NOT NULL, FK
@@ -198,7 +198,7 @@ exactly that set. Every tenant runs the same bundle image; there is no per-tenan
 choice — that is the product.
 
 `DeployRequest.postgres` stays `"database"` from the CLI (`deploy.py:160`); the tier is chosen
-server-side as `deploy.py:159` already states — `control/` platform config sets
+server-side as `deploy.py:159` already states — `servers/control/` platform config sets
 `postgres_model = "rls"` and that wins. The compose backend and `ufoctl deploy` keep working
 unchanged for self-hosters.
 
@@ -209,7 +209,7 @@ deploy API `POST /v1/deploy`) and the **gateway role** (members, below). The gat
 the control-plane package, so it applies the Tenant CR directly through `KubeClient` rather than
 over HTTP. Both end at Tenant CR → operator reconcile.
 
-**The client** (`control/src/ufo_control/client/ufo` — force-included in the control wheel so the
+**The client** (`servers/control/src/ufo_control/client/ufo` — force-included in the control wheel so the
 gateway role serves it at runtime): metalcraft's script copied verbatim, then two mechanical adapts
 — (a) the `workspace` directive's value becomes the tenant's base URL
 (`https://<name>.flyingobject.ai`), written to `~/.ufo/workspace`; chat posts go to
@@ -362,7 +362,7 @@ Units land in order, each independently reviewable, each with its proof; B–F p
 | **A. repo bootstrap + rename** | history-preserving merge (§1), uv workspace, root gates/CI config, dormant `deploy.yml`; then the one mechanical selfhost→ufo commit (§1 table) | gates + ruff + both test suites green at root, again after the rename; `git grep -i selfhost` returns only history-facing docs |
 | **B. core seams** | `[database] system_url` field; `init --workspace-id` | unit tests: explicit system_url wins over derivation; init with supplied uuid creates that workspace id |
 | **C. memory gap** | `mem_page` migration 0004 + writer populates `workspace_id` | migration test + writer test against Postgres |
-| **D. RLS tier** | `control/postgres.py` rls arm (roles, GUC pin, `ufo_dbos_*`), policy bootstrap, migrate-as-owner Job, `render.py` emits tenant DSN + system_url + workspace id | pytest against real Postgres (Docker): two tenants provisioned; per-role connections see disjoint single-workspace views; unpoliced-table case fails loud |
+| **D. RLS tier** | `servers/control/postgres.py` rls arm (roles, GUC pin, `ufo_dbos_*`), policy bootstrap, migrate-as-owner Job, `render.py` emits tenant DSN + system_url + workspace id | pytest against real Postgres (Docker): two tenants provisioned; per-role connections see disjoint single-workspace views; unpoliced-table case fails loud |
 | **E. `extensions/ufo`** | member surface + directive codec + HMAC bearer verify; added to `assistant_hosted` (→ 20) | focused tests: codec frame map; token verify + member link; admit/tail against the web-surface pattern; pack test asserts the set |
 | **F. `ufo-control gateway` role + members write** | the claim machine (control-plane `onboard_claim` table, no RLS; SES; directives), join-or-provision applying the Tenant CR through `KubeClient`, token mint; `members.add_member` (also exposed as `POST /v1/tenants/{name}/members`) | claim-flow tests (code hash, TTL, attempts); provision assembles a valid `DeployRequest`; join test drives the member write against real Postgres and the surface links the new member |
 | **G. ship** | images, Terraform apply, DNS, smoke, cutover (§6) | the §6 smoke list, executed in order |

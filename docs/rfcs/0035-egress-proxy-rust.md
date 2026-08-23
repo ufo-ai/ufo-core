@@ -14,7 +14,7 @@ date: 2026-08-16
 > logic: it verifies the deployment-signed run/probe token, asks core `serve` over an internal
 > token-scoped RPC what egress is allowed (and for the resolved secrets), enforces it on the wire, and
 > posts metering back. Every policy decision, every key, and every ledger write stay in core `serve`,
-> which already owns them — no reimplementation, no drift, and nothing to re-port when `control/`
+> which already owns them — no reimplementation, no drift, and nothing to re-port when `servers/control/`
 > becomes Rust.
 
 ## Current state
@@ -44,7 +44,7 @@ Settled with the author:
 | Fork | Decision |
 |---|---|
 | Split | Rust owns the **wire only** (CONNECT, TLS-terminate/MITM, relay, inject, DNS-pin, SSE token parse). Core `serve` owns **all policy, keys, and metering**, exposed as an internal RPC. |
-| Where the control RPC lives | Core **`serve`** (Python), not `control/` and not a sidecar on the egress pod. `serve` already runs this exact code and holds the keys; `control/` (soon Rust) stays the sign-in gateway. |
+| Where the control RPC lives | Core **`serve`** (Python), not `servers/control/` and not a sidecar on the egress pod. `serve` already runs this exact code and holds the keys; `servers/control/` (soon Rust) stays the sign-in gateway. |
 | Keys | The Fernet key, the GitHub-App key, the Composio key, and the owner DSN live only in core `serve`. The egress pod holds none of them — a compromised proxy leaks at most a turn's already-on-the-wire secret, never a master key. |
 | Owner DSN | Deleted from the egress path. `serve` resolves each token under `ws(workspace_id)` with its normal **RLS-scoped** `ufo_serve` role; no cross-workspace superuser DSN is distributed to the edge. |
 
@@ -100,7 +100,7 @@ Metering records: `{"kind":"egress","workspace_id":_,"turn_id":_|null}` and
 off the wire (it tees the response) and posts it; `serve` prices and writes — so pricing and its digest
 never leave Python.
 
-### Crate `egress/` (thin)
+### Crate `servers/egress/` (thin)
 
 | Module | Responsibility |
 |---|---|
@@ -144,7 +144,7 @@ egress CA and control token through env. `serve` does **not** spawn or supervise
 `ufoctl serve` with no proxy running gives the sandbox a proxy address that refuses every CONNECT,
 so a well-behaved client gets no egress — which is why the dev rig runs the service beside it.
 
-**Rust (`egress/`):** the crate above.
+**Rust (`servers/egress/`):** the crate above.
 
 **Tests split with the code:** the wire tests (`test_proxy_server.py`'s CONNECT/MITM/relay/DNS/caps
 + the SSE parse) become Rust `#[tokio::test]`s driving a real CONNECT against a **fake control RPC**
@@ -154,7 +154,7 @@ endpoint or at `PerAgentRules` directly. `make test` and `cargo test` both green
 
 ## Deploy
 
-- `egress/Dockerfile` + `.github/workflows/egress.yml` (fmt, clippy, `cargo test` — no Postgres needed
+- `servers/egress/Dockerfile` + `.github/workflows/egress.yml` (fmt, clippy, `cargo test` — no Postgres needed
   now; the Rust tests use a fake control server).
 - `deploy.yml` builds/pushes `ufo-egress`; the proxy pod runs it beside the cache daemon.
 - The proxy env carries the control RPC URL + `UFO_EGRESS_CONTROL_TOKEN` + `UFO_TOKEN_SECRET` +
@@ -175,4 +175,4 @@ endpoint or at `PerAgentRules` directly. `make test` and `cargo test` both green
 ## Non-goals
 
 No change to what egress is allowed, metered, or injected — a language and topology move. No change to
-the cache daemon beyond repointing its credential callback. `control/` is untouched.
+the cache daemon beyond repointing its credential callback. `servers/control/` is untouched.

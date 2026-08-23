@@ -163,7 +163,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
-        working-directory: control
+        working-directory: servers/control
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -187,7 +187,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: control
+          workspaces: servers/control
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -218,7 +218,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
-        working-directory: control
+        working-directory: servers/control
     services:
       postgres-admin:
         image: pgvector/pgvector:pg17
@@ -239,5 +239,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: control
+          workspaces: servers/control
       - run: cargo test --test rls_it

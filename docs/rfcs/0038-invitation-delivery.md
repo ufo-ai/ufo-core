@@ -8,14 +8,14 @@ date: 2026-08-20
 # Invitation delivery
 
 > A teammate added to a workspace now gets an email. The delivery costs a leased ledger, a
-> 15-second poll, and a hand-rolled SigV4 sender — 1,849 lines of `control/` to carry three facts
+> 15-second poll, and a hand-rolled SigV4 sender — 1,849 lines of `servers/control/` to carry three facts
 > and a link. This record fixes what the transport becomes, what comes out with it, and in what
 > order. The message does not change: our words, our link.
 
 ## Current state
 
 `AddMember.add` (`core/src/ufo/kinds/members.py:318`) mints the member row and stamps `invited_by`. That
-row is the grant — `control/src/shared.rs:125`: "Every workspace this address may enter: its exact
+row is the grant — `servers/control/src/shared.rs:125`: "Every workspace this address may enter: its exact
 memberships plus the one its verified domain names." The invitation is therefore a message and
 nothing more. An unread one locks nobody out.
 
@@ -24,12 +24,12 @@ language, and a self-hosted deploy runs no gateway. So control polls core.
 
 | Piece | Cost | Why it exists |
 |---|---|---|
-| `control/src/invite_delivery.rs` | 737 lines, 1,112 in its test | the queue core cannot enqueue into |
+| `servers/control/src/invite_delivery.rs` | 737 lines, 1,112 in its test | the queue core cannot enqueue into |
 | `materialize` at `POLL_INTERVAL_SECONDS = 15` | reads every invited member ever, paged | core holds no delivered mark, so no cursor is safe |
 | lease, `for update skip locked`, backoff to an hour | | two replicas over one table |
 | attempt marker, `SendVerdict`, `AMBIGUOUS_SEND` | | SES answers no read, so after a timeout "was it sent" is undecidable |
 | `INVITATIONS_PER_WORKSPACE_PER_DAY = 100` under an advisory lock | | abuse policy |
-| `SesEmailSender` (`control/src/email.rs:315`) | ~400 of that file's 600 lines | a local SigV4 signer, an STS `AssumeRoleWithWebIdentity` exchange, an XML parse |
+| `SesEmailSender` (`servers/control/src/email.rs:315`) | ~400 of that file's 600 lines | a local SigV4 signer, an STS `AssumeRoleWithWebIdentity` exchange, an XML parse |
 
 `email.rs` has a second caller: `invite_email` (line 198), the waitlist grant. It leaves when the
 waitlist does.
@@ -41,7 +41,7 @@ Three units, in this order. Each stands alone.
 ### 1. The transport
 
 Swap SESv2 for one authenticated POST to a mail API, behind the `EmailSender` seam that already
-exists (`control/src/email.rs:545`).
+exists (`servers/control/src/email.rs:545`).
 
 | | Today | After |
 |---|---|---|
@@ -65,7 +65,7 @@ stays: it is the work-email gate, not the transport.
 
 Give core one outbound call at `AddMember.add` and the reconciler has no work left — a mail API
 owns delivery once it accepts the message. Deleted: `invite_delivery.rs` and its test, the table
-and its rows in one migration, the `invitations` RPC (`control/src/shared.rs:153`), and
+and its rows in one migration, the `invitations` RPC (`servers/control/src/shared.rs:153`), and
 `invite-delivery-retry`. Added: one hosted-only core→control call, with the per-workspace cap at
 the call site.
 

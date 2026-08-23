@@ -33,7 +33,7 @@ per-user credentials — a per-user PAT would leak across users of one workspace
 
 ## Proposal
 
-A Rust daemon, `ufo-cache` (crate `cache/`), runs on the proxy pod. It is the sandbox egress cache
+A Rust daemon, `ufo-cache` (crate `servers/cache/`), runs on the proxy pod. It is the sandbox egress cache
 and the seed of a Rust egress data plane. The split that makes this safe and small:
 
 | Plane | Owner | What | Where decided |

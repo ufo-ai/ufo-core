@@ -400,7 +400,7 @@ research (the research tools over the Perplexity search backend).
 
 A third-party extension is JS, declared by a static `ufo.manifest.json` core reads without
 executing any code — contribution points plus lazy activation, never a top-level import — and runs
-isolated from core in **`runner`**, a standalone service alongside `control/`, never part of
+isolated from core in **`runner`**, a standalone service alongside `servers/control/`, never part of
 `ufoctl serve`'s one process. First-party (bundled) extensions are unaffected: they keep the
 in-process Python mechanism above, unchanged. The line is provenance (reviewed-and-pinned vs.
 store-installed-or-locally-loaded), not a rewrite of what already works. RFC 0015 carries the

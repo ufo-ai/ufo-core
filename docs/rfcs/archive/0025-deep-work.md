@@ -94,7 +94,7 @@ the pattern `memory_item` establishes (`spec.md:62`) and
 ### The record
 
 Every table carries `workspace_id`: `bootstrap_policies` raises on a public table without one
-(`control/src/ufo_control/rls.py:187-191`), and `transaction()` enforces no scoping of its own
+(`servers/control/src/ufo_control/rls.py:187-191`), and `transaction()` enforces no scoping of its own
 (`core/src/ufo/ext/context.py:655`), so the column is both the RLS requirement and the tenant fence.
 
 | Table | Columns |

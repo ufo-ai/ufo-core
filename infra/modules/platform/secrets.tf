@@ -73,9 +73,9 @@ locals {
 
   # The shared serve fleet's DSN — the RLS-*subject* ufo_serve role on the shared app database, the
   # one role for every hosted workspace (it sets app.workspace_id per transaction). The password is
-  # derived from the same seed + formula as `control/src/rls.rs` role_password()
+  # derived from the same seed + formula as `servers/control/src/rls.rs` role_password()
   # (sha256("<seed>:ufo_serve")), reproduced here so the terraform-rendered config matches the role
-  # the rls-bootstrap Job creates — a cross-runtime contract, `control/src/rls.rs` is the source of
+  # the rls-bootstrap Job creates — a cross-runtime contract, `servers/control/src/rls.rs` is the source of
   # truth. Core
   # derives the DBOS system store as the `<name>_dbos` sibling (config.DatabaseConfig), so this url
   # alone resolves the fleet's shared `ufo_dbos` system database; the rls-bootstrap Job provisions it.

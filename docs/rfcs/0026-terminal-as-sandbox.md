@@ -25,7 +25,7 @@ date: 2026-08-12
 | The turn builds its session off that one carrier | `core/src/ufo/loop/queue.py:367` |
 | A conversation's workspace is `workspace_root/<conversation-id>` | `core/src/ufo/sandbox/conversation.py:121` |
 | The durable handle already carries its backend: `<backend>:<id>` | `core/src/ufo/sandbox/session.py:176` |
-| The shell client is a pure directive renderer; the server drives every screen | `control/src/ufo_control/client/ufo:617` |
+| The shell client is a pure directive renderer; the server drives every screen | `servers/control/src/ufo_control/client/ufo:617` |
 | The one out-of-band POST: a privately entered secret, answered by header | client `:486`, surface `:310` |
 | A held stream lasts 85s, then `poll` and the client reconnects | `extensions/ufo/ufo_ext_ufo/surface.py:54` |
 

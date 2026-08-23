@@ -63,7 +63,7 @@ Every screen's data becomes an object kind with `member_page`/`member_detail`:
 |---|---|---|
 | Radar entries | web reads `report_digest_entry` via a hand-written `sa.table` | `report_digest` registers the kind; the bespoke read dies |
 | Conversations | `api/chats` bespoke projection; the kind reads one row at a time (spec.md:704) | the kind gains a member listing — the `api/chats` query becomes its gate. `mine`/`speaker` are viewer-relative computed fields, a new listing capability a kind may declare beside its row scalars |
-| Shared files | `workspace/artifacts` bespoke read | the `artifact` kind's member listing carries the signed preview/download links |
+| Shared files | `workspace/artifacts` bespoke read | the `artifact` kind's member listing carries the signed servers/preview/download links |
 | Memory (wiki) | `workspace/memory` bespoke read | the `memory` kind's member listing covers it |
 | Scheduled, triggers, members, sites | already kinds | unchanged |
 

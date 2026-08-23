@@ -158,7 +158,7 @@ services:
   # already forms) and it reaches serve's RPC at 127.0.0.1:8710. `ufoctl serve` alone gives no
   # sandbox egress; this service is what makes an in-sandbox CONNECT land somewhere.
   egress:
-    build: {context: ./egress, dockerfile: Dockerfile}
+    build: {context: ./servers/egress, dockerfile: Dockerfile}
     image: ${UFO_EGRESS_DEV_IMAGE:-ufo-egress-dev}
     network_mode: "service:serve"
     environment:

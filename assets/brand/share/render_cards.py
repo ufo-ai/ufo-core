@@ -10,7 +10,7 @@ its own; the hosted-site card adds one line of type above it.
 The brand faces are not duplicated here — they are extracted at render time from
 the subset woff2 already inlined in `infra/modules/edge/landing.html`.
 
-Both renders are written into `control/src/assets`, beside the gateway's other
+Both renders are written into `servers/control/src/assets`, beside the gateway's other
 compiled-in artwork: the gateway image builds from the `control` tree alone, so a
 card held above it is outside that build context.
 
@@ -33,7 +33,7 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 # assets/brand/share -> repo root, when the script sits where it is committed.
 DEFAULT_REPO = HERE.parents[2] if len(HERE.parents) > 2 else HERE
-CARD_DIR = "control/src/assets"
+CARD_DIR = "servers/control/src/assets"
 W, H = 1200, 630
 
 LOCKUP = "art/logo-ember-with-padding.svg"

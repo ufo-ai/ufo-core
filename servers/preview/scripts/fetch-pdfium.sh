@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fetches the pinned pdfium dynamic library into preview/.pdfium (or $1 if given).
+# Fetches the pinned pdfium dynamic library into servers/preview/.pdfium (or $1 if given).
 # pdfium-render binds it at runtime; tests read UFO_PREVIEW_PDFIUM_LIB pointing at it.
 set -eu
 PDFIUM_TAG="chromium/8009"

@@ -10,7 +10,7 @@ fn test_config() -> Arc<ufo_preview::Config> {
     m.insert(
         "UFO_PREVIEW_PDFIUM_LIB".into(),
         std::env::var("UFO_PREVIEW_PDFIUM_LIB")
-            .expect("set UFO_PREVIEW_PDFIUM_LIB — run preview/scripts/fetch-pdfium.sh"),
+            .expect("set UFO_PREVIEW_PDFIUM_LIB — run servers/preview/scripts/fetch-pdfium.sh"),
     );
     m.insert("UFO_PREVIEW_ALLOW_LOCAL".into(), "1".into());
     if let Ok(bin) = std::env::var("UFO_PREVIEW_SOFFICE_BIN") {

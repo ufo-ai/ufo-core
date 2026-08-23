@@ -621,17 +621,18 @@ def _mint_egress_ca() -> tuple[str, str]:
 
 def _egress_binary(repo_root: Path) -> Path:
     """The `ufo-egress` data-plane binary the stack runs beside serve so an in-sandbox fetch has a
-    proxy to reach. It is the deleted in-process proxy's replacement, built from `egress/`; a stack
-    with no egress wire refuses every sandbox CONNECT, so `run` resolves the binary before touching
-    a database — a missing build fails in seconds, never after a materialization and never as an
-    unexplained connection-refused inside a suite that fetches over the network."""
+    proxy to reach. It is the deleted in-process proxy's replacement, built from `servers/egress/`;
+    a stack with no egress wire refuses every sandbox CONNECT, so `run` resolves the binary before
+    touching a database — a missing build fails in seconds, never after a materialization and
+    never as an unexplained connection-refused inside a suite that fetches over the network."""
     for profile in ("release", "debug"):
-        candidate = repo_root / "egress" / "target" / profile / "ufo-egress"
+        candidate = repo_root / "servers" / "egress" / "target" / profile / "ufo-egress"
         if candidate.exists():
             return candidate
     raise RuntimeError(
-        "ufo-egress binary not found under egress/target/{release,debug}/ — the eval sandbox "
-        "routes egress through it. Build it: cargo build --manifest-path egress/Cargo.toml"
+        "ufo-egress binary not found under servers/egress/target/{release,debug}/ — the eval "
+        "sandbox routes egress through it. Build it: "
+        "cargo build --manifest-path servers/egress/Cargo.toml"
     )
 
 

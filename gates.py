@@ -61,11 +61,11 @@ RAW_CSS_VALUE = re.compile(
 )
 UFO_SURFACE_MODULE = Path("extensions/ufo/ufo_ext_ufo/surface.py")
 GATEWAY_MODULES = (
-    Path("control/src/gateway.rs"),
-    Path("control/src/directives.rs"),
+    Path("servers/control/src/gateway.rs"),
+    Path("servers/control/src/directives.rs"),
 )
 RUST_WIRE_MODULE = Path("client/src/wire.rs")
-ONBOARD_WEB_MODULE = Path("control/src/login.html")
+ONBOARD_WEB_MODULE = Path("servers/control/src/login.html")
 RUST_DIRECTIVE_CALL = re.compile(r'\bdirective\(\s*"([a-z]+)"')
 TERMINAL_DROPPED_VERBS = frozenset({"debugger", "first"})
 ONBOARD_WEB_DROPPED_VERBS = frozenset({"install"})
@@ -880,7 +880,7 @@ def _drawn_mark_failures() -> list[str]:
     return [
         f"mark: {copy} is not {portal} byte for byte — a logo is copied, never rewritten"
         for copy in (
-            Path("control/src/assets/ufo-logo.svg"),
+            Path("servers/control/src/assets/ufo-logo.svg"),
             Path("core/src/ufo/surfaces/assets/ufo-logo.svg"),
         )
         if not copy.exists() or copy.read_bytes() != drawn
@@ -912,9 +912,9 @@ def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
     )
 
     # The gateway is Rust, so its emitted verbs are read off the source rather than an AST. The
-    # two codecs sharing one escaping is proved instead by `control/tests/contract.rs`, which
-    # renders the golden fixture `ufo_testsupport.wire_fixture` writes through the Python codec —
-    # an equivalence a test can hold and a text comparison could only approximate.
+    # two codecs sharing one escaping is proved instead by `servers/control/tests/contract.rs`,
+    # which renders the golden fixture `ufo_testsupport.wire_fixture` writes through the Python
+    # codec — an equivalence a test can hold and a text comparison could only approximate.
     gateway_emitted: set[str] = set()
     found_gateway = False
     for rel in GATEWAY_MODULES:

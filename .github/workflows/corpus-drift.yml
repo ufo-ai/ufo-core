@@ -60,7 +60,7 @@ jobs:
 
             1. Read every file in the corpus. For each customer-facing claim, verify it against the
                code that produces it, not against another document: signup, invitations and their
-               refusals in `control/src/ufo_control/` (`gateway.py`, `gateway_claim.py`,
+               refusals in `servers/control/src/ufo_control/` (`gateway.py`, `gateway_claim.py`,
                `gateway_invite.py`, `gateway_slack_connect.py`); the Slack install states, their
                hints and the shared channel in `extensions/slack/`; billing, plan activation, seats
                and overage in `extensions/metronome/`; memory scopes and the foreign-room seal in

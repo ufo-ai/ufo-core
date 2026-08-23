@@ -13,7 +13,7 @@ struct PageMeta {
 
 fn pdfium_lib() -> String {
     std::env::var("UFO_PREVIEW_PDFIUM_LIB")
-        .expect("set UFO_PREVIEW_PDFIUM_LIB — run preview/scripts/fetch-pdfium.sh")
+        .expect("set UFO_PREVIEW_PDFIUM_LIB — run servers/preview/scripts/fetch-pdfium.sh")
 }
 
 #[test]

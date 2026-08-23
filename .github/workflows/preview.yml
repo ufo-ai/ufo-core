@@ -7,9 +7,9 @@ name: preview
 on:
   push:
     branches: [main]
-    paths: ["preview/**", ".github/workflows/preview.yml"]
+    paths: ["servers/preview/**", ".github/workflows/preview.yml"]
   pull_request:
-    paths: ["preview/**", ".github/workflows/preview.yml"]
+    paths: ["servers/preview/**", ".github/workflows/preview.yml"]
 
 jobs:
   check:
@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: preview
+        working-directory: servers/preview
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -25,7 +25,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: preview
+          workspaces: servers/preview
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: preview
+        working-directory: servers/preview
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f testbed.Dockerfile -t ufo-preview-testbed .
@@ -48,7 +48,7 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: preview
+        working-directory: servers/preview
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t ufo-preview-ci .

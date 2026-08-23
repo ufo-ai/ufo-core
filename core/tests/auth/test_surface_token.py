@@ -60,14 +60,16 @@ def test_fails_loud_without_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:
         verify_surface_token("sites", "anything")
 
 
-BEARER_CONTRACT = Path(__file__).parents[3] / "control" / "tests" / "bearer_contract.json"
+BEARER_CONTRACT = (
+    Path(__file__).parents[3] / "servers" / "control" / "tests" / "bearer_contract.json"
+)
 
 
 def test_the_rust_contract_vectors_are_this_codec() -> None:
     """The gateway mints in Rust and every surface verifies here, so one drift in either half is a
-    token nothing accepts. `control/tests/contract.rs` signs these same vectors and asserts the same
-    strings; this end proves the file still describes the codec it was generated from, so neither
-    half can move without the other going red.
+    token nothing accepts. `servers/control/tests/contract.rs` signs these same vectors and
+    asserts the same strings; this end proves the file still describes the codec it was generated
+    from, so neither half can move without the other going red.
 
     The unicode vector is the one that earns its place: `json.dumps` escapes non-ASCII under its
     default `ensure_ascii=True`, and a JSON writer that emits UTF-8 straight through signs a

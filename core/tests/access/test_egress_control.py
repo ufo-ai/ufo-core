@@ -48,7 +48,7 @@ PROVIDER = "sampleprov"
 HOST = "api.sample.test"
 ACCOUNT = "acct-9f3c"
 CLI_HEADER = "authorization"
-CONTRACT = Path(__file__).parents[3] / "egress" / "tests" / "rule_contract.json"
+CONTRACT = Path(__file__).parents[3] / "servers" / "egress" / "tests" / "rule_contract.json"
 
 
 def _basic(token: str) -> str:

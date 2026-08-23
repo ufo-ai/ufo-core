@@ -18,7 +18,7 @@ date: 2026-08-12
 
 ## Current state
 
-Sign-in is one state machine, `Onboarding.advance` (`control/src/ufo_control/gateway.py:90`),
+Sign-in is one state machine, `Onboarding.advance` (`servers/control/src/ufo_control/gateway.py:90`),
 driven by two renderers over `POST /v1/onboard/{web,terminal}`: the self-contained `/login` page
 (`gateway_web.py`) and the terminal client's directive protocol. The email-verification step is
 ours end to end: `ClaimWorkflow` mints `secrets.randbelow(10**6)` (`gateway_claim.py:40`), stores
@@ -38,7 +38,7 @@ in `.env` with no reader.
 
 WorkOS is the verifier; the claim is the seam. `onboard_claim` keeps its role as the machine's
 state, loses its code columns, and gains its verified stamp from WorkOS instead of a hash compare.
-Only `control/` imports `workos`; core never does.
+Only `servers/control/` imports `workos`; core never does.
 
 Self-hosted deploys run none of this. They have no gateway — no `/login`, no onboarding machine,
 no email verification — so there is nothing for WorkOS to replace: sign-in stays `ufoctl init`
@@ -80,7 +80,7 @@ six digits in the same prompt.
 | Deleted | Added |
 |---|---|
 | Code mint/hash/attempt-cap in `gateway_claim.py`, code columns on `onboard_claim` (same migration) | `auth/start` + `auth/callback` routes on the gateway |
-| `verification_email` and its send path (`gateway_email.py:150`; invites keep SES) | `workos` dependency in `control/` only |
+| `verification_email` and its send path (`gateway_email.py:150`; invites keep SES) | `workos` dependency in `servers/control/` only |
 | The code-verification tests in `test_gateway_claim.py` (the invite-grant tests stay) | `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_REDIRECT_URI` read at gateway boot, failing loud without all three |
 
 ### Sessions stay stateless — deliberately
@@ -131,7 +131,7 @@ slots in ahead of the code send.
 
 ## Doctrine fit / implications
 
-- Core untouched. WorkOS is hosted-control-plane plumbing in `control/`, the component that
+- Core untouched. WorkOS is hosted-control-plane plumbing in `servers/control/`, the component that
   exists only for the hosted deploy; self-hosted keeps `ufoctl init`.
 - The callback is the sanctioned third-party plumbing carve-out; no new member-facing endpoint.
 - Async-native via `AsyncWorkOSClient`; the gateway's one event loop never blocks on WorkOS.

@@ -27,7 +27,7 @@ RUNTIME_PATHS = frozenset(
         "uv.lock",
     }
 )
-RUNTIME_PREFIXES = ("control/", "core/src/", "extensions/", "packs/", "sandbox/")
+RUNTIME_PREFIXES = ("servers/control/", "core/src/", "extensions/", "packs/", "sandbox/")
 BOUNDARY_ERROR = (
     "runtime authorization and its consumers must land separately: contract IAM only after the "
     "runtime that used the grant has rolled and drained"

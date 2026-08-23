@@ -4,8 +4,8 @@
 # because a cache mount's contents are not part of the image.
 FROM rust:1-bookworm AS control
 WORKDIR /control
-COPY control/Cargo.toml control/Cargo.lock ./
-COPY control/src ./src
+COPY servers/control/Cargo.toml servers/control/Cargo.lock ./
+COPY servers/control/src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/control/target \
     cargo build --release --locked --bin ufo-control \

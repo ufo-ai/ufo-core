@@ -107,7 +107,7 @@ SHIP_STAGE = "ship"
 ARM_PREFIX = "gepa"
 ARMS_DIR = "arms"
 STATE_FILE = "state.jsonl"
-EGRESS_BINARY = Path("egress/target/debug/ufo-egress")
+EGRESS_BINARY = Path("servers/egress/target/debug/ufo-egress")
 RUNS_DIR = Path("eval-reports/runs")
 EXPERIMENTS_DIR = Path("eval-reports/experiments")
 WORKTREES_DIR = Path(".local/gepa")
@@ -992,7 +992,8 @@ class Gepa:
         binary = self.repo / EGRESS_BINARY
         if not binary.is_file():
             raise SystemExit(
-                f"{EGRESS_BINARY} missing — build it: cargo build --manifest-path egress/Cargo.toml"
+                f"{EGRESS_BINARY} missing — build it: "
+                "cargo build --manifest-path servers/egress/Cargo.toml"
             )
         estimate = estimated_usd(self.spec, pareto)
         if estimate > self.spec.budget_usd:

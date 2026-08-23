@@ -3,12 +3,12 @@
 `og-home.jpg` is the `og:image` for ufo.ai; `og-site.jpg` is the one a hosted
 site's frame page points at. Both are 1200x630 progressive JPEG, served
 anonymously and immutably from the apex at `/share/og-home.jpg` and
-`/share/og-site.jpg` — the gateway compiles both in (`control/src/web.rs`), so an
+`/share/og-site.jpg` — the gateway compiles both in (`servers/control/src/web.rs`), so an
 unfurler that carries no session still gets them.
 
 This directory holds the artboard, the artwork and the renderer; the two renders
-themselves are committed at `control/src/assets/og-home.jpg` and
-`control/src/assets/og-site.jpg`, because the gateway image builds from the
+themselves are committed at `servers/control/src/assets/og-home.jpg` and
+`servers/control/src/assets/og-site.jpg`, because the gateway image builds from the
 `control` tree alone and reaches nothing above it.
 
 Neither file is hand-drawn: `render_cards.py` composes `card.html` over the flat
@@ -16,7 +16,7 @@ ground, draws the logo lockup from `art/` on it, and screenshots it at exactly
 1200x630. Regenerate and verify with
 
 ```
-python3 assets/brand/share/render_cards.py          # writes control/src/assets
+python3 assets/brand/share/render_cards.py          # writes servers/control/src/assets
 python3 assets/brand/share/render_cards.py --check  # reproduces byte-identically
 ```
 

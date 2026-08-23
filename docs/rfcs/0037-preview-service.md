@@ -47,7 +47,7 @@ Settled with the author:
 
 | Fork | Decision |
 |---|---|
-| Topology | A standalone Rust service (`preview/` crate, image `ufo-preview`), the `cache/` skeleton: axum 0.8, `Config::from_env` fail-loud, `GET /_health`, graceful shutdown. Stateless — no DB, no AWS credentials, no state beyond the in-flight request. |
+| Topology | A standalone Rust service (`servers/preview/` crate, image `ufo-preview`), the `servers/cache/` skeleton: axum 0.8, `Config::from_env` fail-loud, `GET /_health`, graceful shutdown. Stateless — no DB, no AWS credentials, no state beyond the in-flight request. |
 | Converter | LibreOffice baked into the service image, **spawned per request** (no Gotenberg dependency); rasterization by `pdfium-render` in a separate worker binary. The service process itself never parses a document. |
 | Producer swap | This replaces the in-sandbox render. `share_file` calls the service through the egress proxy; the `soffice`/`pdftoppm` recipe and its in-container preflight are torn out. The sandbox image keeps its renderers — the document-production skills use them; only the share-time render leaves. |
 | Bytes and core | Core never holds document or image bytes. It deals in presigned URLs and metadata. |
@@ -149,7 +149,7 @@ renders pages 1..n into the box, crops to content when asked, writes PNGs, exits
 
 ## Both ends
 
-**Rust (`preview/`):** the crate above — `main / config / server / admit` (magic-byte sniff +
+**Rust (`servers/preview/`):** the crate above — `main / config / server / admit` (magic-byte sniff +
 caps), `fetch` (SSRF-guarded GET and PUT), `convert` (the soffice spawn), `worker` (the pdfium bin),
 `sink` (inline / put_url).
 

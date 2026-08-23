@@ -172,7 +172,7 @@ Alternatives).
 
 ### 4. `runner`: a standalone service, not a Kubernetes workload
 
-`runner` is a **standalone FastAPI service**, deployed exactly like `control/` already is — its own
+`runner` is a **standalone FastAPI service**, deployed exactly like `servers/control/` already is — its own
 `pyproject.toml`, its own image, its own process — never folded into `ufoctl serve`'s one process,
 and never requiring Kubernetes. It embeds `wasmtime` directly (the `wasmtime` PyPI package),
 confirmed against the real 2026 release, not assumed from documentation:
@@ -200,9 +200,9 @@ confirmed against the real 2026 release, not assumed from documentation:
   behind a load balancer — an AWS ASG, a GCP MIG, an Azure VMSS, a plain on-prem VM pool, or a
   container scheduler including but never requiring Kubernetes. This matches core's own fixed
   decision (`spec.md`'s Fixed decisions table: "Kubernetes… absent from core by construction").
-- **A sibling service, like `control/`, not a fifth role.** `ufoctl serve`'s four roles
+- **A sibling service, like `servers/control/`, not a fifth role.** `ufoctl serve`'s four roles
   (surfaces/workers/jobs/proxy) still share nothing in memory and still run in one process by
-  default; `runner` sits beside that, exactly as `control/` already does — no new architectural
+  default; `runner` sits beside that, exactly as `servers/control/` already does — no new architectural
   category, and nothing about the existing Roles doctrine changes.
 
 ### 5. `ExtensionContext` over the wire — the third-party surface
@@ -352,7 +352,7 @@ for opening `runner` to genuinely adversarial load, not a later nicety.
   in the sandbox, real value only at a boundary the sandboxed code doesn't control, released only to
   a matched host and header) without literally reusing the proxy's types.
 - **A sibling service, not a new architectural category.** `runner` is a separate deployable unit,
-  exactly as `control/` already is for the hosted gateway — no Kubernetes dependency either way,
+  exactly as `servers/control/` already is for the hosted gateway — no Kubernetes dependency either way,
   matching core's own fixed decision.
 - **A bigger departure from the named prior art than it looks.** VS Code does not distinguish
   first-party from third-party extensions at all — every extension shares one host, full privilege.

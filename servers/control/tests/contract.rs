@@ -58,7 +58,7 @@ struct WireRow {
 
 #[test]
 fn every_onboard_fixture_line_is_this_encoder() {
-    let raw = include_str!("../../client/tests/fixtures/directives.jsonl");
+    let raw = include_str!("../../../client/tests/fixtures/directives.jsonl");
     let rows: Vec<WireRow> = raw
         .lines()
         .filter(|line| !line.is_empty())

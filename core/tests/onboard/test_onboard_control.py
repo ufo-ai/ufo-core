@@ -1,9 +1,9 @@
 """The internal onboarding RPC the Rust control plane calls.
 
 These are the seat, candidate, membership, and fleet behaviours that used to live in
-`control/tests/test_rls.py` against `SharedWorkspaces`. They moved here with the code: control holds
-no privilege on a core table any more, so what a workspace *is* — the seat, the balance grant, the
-default agent, the walled intake prompt — is core's to prove.
+`servers/control/tests/test_rls.py` against `SharedWorkspaces`. They moved here with the code:
+control holds no privilege on a core table any more, so what a workspace *is* — the seat, the
+balance grant, the default agent, the walled intake prompt — is core's to prove.
 """
 
 import logging
@@ -372,13 +372,13 @@ async def test_the_fleet_counts_every_workspace(onboard_client: AsyncClient) -> 
 
 
 def test_the_workspace_derivation_matches_the_rust_contract() -> None:
-    """`control/tests/onboard_contract.json` holds the same vectors the Rust client asserts. One
-    domain has to derive one workspace on both ends, or a customer signing in through the gateway
-    would be seated in a workspace the portal never shows them."""
+    """`servers/control/tests/onboard_contract.json` holds the same vectors the Rust client
+    asserts. One domain has to derive one workspace on both ends, or a customer signing in through
+    the gateway would be seated in a workspace the portal never shows them."""
     import json
     from pathlib import Path
 
-    contract = Path(__file__).parents[3] / "control" / "tests" / "onboard_contract.json"
+    contract = Path(__file__).parents[3] / "servers" / "control" / "tests" / "onboard_contract.json"
     vectors: dict[str, str] = json.loads(contract.read_text())
     assert len(vectors) >= 4
     for domain, expected in vectors.items():

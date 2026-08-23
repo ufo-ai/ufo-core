@@ -6,9 +6,9 @@ name: cache
 on:
   push:
     branches: [main]
-    paths: ["cache/**", ".github/workflows/cache.yml"]
+    paths: ["servers/cache/**", ".github/workflows/cache.yml"]
   pull_request:
-    paths: ["cache/**", ".github/workflows/cache.yml"]
+    paths: ["servers/cache/**", ".github/workflows/cache.yml"]
 
 jobs:
   check:
@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
-        working-directory: cache
+        working-directory: servers/cache
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,7 +24,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: cache
+          workspaces: servers/cache
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - name: Start minio

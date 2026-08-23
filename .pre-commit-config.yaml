@@ -34,25 +34,25 @@ repos:
         pass_filenames: false
       - id: fmt-control
         name: cargo fmt control
-        entry: sh -c 'cd control && cargo fmt --check'
+        entry: sh -c 'cd servers/control && cargo fmt --check'
         language: system
-        files: ^control/
+        files: ^servers/control/
         pass_filenames: false
       - id: clippy-control
         name: cargo clippy control
-        entry: sh -c 'cd control && cargo clippy --all-targets -- -D warnings'
+        entry: sh -c 'cd servers/control && cargo clippy --all-targets -- -D warnings'
         language: system
-        files: ^control/
+        files: ^servers/control/
         pass_filenames: false
       - id: fmt-preview
         name: cargo fmt preview
-        entry: sh -c 'cd preview && cargo fmt --check'
+        entry: sh -c 'cd servers/preview && cargo fmt --check'
         language: system
-        files: ^preview/
+        files: ^servers/preview/
         pass_filenames: false
       - id: clippy-preview
         name: cargo clippy preview
-        entry: sh -c 'cd preview && cargo clippy --all-targets -- -D warnings'
+        entry: sh -c 'cd servers/preview && cargo clippy --all-targets -- -D warnings'
         language: system
-        files: ^preview/
+        files: ^servers/preview/
         pass_filenames: false

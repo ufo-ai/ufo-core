@@ -56,8 +56,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: egress
-      - run: cargo build --manifest-path egress/Cargo.toml
+          workspaces: servers/egress
+      - run: cargo build --manifest-path servers/egress/Cargo.toml
       # The docker-gated tests need the ~6-7 GB sandbox image, and building it is ~3.3 minutes of
       # this job. `sandbox-image.yml` publishes it from main under a tag keyed by the pinned
       # Dockerfile, so a tag that exists was built from this commit's definition on this base: pull

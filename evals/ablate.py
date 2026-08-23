@@ -66,7 +66,7 @@ from evals.registry import TASKS
 CONTROL_ARM = "control"
 INGESTION_PREFIX = "memory_ingestion"
 ARM_LABEL_PREFIX = "ablate"
-EGRESS_BINARY = Path("egress/target/debug/ufo-egress")
+EGRESS_BINARY = Path("servers/egress/target/debug/ufo-egress")
 RUNS_DIR = Path("eval-reports/runs")
 EXPERIMENTS_DIR = Path("eval-reports/experiments")
 WORKTREES_DIR = Path(".local/ablate")
@@ -357,7 +357,8 @@ class Ablation:
         binary = self.repo / EGRESS_BINARY
         if not binary.is_file():
             raise SystemExit(
-                f"{EGRESS_BINARY} missing — build it: cargo build --manifest-path egress/Cargo.toml"
+                f"{EGRESS_BINARY} missing — build it: "
+                "cargo build --manifest-path servers/egress/Cargo.toml"
             )
         cases = self._planned_cases()
         runs = (len(self.spec.arm) + 1) * self.spec.repeats

@@ -145,7 +145,10 @@ test("the page hands an unfurler a titled card at an absolute https URL", async 
   assert.equal(card.protocol, "https:");
   // And it is the card this repository holds, where the gateway compiles it in from.
   const committed = await readFile(
-    new URL(`../../..${card.pathname.replace("/share/", "/control/src/assets/")}`, import.meta.url),
+    new URL(
+      `../../..${card.pathname.replace("/share/", "/servers/control/src/assets/")}`,
+      import.meta.url,
+    ),
   );
   assert.deepEqual(committed.subarray(0, 3), Buffer.from([0xff, 0xd8, 0xff]));
 });

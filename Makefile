@@ -128,18 +128,18 @@ control-pg: ## Start the control suite's Postgres on :5549
 	until docker exec ufo-control-rust-pg pg_isready -U ufo >/dev/null 2>&1; do sleep 1; done
 
 test-control: ## Run the control (gateway) suite — needs `make control-pg`
-	cd control && cargo test
+	cd servers/control && cargo test
 
 check-control: ## Run the control crate's static gates — fmt and clippy
-	cd control && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+	cd servers/control && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 test-preview: ## Run the preview renderer suite — needs soffice and scripts/fetch-pdfium.sh
-	@lib=$$(ls preview/.pdfium/libpdfium.* 2>/dev/null | head -n1); \
-	test -n "$$lib" || { echo "missing preview/.pdfium — run preview/scripts/fetch-pdfium.sh first" >&2; exit 1; }; \
-	UFO_PREVIEW_PDFIUM_LIB="$$PWD/$$lib" sh -c 'cd preview && cargo test -- --include-ignored --test-threads=4'
+	@lib=$$(ls servers/preview/.pdfium/libpdfium.* 2>/dev/null | head -n1); \
+	test -n "$$lib" || { echo "missing servers/preview/.pdfium — run servers/preview/scripts/fetch-pdfium.sh first" >&2; exit 1; }; \
+	UFO_PREVIEW_PDFIUM_LIB="$$PWD/$$lib" sh -c 'cd servers/preview && cargo test -- --include-ignored --test-threads=4'
 
 check-preview: ## Run the preview crate's static gates — fmt and clippy
-	cd preview && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+	cd servers/preview && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 test-web: $(WEB)/node_modules ## Run the portal's vitest suite
 	npm --prefix $(WEB) test

@@ -201,9 +201,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - {repository: ufo-cache, dir: cache}
-          - {repository: ufo-egress, dir: egress}
-          - {repository: ufo-preview, dir: preview}
+          - {repository: ufo-cache, dir: servers/cache}
+          - {repository: ufo-egress, dir: servers/egress}
+          - {repository: ufo-preview, dir: servers/preview}
     env:
       IMAGE_TAG: ${{ needs.changes.outputs.image_tag }}
     steps:
@@ -297,7 +297,7 @@ jobs:
       - name: Select image work
         id: select
         run: |
-          SOURCES="$(git rev-parse HEAD:control)-$CLIENT_TREE"
+          SOURCES="$(git rev-parse HEAD:servers/control)-$CLIENT_TREE"
           echo "sources=$SOURCES" >> "$GITHUB_OUTPUT"
           if aws ecr describe-images --repository-name ufo-control --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo-control:$IMAGE_TAG already pushed — skipping"
@@ -323,13 +323,13 @@ jobs:
         with:
           pattern: clientbin-*
           merge-multiple: true
-          path: control/clientbin
+          path: servers/control/clientbin
 
       - name: Reuse the pushed client binaries
         if: steps.select.outputs.work == 'build' && needs.client.result == 'skipped'
         run: |
           docker create --name clientbin "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE" noop
-          docker cp clientbin:/clientbin/. control/clientbin
+          docker cp clientbin:/clientbin/. servers/control/clientbin
           docker rm clientbin
 
       - uses: docker/setup-buildx-action@v3
@@ -338,7 +338,7 @@ jobs:
       - uses: docker/build-push-action@v6
         if: steps.select.outputs.work == 'build'
         with:
-          context: control
+          context: servers/control
           push: true
           provenance: false
           tags: ${{ env.ECR_REGISTRY }}/ufo-control:${{ env.IMAGE_TAG }}
@@ -403,7 +403,7 @@ jobs:
         with:
           pattern: clientbin-*
           merge-multiple: true
-          path: control/clientbin
+          path: servers/control/clientbin
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -457,7 +457,7 @@ jobs:
           if aws ecr describe-images --repository-name ufo-clientbin --image-ids imageTag="$CLIENT_TREE" >/dev/null 2>&1; then
             echo "ufo-clientbin:$CLIENT_TREE already pushed — skipping"
           else
-            printf 'FROM scratch\nCOPY . /clientbin\n' | docker build -t "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE" -f - control/clientbin
+            printf 'FROM scratch\nCOPY . /clientbin\n' | docker build -t "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE" -f - servers/control/clientbin
             docker push "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE"
           fi
 

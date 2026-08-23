@@ -223,7 +223,7 @@ authentication, scope, plan, policy, invalid-email, and inconsistent-channel err
 `ufo-control slack-connect-retry <email-domain>` re-arms one failed row after its cause is fixed —
 it never sends directly and never touches a delivered row.
 
-UFO's app here (`control/slack-connect-app.yaml`) is not the customer-installed Slack app below. Its
+UFO's app here (`servers/control/slack-connect-app.yaml`) is not the customer-installed Slack app below. Its
 declared scopes are asserted against the Web API methods this workflow calls, since a missing scope
 fails nowhere but production. It
 lives only in the operator workspace, makes outbound Web API calls only, and holds one gateway-only
@@ -552,7 +552,7 @@ infra/modules/edge/
   worker.js               public edge behavior
   worker.test.mjs         its behavior proof (node --test, ci checks job)
 
-control/src/
+servers/control/src/
   main.rs                 the seven CLI verbs: gateway, migrate, invite, slack-connect-retry,
                           invite-delivery-retry, rls-bootstrap, serve-dsn
   gateway.rs              the HTTP routes and the onboarding state machine

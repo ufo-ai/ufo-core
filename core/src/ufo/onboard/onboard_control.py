@@ -1,10 +1,10 @@
 """The internal onboarding RPC the Rust control plane calls.
 
-`control/` holds one database credential — a role granted the `ufo_control` schema and nothing in
-`public` — so every read and write of a core table arrives here instead. That keeps one home for
-what a workspace *is*: `create_member`'s seat semantics, the balance ledger's invariants, the
-default agent's name and model, and the wall that holds untrusted intake text out of a system
-prompt. None of it is reimplemented on the edge, so none of it can drift.
+`servers/control/` holds one database credential — a role granted the `ufo_control` schema and
+nothing in `public` — so every read and write of a core table arrives here instead. That keeps
+one home for what a workspace *is*: `create_member`'s seat semantics, the balance ledger's
+invariants, the default agent's name and model, and the wall that holds untrusted intake text out
+of a system prompt. None of it is reimplemented on the edge, so none of it can drift.
 
 The routes live under `/internal/onboard/`, gated by `Authorization: Bearer <control_token>` — its
 own secret, never the egress control token, so the sign-in gateway's credential reaches nothing

@@ -19,7 +19,7 @@ flowchart TD
 
 | Layer | Question | Mechanism | Home |
 |---|---|---|---|
-| Tenancy | which workspace | `ws()` / `agent()` contextvars + Postgres RLS + blob key prefix | `core/src/ufo/workspace.py`, `db.py`, `blob.py`, `control/src/rls.rs` |
+| Tenancy | which workspace | `ws()` / `agent()` contextvars + Postgres RLS + blob key prefix | `core/src/ufo/workspace.py`, `db.py`, `blob.py`, `servers/control/src/rls.rs` |
 | Identity | which human | `surface_identity` row + HMAC bearer (`ufo_session` cookie / CLI token) | `core/src/ufo/ext/surface.py`, `core/src/ufo/auth/bearer.py` |
 | Admission | may this turn start | membership, agent-binding assertion, seat gate, spend preflight | `core/src/ufo/surfaces/admission.py`, `core/src/ufo/seats.py` |
 | Authority | who does this act speak for | `speaker_member_id` per message, `on_behalf_of_member_id` for background work, `requested_by` per tool call | `core/src/ufo/loop/engine.py`, `tools/context.py` |
@@ -81,7 +81,7 @@ claims, jobs from their candidate row.
 
 Row-level security backs the contextvar on Postgres:
 
-- The control plane (`ufo-control rls-bootstrap`, `control/src/rls.rs`) enables
+- The control plane (`ufo-control rls-bootstrap`, `servers/control/src/rls.rs`) enables
   RLS and creates a `workspace_id = current_setting('app.workspace_id')::uuid` policy on **every**
   table in `public` (`alembic_version` aside); a table with neither `workspace_id` nor
   `id`-as-workspace fails the bootstrap. Policies are runtime DDL, not alembic migrations — a new
@@ -439,7 +439,7 @@ per-member. RLS scopes each read to the one bound workspace.
 
 | Invariant | Proof |
 |---|---|
-| RLS isolation, fail-closed GUC, owner bypass | `control/tests/rls_it.rs` (the `control` CI job) |
+| RLS isolation, fail-closed GUC, owner bypass | `servers/control/tests/rls_it.rs` (the `control` CI job) |
 | Pooled connections carry no workspace across checkouts | `core/tests/test_db.py` |
 | Blob prefix scoping and fleet-store bounds | `core/tests/test_blob.py` |
 | Audience atoms, narrowing, subject sets | `core/tests/test_audience.py` |

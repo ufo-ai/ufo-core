@@ -7,9 +7,10 @@ client's tests. Regenerate: `uv run python -m ufo_testsupport.wire_fixture`.
 
 Both wires share one escaping — a field's backslash, tab, and newline, in that order, with carriage
 returns dropped — so one codec renders both here. The onboarding wire's producer is the Rust gateway
-(`control/src/directives.rs`), which is held to these same lines by
-`control/tests/contract.rs::every_onboard_fixture_line_is_this_encoder`: the fixture is generated on
-this side and asserted on that one, so neither half can move without the other going red.
+(`servers/control/src/directives.rs`), which is held to these same lines by
+`servers/control/tests/contract.rs::every_onboard_fixture_line_is_this_encoder`: the fixture is
+generated on this side and asserted on that one, so neither half can move without the other going
+red.
 """
 
 import json

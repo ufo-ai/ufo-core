@@ -8,19 +8,19 @@ date: 2026-08-17
 # Control plane in Rust — its own ledgers, a core RPC for core's tables
 
 > RFC 0035 moved the egress data plane to Rust and left every policy decision, key, and ledger write
-> in core `serve`, noting there would be "nothing to re-port when `control/` becomes Rust". This RFC
-> is that port. `control/` becomes a Rust crate holding one credential — a role scoped to the three
+> in core `serve`, noting there would be "nothing to re-port when `servers/control/` becomes Rust". This RFC
+> is that port. `servers/control/` becomes a Rust crate holding one credential — a role scoped to the three
 > `ufo_control` ledgers it alone owns — and reaches every core table through an internal RPC that
 > core `serve` answers on paths it already runs. The gateway pod stops holding the RLS-bypassing
 > owner DSN, and the control image stops carrying a Python runtime.
 
 ## Current state
 
-`control/` is 3,515 lines of Python across 14 modules plus 6,270 lines of pytest. It serves
+`servers/control/` is 3,515 lines of Python across 14 modules plus 6,270 lines of pytest. It serves
 `/healthz`, `/ufo`, `/ufo/bin/{target}`, `/fleet`, `/login`, the three WorkOS paths, and
-`/v1/onboard/{channel}` (`control/src/ufo_control/gateway.py:414-593`), and carries five CLI verbs:
+`/v1/onboard/{channel}` (`servers/control/src/ufo_control/gateway.py:414-593`), and carries five CLI verbs:
 `gateway`, `migrate`, `invite`, `slack-connect-retry`, `rls-bootstrap`
-(`control/src/ufo_control/main.py`).
+(`servers/control/src/ufo_control/main.py`).
 
 Two things make it more than an HTTP server.
 
@@ -32,13 +32,13 @@ Two things make it more than an HTTP server.
 | `gateway.py:24-26` | `ufo.db.init_db`/`dispose_db`/`workspace_tx`, `ufo.ext.surface.OPERATOR_EMAIL_DOMAIN`, `ufo.sdk.http.set_session_cookie` |
 | `gateway_token.py:7` | `ufo.auth.bearer.mint_token` |
 
-This is why `control/Dockerfile` is `FROM ${UFO_IMAGE}` — the control image exists only as a layer on
+This is why `servers/control/Dockerfile` is `FROM ${UFO_IMAGE}` — the control image exists only as a layer on
 the full Python runtime distribution.
 
 **It holds the owner DSN in the serving pod.** `gateway_app`'s lifespan opens a pool on
 `UFO_CONTROL_POSTGRES_OWNER_DSN` (`gateway.py:365`) and a second connection on
 `UFO_CONTROL_SERVE_DSN` via `init_db` (`gateway.py:400`). The owner role bypasses RLS —
-`control/src/ufo_control/rls.py` never sets `FORCE ROW LEVEL SECURITY`, so the table owner is exempt
+`servers/control/src/ufo_control/rls.py` never sets `FORCE ROW LEVEL SECURITY`, so the table owner is exempt
 by default. A pod on the public sign-in path can therefore read every workspace's rows.
 
 It uses that reach in exactly three places:
@@ -145,26 +145,26 @@ workspace existence, its uuid, and the first member's email domain.
 
 ### Crate shape
 
-`control/` becomes a Rust crate in place, standalone like `cache/`, `client/`, and `egress/` — the
+`servers/control/` becomes a Rust crate in place, standalone like `servers/cache/`, `client/`, and `servers/egress/` — the
 repo has no root Cargo workspace.
 
 ```
-control/Cargo.toml            ufo-control
-control/src/main.rs           clap: gateway | migrate | invite | slack-connect-retry | rls-bootstrap
-control/src/gateway.rs        axum routes and Onboarding::advance
-control/src/{web,claim,directives}.rs
-control/src/{store,invite,slack_connect,schema}.rs
-control/src/{shared,token,workos,email,rls}.rs
-control/src/client/ufo        the POSIX script, include_str!
-control/tests/{gateway_it,schema_it,contract}.rs
+servers/control/Cargo.toml            ufo-control
+servers/control/src/main.rs           clap: gateway | migrate | invite | slack-connect-retry | rls-bootstrap
+servers/control/src/gateway.rs        axum routes and Onboarding::advance
+servers/control/src/{web,claim,directives}.rs
+servers/control/src/{store,invite,slack_connect,schema}.rs
+servers/control/src/{shared,token,workos,email,rls}.rs
+servers/control/src/client/ufo        the POSIX script, include_str!
+servers/control/tests/{gateway_it,schema_it,contract}.rs
 ```
 
 `tokio-postgres` + `deadpool-postgres`, not `sqlx`: control's SQL is raw strings today, and `sqlx`'s
 compile-time query checking needs a live database at image-build time. The rest — `axum`, `reqwest`,
 `serde`, `hmac`/`sha2`/`base64`, `uuid`, `chrono`, `anyhow`, `thiserror`, `tracing` — matches
-`egress/Cargo.toml`, with `clap` and `opentelemetry-otlp` added.
+`servers/egress/Cargo.toml`, with `clap` and `opentelemetry-otlp` added.
 
-`control/Dockerfile` stops being `FROM ${UFO_IMAGE}`: a Rust build stage over a slim runtime
+`servers/control/Dockerfile` stops being `FROM ${UFO_IMAGE}`: a Rust build stage over a slim runtime
 carrying the binary and the `clientbin` directory. The control image drops the Python runtime.
 
 ### Two hand-rolled integrations
@@ -181,19 +181,19 @@ Neither needs a vendor SDK, because neither meaningfully uses one today.
 `core/src/ufo/auth/bearer.py` is a 115-line self-contained HMAC codec whose wire format its own docstring
 spells out. Rust mints it; core keeps the verify half every surface uses. Golden vectors —
 `(secret, workspace_id, email, exp) → token` — are asserted from both sides, the shape
-`egress/tests/contract.rs` and `rule_contract.json` already established.
+`servers/egress/tests/contract.rs` and `rule_contract.json` already established.
 
 ### Tests
 
 | Suite | Home |
 |---|---|
-| Gateway HTTP surface, claim, invite, email, Slack Connect, schema | `control/tests/*.rs`, against real Postgres |
-| Bearer vectors and the RPC wire | `control/tests/contract.rs` + a golden JSON, checked from both sides |
+| Gateway HTTP surface, claim, invite, email, Slack Connect, schema | `servers/control/tests/*.rs`, against real Postgres |
+| Bearer vectors and the RPC wire | `servers/control/tests/contract.rs` + a golden JSON, checked from both sides |
 | `/internal/onboard/*` | new `core/tests/test_onboard_control.py` |
-| The `ufo_control` role's fence — `select` on `member` denied, `has_table_privilege` false | a `control/tests/schema_it.rs` case |
+| The `ufo_control` role's fence — `select` on `member` denied, `has_table_privilege` false | a `servers/control/tests/schema_it.rs` case |
 
 CI runs Postgres as a service, applies core's alembic migrations with `uv run`, then `cargo test` —
-the order `control/tests/conftest.py:73` establishes today, and the shape the existing `rls` job on
+the order `servers/control/tests/conftest.py:73` establishes today, and the shape the existing `rls` job on
 :5544 already uses.
 
 ### Repo fallout, same change
@@ -255,8 +255,8 @@ the connection was unverified before and is verified now.
 
 | Fork | Resolution |
 |---|---|
-| Where `control/tests/test_rls.py` (937 lines) lands | It split. The bootstrap half — policies, roles, grants, timeouts, the DBOS database, lock-timeout behaviour — is `control/tests/rls_it.rs`. The `SharedWorkspaces` half — the seat, the signup balance, the default agent, candidate resolution — is `core/tests/test_onboard_control.py`, because that code moved to core. |
-| The directive encoder for `wire_fixture.py` | Neither. The two codecs were byte-identical, so the fixture is generated through the one surviving Python encoder and the Rust producer is held to those same golden lines by `control/tests/contract.rs`. Regenerating produced a zero-byte diff. |
+| Where `servers/control/tests/test_rls.py` (937 lines) lands | It split. The bootstrap half — policies, roles, grants, timeouts, the DBOS database, lock-timeout behaviour — is `servers/control/tests/rls_it.rs`. The `SharedWorkspaces` half — the seat, the signup balance, the default agent, candidate resolution — is `core/tests/test_onboard_control.py`, because that code moved to core. |
+| The directive encoder for `wire_fixture.py` | Neither. The two codecs were byte-identical, so the fixture is generated through the one surviving Python encoder and the Rust producer is held to those same golden lines by `servers/control/tests/contract.rs`. Regenerating produced a zero-byte diff. |
 | Refusal copy when `serve` is unreachable | "Could not reach the workspace service. Try again." A refusal core itself worded rides back verbatim instead, so a domain mapping to two workspaces reads the same either side of the wire. |
 
 ## What the port changed from this design
