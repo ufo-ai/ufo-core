@@ -401,7 +401,7 @@ test("the pool's record shares and revokes into the lane of the agent already ho
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await pressItem("github");
-  await userEvent.click(screen.getByRole("button", { name: "Unshare" }));
+  await userEvent.click(screen.getByRole("button", { name: "Make private" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");

@@ -9,7 +9,10 @@ const {
   Button,
   Dialog,
   DialogTrigger,
+  FileBody,
+  FileDownload,
   Header,
+  HeldRecord,
   Markdown,
   Moment,
   ObjectDetail,
@@ -42,7 +45,6 @@ const {
   useLayoutEffect,
   usePageHead,
   usePanelRead,
-  useSlot,
   useState,
   useTextArtifact,
 } = UfoAppKit;
@@ -249,25 +251,20 @@ function RecordSlot({
   onPlace: (place: Placement) => void;
 }) {
   const shut = () => onPlace({ opens: closed(opens, id) });
-  return useSlot(
-    held === null ? (
-      <PanelEmpty>That item is not on this page.</PanelEmpty>
-    ) : (
-      <ObjectDetail
-        agentId={held.agent}
-        kind={held.kind}
-        name={held.name}
-        onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
-        onBack={shut}
-      />
-    ),
-    {
-      id,
-      kind: "panel",
-      title: held?.name ?? id,
-      parent: { label: from, onGo: shut },
-      onClose: shut,
-    },
+  return (
+    <HeldRecord id={id} title={held?.name ?? id} from={from} onClose={shut}>
+      {held === null ? (
+        <PanelEmpty>That item is not on this page.</PanelEmpty>
+      ) : (
+        <ObjectDetail
+          agentId={held.agent}
+          kind={held.kind}
+          name={held.name}
+          onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
+          onBack={shut}
+        />
+      )}
+    </HeldRecord>
   );
 }
 
@@ -777,9 +774,9 @@ function Shared({ artifact }: { artifact: RadarArtifact }) {
   );
 }
 
-/** The pressed file at full size: its picture — the file itself when it is an image, the first
- *  rendered page when it is a document — under its name and the download that fetches the file
- *  itself. A file with no picture is stated as such; the download still answers. */
+/** The pressed file at full size, read the way every screen reads a shared file: its picture — the
+ *  file itself when it is an image, the first rendered page when it is a document — under its name
+ *  and the download that fetches the file itself. */
 function FileSheet({ artifact, onClose }: { artifact: RadarArtifact; onClose: () => void }) {
   const meta = [artifact.subject, artifact.media_type, formatSize(artifact.size_bytes)]
     .filter((part) => part)
@@ -789,44 +786,11 @@ function FileSheet({ artifact, onClose }: { artifact: RadarArtifact; onClose: ()
       open
       onClose={onClose}
       title={artifact.filename}
-      actions={
-        <a
-          href={artifact.url ?? ""}
-          download={artifact.filename}
-          className={cn(buttonVariants({ variant: "send" }), "shrink-0 no-underline")}
-        >
-          Download
-        </a>
-      }
+      actions={<FileDownload file={artifact} />}
     >
       <div className="font-mono text-small text-ink-soft">{meta}</div>
-      {artifact.preview_url || artifact.media_type.startsWith("image/") ? (
-        <FullPicture artifact={artifact} />
-      ) : (
-        <div className="font-mono text-small text-ink-soft">
-          No preview for this file type. Download it to open it.
-        </div>
-      )}
+      <FileBody file={artifact} />
     </Sheet>
-  );
-}
-
-function FullPicture({ artifact }: { artifact: RadarArtifact }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) {
-    return (
-      <div className="font-mono text-small text-ink-soft">
-        The image did not load. Its link may have expired — reload the page.
-      </div>
-    );
-  }
-  return (
-    <img
-      alt={artifact.subject || artifact.filename}
-      src={artifact.preview_url ?? artifact.url ?? ""}
-      onError={() => setFailed(true)}
-      className="max-h-(--media-tall) max-w-full object-contain"
-    />
   );
 }
 

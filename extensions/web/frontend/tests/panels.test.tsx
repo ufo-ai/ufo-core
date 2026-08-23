@@ -11,8 +11,8 @@ beforeEach(() => {
   useStreamFake();
 });
 
-function toggleApplications(): void {
-  fireEvent.click(screen.getByRole("button", { name: "Applications" }));
+function toggleApplications(): Promise<void> {
+  return userEvent.click(screen.getByRole("button", { name: "Applications" }));
 }
 
 
@@ -253,7 +253,7 @@ test("the agents index states a row's name alone, and leaves the address list to
     />,
   );
 
-  toggleApplications();
+  await toggleApplications();
   const index = within(await screen.findByRole("navigation", { name: "Apps" }));
   expect(index.getByText("Main")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
@@ -270,7 +270,7 @@ test("a non-admin reads the same index rows", async () => {
     <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  toggleApplications();
+  await toggleApplications();
   const index = within(await screen.findByRole("navigation", { name: "Apps" }));
   expect(index.getByText("Main")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();

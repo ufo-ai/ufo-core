@@ -182,14 +182,13 @@ const TERMINAL_CHAT = {
   surface: "ufo",
 };
 
-/** The settings flyout adjusts the rail in place without hiding it, so the row press is the whole
- *  act; the header's own press shuts the panel again so a later `filterBy` starts shut. The header
- *  is pressed with `fireEvent` because a pointer click would first hover it open and then toggle
- *  it shut. */
+/** The settings menu adjusts the rail in place without hiding it, so the tick is the whole act; the
+ *  menu is dismissed afterwards so a later `filterBy` starts shut. A surface is a choice turned on
+ *  and off, so its row is a menu checkbox rather than a button. */
 async function filterBy(label: string) {
-  fireEvent.click(await screen.findByRole("button", { name: "Conversations" }));
-  fireEvent.click(await screen.findByRole("button", { name: label }));
-  fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Conversations" }));
+  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: label }));
+  await userEvent.keyboard("{Escape}");
 }
 
 test("the rail walks the listing to its far page", async () => {
@@ -265,16 +264,16 @@ test("a tick leaves the filter open, so both surfaces are named in one visit", a
   wire({ ...chatsOnWire([CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "Conversations" }));
-  fireEvent.click(await screen.findByRole("button", { name: "Slack" }));
-  fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Conversations" }));
+  await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Slack" }));
+  await userEvent.click(screen.getByRole("menuitemcheckbox", { name: "Terminal" }));
 
   expect(screen.getByRole("button", { name: "Conversations" }).getAttribute("aria-expanded")).toBe(
     "true",
   );
   expect(
     ["Terminal", "Slack", "iMessage"].map((label) =>
-      screen.getByRole("button", { name: label }).getAttribute("aria-pressed"),
+      screen.getByRole("menuitemcheckbox", { name: label }).getAttribute("aria-checked"),
     ),
   ).toEqual(["true", "true", "false"]);
 
@@ -1014,7 +1013,7 @@ test("the applications flyout opens the agent's page, and the sidebar starts the
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("main");
 
-  fireEvent.click(screen.getByRole("button", { name: "Applications" }));
+  await userEvent.click(screen.getByRole("button", { name: "Applications" }));
   await openAgentRow("Assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
   expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull();
@@ -1152,7 +1151,7 @@ test("the sidebar marks the destination the member is in and leaves the others o
   await userEvent.click(rail.getByRole("button", { name: "Connectors" }));
   await waitFor(() => expect(marked()).toEqual(["Connectors"]));
 
-  fireEvent.click(rail.getByRole("button", { name: "Applications" }));
+  await userEvent.click(rail.getByRole("button", { name: "Applications" }));
   const index = within(await screen.findByRole("navigation", { name: "Apps" }));
   expect(index.getByText("Assistant")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();

@@ -16,7 +16,7 @@ import { Td, TdFact } from "@/components/ui/table";
 import { FormFromSchema, initialSpecValue, type SpecSchema, type SpecValue } from "@/kernel/form";
 import type { Placement } from "@/kernel/pager";
 import { Header, PageToolbar, RecordPanel } from "@/kernel/pane";
-import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
+import { appended, beside, closed, opened, useSlot, type SlotKind } from "@/kernel/slots";
 import {
   OutcomeNotice,
   Panel,
@@ -346,26 +346,42 @@ export function HeldRecords({
   );
 }
 
-/** One lane of the track. The record inside it cannot name the lane: it is drawn within the track
- *  its own acts lie over, so a track read from in there is that one rather than the pane's. This
- *  pane named the lane, so the lane a link was followed from is the id it gave it.
+/** One lane of the track, and the one renderer every screen that stands a record in a lane uses.
+ *  The record inside it cannot name the lane: it is drawn within the track its own acts lie over,
+ *  so a track read from in there is that one rather than the pane's. This pane named the lane, so
+ *  the lane a link was followed from is the id it gave it.
  *
  *  An id the pane cannot draw a record for — one naming something other than an object, or any of
  *  them while the track names no agent to read them in — still stands as a lane and says so inside
  *  it. Drawing nothing would leave the address carrying a record the member can neither read nor
- *  shut, because the close belongs to the lane. */
-function HeldRecord({
+ *  shut, because the close belongs to the lane.
+ *
+ *  `from` is what the lane was opened out of, said as the crumb over it: a lane paged one to a
+ *  screen has no lane standing to its left to read as the way back. A screen that stands its lanes
+ *  beside each other passes none, because the lane to the left is that way back. */
+export function HeldRecord({
   id,
   title,
+  kind = "panel",
+  from,
   onClose,
   children,
 }: {
   id: string;
-  title: string;
+  /** What the lane's band names it, absent while the read that names it is still in flight. */
+  title?: string;
+  kind?: SlotKind;
+  from?: string;
   onClose: () => void;
   children: ReactNode;
 }) {
-  return useSlot(children, { id, kind: "panel", title, onClose });
+  return useSlot(children, {
+    id,
+    kind,
+    title,
+    parent: from === undefined ? undefined : { label: from, onGo: onClose },
+    onClose,
+  });
 }
 
 /** The band a listing standing among others is headed by: what these records are, and the act that

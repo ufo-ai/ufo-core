@@ -52,12 +52,16 @@ import { Lede, Td, TdFact } from "@/components/ui/table";
 import {
   ARTIFACT_TEXT_BYTES,
   ArtifactText,
+  FileBody,
+  FileDownload,
   MediaIcon,
   isTextMedia,
   useTextArtifact,
 } from "@/kernel/artifact";
+import type { SharedFile } from "@/kernel/artifact";
 import { CardGrid } from "@/kernel/cards";
 import {
+  HeldRecord,
   HeldRecords,
   OWNER_FIELD,
   ObjectDetail,
@@ -80,7 +84,7 @@ import {
   ViewSwitch,
   usePageHead,
 } from "@/kernel/pane";
-import { Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
+import { Empty, Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
 import { RebuildDialog } from "@/kernel/rebuild";
 import { RowLines } from "@/kernel/rows";
 import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
@@ -152,6 +156,7 @@ export type {
   PanelState,
   Placement,
   ReactNode,
+  SharedFile,
   WorkspacePlace,
 };
 
@@ -197,10 +202,17 @@ export {
   TdFact,
   ARTIFACT_TEXT_BYTES,
   ArtifactText,
+  /* The shared-file view as page API: the file's own picture, characters or plain statement, and
+     the download beside it. Two pages drew this twice and drifted apart in the words. */
+  FileBody,
+  FileDownload,
   MediaIcon,
   isTextMedia,
   useTextArtifact,
   CardGrid,
+  /* The record lane as page API: one renderer for a record standing in a track, so a page opens a
+     lane the way the portal's own screens do rather than writing a fourth `useSlot` of its own. */
+  HeldRecord,
   HeldRecords,
   OWNER_FIELD,
   ObjectDetail,
@@ -220,6 +232,7 @@ export {
   ToolbarRule,
   ViewSwitch,
   usePageHead,
+  Empty,
   Panel,
   PanelBlank,
   PanelEmpty,

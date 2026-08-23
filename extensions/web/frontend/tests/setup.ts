@@ -4,6 +4,7 @@ import { afterEach, beforeEach, vi } from "vitest";
 import { resetChatStore } from "@/lib/chatStore";
 import { resetRailStore } from "@/lib/railStore";
 import { resetRouter } from "@/lib/router";
+import { resetScheme } from "@/lib/scheme";
 import { resetStreams } from "@/lib/turnStream";
 
 // A CI failure's DOM dump is the one record of what actually rendered there; the default limit
@@ -94,6 +95,7 @@ afterEach(() => {
   resetChatStore();
   resetRailStore();
   resetRouter();
+  resetScheme();
   resetStreams();
   if (typeof localStorage !== "undefined") localStorage.clear();
   if (typeof sessionStorage !== "undefined") sessionStorage.clear();

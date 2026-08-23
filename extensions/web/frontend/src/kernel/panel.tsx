@@ -163,7 +163,11 @@ export function Panel<T>({
   return children(state.payload);
 }
 
-function Empty({ className, children }: { className?: string; children: ReactNode }) {
+/** A sentence standing where records would: centred, bounded to a measure a line reads at, and in
+ *  the register a fact is stated in. Every screen that answers with a sentence draws this one, so a
+ *  loading note, a refusal and a screen with nothing on it read alike wherever the member meets
+ *  them. `className` is the space around it, which is the page's to set and not the note's. */
+export function Empty({ className, children }: { className?: string; children: ReactNode }) {
   return (
     <div className={cn("m-auto max-w-empty text-center text-ink-soft", className)}>
       {children}

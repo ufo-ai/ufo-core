@@ -12,6 +12,7 @@ const {
   Facts,
   Group,
   Header,
+  HeldRecord,
   IconChevronDown,
   IconChevronUp,
   IconDots,
@@ -41,7 +42,6 @@ const {
   usePageHead,
   usePanelRead,
   useRef,
-  useSlot,
   useState,
   useViewer,
 } = UfoAppKit;
@@ -277,15 +277,16 @@ function RecordSlot({
   onPlace: (place: Placement) => void;
 }) {
   const shut = () => onPlace({ opens: closed(opens, id) });
-  return useSlot(
-    <ObjectDetail
-      agentId={held.agent}
-      kind={held.kind}
-      name={held.name}
-      onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
-      onBack={shut}
-    />,
-    { id, kind: "panel", title: held.name, parent: { label: from, onGo: shut }, onClose: shut },
+  return (
+    <HeldRecord id={id} title={held.name} from={from} onClose={shut}>
+      <ObjectDetail
+        agentId={held.agent}
+        kind={held.kind}
+        name={held.name}
+        onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
+        onBack={shut}
+      />
+    </HeldRecord>
   );
 }
 

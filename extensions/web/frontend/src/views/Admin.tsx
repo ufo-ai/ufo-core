@@ -23,6 +23,7 @@ import { postIntent } from "@/lib/api";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { money } from "@/lib/money";
 import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
+import { MEMBER_COLUMNS, MemberCells } from "@/views/Team";
 
 /** The row states what the eye compares down the column and hands the rest to the record beside it:
  *  an agent's surfaces are a list of unknown length, and the act that grants web access is a field
@@ -33,12 +34,8 @@ const AGENT_COLUMNS = [
   { label: "Public Internet", fact: true },
   "Web Audience",
 ];
-const MEMBER_COLUMNS = [
-  "Member",
-  { label: "Role", fact: true },
-  { label: "Seat", fact: true },
-  "",
-];
+/** The roster's own track, with the column administration's acts stand in. */
+const ADMIN_MEMBER_COLUMNS = [...MEMBER_COLUMNS, ""];
 const CAP_COLUMNS = [
   { label: "Cap", fact: true },
   "Subject",
@@ -102,7 +99,7 @@ export function Admin() {
 
               <Section title="Members">
                 <DataTable
-                  columns={MEMBER_COLUMNS}
+                  columns={ADMIN_MEMBER_COLUMNS}
                   rows={payload.members}
                   rowKey={(member) => member.email}
                   empty="This workspace has no members yet."
@@ -320,9 +317,7 @@ function MemberRow({
 }) {
   return (
     <>
-      <Td>{member.email}</Td>
-      <TdFact>{member.admin ? "Admin" : "Member"}</TdFact>
-      <TdFact>{member.seated ? "Seated" : "Unseated"}</TdFact>
+      <MemberCells member={member} />
       <TdActs>
         <div className={ACTS}>
           {member.admin ? (

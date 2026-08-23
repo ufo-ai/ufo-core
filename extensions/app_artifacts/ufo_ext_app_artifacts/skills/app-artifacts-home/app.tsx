@@ -6,6 +6,9 @@ const {
   CardGrid,
   DataTable,
   FacetMenu,
+  FileBody,
+  FileDownload,
+  HeldRecord,
   IconWorldWww,
   Lede,
   MediaIcon,
@@ -32,7 +35,6 @@ const {
   cn,
   creator,
   formatSize,
-  isTextMedia,
   mountApp,
   objectAt,
   opened,
@@ -43,7 +45,6 @@ const {
   useMainAgent,
   usePanelRead,
   useRef,
-  useSlot,
   useState,
   useViewer,
 } = UfoAppKit;
@@ -547,28 +548,29 @@ function Opened({
   const site =
     at !== null && at.kind === SITE_KIND ? sites?.find((row) => row.name === at.name) : undefined;
   const url = typeof site?.site_url === "string" ? site.site_url : null;
-  return useSlot(
-    at !== null ? (
-      <ObjectDetail
-        agentId={at.agent}
-        kind={at.kind}
-        name={at.name}
-        lead={url ? <SiteView url={url} name={at.name} /> : undefined}
-        onOpen={(next) => onOpen(slotOf(next))}
-        onBack={onClose}
-      />
-    ) : card?.file ? (
-      <Viewer entry={card.file} />
-    ) : stranded ? (
-      <PanelEmpty>That item is not on this page.</PanelEmpty>
-    ) : null,
-    {
-      id,
-      kind: at !== null ? "panel" : "reading",
-      title: stranded ? id : nameOf(id, cards),
-      parent: { label: from, onGo: onClose },
-      onClose,
-    },
+  return (
+    <HeldRecord
+      id={id}
+      kind={at !== null ? "panel" : "reading"}
+      title={stranded ? id : nameOf(id, cards)}
+      from={from}
+      onClose={onClose}
+    >
+      {at !== null ? (
+        <ObjectDetail
+          agentId={at.agent}
+          kind={at.kind}
+          name={at.name}
+          lead={url ? <SiteView url={url} name={at.name} /> : undefined}
+          onOpen={(next) => onOpen(slotOf(next))}
+          onBack={onClose}
+        />
+      ) : card?.file ? (
+        <Viewer entry={card.file} />
+      ) : stranded ? (
+        <PanelEmpty>That item is not on this page.</PanelEmpty>
+      ) : null}
+    </HeldRecord>
   );
 }
 
@@ -662,15 +664,7 @@ function Viewer({ entry }: { entry: Artifact }) {
         {meta} · <Moment at={entry.shared_at} />
       </div>
       <div className="flex flex-wrap items-center gap-lg">
-        {entry.url ? (
-          <a
-            href={entry.url}
-            download={entry.filename}
-            className={cn(buttonVariants({ variant: "send" }), "shrink-0 no-underline")}
-          >
-            Download
-          </a>
-        ) : null}
+        <FileDownload file={entry} />
         <span className="flex flex-wrap gap-x-lg font-mono text-small text-ink-soft">
           <a href={chatHash(entry.conversation)} className={out}>
             Conversation
@@ -682,40 +676,8 @@ function Viewer({ entry }: { entry: Artifact }) {
           ) : null}
         </span>
       </div>
-      {isImage(entry) || entry.preview_url ? (
-        <FullImage entry={entry} />
-      ) : isTextMedia(entry.media_type) ? (
-        <ArtifactText
-          url={entry.url}
-          name={entry.filename}
-          mediaType={entry.media_type}
-          display="inline"
-        />
-      ) : (
-        <div className="font-mono text-small text-ink-soft">
-          No preview for this file type. Download it to open it.
-        </div>
-      )}
+      <FileBody file={entry} />
     </div>
-  );
-}
-
-function FullImage({ entry }: { entry: Artifact }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) {
-    return (
-      <div className="font-mono text-small text-ink-soft">
-        The image did not load. Its link may have expired — reload the listing.
-      </div>
-    );
-  }
-  return (
-    <img
-      alt={entry.subject || entry.filename}
-      src={entry.preview_url ?? entry.url ?? ""}
-      onError={() => setFailed(true)}
-      className="max-h-(--media-tall) max-w-full object-contain"
-    />
   );
 }
 

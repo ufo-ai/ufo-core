@@ -15,6 +15,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Empty } from "@/kernel/panel";
 import { SlotTrack } from "@/kernel/slots";
 import {
   Breadcrumb,
@@ -82,7 +83,7 @@ export function Pane({
 export function PaneNote({ children }: { children: ReactNode }) {
   return (
     <Pane className={COLUMN}>
-      <div className="m-auto max-w-empty text-center text-ink-soft">{children}</div>
+      <Empty>{children}</Empty>
     </Pane>
   );
 }

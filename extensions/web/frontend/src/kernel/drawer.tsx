@@ -42,6 +42,13 @@ export function useDrawerSlot(): (node: HTMLElement | null) => void {
   return useContext(DrawerContext).hold;
 }
 
+/** The element the drawer holds the list in, for a layer the list raises over itself: a menu sent to
+ *  the document's own end while the drawer stands is outside the drawer, which is a modal, so
+ *  nothing reaches it there. Null wherever no drawer holds the list. */
+export function useDrawerHost(): HTMLElement | null {
+  return useContext(DrawerContext).host;
+}
+
 /** Where the section's list is drawn: in place beside the page, or in the drawer holding it. */
 export function useDrawerList(list: ReactNode): ReactNode {
   const { hosted, host } = useContext(DrawerContext);

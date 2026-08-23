@@ -51,13 +51,17 @@ function Tick() {
   );
 }
 
+/** `container` is where the menu is drawn: the document's own end by default, and the element a
+ *  caller names when the menu belongs inside a layer already standing — a drawer is a modal, and a
+ *  menu drawn past it is out of the member's reach. */
 export function DropdownMenuContent({
   className,
   sideOffset = 4,
+  container,
   ...props
-}: ComponentProps<typeof DropdownMenuPrimitive.Content>) {
+}: ComponentProps<typeof DropdownMenuPrimitive.Content> & { container?: HTMLElement | null }) {
   return (
-    <DropdownMenuPrimitive.Portal>
+    <DropdownMenuPrimitive.Portal container={container}>
       <DropdownMenuPrimitive.Content
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}

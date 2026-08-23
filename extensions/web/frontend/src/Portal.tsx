@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import logo from "@/assets/ufo-logo.svg";
 import { App } from "@/App";
+import { Empty } from "@/kernel/panel";
 import { FAULTS, SignIn } from "@/views/SignIn";
 import { BASE, SIGN_IN_PATH, sessionFault, type SessionFault } from "@/lib/api";
 import { parseHash } from "@/lib/route";
@@ -69,8 +70,7 @@ export function Portal() {
     if (next.phase === "ready") setBoot(next);
   }, []);
 
-  if (boot.phase === "loading")
-    return <div className="m-auto max-w-empty text-center text-ink-soft">Loading…</div>;
+  if (boot.phase === "loading") return <Empty>Loading…</Empty>;
   if (boot.phase === "signed-out" && boot.fault === "no-member")
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4xl p-2xl">
@@ -83,15 +83,8 @@ export function Portal() {
         <SignIn fault={boot.fault} />
       </div>
     );
-  if (boot.phase === "signed-out")
-    return <div className="m-auto max-w-empty text-center text-ink-soft">Loading…</div>;
-  if (boot.phase === "failed") {
-    return (
-      <div className="m-auto max-w-empty text-center text-ink-soft">
-        {boot.message}
-      </div>
-    );
-  }
+  if (boot.phase === "signed-out") return <Empty>Loading…</Empty>;
+  if (boot.phase === "failed") return <Empty>{boot.message}</Empty>;
   return (
     <App
       agents={boot.payload.agents}

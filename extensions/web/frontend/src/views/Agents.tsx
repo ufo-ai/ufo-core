@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ObjectPane } from "@/kernel/objects";
-import { usePanelRead } from "@/kernel/panel";
+import { Empty, usePanelRead } from "@/kernel/panel";
 import { BANDS } from "@/kernel/pane";
 import { SlotTrack } from "@/kernel/slots";
 import { TabPanel, TabRow } from "@/kernel/tabs";
@@ -470,9 +470,7 @@ export function Agents({
           onPlace={onPlace}
         />
       ) : (
-        <div className="m-auto max-w-empty text-center text-ink-soft">
-          No app is visible to you.
-        </div>
+        <Empty>No app is visible to you.</Empty>
       )}
       {shown && !building ? (
         <Dialog open={settling} onOpenChange={setSettling}>

@@ -391,6 +391,7 @@ export function WorkspaceConnectors({
   const consent = useRef<Window | null>(null);
   const viewer = useViewer();
   const agent = useMainAgent();
+  const agents = useAgents();
   const catalog = usePanelRead<FirstRunPayload>(
     FIRST_RUN_READ,
     reloads,
@@ -494,10 +495,13 @@ export function WorkspaceConnectors({
     const entry = pooled.find((one) => CONNECTION + one.grant === id);
     if (!entry) return null;
     return (
-      <PoolRecord
+      <ConnectionRecord
         key={id}
         entry={entry}
         viewer={viewer}
+        attachTo={agents}
+        holders={entry.agents ?? []}
+        parent={{ label: LIBRARY, onGo: () => shut(id) }}
         onDone={(outcome) => {
           setNotice(outcome);
           setReloads((count) => count + 1);
@@ -825,23 +829,33 @@ function CoverageRecord({ legs, onClose }: { legs: Fact[]; onClose: () => void }
   );
 }
 
-/** One connection of the pool, standing in a slot beside it: the connection's own facts and every
- *  act on it. The agent to attach to is picked here rather than in the bar, so the pick is this
- *  connection's and not whichever row the member presses next. */
-function PoolRecord({
+/** One connection, standing in a slot beside whatever list opened it: the connection's own facts
+ *  and every act on it. The library and an app's own settings open the same record, so a member
+ *  reads one sentence per act wherever they came from — and the acts belong to the member who holds
+ *  the connection, which is why nobody else's record carries them.
+ *
+ *  `holders` are the apps already reaching the connection: the first is the lane a share rides, and
+ *  a revoke walks them all. `attachTo` are the apps this record may attach it to, and it is empty
+ *  where the screen carries the attach act in its own bar — one act says its name once. */
+function ConnectionRecord({
   entry,
   viewer,
+  attachTo,
+  holders,
+  parent,
   onDone,
   onClose,
 }: {
-  entry: PoolConnection;
+  entry: Connection;
   viewer: string | null;
+  attachTo: Agent[];
+  holders: { id: string; name: string }[];
+  parent?: { label: string; onGo: () => void };
   onDone: (notice: NoticeState) => void;
   onClose: () => void;
 }) {
-  const agents = useAgents();
   const [targetAgent, setTargetAgent] = useState("");
-  const attached = (entry.agents ?? [])[0];
+  const holder = holders[0];
 
   async function act(lane: string, envelope: unknown) {
     onDone(outcomeNotice(await postIntent(lane, envelope)));
@@ -850,47 +864,51 @@ function PoolRecord({
   return useSlot(
     <RecordPanel>
       <Facts rows={connectionFacts(entry, viewer)} />
-      {entry.owner_email ? (
+      {entry.own ? (
         <>
-          <Field label="App" htmlFor={ATTACH_AGENT}>
-            <Select value={targetAgent} onValueChange={setTargetAgent}>
-              <SelectTrigger id={ATTACH_AGENT}>
-                <SelectValue placeholder="Attach to app" />
-              </SelectTrigger>
-              <SelectContent>
-                {agents.map((agent) => (
-                  <SelectItem key={agent.id} value={agent.id}>
-                    {agentName(agent.name)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
+          {attachTo.length ? (
+            <Field label="App" htmlFor={ATTACH_AGENT}>
+              <Select value={targetAgent} onValueChange={setTargetAgent}>
+                <SelectTrigger id={ATTACH_AGENT}>
+                  <SelectValue placeholder="Attach to app" />
+                </SelectTrigger>
+                <SelectContent>
+                  {attachTo.map((agent) => (
+                    <SelectItem key={agent.id} value={agent.id}>
+                      {agentName(agent.name)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          ) : null}
           <div className="flex flex-wrap items-center gap-sm">
-            <Button
-              variant="send"
-              size="bar"
-              disabled={!targetAgent}
-              onClick={() =>
-                act(targetAgent, {
-                  verb: "attach",
-                  kind: "connector_grant",
-                  name: entry.grant,
-                  spec: {
-                    provider: entry.provider,
-                    account_id: entry.account_id,
-                    shared: entry.shared,
-                  },
-                })
-              }
-            >
-              Attach to app
-            </Button>
-            {attached ? (
+            {attachTo.length ? (
+              <Button
+                variant="send"
+                size="bar"
+                disabled={!targetAgent}
+                onClick={() =>
+                  act(targetAgent, {
+                    verb: "attach",
+                    kind: "connector_grant",
+                    name: entry.grant,
+                    spec: {
+                      provider: entry.provider,
+                      account_id: entry.account_id,
+                      shared: entry.shared,
+                    },
+                  })
+                }
+              >
+                Attach to app
+              </Button>
+            ) : null}
+            {holder ? (
               <Button
                 variant="row"
                 onClick={() =>
-                  act(attached.id, {
+                  act(holder.id, {
                     verb: "apply",
                     kind: "connector_grant",
                     name: entry.grant,
@@ -902,18 +920,18 @@ function PoolRecord({
                   })
                 }
               >
-                {entry.shared ? "Unshare" : "Share"}
+                {entry.shared ? "Make private" : "Share with app"}
               </Button>
             ) : null}
-            {attached ? (
+            {holder ? (
               <ConfirmButton
                 verb="Revoke"
                 variant="row"
                 onClick={async () => {
                   let last = QUIET;
-                  for (const holder of entry.agents) {
+                  for (const held of holders) {
                     last = outcomeNotice(
-                      await postIntent(holder.id, {
+                      await postIntent(held.id, {
                         verb: "detach",
                         kind: "connector_grant",
                         name: entry.grant,
@@ -933,7 +951,7 @@ function PoolRecord({
       id: CONNECTION + entry.grant,
       kind: "panel",
       title: connectionName(entry),
-      parent: { label: LIBRARY, onGo: onClose },
+      parent,
       onClose,
     },
   );
@@ -1101,11 +1119,19 @@ function ConnectorList({
   );
 
   const shown = record ? (
-    <HeldGrant
+    <ConnectionRecord
       key={record.grant}
       entry={record}
       viewer={viewer}
-      onAct={act}
+      /* The bar over the table is where this screen attaches a connection, so the record does not
+         say the same act a second time under another name. */
+      attachTo={[]}
+      holders={[{ id: agent.id, name: agent.name }]}
+      onDone={(notice) => {
+        if (notice.refused) setConsentUrl(null);
+        setHandoff(notice);
+        setReloads((count) => count + 1);
+      }}
       onClose={() => setStanding("")}
     />
   ) : null;
@@ -1217,55 +1243,3 @@ function ConnectorList({
   );
 }
 
-/** One grant the agent already holds, standing in the dialog's own track: what the connection is,
- *  and whether the workspace or only this member reaches it. */
-function HeldGrant({
-  entry,
-  viewer,
-  onAct,
-  onClose,
-}: {
-  entry: Connection;
-  viewer: string | null;
-  onAct: (envelope: unknown) => void;
-  onClose: () => void;
-}) {
-  return useSlot(
-    <RecordPanel>
-      <Facts rows={connectionFacts(entry, viewer)} />
-      {entry.own ? (
-        <div className="flex flex-wrap items-center gap-sm">
-          <Button
-            variant="send"
-            size="bar"
-            onClick={() =>
-              onAct({
-                verb: "apply",
-                kind: "connector_grant",
-                name: entry.grant,
-                spec: {
-                  provider: entry.provider,
-                  account_id: entry.account_id,
-                  shared: !entry.shared,
-                },
-              })
-            }
-          >
-            {entry.shared ? "Make private" : "Share with app"}
-          </Button>
-          <ConfirmButton
-            verb="Revoke"
-            variant="row"
-            onClick={() => onAct({ verb: "detach", kind: "connector_grant", name: entry.grant })}
-          />
-        </div>
-      ) : null}
-    </RecordPanel>,
-    {
-      id: CONNECTION + entry.grant,
-      kind: "panel",
-      title: connectionName(entry),
-      onClose,
-    },
-  );
-}

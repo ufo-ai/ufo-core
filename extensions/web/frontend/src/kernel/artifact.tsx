@@ -5,8 +5,9 @@ import {
   IconFileTypePdf,
   IconPhoto,
 } from "@tabler/icons-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
+import { buttonVariants } from "@/components/ui/button";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/size";
@@ -51,6 +52,72 @@ export function MediaIcon({ mediaType }: { mediaType: string }) {
   ) : (
     <IconFile className="size-icon" aria-hidden />
   );
+}
+
+/** A file shared into a conversation, as every screen that reads one names it. The shelf carries
+ *  more about it and a run's own sheet carries less; what is here is what drawing the file itself
+ *  takes. */
+export type SharedFile = {
+  filename: string;
+  subject: string | null;
+  media_type: string;
+  url: string | null;
+  /** The picture the store rendered for a file that is not itself one — a document's first page. */
+  preview_url: string | null;
+};
+
+/** The file itself, drawn once for every screen that reads one: its own picture where it has one,
+ *  its characters where it is text, and a plain statement where it is neither — the download is
+ *  then the whole of what a member can do with it, and a page that drew nothing there would leave
+ *  them waiting on a preview that is never coming.
+ *
+ *  A picture whose link has expired states that, because the src is a signed URL the listing minted
+ *  and the member's answer is to read the listing again. */
+export function FileBody({ file }: { file: SharedFile }) {
+  const [failed, setFailed] = useState(false);
+  const pictured = file.preview_url ?? (file.media_type.startsWith("image/") ? file.url : null);
+  if (pictured === null) {
+    return isTextMedia(file.media_type) ? (
+      <ArtifactText
+        url={file.url}
+        name={file.filename}
+        mediaType={file.media_type}
+        display="inline"
+      />
+    ) : (
+      <FileNote>No preview for this file type. Download it to open it.</FileNote>
+    );
+  }
+  if (failed) {
+    return <FileNote>The image did not load. Its link may have expired — reload the page.</FileNote>;
+  }
+  return (
+    <img
+      alt={file.subject || file.filename}
+      src={pictured}
+      onError={() => setFailed(true)}
+      className="max-h-(--media-tall) max-w-full object-contain"
+    />
+  );
+}
+
+/** What the file's own bytes are fetched by. It is drawn only where the file answers one: a link to
+ *  nothing is a control the member presses once and learns nothing from. */
+export function FileDownload({ file }: { file: SharedFile }) {
+  if (!file.url) return null;
+  return (
+    <a
+      href={file.url}
+      download={file.filename}
+      className={cn(buttonVariants({ variant: "send" }), "shrink-0 no-underline")}
+    >
+      Download
+    </a>
+  );
+}
+
+function FileNote({ children }: { children: ReactNode }) {
+  return <div className="font-mono text-small text-ink-soft">{children}</div>;
 }
 
 /** The fetched slice as RFC 4180 rows: a quoted field holds commas and newlines, a doubled quote

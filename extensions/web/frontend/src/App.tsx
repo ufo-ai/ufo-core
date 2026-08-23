@@ -4,7 +4,6 @@ import {
   IconAdjustments,
   IconApps,
   IconBrandSlack,
-  IconCheck,
   IconChevronRight,
   IconDeviceDesktop,
   IconEdit,
@@ -56,18 +55,20 @@ import {
   useViewer,
 } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
-import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
+import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
-import { SCHEME_OPTIONS, heldScheme, holdScheme, type Scheme } from "@/lib/scheme";
+import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
 import { pageTitle } from "@/lib/title";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSub,
@@ -366,11 +367,7 @@ function signOut(): void {
  *  `System` is a choice they can read back, and a value that flipped itself at dusk would say they
  *  had picked light. */
 function AccountMenu({ member }: { member: Member }) {
-  const [scheme, setScheme] = useState<Scheme>(heldScheme);
-  const pick = (next: Scheme) => {
-    holdScheme(next);
-    setScheme(next);
-  };
+  const scheme = useScheme();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -396,12 +393,7 @@ function AccountMenu({ member }: { member: Member }) {
             Theme
           </DropdownMenuSubTrigger>
           <DropdownMenuSubContent>
-            <DropdownMenuRadioGroup
-              value={scheme}
-              onValueChange={(value) =>
-                pick(value === "light" || value === "dark" ? value : "system")
-              }
-            >
+            <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
               {SCHEME_OPTIONS.map((option) => (
                 <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
                   {option.label}
@@ -440,8 +432,6 @@ const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
   connectors: <IconPlug className={GLYPH} aria-hidden />,
 };
-
-const FLYOUT_ID = "applications-flyout";
 
 function SidebarTooltip({
   collapsed,
@@ -524,11 +514,7 @@ function SchemeGlyph({ scheme }: { scheme: Scheme }) {
 }
 
 function SchemePick({ collapsed }: { collapsed: boolean }) {
-  const [scheme, setScheme] = useState<Scheme>(heldScheme);
-  const pick = (next: Scheme) => {
-    holdScheme(next);
-    setScheme(next);
-  };
+  const scheme = useScheme();
   return (
     <DropdownMenu>
       <SidebarTooltip collapsed={collapsed} label="Theme">
@@ -543,10 +529,7 @@ function SchemePick({ collapsed }: { collapsed: boolean }) {
         </DropdownMenuTrigger>
       </SidebarTooltip>
       <DropdownMenuContent align="end">
-        <DropdownMenuRadioGroup
-          value={scheme}
-          onValueChange={(value) => pick(value === "light" || value === "dark" ? value : "system")}
-        >
+        <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
           {SCHEME_OPTIONS.map((option) => (
             <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
               {option.label}
@@ -578,81 +561,66 @@ function ApplicationsFlyout({
   onBuild: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    const dismiss = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", dismiss);
-    return () => document.removeEventListener("keydown", dismiss);
-  }, [open]);
+  const host = useDrawerHost();
   const building = route.kind === "agents" && route.build === true;
   const openId = route.kind === "agent" ? route.agentId : null;
   return (
-    <div
-      className="relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
+    <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
       {/* The section's header, not a destination: the same muted band Conversations wears, and
           the same disclosure act a rail group's heading carries — the whole line the trigger for
           the flyout that holds everything the section reaches. */}
       {collapsed ? (
         <SidebarTooltip collapsed={collapsed} label="Applications">
-          <button
-            type="button"
-            aria-label="Applications"
-            aria-expanded={open}
-            aria-controls={FLYOUT_ID}
-            onClick={() => setOpen((held) => !held)}
-            className={cn(NAV_ROW, "justify-center gap-0 px-0")}
-          >
-            <AppsGlyph />
-          </button>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="Applications"
+              className={cn(NAV_ROW, "justify-center gap-0 px-0")}
+            >
+              <AppsGlyph />
+            </button>
+          </DropdownMenuTrigger>
         </SidebarTooltip>
       ) : (
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={FLYOUT_ID}
-          onClick={() => setOpen((held) => !held)}
-          className={cn(
-            "flex h-(--size-row) w-full items-center gap-sm rounded-control border-0",
-            "bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft",
-            "hover:bg-fill",
-          )}
-        >
-          <span className="min-w-0 flex-1 truncate">Applications</span>
-          <IconLayoutGrid className="size-(--size-glyph) shrink-0" aria-hidden />
-        </button>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(
+              "flex h-(--size-row) w-full items-center gap-sm rounded-control border-0",
+              "bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft",
+              "hover:bg-fill data-[state=open]:bg-fill",
+            )}
+          >
+            <span className="min-w-0 flex-1 truncate">Applications</span>
+            <IconLayoutGrid className="size-(--size-glyph) shrink-0" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
       )}
-      {open ? (
-        <div
-          id={FLYOUT_ID}
-          className={cn(
-            "absolute left-full top-0 z-10 flex max-h-96 w-sidebar flex-col py-sm",
-            "rounded-menu border border-edge bg-popover text-popover-foreground animate-raise",
-            "max-narrow:left-0 max-narrow:top-full",
-          )}
-        >
-          <AppsIndex
-            agents={agents}
-            openId={openId}
-            building={building}
-            pinned={pinned}
-            onPin={onPin}
-            onOpen={(agentId) => {
-              setOpen(false);
-              openAgent(agentId);
-            }}
-            onBuild={() => {
-              setOpen(false);
-              onBuild();
-            }}
-          />
-        </div>
-      ) : null}
-    </div>
+      {/* The index is a list of its own rows rather than menu items, so a pick shuts the menu from
+          here — nothing inside it is an item Radix would shut it for. */}
+      <DropdownMenuContent
+        side="right"
+        align="start"
+        container={host}
+        className="max-h-96 w-sidebar p-0 py-sm"
+      >
+        <AppsIndex
+          agents={agents}
+          openId={openId}
+          building={building}
+          pinned={pinned}
+          onPin={onPin}
+          onOpen={(agentId) => {
+            setOpen(false);
+            openAgent(agentId);
+          }}
+          onBuild={() => {
+            setOpen(false);
+            onBuild();
+          }}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -1129,139 +1097,54 @@ function NotShared() {
   return <PaneNote>This conversation is not shared with this account.</PaneNote>;
 }
 
-const RAIL_PANEL_ID = "conversation-settings-flyout";
-
-/** The conversations header and the settings flyout it holds: the same band, the same hover, and
- *  the same panel the Applications header carries, so the two sections read and act as one
- *  system. The rows adjust the rail in place, so the panel stays up while the member reads what
- *  each press did. */
+/** The conversations header and the settings menu it holds: the same band and the same menu the
+ *  Applications header carries, so the two sections read and act as one system. A sort is a pick
+ *  between ladders and a surface is a choice turned on and off, which is why one shuts the menu and
+ *  the other leaves it standing — the surfaces are read as a set, and the rail adjusts behind the
+ *  menu while the member reads what each tick did. */
 function RailSettingsFlyout() {
   const { sort, shown } = useRail();
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (!open) return;
-    const dismiss = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("keydown", dismiss);
-    return () => document.removeEventListener("keydown", dismiss);
-  }, [open]);
+  const host = useDrawerHost();
   return (
-    <div
-      className="relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={RAIL_PANEL_ID}
-        onClick={() => setOpen((held) => !held)}
-        className={cn(
-          "flex h-(--size-row) w-full items-center gap-sm rounded-control border-0",
-          "bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft",
-          "hover:bg-fill",
-        )}
-      >
-        <span className="min-w-0 flex-1 truncate">Conversations</span>
-        <IconAdjustments className="size-(--size-glyph) shrink-0" aria-hidden />
-      </button>
-      {open ? (
-        <div
-          id={RAIL_PANEL_ID}
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
           className={cn(
-            "absolute left-full top-0 z-10 flex min-w-(--container-menu) flex-col gap-px px-sm py-sm",
-            "rounded-menu border border-edge bg-popover text-popover-foreground animate-raise",
-            "max-narrow:left-0 max-narrow:top-full",
+            "flex h-(--size-row) w-full items-center gap-sm rounded-control border-0",
+            "bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft",
+            "hover:bg-fill data-[state=open]:bg-fill",
           )}
         >
-          <PanelSub label="Sort by">
-            <PanelRow active={sort === "recency"} onPick={() => pickRailSort("recency")}>
-              Recency
-            </PanelRow>
-            <PanelRow active={sort === "agent"} onPick={() => pickRailSort("agent")}>
-              App
-            </PanelRow>
-          </PanelSub>
-          <h3 className="m-0 flex h-(--size-row) shrink-0 items-center px-sm font-sans text-label font-medium text-ink-soft">
-            Show
-          </h3>
-          {RAIL_SHOWN_OPTIONS.map((option) => (
-            <PanelRow
-              key={option.surface}
-              active={shown[option.surface]}
-              onPick={() => pickRailShown({ ...shown, [option.surface]: !shown[option.surface] })}
+          <span className="min-w-0 flex-1 truncate">Conversations</span>
+          <IconAdjustments className="size-(--size-glyph) shrink-0" aria-hidden />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="right" align="start" container={host}>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>Sort by</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownMenuRadioGroup
+              value={sort}
+              onValueChange={(value) => pickRailSort(value === "agent" ? "agent" : "recency")}
             >
-              {option.label}
-            </PanelRow>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/** A nested menu inside a flyout panel: the row names the group, and resting on it opens the
- *  group's own panel beside it, the way the panel itself opened beside its header. */
-function PanelSub({ label, children }: { label: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div
-      className="relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-    >
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((held) => !held)}
-        className="flex h-(--size-row) w-full items-center gap-sm rounded-row border-0 bg-transparent px-sm text-left text-label text-ink-soft hover:bg-fill"
-      >
-        <span className="min-w-0 flex-1 truncate">{label}</span>
-        <IconChevronRight className="size-icon shrink-0" aria-hidden />
-      </button>
-      {open ? (
-        /* Placed the way the menu primitives place a submenu: past the parent panel's outer edge
-           — the row's own inset plus the same small offset — with the first row level with its
-           trigger, never over the parent. The offset is padding on the carrier rather than
-           distance, so the pointer's path from the row to the panel never leaves the hover
-           surface. */
-        <div
-          className="absolute left-full -top-sm z-10 pl-[calc(var(--spacing-sm)+var(--spacing-2xs))]"
-        >
-          <div
-            className={cn(
-              "flex min-w-(--container-menu) flex-col gap-px px-sm py-sm",
-              "rounded-menu border border-edge bg-popover text-popover-foreground animate-raise",
-            )}
+              <DropdownMenuRadioItem value="recency">Recency</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="agent">App</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuLabel>Show</DropdownMenuLabel>
+        {RAIL_SHOWN_OPTIONS.map((option) => (
+          <DropdownMenuCheckboxItem
+            key={option.surface}
+            checked={shown[option.surface]}
+            onCheckedChange={(next) => pickRailShown({ ...shown, [option.surface]: next })}
           >
-            {children}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function PanelRow({
-  active,
-  onPick,
-  children,
-}: {
-  active: boolean;
-  onPick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onPick}
-      className="flex h-(--size-row) w-full shrink-0 items-center gap-sm rounded-row border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill"
-    >
-      <span className="min-w-0 flex-1 truncate">{children}</span>
-      <IconCheck className={cn("size-icon shrink-0", !active && "invisible")} aria-hidden />
-    </button>
+            {option.label}
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -1537,4 +1420,3 @@ function SurfaceMark({ conversation }: { conversation: OwnedConversation }) {
     </a>
   );
 }
-

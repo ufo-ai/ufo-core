@@ -109,7 +109,7 @@ const ASKED = {
 
 async function raisedIndex(): Promise<HTMLElement> {
   if (!screen.queryByRole("navigation", { name: "Apps" })) {
-    fireEvent.click(await screen.findByRole("button", { name: "Applications" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Applications" }));
   }
   return agentIndex();
 }
@@ -1006,7 +1006,9 @@ test("a status read that fails after answering keeps polling and recovers", asyn
       });
     };
     await settle(0);
-    fireEvent.click(screen.getByRole("button", { name: "Applications" }));
+    // The menu opens on the pointer press, and `userEvent` cannot make one while this test holds
+    // the clock: the keyboard press is the same act, and it needs no timer to advance.
+    fireEvent.keyDown(screen.getByRole("button", { name: "Applications" }), { key: "Enter" });
     await settle(0);
     const row = () => screen.getByRole("button", { name: /^Research/ });
     expect(row().querySelector(".bg-live")).toBeTruthy();

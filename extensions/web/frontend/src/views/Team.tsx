@@ -26,8 +26,7 @@ import {
 import { DataTable } from "@/kernel/table";
 import { postIntent } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
-
-type Member = { email: string; admin: boolean; seated: boolean };
+import type { Member } from "@/lib/types";
 
 type Roster = { members: Member[]; can_add: boolean };
 
@@ -51,7 +50,26 @@ const ADD_MEMBERS = "add-members";
  *  as the lane's description is how they are told the rest. */
 const ADD_MEMBERS_NOTE = "add-members-note";
 
-const COLUMNS = ["Member", { label: "Role", fact: true }, { label: "Seat", fact: true }];
+/** What a member row states, wherever the workspace lists its members: the address it is held
+ *  under, whether they administer it, and whether they hold a seat. Administration stands its own
+ *  acts after these, so it takes the same track with one column added. */
+export const MEMBER_COLUMNS = [
+  "Member",
+  { label: "Role", fact: true },
+  { label: "Seat", fact: true },
+];
+
+/** The three cells of one member row. A seat is either held or it is not, and it is said the same
+ *  word on every screen that states it. */
+export function MemberCells({ member }: { member: Member }) {
+  return (
+    <>
+      <Td>{member.email}</Td>
+      <TdFact>{member.admin ? "Admin" : "Member"}</TdFact>
+      <TdFact>{member.seated ? "Seated" : "No seat"}</TdFact>
+    </>
+  );
+}
 
 function counted(landed: string[]) {
   return landed.length === 1 ? landed[0] : landed.length + " members added.";
@@ -207,19 +225,13 @@ export function Team({
           return (
             <Section bar={<Filter options={ROLES} value={role} onChange={setRole} />}>
               <DataTable
-                columns={COLUMNS}
+                columns={MEMBER_COLUMNS}
                 rows={found}
                 rowKey={(entry) => entry.email}
                 empty="This workspace has no members yet."
                 note={query || role ? "No member matches this search." : undefined}
               >
-                {(entry) => (
-                  <>
-                    <Td>{entry.email}</Td>
-                    <TdFact>{entry.admin ? "Admin" : "Member"}</TdFact>
-                    <TdFact>{entry.seated ? "Seated" : "No seat"}</TdFact>
-                  </>
-                )}
+                {(entry) => <MemberCells member={entry} />}
               </DataTable>
             </Section>
           );

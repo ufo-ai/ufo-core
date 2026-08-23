@@ -40,7 +40,7 @@ import {
 } from "@/kernel/messages";
 import { PressRow, PRESS_ROW, PRESS_ROW_ARROW } from "@/components/ui/pressrow";
 import { COLUMN } from "@/kernel/pane";
-import { usePanelRead } from "@/kernel/panel";
+import { Empty, usePanelRead } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
@@ -212,16 +212,12 @@ export function Chat({
               </Handoff>
             ) : null}
             {stalled ? (
-              <div className="m-auto max-w-empty text-center text-ink-soft">
+              <Empty>
                 <p>{stalled.title}</p>
                 {stalled.description ? <p>{stalled.description}</p> : null}
-              </div>
+              </Empty>
             ) : null}
-            {showEmpty ? (
-              <div className="m-auto max-w-empty text-center text-ink-soft">
-                No messages in this conversation yet.
-              </div>
-            ) : null}
+            {showEmpty ? <Empty>No messages in this conversation yet.</Empty> : null}
           </MessageLog>
         </TranscriptPane>
       )}
