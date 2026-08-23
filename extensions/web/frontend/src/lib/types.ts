@@ -73,10 +73,12 @@ export type AdminPayload = {
 };
 
 /** A file a message carries — one a turn shared, or one the member attached to their own words.
- *  `preview_url` is a same-origin picture of it: the file itself when it is an image, or the first
- *  page a document was rendered to. `media_type` says which cards the artifacts sidebar can draw as
- *  a document, so pressing one opens it there instead of downloading, and which picture wears a
- *  badge naming the document it came from. A file the member attached lives in the conversation's
+ *  `preview_url` links a picture of it: the file itself when it is an image, or the first page a
+ *  document was rendered to. It carries its origin, like `url` — an app page draws this chat framed
+ *  on its own origin, where a picture named without one resolves against the site rather than the
+ *  route serving it. `media_type` says which cards the artifacts sidebar can draw as a document, so
+ *  pressing one opens it there instead of downloading, and which picture wears a badge naming the
+ *  document it came from. A file the member attached lives in the conversation's
  *  workspace rather than the artifact store, so it carries neither a download `url` nor a size. */
 export type ChatFile = {
   filename: string;

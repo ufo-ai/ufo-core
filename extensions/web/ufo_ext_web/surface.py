@@ -33,7 +33,7 @@ from functools import partial
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -1079,14 +1079,18 @@ def _member_attachments(said: str) -> tuple[str, tuple[str, ...]]:
     return said[: found.start()].rstrip(), paths
 
 
-def _attachment_preview(agent_id: UUID, conversation_id: UUID, path: str) -> str | None:
-    """The same-origin link the portal draws one attached file's picture from, or None for a type
-    the attachment route does not serve. The page's own CSP loads images from its origin alone, so
-    the link travels without a base."""
-    if raster_image_media_type(path) is None:
+def _attachment_preview(
+    public_base_url: str | None, agent_id: UUID, conversation_id: UUID, path: str
+) -> str | None:
+    """The link the chat draws one attached file's picture from, or None for a type the attachment
+    route does not serve and for a deploy that names no public base. The link carries that base
+    because an app page draws the chat framed on its own origin, where a picture named without one
+    resolves against the site rather than the route serving it."""
+    if raster_image_media_type(path) is None or not public_base_url:
         return None
     return (
-        f"{PORTAL_PATH}/agents/{agent_id}/conversations/{conversation_id}/attachments/{quote(path)}"
+        f"{public_base_url.rstrip('/')}{PORTAL_PATH}"
+        f"/agents/{agent_id}/conversations/{conversation_id}/attachments/{quote(path)}"
     )
 
 
@@ -1740,7 +1744,7 @@ async def _transcript_aids(
         files=files,
         apps=drawn,
         connects=await _connect_controls(ctx, conversation_id, turns, viewer),
-        attach=partial(_attachment_preview, agent_id, conversation_id),
+        attach=partial(_attachment_preview, ctx.public_base_url, agent_id, conversation_id),
         run_conversation=any(turn.subagent_profile is not None for turn in turns),
     )
 
@@ -1860,7 +1864,7 @@ async def _conversation_messages(
     }
     latest = await ctx.latest_turn(conversation_id)
     detail = None if latest is None else await ctx.turn_detail(latest)
-    attach = partial(_attachment_preview, agent_id, conversation_id)
+    attach = partial(_attachment_preview, ctx.public_base_url, agent_id, conversation_id)
     if recorded is None:
         rendered: list[dict[str, object]] = []
         earlier = 0
@@ -2732,12 +2736,11 @@ async def _project_slot_context(
                 # so the picture's type is read off the blob the link serves, never off the
                 # member's filename, which for a document names the document.
                 if artifact_preview_url is not None:
-                    parsed = urlsplit(artifact_preview_url)
-                    preview_media_type = raster_image_media_type(parsed.path)
+                    preview_path = urlsplit(artifact_preview_url).path
+                    preview_media_type = raster_image_media_type(preview_path)
                     if preview_media_type is not None:
                         artifact_preview = ImagePreview(
-                            media_type=preview_media_type,
-                            url=urlunsplit(("", "", parsed.path, parsed.query, "")),
+                            media_type=preview_media_type, url=artifact_preview_url
                         )
                 artifacts.append(
                     ConversationArtifact(
@@ -3482,22 +3485,18 @@ async def _pending_prompts(
 
 
 def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, object]:
-    """One shared file as the chat draws it, with a same-origin `preview_url` when the file is
-    itself a picture — the portal draws those inline in the reply, and the page's CSP loads images
-    only from its own origin, so the minted link travels without its base. `media_type` is how the
-    chat knows which cards the artifacts sidebar can draw as a document."""
-    preview_url = None
-    minted = ctx.artifact_preview_link(artifact)
-    if minted is not None:
-        parsed = urlsplit(minted)
-        preview_url = urlunsplit(("", "", parsed.path, parsed.query, ""))
+    """One shared file as the chat draws it, carrying a `preview_url` when the file is itself a
+    picture — the chat draws those inline in the reply. Both links carry their base: the
+    chat is drawn by the portal and by an app page framed on its own origin, so a picture named
+    without one resolves against whichever origin happens to draw it. `media_type` is how the chat
+    knows which cards the artifacts sidebar can draw as a document."""
     return {
         "filename": artifact.filename,
         "subject": artifact.subject,
         "media_type": artifact.media_type,
         "size_bytes": artifact.size_bytes,
         "url": ctx.artifact_link(artifact),
-        "preview_url": preview_url,
+        "preview_url": ctx.artifact_preview_link(artifact),
     }
 
 

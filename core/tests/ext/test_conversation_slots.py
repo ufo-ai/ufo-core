@@ -191,19 +191,33 @@ def test_conversation_artifacts_reject_unsafe_links(url: str) -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "https://example.com/image.png",
+        "/image.png",
         "//example.com/image.png",
-        "/image.png#fragment",
-        "/\\evil.example/image.png",
-        "/%5cevil.example/image.png",
-        "/image\x00.png",
-        "/image%0d.png",
-        "/image\x7f.png",
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "https://user:secret@example.com/image.png",
+        "https://example.com/image.png#fragment",
+        "https://example.com/\\evil.example/image.png",
+        "https://example.com/%5cevil.example/image.png",
+        "https://example.com/image\x00.png",
+        "https://example.com/image%0d.png",
+        "https://example.com/image\x7f.png",
     ],
 )
-def test_image_previews_accept_only_same_origin_root_relative_urls(url: str) -> None:
-    with pytest.raises(ValueError, match="same-origin"):
+def test_image_previews_accept_only_credential_free_http_urls(url: str) -> None:
+    """A picture link names the host serving it, because an app page draws the chat framed on a site
+    origin of its own and resolves a root-relative link against that site."""
+    with pytest.raises(ValueError, match="image preview URL"):
         ImagePreview(media_type="image/png", url=url)
+
+
+def test_an_image_preview_carries_the_link_the_deploy_minted() -> None:
+    assert (
+        ImagePreview(
+            media_type="image/png", url="https://app.example.com/artifacts/a/b.png?exp=1&sig=2"
+        ).url
+        == "https://app.example.com/artifacts/a/b.png?exp=1&sig=2"
+    )
 
 
 @pytest.mark.parametrize(

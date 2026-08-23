@@ -49,19 +49,23 @@ class ImagePreview(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def same_origin_url(cls, value: str) -> str:
+    def drawable_url(cls, value: str) -> str:
+        """A picture is drawn by the portal and by an app page framed on a site origin of its own,
+        so the link names its host: resolved from that page, a root-relative one addresses the site
+        rather than the route serving the bytes. It carries no credentials and no fragment, and
+        nothing a browser reads as an escape out of an attribute."""
         parsed = urlsplit(value)
         decoded = unquote(value)
         if (
-            not value.startswith("/")
-            or value.startswith("//")
-            or parsed.scheme
-            or parsed.netloc
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
             or parsed.fragment
             or "\\" in decoded
             or any(category(char) == "Cc" for char in decoded)
         ):
-            raise ValueError("image preview URL must be same-origin and root-relative")
+            raise ValueError("image preview URL must be an HTTP(S) URL without credentials")
         return value
 
 

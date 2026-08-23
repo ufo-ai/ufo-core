@@ -11,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast, get_args
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -7278,7 +7278,7 @@ async def test_shared_files_stream_and_reload_as_download_links(
     assert streamed["report.pdf"]["url"].startswith("https://web/artifacts/")
     assert streamed["report.pdf"]["preview_url"] is None
     assert streamed["portrait.jpg"]["media_type"] == "image/jpeg"
-    assert streamed["portrait.jpg"]["preview_url"].startswith("/artifacts/")
+    assert streamed["portrait.jpg"]["preview_url"].startswith("https://web/artifacts/")
     assert "&preview=" in streamed["portrait.jpg"]["preview_url"]
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     loaded = await client.get(
@@ -7295,7 +7295,79 @@ async def test_shared_files_stream_and_reload_as_download_links(
     assert reloaded["report.pdf"]["media_type"] == "application/pdf"
     assert reloaded["report.pdf"]["preview_url"] is None
     assert reloaded["portrait.jpg"]["media_type"] == "image/jpeg"
-    assert reloaded["portrait.jpg"]["preview_url"].startswith("/artifacts/")
+    assert reloaded["portrait.jpg"]["preview_url"].startswith("https://web/artifacts/")
+
+
+FRAMED_PAGE_ORIGIN = "https://siwnfzm3trn3jahsxigamfhuh56n74adgc6q.sites.example/"
+"""The origin an app page is framed on: a site label of its own, never the app host. A picture link
+is read from here in `test_chat_pictures_resolve_from_a_page_framed_on_its_own_origin`."""
+
+
+async def test_chat_pictures_resolve_from_a_page_framed_on_its_own_origin(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """An app page draws this chat framed on a site origin of its own, so every picture link a file
+    carries names the host that serves it. Resolved from that page, a link without its base
+    addresses the site — where the ingress answers out of a bundle manifest that holds no picture —
+    so the file the turn shared and the one the member attached are both read here as that page
+    reads them."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="here is the portrait"),
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=(
+                        f"<context>\nmessage_ref: {turn_id}\n</context>\nwhat is this\n\n"
+                        "[Attached files, saved in the workspace: web-inbox/lights.png]"
+                    ),
+                ),
+                Message(role="assistant", content="here is the portrait"),
+            ),
+        ),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.shared_artifact).values(
+                turn_id=turn_id,
+                blob_key=f"artifacts/{uuid4()}/portrait.jpg",
+                workspace_id=workspace_id,
+                filename="portrait.jpg",
+                subject="the portrait",
+                media_type="image/jpeg",
+                size_bytes=5,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert loaded.status_code == 200
+    drawn = [
+        file
+        for message in loaded.json()["messages"]
+        for file in message.get("files", ())
+        if file["preview_url"] is not None
+    ]
+    assert {file["filename"] for file in drawn} == {"lights.png", "portrait.jpg"}
+    for file in drawn:
+        assert urljoin(FRAMED_PAGE_ORIGIN, file["preview_url"]) == file["preview_url"]
+        assert file["preview_url"].startswith("https://web/")
 
 
 async def test_a_created_app_streams_and_reloads_as_a_card_on_the_reply_that_made_it(
@@ -7596,7 +7668,7 @@ async def test_transcript_reply_keeps_its_files_after_a_later_turn(
     (file,) = replies[0]["files"]
     assert file["filename"] == "portrait.jpg"
     assert file["url"].startswith("https://web/artifacts/")
-    assert file["preview_url"].startswith("/artifacts/")
+    assert file["preview_url"].startswith("https://web/artifacts/")
     assert "files" not in replies[1]
 
 
@@ -7655,7 +7727,9 @@ def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> N
             ),
             Message(role="assistant", content="a lamp and a paper"),
         ),
-        attach=lambda path: web_surface._attachment_preview(agent_id, conversation_id, path),
+        attach=lambda path: web_surface._attachment_preview(
+            "https://web", agent_id, conversation_id, path
+        ),
     )
     assert rendered[0] == {
         "role": "user",
@@ -7666,7 +7740,7 @@ def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> N
                 "url": None,
                 "media_type": "image/gif",
                 "preview_url": (
-                    f"/surface/web/agents/{agent_id}/conversations/{conversation_id}"
+                    f"https://web/surface/web/agents/{agent_id}/conversations/{conversation_id}"
                     "/attachments/web-inbox/lights.gif"
                 ),
             },
@@ -12461,7 +12535,7 @@ async def test_durable_shared_files_fill_the_typed_artifacts_slot(
     assert artifact["url"].startswith("https://web/")
     assert artifact["preview"]["type"] == "image"
     assert artifact["preview"]["media_type"] == "image/png"
-    assert artifact["preview"]["url"].startswith("/artifacts/")
+    assert artifact["preview"]["url"].startswith("https://web/artifacts/")
     assert "&preview=" in artifact["preview"]["url"]
     assert "preview=" not in urlsplit(artifact["url"]).query
     preview = await client.get(artifact["preview"]["url"])

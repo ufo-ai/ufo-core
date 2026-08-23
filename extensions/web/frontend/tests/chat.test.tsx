@@ -1922,7 +1922,7 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
         filename: "portrait.jpg",
         url: "/dl/portrait.jpg",
         size_bytes: 88_000,
-        preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+        preview_url: "https://web/artifacts/preview/portrait.jpg?token=signed",
         media_type: "image/jpeg",
       },
       {
@@ -1972,7 +1972,7 @@ test("a reloaded conversation draws files on the earlier reply that shared them"
               filename: "portrait.jpg",
               url: "/dl/portrait.jpg",
               size_bytes: 88_000,
-              preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+              preview_url: "https://web/artifacts/preview/portrait.jpg?token=signed",
               media_type: "image/jpeg",
             },
             {
@@ -2075,7 +2075,7 @@ test("an image the turn shares stands inline in the answer and opens the artifac
             preview: {
               type: "image",
               media_type: "image/jpeg",
-              url: "/artifacts/preview/portrait.jpg?token=signed",
+              url: "https://web/artifacts/preview/portrait.jpg?token=signed",
             },
           },
         ],
@@ -2103,7 +2103,7 @@ test("an image the turn shares stands inline in the answer and opens the artifac
         filename: "portrait.jpg",
         url: "/dl/portrait.jpg",
         size_bytes: 88_000,
-        preview_url: "/artifacts/preview/portrait.jpg?token=signed",
+        preview_url: "https://web/artifacts/preview/portrait.jpg?token=signed",
         media_type: "image/jpeg",
       },
       {
@@ -2123,7 +2123,7 @@ test("an image the turn shares stands inline in the answer and opens the artifac
   });
 
   const picture = await screen.findByRole("img", { name: "portrait.jpg" });
-  expect(picture.getAttribute("src")).toBe("/artifacts/preview/portrait.jpg?token=signed");
+  expect(picture.getAttribute("src")).toBe("https://web/artifacts/preview/portrait.jpg?token=signed");
   expect(screen.queryByRole("link", { name: "portrait.jpg" })).toBeNull();
   expect(screen.getByRole("link", { name: "report.csv" })).toBeTruthy();
 
