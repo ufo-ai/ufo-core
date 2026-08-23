@@ -92,6 +92,7 @@ import {
   type RailSort,
 } from "@/lib/rail";
 import {
+  ADMIN_HASH,
   AGENTS_HASH,
   BUILDER_HASH,
   HOME_HASH,
@@ -465,7 +466,7 @@ export function App({ agents, member, onAgents }: AppProps) {
     [stepPlace],
   );
 
-  const openAdmin = useCallback(() => go("#/admin", { kind: "admin" }), [go]);
+  const openAdmin = useCallback(() => go(ADMIN_HASH, { kind: "admin" }), [go]);
 
   const created = useCallback(
     (agent: Agent, conversationId: string, title: string) => {
@@ -1324,178 +1325,190 @@ function RoutedPane({
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, OwnedConversation>>;
 }) {
-  if (route.kind === "admin") return <Admin />;
-  if (route.kind === "bad-link") return <PaneNote>This link is not valid.</PaneNote>;
-  if (route.kind === "workspace") {
-    return (
-      <TabbedPane
-        group="workspace"
-        tabs={WORKSPACE_TABS}
-        views={WORKSPACE_VIEWS}
-        view={route.view}
-        place={route.place}
-        onPlace={onPlaceWorkspace}
-      />
-    );
-  }
-  if (route.kind === "section") {
-    const view = SECTION_VIEWS[route.section];
-    if (view === undefined) {
-      const shipped = agents.find((agent) => agent.app === route.section);
-      if (!shipped) return <PaneNote>This link is not valid.</PaneNote>;
+  switch (route.kind) {
+    case "admin":
+      return <Admin />;
+    case "bad-link":
+      return <PaneNote>This link is not valid.</PaneNote>;
+    case "workspace":
       return (
-        <SectionLanding
-          agentId={shipped.id}
+        <TabbedPane
+          group="workspace"
+          tabs={WORKSPACE_TABS}
+          views={WORKSPACE_VIEWS}
+          view={route.view}
           place={route.place}
-          onLand={onOpenAgentPlace}
+          onPlace={onPlaceWorkspace}
+        />
+      );
+    case "section": {
+      const view = SECTION_VIEWS[route.section];
+      if (view === undefined) {
+        const shipped = agents.find((agent) => agent.app === route.section);
+        if (!shipped) return <PaneNote>This link is not valid.</PaneNote>;
+        return (
+          <SectionLanding agentId={shipped.id} place={route.place} onLand={onOpenAgentPlace} />
+        );
+      }
+      return (
+        <TabbedPane
+          group="section"
+          tabs={[route.section]}
+          views={{ [route.section]: view } as Record<Section, PaneView>}
+          view={route.section}
+          place={route.place}
+          onPlace={onPlaceSection}
         />
       );
     }
-    return (
-      <TabbedPane
-        group="section"
-        tabs={[route.section]}
-        views={{ [route.section]: view } as Record<Section, PaneView>}
-        view={route.section}
-        place={route.place}
-        onPlace={onPlaceSection}
-      />
-    );
-  }
-  if (route.kind === "agents" || route.kind === "agent") {
-    const selected =
-      route.kind === "agent" ? (agents.find((entry) => entry.id === route.agentId) ?? null) : null;
-    if (route.kind === "agent" && !selected) return <PaneNote>No such app.</PaneNote>;
-    const shown = selected ?? mainAgent;
-    return (
-      <Pane
-        opens={route.kind === "agent" ? (route.place.opens ?? []) : []}
-        onMove={(opens) =>
-          route.kind === "agent"
-            ? onPlaceAgent({ ...route.place, opens }, "replace")
-            : shown
-              ? onOpenAgentPlace(shown.id, { opens })
-              : undefined
-        }
-      >
-        <Agents
-          member={member}
-          selected={selected}
-          build={route.kind === "agents" && route.build === true}
-          chats={rail.phase === "ready" ? rail.rows : null}
-          onCreated={onCreated}
-          place={route.kind === "agent" ? route.place : {}}
-          /* The bare apps hash shows the main agent without having navigated to it, so a place set
-             from that screen has no agent in the address to hang on: it names the agent it is
-             about and lands on that agent's own address. Answering nothing would leave the pane
-             unable to open anything on the one screen the flyout's own exit opens. */
-          onPlace={(place, step) =>
+    case "agents":
+    case "agent": {
+      const selected =
+        route.kind === "agent"
+          ? (agents.find((entry) => entry.id === route.agentId) ?? null)
+          : null;
+      if (route.kind === "agent" && !selected) return <PaneNote>No such app.</PaneNote>;
+      const shown = selected ?? mainAgent;
+      return (
+        <Pane
+          opens={route.kind === "agent" ? (route.place.opens ?? []) : []}
+          onMove={(opens) =>
             route.kind === "agent"
-              ? onPlaceAgent(place, step)
+              ? onPlaceAgent({ ...route.place, opens }, "replace")
               : shown
-                ? onOpenAgentPlace(shown.id, place)
+                ? onOpenAgentPlace(shown.id, { opens })
                 : undefined
           }
-          onAgents={onAgents}
-          onExitBuilder={onExitBuilder}
-          onForwardAgents={onForwardAgents}
-          buildWanted={buildWanted}
-        />
-      </Pane>
-    );
-  }
-  if (route.kind === "conversation-slot") {
-    const agent = agents.find((entry) => entry.id === route.agentId);
-    if (!agent) return <PaneNote>No such app.</PaneNote>;
-    return (
-      <ConversationSlotPane
-        agent={agent}
-        conversationId={route.conversationId}
-        slot={route.slot}
-        rootConversationId={route.rootConversationId}
-        onOpenAgent={onOpenAgent}
-      />
-    );
-  }
-  if (route.kind === "chat") {
-    const row = rail.rows.find(
-      (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
-    );
-    const linkedConversation = linked[route.conversationId];
-    if (!row && linkedConversation) {
-      const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent.id);
-      if (!linkedAgent) return <PaneNote>No such app.</PaneNote>;
-      if (!linkedConversation.readable && !linkedConversation.disclosable) return <NotShared />;
+        >
+          <Agents
+            member={member}
+            selected={selected}
+            build={route.kind === "agents" && route.build === true}
+            chats={rail.phase === "ready" ? rail.rows : null}
+            onCreated={onCreated}
+            place={route.kind === "agent" ? route.place : {}}
+            /* The bare apps hash shows the main agent without having navigated to it, so a
+               place set from that screen has no agent in the address to hang on: it names the
+               agent it is about and lands on that agent's own address. Answering nothing would
+               leave the pane unable to open anything on the one screen the flyout's own exit
+               opens. */
+            onPlace={(place, step) =>
+              route.kind === "agent"
+                ? onPlaceAgent(place, step)
+                : shown
+                  ? onOpenAgentPlace(shown.id, place)
+                  : undefined
+            }
+            onAgents={onAgents}
+            onExitBuilder={onExitBuilder}
+            onForwardAgents={onForwardAgents}
+            buildWanted={buildWanted}
+          />
+        </Pane>
+      );
+    }
+    case "conversation-slot": {
+      const agent = agents.find((entry) => entry.id === route.agentId);
+      if (!agent) return <PaneNote>No such app.</PaneNote>;
       return (
-        <LinkedPane
-          key={linkedConversation.id}
-          agent={linkedAgent}
-          conversation={linkedConversation}
+        <ConversationSlotPane
+          agent={agent}
+          conversationId={route.conversationId}
           slot={route.slot}
-          onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
+          rootConversationId={route.rootConversationId}
           onOpenAgent={onOpenAgent}
         />
       );
     }
-    const listedAgent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;
-    const agent =
-      listedAgent ??
-      (row && row.surface.startsWith("extension:")
-        ? { id: row.agent_id, name: row.agent_name, model: row.agent_model ?? "" }
-        : undefined);
-    if (!row || !agent) {
-      if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;
-      if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
-      const outcome = sought[route.conversationId];
-      if (!outcome) return <PaneNote>Loading…</PaneNote>;
-      if (outcome.kind === "signed-out") {
+    case "chat": {
+      const row = rail.rows.find(
+        (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
+      );
+      const linkedConversation = linked[route.conversationId];
+      if (!row && linkedConversation) {
+        const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent.id);
+        if (!linkedAgent) return <PaneNote>No such app.</PaneNote>;
+        if (!linkedConversation.readable && !linkedConversation.disclosable) return <NotShared />;
         return (
-          <Pane className={COLUMN}>
-            <div className="m-auto">
-              <SignIn />
-            </div>
-          </Pane>
+          <LinkedPane
+            key={linkedConversation.id}
+            agent={linkedAgent}
+            conversation={linkedConversation}
+            slot={route.slot}
+            onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
+            onOpenAgent={onOpenAgent}
+          />
         );
       }
-      if (outcome.kind === "failed") return <PaneNote>{outcome.message}</PaneNote>;
-      return <NotShared />;
+      const listedAgent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;
+      const agent =
+        listedAgent ??
+        (row && row.surface.startsWith("extension:")
+          ? { id: row.agent_id, name: row.agent_name, model: row.agent_model ?? "" }
+          : undefined);
+      if (!row || !agent) {
+        if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;
+        if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
+        const outcome = sought[route.conversationId];
+        if (!outcome) return <PaneNote>Loading…</PaneNote>;
+        if (outcome.kind === "signed-out") {
+          return (
+            <Pane className={COLUMN}>
+              <div className="m-auto">
+                <SignIn />
+              </div>
+            </Pane>
+          );
+        }
+        if (outcome.kind === "failed") return <PaneNote>{outcome.message}</PaneNote>;
+        return <NotShared />;
+      }
+      return (
+        <ChatPane
+          key={row.conversation_id}
+          agent={agent}
+          member={member}
+          conversationId={row.conversation_id}
+          onActivity={onActivity}
+          title={row.title}
+          conversationOnly={!listedAgent}
+          onOpenAgent={onOpenAgent}
+          slot={route.slot}
+          onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
+        />
+      );
     }
-    return (
-      <ChatPane
-        key={row.conversation_id}
-        agent={agent}
-        member={member}
-        conversationId={row.conversation_id}
-        onActivity={onActivity}
-        title={row.title}
-        conversationOnly={!listedAgent}
-        onOpenAgent={onOpenAgent}
-        slot={route.slot}
-        onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
-      />
-    );
+    /* The shell draws the first run itself, above this dispatch, and sends a workspace with no main
+       agent home, so `first-run` reaches here on neither path. It is answered all the same, because
+       every kind the table declares is answered here or the switch does not compile. */
+    case "home":
+    case "first-run":
+    case "new-chat": {
+      const agent =
+        route.kind === "new-chat"
+          ? agents.find((entry) => entry.id === route.agentId)
+          : (mainAgent ?? undefined);
+      if (!agent) return <PaneNote>No such app.</PaneNote>;
+      // One start screen, whichever agent it names. A route naming another agent renames the one
+      // this screen stands for, and a key carrying that agent would remount the box on every
+      // rename — a fresh box holds the draft again but not the member's place in it, and the
+      // cursor lands back at the first character. The chat state and the draft are keyed by the
+      // agent inside it instead, and its composer takes a pending ask on the agent it is renamed
+      // to, because no mount comes to read one handed to the agent the route has just named.
+      return (
+        <ChatPane
+          key="new"
+          agent={agent}
+          member={member}
+          conversationId={null}
+          onCreated={(conversationId, title) => onCreated(agent, conversationId, title)}
+          onActivity={onActivity}
+        />
+      );
+    }
   }
-  const agent =
-    route.kind === "new-chat"
-      ? agents.find((entry) => entry.id === route.agentId)
-      : (mainAgent ?? undefined);
-  if (!agent) return <PaneNote>No such app.</PaneNote>;
-  // One start screen, whichever agent it names. A route naming another agent renames the one this
-  // screen stands for, and a key carrying that agent would remount the box on every rename — a
-  // fresh box holds the draft again but not the member's place in it, and the cursor lands back at
-  // the first character. The chat state and the draft are keyed by the agent inside it instead, and
-  // its composer takes a pending ask on the agent it is renamed to, because no mount comes to read
-  // one handed to the agent the route has just named.
-  return (
-    <ChatPane
-      key="new"
-      agent={agent}
-      member={member}
-      conversationId={null}
-      onCreated={(conversationId, title) => onCreated(agent, conversationId, title)}
-      onActivity={onActivity}
-    />
-  );
+  const missed: never = route;
+  return missed;
 }
 
 /** A conversation another surface holds, read in the portal: the thread pane a portal chat wears,

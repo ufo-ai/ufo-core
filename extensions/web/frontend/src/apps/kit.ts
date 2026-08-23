@@ -93,7 +93,16 @@ import { cn } from "@/lib/cn";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Markdown } from "@/lib/markdown";
 import { Moment, day } from "@/lib/moments";
-import { agentHash, chatHash, sectionHash } from "@/lib/route";
+import {
+  agentHash,
+  chatHash,
+  conversationSlotHash,
+  newChatHash,
+  parseHash,
+  routeIs,
+  sectionHash,
+  workspaceHash,
+} from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { ChatPane } from "@/views/ChatPane";
 
@@ -230,9 +239,17 @@ export {
   Markdown,
   Moment,
   day,
+  /* The route table as page API: every builder it declares, the read that answers an address, and
+     the test that says which kind a route is. A page compiles in the browser against this surface,
+     so a builder it cannot reach is an address it spells by hand instead. */
   agentHash,
   chatHash,
+  conversationSlotHash,
+  newChatHash,
+  parseHash,
+  routeIs,
   sectionHash,
+  workspaceHash,
   formatSize,
   ChatPane,
 };

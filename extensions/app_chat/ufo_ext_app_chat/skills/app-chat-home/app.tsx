@@ -19,6 +19,7 @@ const {
   mountApp,
   navigate,
   onOpenTarget,
+  routeIs,
   useAppLinks,
   useCallback,
   useEffect,
@@ -90,15 +91,15 @@ function ChatApp({
   useAppLinks(
     useCallback(
       (route) => {
-        if (route.kind === "chat") {
+        if (routeIs(route, "chat")) {
           place(route.conversationId);
           return true;
         }
-        if (route.kind === "new-chat") {
+        if (routeIs(route, "new-chat")) {
           place(COMPOSE);
           return true;
         }
-        if (route.kind === "home") {
+        if (routeIs(route, "home")) {
           place(null);
           return true;
         }

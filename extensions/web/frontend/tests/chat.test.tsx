@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import type { EarlierMessages } from "@/lib/earlier";
+import { conversationSlotHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
 
 import {
@@ -1359,8 +1360,7 @@ test.each([
   [200, { type: "changes", changes: [], truncated: true }, "Some changes may not be shown."],
   [404, null, "This conversation is not shared with you."],
 ])("changes renders status %s", async (status, payload, message) => {
-  location.hash =
-    "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/changes";
+  location.hash = conversationSlotHash(AGENT.id, CONVO_ID, "changes");
   wire({
     ["/conversations/" + CONVO_ID + "/slots/changes"]: () =>
       payload === null ? new Response("no", { status }) : json(payload),
@@ -1373,8 +1373,7 @@ test.each([
 });
 
 test("changes poll after another file result lands", async () => {
-  location.hash =
-    "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/changes";
+  location.hash = conversationSlotHash(AGENT.id, CONVO_ID, "changes");
   let loads = 0;
   wire({
     ["/conversations/" + CONVO_ID + "/slots/changes"]: () => {
@@ -1442,8 +1441,7 @@ test("slot counts poll when a turn settles", async () => {
 test("a slot URL opens a conversation absent from the chat rail", async () => {
   const child = "66666666-6666-4666-8666-666666666666";
   const root = "77777777-7777-4777-8777-777777777777";
-  location.hash =
-    "#/agents/" + AGENT.id + "/conversations/" + child + "/slots/changes?root=" + root;
+  location.hash = conversationSlotHash(AGENT.id, child, "changes", root);
   wire({
     ["/conversations/" + child + "/slots/changes?root=" + root]: () =>
       json({

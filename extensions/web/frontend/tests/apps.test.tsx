@@ -272,3 +272,18 @@ test("an app's TSX page compiles in the browser and runs against the kit global"
   expect(spoken).toEqual(["compiled:function"]);
   delete (window as { UfoAppKit?: unknown }).UfoAppKit;
 });
+
+/** A page spells no address by hand: every builder the route table declares stands on the kit, so a
+ *  builder that is renamed breaks the page at `tsc` rather than inside a frame at runtime. */
+test("the kit publishes every route builder and the route-kind test", async () => {
+  vi.resetModules();
+  const kit = (await import("@/apps/kit")) as unknown as Record<string, unknown>;
+  const route = (await import("@/lib/route")) as unknown as Record<string, unknown>;
+  const builders = Object.keys(route).filter(
+    (name) => name.endsWith("Hash") && typeof route[name] === "function",
+  );
+
+  expect(builders.length).toBeGreaterThan(0);
+  for (const name of builders) expect(kit[name]).toBe(route[name]);
+  expect(kit.routeIs).toBe(route.routeIs);
+});

@@ -7,11 +7,17 @@ import type { Placement } from "@/kernel/pager";
 import { usePlaceRecorder } from "@/kernel/place";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 import {
+  ADMIN_HASH,
+  AGENTS_HASH,
+  BUILDER_HASH,
+  FIRST_RUN_HASH,
   agentHash,
   artifactTarget,
   bootRoute,
   chatHash,
+  conversationSlotHash,
   parseHash,
+  routeIs,
   sectionHash,
   workspaceHash,
   type PlaceStep,
@@ -125,10 +131,63 @@ test("a workspace tab and a section carry the same place and parse back to it", 
     section: "connectors",
     place,
   });
-  expect(parseHash("#/workspace/artifacts")).toEqual({ kind: "home" });
   expect(parseHash("#/artifacts")).toEqual({ kind: "section", section: "artifacts", place: {} });
-  expect(parseHash("#/sites")).toEqual({ kind: "home" });
-  expect(parseHash("#/memory")).toEqual({ kind: "home" });
+  expect(parseHash("#/sites")).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/memory")).toEqual({ kind: "bad-link" });
+});
+
+/** A screen that left the workspace tabs kept its name, and the links members already hold spell
+ *  the address it had then. The table reads that address as the section holding the same screen. */
+test("a screen moved off the workspace tabs still answers at the address it had", () => {
+  expect(parseHash("#/workspace/connectors?q=slack")).toEqual({
+    kind: "section",
+    section: "connectors",
+    place: { q: "slack" },
+  });
+  expect(parseHash("#/workspace/artifacts")).toEqual({
+    kind: "section",
+    section: "artifacts",
+    place: {},
+  });
+  expect(parseHash("#/workspace/nothing")).toEqual({ kind: "bad-link" });
+});
+
+/** One table row holds the pattern, the read and the builder for a route, so every address the
+ *  portal writes is one its own read answers with the route that wrote it. */
+test("a conversation slot has a builder, and it writes the address its own read takes", () => {
+  const root = "99999999-9999-4999-8999-999999999999";
+  expect(conversationSlotHash(AGENT.id, CONVO_ID, "changes")).toBe(
+    "#/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/changes",
+  );
+  expect(parseHash(conversationSlotHash(AGENT.id, CONVO_ID, "changes", root))).toEqual({
+    kind: "conversation-slot",
+    agentId: AGENT.id,
+    conversationId: CONVO_ID,
+    slot: "changes",
+    rootConversationId: root,
+  });
+});
+
+/** A screen with nothing to carry used to be matched by whole-string equality, so a link that
+ *  arrived with anything after the path — a mail tracker, a copied query — opened the home
+ *  composer instead of the screen the member asked for. */
+test("a screen that carries no place is read whatever the address arrived holding", () => {
+  expect(parseHash(ADMIN_HASH + "?x=1")).toEqual({ kind: "admin" });
+  expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({ kind: "agents" });
+  expect(parseHash(BUILDER_HASH + "?x=1")).toEqual({ kind: "agents", build: true });
+  expect(parseHash(FIRST_RUN_HASH + "?x=1")).toEqual({ kind: "first-run" });
+  expect(parseHash("")).toEqual({ kind: "home" });
+  expect(parseHash("#")).toEqual({ kind: "home" });
+  expect(parseHash("#/")).toEqual({ kind: "home" });
+});
+
+/** The kind test the kit publishes: a page holds no route type at runtime, and this is the one
+ *  answer it asks for rather than spelling the kinds again. */
+test("a route answers which kind it is, and narrows to it", () => {
+  const route = parseHash(chatHash(CONVO_ID));
+  expect(routeIs(route, "chat")).toBe(true);
+  expect(routeIs(route, "home")).toBe(false);
+  expect(routeIs(route, "chat") && route.conversationId).toBe(CONVO_ID);
 });
 
 test("the memory hash carries its place and parses back to it", () => {
@@ -352,9 +411,9 @@ test("paging with slots standing pushes and leaves nothing to unwind", () => {
 });
 
 test("a hash under the torn-out subagent namespace names no route", () => {
-  expect(parseHash("#/subagents/deep_research")).toEqual({ kind: "home" });
+  expect(parseHash("#/subagents/deep_research")).toEqual({ kind: "bad-link" });
   expect(parseHash("#/subagents/deep_research/conversations/" + CONVO_ID)).toEqual({
-    kind: "home",
+    kind: "bad-link",
   });
 });
 

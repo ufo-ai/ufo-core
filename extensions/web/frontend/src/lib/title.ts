@@ -32,6 +32,8 @@ export function pageTitle(
   return titled(...trail.filter((part): part is string => Boolean(part)));
 }
 
+/** Where the member is, one arm per kind the route table declares. The `never` at the end is what
+ *  makes a route the table gains a compile error here, instead of a tab that says `undefined`. */
 function where(
   route: Route,
   agents: Agent[],
@@ -73,4 +75,6 @@ function where(
     case "bad-link":
       return [INVALID_LINK];
   }
+  const missed: never = route;
+  return missed;
 }
