@@ -336,3 +336,45 @@ def test_daytona_image_bakes_the_same_layers_as_the_dockerfile() -> None:
     ):
         assert command in rendered
     assert f"USER {RUNTIME_USER}" in rendered
+
+
+def test_daytona_publish_boots_nothing_for_a_standing_active_snapshot(monkeypatch) -> None:
+    """The verify sandbox spends the organization's one memory budget, which the live fleet is
+    also spending, so a republish with nothing changed must create nothing and boot nothing — an
+    active digest-named snapshot is current by construction."""
+    from daytona_api_client import SnapshotState
+
+    acts: list[tuple[str, str]] = []
+    states = {
+        build_template.daytona_snapshot_name("small"): SnapshotState.ACTIVE,
+        build_template.daytona_snapshot_name("medium"): SnapshotState.INACTIVE,
+    }
+
+    class Snapshots:
+        def get(self, name):
+            if name in states:
+                return SimpleNamespace(state=states[name])
+            raise build_template.DaytonaNotFoundError(f"no snapshot {name}")
+
+        def create(self, params, on_logs):
+            acts.append(("create", params.name))
+
+        def activate(self, snapshot):
+            acts.append(("activate", "medium"))
+
+    monkeypatch.setattr(build_template, "Daytona", lambda: SimpleNamespace(snapshot=Snapshots()))
+    monkeypatch.setattr(
+        build_template,
+        "verify_daytona_snapshot",
+        lambda daytona, name: acts.append(("verify", name)),
+    )
+
+    build_template.build_daytona_snapshots()
+
+    large = build_template.daytona_snapshot_name("large")
+    assert acts == [
+        ("activate", "medium"),
+        ("verify", build_template.daytona_snapshot_name("medium")),
+        ("create", large),
+        ("verify", large),
+    ]

@@ -358,10 +358,12 @@ def daytona_image(size: str) -> DaytonaImage:
 
 
 def build_daytona_snapshots() -> None:
-    """Publish one snapshot per tier from the shared definition, verify each by booting it and
-    running the baked-tool readiness probe, and print the DAYTONA_SNAPSHOTS wire line. Digest-named
-    means an existing active snapshot is current by construction, so a republish with nothing
-    changed creates nothing; one that fell inactive (two weeks unused) is reactivated."""
+    """Publish one snapshot per tier from the shared definition, verify a snapshot this run
+    created or reactivated by booting it and running the baked-tool readiness probe, and print the
+    DAYTONA_SNAPSHOTS wire line. Digest-named means an existing active snapshot is current by
+    construction, so a republish with nothing changed creates nothing and boots nothing — the
+    verify sandbox draws from the organization's one memory budget, which the live fleet is
+    spending, so a boot happens only where there is something new to prove."""
     daytona = Daytona()
     references = []
     for size, sizing in DAYTONA_TIERS.items():
@@ -378,9 +380,10 @@ def build_daytona_snapshots() -> None:
                 ),
                 on_logs=print,
             )
+            verify_daytona_snapshot(daytona, name)
         elif snapshot.state != SnapshotState.ACTIVE:
             daytona.snapshot.activate(snapshot)
-        verify_daytona_snapshot(daytona, name)
+            verify_daytona_snapshot(daytona, name)
         references.append(f"{size}={name}")
     print(",".join(references))
 
