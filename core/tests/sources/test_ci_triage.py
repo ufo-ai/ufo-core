@@ -11,6 +11,8 @@ CROSS_CUTTING = ("testsupport/**", ".github/**", "*")
 CHECKS_ONLY_ROOTS = frozenset({"client", "docs"})
 GATED_JOBS = {
     "checks": "checks",
+    "web": "checks",
+    "test-shard": "checks",
     "wheel": "wheel",
     "control-test": "control",
     "rls": "control",
