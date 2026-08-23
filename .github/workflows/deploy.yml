@@ -576,9 +576,7 @@ jobs:
             LOCK=false
           fi
           terraform plan -input=false -no-color -lock="$LOCK" -lock-timeout=10m \
-            -target=module.testing -target=cloudflare_ruleset.portal_origin_cache \
-            -target=cloudflare_zone_setting.ufo_browser_cache_ttl \
-            -out="$RUNNER_TEMP/edge.tfplan"
+            -target=module.testing -out="$RUNNER_TEMP/edge.tfplan"
 
       - name: Reject destructive changes
         working-directory: infra/envs/edge

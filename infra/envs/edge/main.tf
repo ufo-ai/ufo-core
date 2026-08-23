@@ -45,30 +45,6 @@ resource "cloudflare_zone_setting" "always_use_https" {
   depends_on = [cloudflare_ruleset.flyingobject_redirect]
 }
 
-# The zone's cache-settings phase for the portal hosts, held empty: the portal rides Cloudflare's
-# default caching, extension-matched edge entries and the zone browser TTL included, so a portal
-# asset can sit in a browser for that TTL after a deploy. The ruleset resource stands even with no
-# rules because the deploy pipeline applies this stack by target, and a rule can only be added or
-# removed through an address the pipeline already names.
-resource "cloudflare_ruleset" "portal_origin_cache" {
-  zone_id = data.cloudflare_zone.ufo_ai.id
-  name    = "portal host cache settings"
-  kind    = "zone"
-  phase   = "http_request_cache_settings"
-}
-
-# Browsers cache what the origin says, not a zone-stamped TTL. The portal's assets ship `no-cache`
-# plus a content ETag so a deploy is visible on the next revalidation; a zone TTL rewriting that to
-# hours is how a rolled-out fix keeps failing in every browser that holds the old copy. The edge
-# keeps caching under HTTP's own rules — `no-cache` stores and revalidates per request, so edge
-# entries refresh on the first request after a roll and the session gate still answers every
-# revalidation.
-resource "cloudflare_zone_setting" "ufo_browser_cache_ttl" {
-  zone_id    = data.cloudflare_zone.ufo_ai.id
-  setting_id = "browser_cache_ttl"
-  value      = 0
-}
-
 module "prod" {
   source = "../../modules/edge"
 

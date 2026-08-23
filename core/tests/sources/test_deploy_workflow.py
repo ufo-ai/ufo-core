@@ -1326,11 +1326,7 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
         (
             "deploy.yml",
             "edge",
-            (
-                "module.testing",
-                "cloudflare_ruleset.portal_origin_cache",
-                "cloudflare_zone_setting.ufo_browser_cache_ttl",
-            ),
+            ("module.testing",),
             "edge",
             "Reject destructive changes",
             "Terraform apply",
