@@ -27,6 +27,7 @@ use deadpool_postgres::Pool;
 use uuid::Uuid;
 
 use crate::email::{EmailSender, SendError};
+use crate::gateway::INVITATION_LOGIN_PATH;
 use crate::shared::{Invitation, SeatError, SharedWorkspaces};
 use crate::web::LOGO_PNG_PATH;
 
@@ -80,7 +81,7 @@ pub const MAX_LABEL_CHARS: usize = 253;
 
 pub const INVITATION_SUBJECT: &str = "You were added to a ufo workspace";
 pub const INVITATION_BODY: &str = "{invited_by} added you to the {workspace_label} workspace \
-                                   on ufo.\n\nSign in as {email} at https://{apex_host}/login.\n";
+                                   on ufo.\n\nSign in as {email} at https://{apex_host}{sign_in_path}\n";
 
 /// The same message with the sign-in page's own look: its surface, its card, its button.
 ///
@@ -108,7 +109,7 @@ pub const INVITATION_HTML: &str = r##"<!doctype html>
 <p style="margin:0 0 20px;font:14px/1.5 system-ui,sans-serif;color:#919090;">Sign in as {email}.</p>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
 <tr><td align="center" bgcolor="#191A1A" style="border-radius:4px;">
-<a href="https://{apex_host}/login"
+<a href="https://{apex_host}{sign_in_path}"
    style="display:block;padding:10px 18px;font:500 15px/1.5 system-ui,sans-serif;color:#FAF9F7;text-decoration:none;">Sign in</a>
 </td></tr></table>
 </td></tr></table>
@@ -554,12 +555,14 @@ impl InviteDeliveries {
             .replace("{invited_by}", &delivery.invited_by)
             .replace("{workspace_label}", &delivery.workspace_label)
             .replace("{email}", &delivery.email)
-            .replace("{apex_host}", &self.apex_host);
+            .replace("{apex_host}", &self.apex_host)
+            .replace("{sign_in_path}", INVITATION_LOGIN_PATH);
         let html = INVITATION_HTML
             .replace("{invited_by}", &escaped(&delivery.invited_by))
             .replace("{workspace_label}", &escaped(&delivery.workspace_label))
             .replace("{email}", &escaped(&delivery.email))
             .replace("{apex_host}", &escaped(&self.apex_host))
+            .replace("{sign_in_path}", &escaped(INVITATION_LOGIN_PATH))
             .replace("{logo_path}", LOGO_PNG_PATH);
         Ok((text, html))
     }

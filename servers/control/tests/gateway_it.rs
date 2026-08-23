@@ -7,17 +7,20 @@
 
 mod harness;
 
+use chrono::{Duration, Utc};
 use harness::{ledger_pool, spawn_http};
 use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use ufo_control::claim::ClaimWorkflow;
 use ufo_control::gateway::{
     parse_invite_required, router, stamped_script, GatewayState, Onboarding, BILLING_CHOICE,
-    FIRST_MOVE_PROMPT, MAX_BODY_BYTES, OPERATOR_EMAIL_DOMAIN, WORKSPACE_PROMPT,
+    FIRST_MOVE_PROMPT, INVITATION_LOGIN_PATH, LOGIN_PATH, LOGOUT_PATH, MAX_BODY_BYTES,
+    OPERATOR_COOKIE, OPERATOR_EMAIL_DOMAIN, WORKSPACE_PROMPT,
 };
 use ufo_control::invite::InviteCodes;
 use ufo_control::shared::SharedWorkspaces;
 use ufo_control::store::OnboardStore;
+use ufo_control::token::{mint_token, sign, SESSION_COOKIE};
 use ufo_control::web::{
     ASSET_CACHE, ILLUSTRATION_BYTES, ILLUSTRATION_PATH, LOGIN_PAGE, LOGO_PATH, LOGO_PNG_BYTES,
     LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE, SHARE_HOME_BYTES, SHARE_HOME_PATH, SHARE_SITE_BYTES,
@@ -27,6 +30,8 @@ use ufo_control::workos::{Verifier, WorkosVerifier, CONSOLE_CODE};
 
 const SECRET: &str = "local-dev-token-secret";
 const APEX: &str = "flyingobject.ai";
+const WORKSPACE: &str = "11111111-1111-1111-1111-111111111111";
+const CONVERSATION: &str = "6f1c8038-1111-4222-8333-444455556666";
 
 /// A gateway on its own socket, with its own database and its own two stand-in services.
 struct Rig {
@@ -187,6 +192,109 @@ async fn the_login_page_is_served_as_html() {
         .await
         .unwrap()
         .starts_with("<!doctype html>"));
+}
+
+#[tokio::test]
+async fn a_browser_already_holding_a_session_is_forwarded_where_it_asked_to_land() {
+    // The door is served on the product's own host, so the cookie the portal binds arrives here: a
+    // member who already proved their address is sent on to the conversation the link named, rather
+    // than asked for that address a second time.
+    let rig = rig(vec![], vec![], true).await;
+    let held = mint_token(SECRET, WORKSPACE, "dana@acme.com", Utc::now()).unwrap();
+    let response = client()
+        .get(format!("{}/login?c={CONVERSATION}", rig.base))
+        .header("cookie", format!("{SESSION_COOKIE}={held}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()["location"],
+        format!("https://app.flyingobject.ai/surface/web?c={CONVERSATION}")
+    );
+}
+
+#[tokio::test]
+async fn an_ask_only_the_page_can_answer_gets_it_even_holding_a_session() {
+    // Each of these reaches the door from a caller that would refuse the forward right back to it:
+    // the operator surfaces read `ufo_debug`, which only the page's POST binds; the artifact refused
+    // this very session; and the invitation names an address the session may not prove.
+    let rig = rig(vec![], vec![], true).await;
+    let held = mint_token(SECRET, WORKSPACE, "ops@metalcraft.ai", Utc::now()).unwrap();
+    for asked in [
+        "debug=1",
+        "a=%2Fartifacts%2F1%2Freport.pdf",
+        INVITATION_LOGIN_PATH.split_once('?').unwrap().1,
+    ] {
+        let response = client()
+            .get(format!("{}{LOGIN_PATH}?{asked}", rig.base))
+            .header("cookie", format!("{SESSION_COOKIE}={held}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{asked}");
+        assert!(response
+            .text()
+            .await
+            .unwrap()
+            .starts_with("<!doctype html>"));
+    }
+}
+
+#[tokio::test]
+async fn a_cookie_that_outlived_its_bearer_gets_the_sign_in_page() {
+    let rig = rig(vec![], vec![], true).await;
+    let stale = sign(
+        SECRET,
+        WORKSPACE,
+        "dana@acme.com",
+        Utc::now() - Duration::days(1),
+    )
+    .unwrap();
+    let response = client()
+        .get(format!("{}/login", rig.base))
+        .header("cookie", format!("{SESSION_COOKIE}={stale}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .text()
+        .await
+        .unwrap()
+        .starts_with("<!doctype html>"));
+}
+
+#[tokio::test]
+async fn signing_out_expires_the_held_session_and_lands_on_the_form() {
+    // The route is the one way back to the form now that the door forwards a live session. It reads
+    // no session, so a browser holding a bearer and a browser holding nothing are answered the same
+    // way, and the form is what the door draws once the cookies are gone.
+    let rig = rig(vec![], vec![], true).await;
+    let held = mint_token(SECRET, WORKSPACE, "dana@acme.com", Utc::now()).unwrap();
+    for carried in [Some(format!("{SESSION_COOKIE}={held}")), None] {
+        let mut request = client().get(format!("{}{LOGOUT_PATH}", rig.base));
+        if let Some(cookie) = &carried {
+            request = request.header("cookie", cookie);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()["location"], LOGIN_PATH);
+        let cleared: Vec<&str> = response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        for name in [SESSION_COOKIE, OPERATOR_COOKIE, ONBOARD_SESSION_COOKIE] {
+            let expired = cleared
+                .iter()
+                .find(|cookie| cookie.starts_with(&format!("{name}=;")))
+                .unwrap_or_else(|| panic!("{name} is not cleared: {cleared:?}"));
+            assert!(expired.contains("Max-Age=0"), "{expired}");
+            assert!(expired.contains("Path=/"), "{expired}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -858,6 +966,37 @@ async fn a_callback_without_the_bound_cookie_refuses_and_lands_on_the_page() {
         .unwrap();
     assert!(landing.starts_with("/login?error="), "{landing}");
     assert!(landing.ends_with("&first=1"), "{landing}");
+}
+
+#[tokio::test]
+async fn the_invitation_ask_survives_the_google_hop_it_was_carried_into() {
+    // The ask is what makes the door draw the form for a recipient already holding another
+    // workspace's session. A hop that dropped it would return the completed sign-in to a door that
+    // forwards it away unfinished, leaving the seat unclaimed.
+    let rig = rig(vec![], vec![], true).await;
+    let start = client()
+        .get(format!("{}/v1/onboard/auth/start?invite=1", rig.base))
+        .send()
+        .await
+        .unwrap();
+    let location = start.headers().get("location").unwrap().to_str().unwrap();
+    let state = location.split("state=").nth(1).unwrap().to_string();
+
+    let response = client()
+        .get(format!(
+            "{}/v1/onboard/auth/callback?state={state}&code=founder%40acme.com",
+            rig.base
+        ))
+        .send()
+        .await
+        .unwrap();
+    let landing = response
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(landing.ends_with("&invite=1"), "{landing}");
 }
 
 #[tokio::test]

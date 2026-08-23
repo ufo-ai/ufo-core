@@ -63,6 +63,7 @@ pub struct AuthCarry {
     pub artifact: Option<String>,
     pub first_run: bool,
     pub debug: bool,
+    pub invite: bool,
 }
 
 #[derive(serde::Serialize, Deserialize)]
@@ -72,6 +73,7 @@ struct StatePayload {
     a: Option<String>,
     f: bool,
     d: bool,
+    i: bool,
 }
 
 /// The OAuth `state`: the onboarding session and what the member clicked to reach sign-in, under a
@@ -84,6 +86,7 @@ pub fn pack_state(carry: &AuthCarry, secret: &str) -> String {
         a: carry.artifact.clone(),
         f: carry.first_run,
         d: carry.debug,
+        i: carry.invite,
     };
     let json = serde_json::to_vec(&payload).expect("the carry serializes");
     let body = URL_SAFE_NO_PAD.encode(json);
@@ -119,6 +122,7 @@ pub fn unpack_state(raw: &str, secret: &str) -> Result<AuthCarry, StateError> {
             .filter(|value| value.starts_with(ARTIFACT_CARRY_PREFIX)),
         first_run: payload.f,
         debug: payload.d,
+        invite: payload.i,
     })
 }
 
@@ -136,7 +140,7 @@ pub enum StateError {
 
 /// A canonical 8-4-4-4-12 lowercase hex uuid, the shape a conversation id takes. Anything else is a
 /// value the query invented, so it is dropped rather than carried into a redirect.
-fn is_uuid_shaped(value: &str) -> bool {
+pub(crate) fn is_uuid_shaped(value: &str) -> bool {
     let groups = [8, 4, 4, 4, 12];
     let mut parts = value.split('-');
     for expected in groups {
@@ -197,7 +201,7 @@ fn subkey_signature(secret: &str, label: &[u8], message: &[u8]) -> String {
 }
 
 /// Signature comparison that does not leak where two strings first differ.
-fn constant_time_eq(left: &str, right: &str) -> bool {
+pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
         return false;
     }

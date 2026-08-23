@@ -2,8 +2,10 @@
 //! `~/.ufo/credentials`, surfaces verify it).
 //!
 //! One self-contained HMAC claim, no server-side state. The codec is core's — `core/src/ufo/
-//! bearer.py` spells it out and owns the verify half every surface reads through — so this half
-//! only signs, and `tests/contract.rs` holds it to core's own vectors:
+//! bearer.py` spells it out and owns the verify half every product surface reads through — so this
+//! half signs, and reads a claim back only for the sign-in door, which stands in front of those
+//! surfaces and answers before any of them sees the request. `tests/contract.rs` holds both
+//! directions to core's own vectors:
 //!
 //! ```text
 //! payload_json = {"email": "<lower email>", "exp": <unix seconds>, "ws": "<workspace uuid>"}
@@ -15,12 +17,17 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
 use hmac::{Hmac, Mac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+
+use crate::workos::constant_time_eq;
 
 pub const TOKEN_SECRET_ENV: &str = "UFO_TOKEN_SECRET";
 pub const TOKEN_TTL_DAYS: i64 = 30;
 const TOKEN_SEPARATOR: char = '.';
+
+/// The cookie a bearer rides in a browser, core's `SESSION_COOKIE` under the same name it binds.
+pub const SESSION_COOKIE: &str = "ufo_session";
 
 /// The claim's fields in the order core's `json.dumps(..., sort_keys=True)` writes them. Serde
 /// serializes a struct in declaration order, so alphabetical here is byte-identical there — and the
@@ -70,6 +77,37 @@ pub fn sign(
     mac.update(body.as_bytes());
     let signature = mac.finalize().into_bytes();
     Ok(format!("{body}{TOKEN_SEPARATOR}{signature:x}"))
+}
+
+/// The lowercased member email a presented bearer proves, or None when it proves nothing: signature
+/// under this deploy's secret and expiry are both checked before either field is read, so a forged,
+/// tampered, or expired token yields no identity. A deploy holding no secret verifies nothing rather
+/// than accepting a token signed with the empty key.
+pub fn verified_email(secret: &str, token: &str, now: DateTime<Utc>) -> Option<String> {
+    if secret.is_empty() {
+        return None;
+    }
+    let (body, signature) = token.split_once(TOKEN_SEPARATOR)?;
+    let mut mac = <Hmac<Sha256>>::new_from_slice(secret.as_bytes())
+        .expect("hmac-sha256 accepts a key of any length");
+    mac.update(body.as_bytes());
+    if !constant_time_eq(signature, &format!("{:x}", mac.finalize().into_bytes())) {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(body).ok()?;
+    let presented: PresentedClaim = serde_json::from_slice(&decoded).ok()?;
+    if presented.exp <= now.timestamp() {
+        return None;
+    }
+    Some(presented.email.to_lowercase())
+}
+
+/// The claim read back off the wire. Only the fields the sign-in door acts on are named, and every
+/// one of them is read after the signature over the whole body verifies.
+#[derive(Deserialize)]
+struct PresentedClaim {
+    email: String,
+    exp: i64,
 }
 
 /// Re-escape every non-ASCII character as `\uXXXX`, the way `json.dumps` does under its default
@@ -196,5 +234,63 @@ mod tests {
         let json = String::from_utf8(URL_SAFE_NO_PAD.decode(body).unwrap()).unwrap();
         let expected = 1_800_000_000 + TOKEN_TTL_DAYS * 24 * 60 * 60;
         assert!(json.contains(&format!(r#""exp":{expected}"#)), "{json}");
+    }
+
+    #[test]
+    fn a_live_token_verifies_to_the_address_it_claims() {
+        let token = mint_token(SECRET, WORKSPACE, "  Dana@Acme.COM ", at(1_800_000_000)).unwrap();
+        assert_eq!(
+            verified_email(SECRET, &token, at(1_800_000_000)).as_deref(),
+            Some("dana@acme.com")
+        );
+    }
+
+    #[test]
+    fn an_expired_token_verifies_to_nothing() {
+        let token = sign(SECRET, WORKSPACE, "dana@acme.com", at(1_800_000_000)).unwrap();
+        assert!(verified_email(SECRET, &token, at(1_799_999_999)).is_some());
+        assert_eq!(verified_email(SECRET, &token, at(1_800_000_000)), None);
+        assert_eq!(verified_email(SECRET, &token, at(1_800_000_001)), None);
+    }
+
+    #[test]
+    fn a_token_signed_elsewhere_or_tampered_with_verifies_to_nothing() {
+        let token = sign(SECRET, WORKSPACE, "dana@acme.com", at(1_800_000_000)).unwrap();
+        let (body, signature) = token.split_once('.').unwrap();
+        let forged = sign(
+            "another-secret",
+            WORKSPACE,
+            "dana@acme.com",
+            at(1_800_000_000),
+        )
+        .unwrap();
+        for candidate in [
+            forged.as_str(),
+            &format!("{body}x.{signature}"),
+            &format!("{body}.{}", "0".repeat(64)),
+            body,
+            "",
+        ] {
+            assert_eq!(
+                verified_email(SECRET, candidate, at(1_799_999_999)),
+                None,
+                "{candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deploy_holding_no_secret_verifies_nothing() {
+        let token = sign(SECRET, WORKSPACE, "dana@acme.com", at(1_800_000_000)).unwrap();
+        assert_eq!(verified_email("", &token, at(1_799_999_999)), None);
+    }
+
+    #[test]
+    fn a_non_ascii_address_verifies_back_to_the_address_core_signed() {
+        let token = sign(SECRET, WORKSPACE, "josé@exämple.com", at(1_800_000_000)).unwrap();
+        assert_eq!(
+            verified_email(SECRET, &token, at(1_799_999_999)).as_deref(),
+            Some("josé@exämple.com")
+        );
     }
 }

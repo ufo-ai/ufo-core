@@ -1,7 +1,8 @@
 //! The web presentation of the onboarding machine the terminal client drives.
 //!
-//! `GET /login` serves a self-contained sign-in page; `POST /v1/onboard/web` advances the identical
-//! onboarding state machine (the claim row keyed by the onboarding session) and returns the
+//! `GET /login` serves a self-contained sign-in page to a browser holding no session, and forwards
+//! one that already holds a session to the portal instead; `POST /v1/onboard/web` advances the
+//! identical onboarding state machine (the claim row keyed by the onboarding session) and returns the
 //! directive lines as JSON — a second renderer, never a second machine. The browser collects the
 //! work email and the code inline, exactly as the terminal does: the machine's `say`/`ask`
 //! directives render as the transcript and the next input, so the page reads and answers them and

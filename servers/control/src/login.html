@@ -151,6 +151,10 @@ const firstRun = location.hash === '#/first-run' || params.get('first') === '1';
    that link returns to it. A sign-in that asked for nothing lands in the portal, whatever the
    member's email domain is. */
 const debug = params.get('debug') === '1';
+/* An invitation names one address, which the browser's own session may not prove, so this page is
+   drawn for it however live that session is. The ask rides the Google hop the way the others do, or
+   the callback would return to a door that forwards the completed sign-in away unfinished. */
+const invite = params.get('invite') === '1';
 let token = null;
 let workspace = null;
 let debuggerUrl = null;
@@ -364,6 +368,7 @@ if (target) gq.set('c', target[0]);
 if (artifact) gq.set('a', artifact);
 if (firstRun) gq.set('first', '1');
 if (debug) gq.set('debug', '1');
+if (invite) gq.set('invite', '1');
 google.href = START + (gq.size ? '?' + gq : '');
 
 if (fault) {

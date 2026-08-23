@@ -8,6 +8,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
+import { SIGN_OUT_PATH } from "@/lib/api";
 import { chatHash } from "@/lib/route";
 import { webAudienceLabel } from "@/lib/audience";
 
@@ -136,7 +137,11 @@ test("a live session whose email holds no member row is told that, not to sign i
 
   expect(await screen.findByText("Not a member of this workspace")).toBeTruthy();
   expect(screen.getByText(/An admin has to add the address/)).toBeTruthy();
-  expect(screen.getByRole("link", { name: "Sign in with another email" })).toBeTruthy();
+  // The bearer behind this refusal is live, so the sign-in door would forward it straight back to
+  // the workspace that just refused it. Another address is reached by clearing this one first.
+  expect(
+    screen.getByRole("link", { name: "Sign in with another email" }).getAttribute("href"),
+  ).toBe(SIGN_OUT_PATH);
   expect(screen.queryByText("Session ended")).toBeNull();
 });
 
@@ -197,6 +202,7 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Connectors",
     "Workspace",
     "Theme",
+    "Sign out",
   ]);
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
 });
@@ -269,6 +275,18 @@ test("the bar's mark stands at a phone width too, centred out of the row", () =>
   expect(mark.closest("header")!.className).toContain("relative");
 });
 
+test("the account at a phone width offers the way back out", async () => {
+  atPhoneWidth();
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
+  const went: string[] = [];
+  vi.stubGlobal("location", { ...window.location, assign: (to: string) => went.push(to) });
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+  expect(went).toEqual([SIGN_OUT_PATH]);
+});
+
 test("the menu drawer holds the whole sidebar and the act that starts a conversation", async () => {
   atPhoneWidth();
   wire({});
@@ -290,11 +308,12 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Connectors",
     "Workspace",
     "Theme",
+    "Sign out",
   ]);
 });
 
 
-test("the sidebar's foot states who is signed in and offers the theme choice", async () => {
+test("the sidebar's foot states who is signed in and offers the way back out", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -304,6 +323,13 @@ test("the sidebar's foot states who is signed in and offers the theme choice", a
   expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
   expect(within(foot).getByText("Member")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Administration" })).toBeNull();
+
+  // The sign-in door forwards a browser that already holds a session, so this is the act that
+  // reaches the form: it clears the cookies on the host that bound them and lands there.
+  const went: string[] = [];
+  vi.stubGlobal("location", { ...window.location, assign: (to: string) => went.push(to) });
+  await userEvent.click(within(foot).getByRole("button", { name: "Sign out" }));
+  expect(went).toEqual([SIGN_OUT_PATH]);
 
   await userEvent.click(within(foot).getByRole("button", { name: "Theme" }));
   expect(await screen.findByRole("menuitemradio", { name: "System" })).toBeTruthy();

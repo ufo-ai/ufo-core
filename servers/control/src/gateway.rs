@@ -30,8 +30,8 @@ use crate::web::{
     SHARE_HOME_PATH, SHARE_SITE_BYTES, SHARE_SITE_PATH, WEB_CHANNEL,
 };
 use crate::workos::{
-    console_signin_page, open_session, pack_state, seal_session, unpack_state, AuthCarry, Verifier,
-    AUTH_CALLBACK_PATH, AUTH_CONSOLE_PATH, AUTH_START_PATH, SIGN_IN_FAILED,
+    console_signin_page, is_uuid_shaped, open_session, pack_state, seal_session, unpack_state,
+    AuthCarry, Verifier, AUTH_CALLBACK_PATH, AUTH_CONSOLE_PATH, AUTH_START_PATH, SIGN_IN_FAILED,
 };
 
 pub const INVITE_REQUIRED_ENV: &str = "UFO_INVITE_REQUIRED";
@@ -39,7 +39,18 @@ pub const CLIENT_BIN_DIR_ENV: &str = "UFO_CLIENT_BIN_DIR";
 pub const GATEWAY_PORT_ENV: &str = "UFO_GATEWAY_PORT";
 
 pub const OPERATOR_EMAIL_DOMAIN: &str = "metalcraft.ai";
+pub const LOGIN_PATH: &str = "/login";
+pub const LOGOUT_PATH: &str = "/logout";
+pub const PORTAL_SURFACE_PATH: &str = "/surface/web";
 pub const DEBUG_SURFACE_PATH: &str = "/surface/debug";
+
+/// The sign-in door under the one ask an invitation carries, the address the mail names being one
+/// the browser's own session may not prove.
+pub const INVITATION_LOGIN_PATH: &str = "/login?invite=1";
+
+/// The operator session cookie, core's `ufo.ext.operator.OPERATOR_COOKIE` under the name it binds.
+/// The operator surfaces are served on this host, so a sign-out here is what clears it.
+pub const OPERATOR_COOKIE: &str = "ufo_debug";
 pub const FIRST_MOVE_PROMPT: &str = "What first?";
 pub const SLACK_CHOICE: &str = "Connect Slack";
 pub const BILLING_CHOICE: &str = "Set up billing";
@@ -452,7 +463,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/ufo", get(serve_script))
         .route("/ufo/bin/{target}", get(client_binary))
         .route("/fleet", get(fleet))
-        .route("/login", get(login))
+        .route(LOGIN_PATH, get(login))
+        .route(LOGOUT_PATH, get(logout))
         .route(LOGO_PATH, get(logo))
         .route(LOGO_PNG_PATH, get(logo_png))
         .route(ILLUSTRATION_PATH, get(illustration))
@@ -539,12 +551,102 @@ async fn fleet(State(state): State<GatewayState>) -> Response {
     }
 }
 
-async fn login() -> Response {
+/// The sign-in page, or the portal itself for a browser that already holds a session: `/login` is
+/// served on the product's own host, so the cookie the portal binds arrives here, and a member who is
+/// already signed in is forwarded rather than asked for an address they have already proved.
+async fn login(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let landing = signed_in_landing(
+        &state.onboarding.token_secret,
+        &state.onboarding.workspaces.workspace_url,
+        &headers,
+        &query,
+    );
+    if let Some(landing) = landing {
+        return Redirect::to(&landing).into_response();
+    }
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         LOGIN_PAGE,
     )
         .into_response()
+}
+
+/// The asks the page alone can answer, so the form is drawn for a browser already holding a session
+/// whenever the query names one. Each reaches this door from exactly one caller — so its presence,
+/// not its value, is the whole signal — and each is a caller a forward would send straight back to.
+///
+/// `debug` comes from `ufo.ext.operator.OPERATOR_LOGIN_PATH`, and the operator surfaces read
+/// `ufo_debug`, which only the page's POST binds. `a` comes from `ufo.surfaces.artifacts._refusal`,
+/// which refused this very session the artifact, so it would refuse the forward too. `invite` comes
+/// from `INVITATION_LOGIN_PATH`, and the mail names an address this session may not prove, whose
+/// seat is claimed in the walk the page runs. `error` comes from `auth_callback`, and the sentence it
+/// carries is one the page alone states, so a forward would drop a refusal the member is owed.
+const FORM_ONLY_ASKS: [&str; 4] = ["debug", "a", "invite", "error"];
+
+/// Where a browser holding a live bearer is sent, or None when the page is the answer — it holds no
+/// session, or the query names an ask only the page can answer. A forward is the destination the
+/// page's own handoff posts to, read off the same query the page reads it from, so a link naming a
+/// conversation or the first run lands where it named.
+fn signed_in_landing(
+    token_secret: &str,
+    workspace_url: &str,
+    headers: &HeaderMap,
+    query: &HashMap<String, String>,
+) -> Option<String> {
+    if FORM_ONLY_ASKS.iter().any(|ask| query.contains_key(*ask)) {
+        return None;
+    }
+    let bearer = session_bearer(headers)?;
+    token::verified_email(token_secret, bearer, Utc::now())?;
+    let carried = query
+        .get("c")
+        .filter(|value| is_uuid_shaped(value))
+        .map(|conversation| format!("?c={conversation}"))
+        .or_else(|| {
+            query
+                .get("first")
+                .filter(|value| *value == "1")
+                .map(|_| "?first=1".to_string())
+        })
+        .unwrap_or_default();
+    Some(format!("{workspace_url}{PORTAL_SURFACE_PATH}{carried}"))
+}
+
+/// The way out of a session, and the way to another one: it expires every cookie this host binds and
+/// sends the browser to the sign-in door, which draws the form for a browser holding none of them. So
+/// a member signs in as somebody else, or into another workspace, without waiting out an expiry. The
+/// route reads nothing: a browser holding no session is answered the same way, so a stale tab and a
+/// second click land on the form rather than on a refusal.
+async fn logout() -> Response {
+    let mut response = Redirect::to(LOGIN_PATH).into_response();
+    for name in BOUND_COOKIES {
+        expire_cookie(&mut response, name);
+    }
+    response
+}
+
+/// Every cookie bound on this host, and so every cookie a sign-out clears: the member bearer the
+/// portal reads, the operator session the debug surfaces read, and the onboarding session standing
+/// behind a half-finished claim, which would otherwise resume the previous member's address at the
+/// next submit.
+const BOUND_COOKIES: [&str; 3] = [
+    token::SESSION_COOKIE,
+    OPERATOR_COOKIE,
+    ONBOARD_SESSION_COOKIE,
+];
+
+/// The member bearer the request carries in the cookie the portal binds, or None when no cookie of
+/// that name arrives.
+fn session_bearer(headers: &HeaderMap) -> Option<&str> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == token::SESSION_COOKIE && !value.is_empty()).then_some(value)
+    })
 }
 
 /// The mark both sign-in pages draw. It is the one thing they fetch, on the connection already open
@@ -627,6 +729,7 @@ async fn auth_start(
         artifact: query.get("a").cloned(),
         first_run: query.get("first").is_some_and(|value| value == "1"),
         debug: query.get("debug").is_some_and(|value| value == "1"),
+        invite: query.get("invite").is_some_and(|value| value == "1"),
     };
     let honored = match unpack_state(&pack_state(&carry, secret), secret) {
         Ok(honored) => honored,
@@ -685,6 +788,9 @@ async fn auth_callback(
     }
     if carry.debug {
         landing.push(("debug".to_string(), "1".to_string()));
+    }
+    if carry.invite {
+        landing.push(("invite".to_string(), "1".to_string()));
     }
     let bound = onboard_session(&headers, secret);
     let refusal = match bound {
@@ -867,6 +973,22 @@ fn set_session_cookie(response: &mut Response, sealed: &str) {
     }
 }
 
+/// The date a cleared cookie carries, so a browser that honors no `Max-Age` drops the value on the
+/// same header.
+const EXPIRED: &str = "Thu, 01 Jan 1970 00:00:00 GMT";
+
+/// The counterpart of every cookie this deploy binds: an empty value, already expired. A browser
+/// replaces a cookie only when the header names it under the same `Path` and `Domain`, so the
+/// attributes here are the ones `set_session_cookie` and core's own binder write — host-only, under
+/// `Path=/` — or the live value survives beside the cleared one.
+fn expire_cookie(response: &mut Response, name: &str) {
+    let cookie =
+        format!("{name}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0; Expires={EXPIRED}");
+    if let Ok(value) = cookie.parse() {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+}
+
 fn fresh_session() -> String {
     let mut bytes = [0_u8; ONBOARD_SESSION_BYTES];
     getrandom::fill(&mut bytes).expect("the platform has a random source");
@@ -908,4 +1030,171 @@ pub fn parse_invite_required(value: &str) -> Result<bool, String> {
 
 pub fn invite_required_from_env() -> Result<bool, String> {
     parse_invite_required(&std::env::var(INVITE_REQUIRED_ENV).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECRET: &str = "local-dev-token-secret";
+    const WORKSPACE: &str = "11111111-1111-1111-1111-111111111111";
+    const WORKSPACE_URL: &str = "https://app.flyingobject.ai";
+    const CONVERSATION: &str = "6f1c8038-1111-4222-8333-444455556666";
+
+    fn landing(cookie: Option<&str>, asked: &[(&str, &str)]) -> Option<String> {
+        let mut headers = HeaderMap::new();
+        if let Some(cookie) = cookie {
+            headers.insert(header::COOKIE, cookie.parse().unwrap());
+        }
+        let query = asked
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        signed_in_landing(SECRET, WORKSPACE_URL, &headers, &query)
+    }
+
+    fn session(email: &str) -> String {
+        let bearer = token::mint_token(SECRET, WORKSPACE, email, Utc::now()).unwrap();
+        format!("{}={bearer}", token::SESSION_COOKIE)
+    }
+
+    #[test]
+    fn a_live_session_lands_where_the_page_would_have_posted_it() {
+        let held = session("dana@acme.com");
+        for (asked, landed) in [
+            (vec![], format!("{WORKSPACE_URL}{PORTAL_SURFACE_PATH}")),
+            (
+                vec![("c", CONVERSATION)],
+                format!("{WORKSPACE_URL}{PORTAL_SURFACE_PATH}?c={CONVERSATION}"),
+            ),
+            (
+                vec![("first", "1")],
+                format!("{WORKSPACE_URL}{PORTAL_SURFACE_PATH}?first=1"),
+            ),
+        ] {
+            assert_eq!(
+                landing(Some(&held), &asked).as_deref(),
+                Some(landed.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn a_target_the_query_invented_is_dropped_rather_than_carried() {
+        // The page validates the same two shapes before it posts anywhere, so a value outside them
+        // lands the member in the portal instead of at an address the query wrote.
+        let held = session("dana@acme.com");
+        let portal = format!("{WORKSPACE_URL}{PORTAL_SURFACE_PATH}");
+        for asked in [
+            vec![("c", "../../elsewhere")],
+            vec![("c", "6F1C8038-1111-4222-8333-444455556666")],
+            vec![("first", "0")],
+        ] {
+            assert_eq!(
+                landing(Some(&held), &asked).as_deref(),
+                Some(portal.as_str()),
+                "{asked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ask_only_the_page_can_answer_draws_it_over_a_live_session() {
+        // Each of these reaches the door from a caller a forward would send straight back to, or with
+        // a sentence only the page states: the operator surfaces read a cookie only the page's POST
+        // binds, the artifact refused this very session, the invitation names an address it may not
+        // prove, and a refused Google hop returns its refusal here to be read.
+        for held in [session("dana@acme.com"), session("ops@metalcraft.ai")] {
+            for asked in [
+                vec![("debug", "1")],
+                vec![("a", "/artifacts/1/report.pdf")],
+                vec![("invite", "1")],
+                vec![("error", "That address is not a work email.")],
+                vec![("c", CONVERSATION), ("a", "/artifacts/1/report.pdf")],
+            ] {
+                assert_eq!(landing(Some(&held), &asked), None, "{asked:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_invitation_mail_names_the_door_that_draws_the_form() {
+        let (ask, _) = INVITATION_LOGIN_PATH
+            .strip_prefix(&format!("{LOGIN_PATH}?"))
+            .and_then(|query| query.split_once('='))
+            .expect("the invitation path carries one ask");
+        assert!(FORM_ONLY_ASKS.contains(&ask), "{ask}");
+    }
+
+    #[test]
+    fn a_browser_holding_no_live_session_is_left_to_the_page() {
+        let expired = token::sign(SECRET, WORKSPACE, "dana@acme.com", Utc::now()).unwrap();
+        let elsewhere =
+            token::mint_token("another-secret", WORKSPACE, "dana@acme.com", Utc::now()).unwrap();
+        for cookie in [
+            None,
+            Some("ufo_onboard=other".to_string()),
+            Some(format!("{}=", token::SESSION_COOKIE)),
+            Some(format!("{}=not-a-token", token::SESSION_COOKIE)),
+            Some(format!("{}={expired}", token::SESSION_COOKIE)),
+            Some(format!("{}={elsewhere}", token::SESSION_COOKIE)),
+        ] {
+            assert_eq!(landing(cookie.as_deref(), &[]), None, "{cookie:?}");
+        }
+    }
+
+    fn cookie_headers(response: &Response) -> Vec<String> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn signing_out_clears_every_bound_cookie_and_sends_the_browser_to_the_form() {
+        let cleared = |name: &str| {
+            format!("{name}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0; Expires={EXPIRED}")
+        };
+        let response = logout().await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], LOGIN_PATH);
+        assert_eq!(
+            cookie_headers(&response),
+            BOUND_COOKIES.map(cleared).to_vec()
+        );
+    }
+
+    #[test]
+    fn the_cleared_cookie_carries_the_attributes_the_bound_one_was_set_with() {
+        // A browser replaces a cookie by name, path and domain, so a clearing header that differs on
+        // any of them leaves the live value in the jar beside it.
+        let mut bound = Response::new(Body::empty());
+        set_session_cookie(&mut bound, "sealed");
+        let mut cleared = Response::new(Body::empty());
+        expire_cookie(&mut cleared, ONBOARD_SESSION_COOKIE);
+        let attributes = |cookie: &str| {
+            cookie
+                .split("; ")
+                .skip(1)
+                .filter(|part| !part.starts_with("Max-Age") && !part.starts_with("Expires"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            attributes(&cookie_headers(&bound)[0]),
+            attributes(&cookie_headers(&cleared)[0])
+        );
+    }
+
+    #[test]
+    fn the_session_is_read_out_of_a_jar_holding_other_cookies() {
+        let held = session("dana@acme.com");
+        let jar = format!("__Host-ufo_onboard=sealed; {held}; theme=dark");
+        assert_eq!(
+            landing(Some(&jar), &[]).as_deref(),
+            Some(format!("{WORKSPACE_URL}{PORTAL_SURFACE_PATH}").as_str())
+        );
+    }
 }

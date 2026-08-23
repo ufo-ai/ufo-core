@@ -10,6 +10,7 @@ import {
   IconEdit,
   IconLayoutGrid,
   IconLayoutSidebarRight,
+  IconLogout,
   IconMenu2,
   IconMessageCircle,
   IconMoon,
@@ -54,6 +55,7 @@ import {
   surfaceWord,
   useViewer,
 } from "@/lib/audience";
+import { SIGN_OUT_PATH } from "@/lib/api";
 import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -353,6 +355,13 @@ function NavDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   );
 }
 
+/** The way back to the form, offered wherever the shell states who is signed in. The sign-in door
+ *  forwards a browser that already holds a session, so signing in as another address — or into
+ *  another workspace an invitation offered — starts by clearing this one. */
+function signOut(): void {
+  window.location.assign(SIGN_OUT_PATH);
+}
+
 /** The submenu trigger states the palette the member picked, not the one the browser resolved:
  *  `System` is a choice they can read back, and a value that flipped itself at dusk would say they
  *  had picked light. */
@@ -404,6 +413,7 @@ function AccountMenu({ member }: { member: Member }) {
         {member.admin ? (
           <DropdownMenuItem onSelect={openAdmin}>Administration</DropdownMenuItem>
         ) : null}
+        <DropdownMenuItem onSelect={signOut}>Sign out</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -828,6 +838,16 @@ function WorkspaceSidebar({
             </button>
           </SidebarTooltip>
         ) : null}
+        <SidebarTooltip collapsed={collapsed} label="Sign out">
+          <button
+            type="button"
+            aria-label="Sign out"
+            onClick={signOut}
+            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
+          >
+            <IconLogout className={GLYPH} aria-hidden />
+          </button>
+        </SidebarTooltip>
       </footer>
     </nav>,
   );

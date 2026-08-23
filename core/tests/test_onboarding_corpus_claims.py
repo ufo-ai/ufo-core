@@ -316,7 +316,7 @@ CLAIMS = (
         corpus="references/getting-started.md",
         phrase="emailed that they were added, with a link to the ordinary sign-in page",
         source=INVITE_DELIVERY,
-        pattern=r"Sign in as \{email\} at https://\{apex_host\}/login",
+        pattern=r"Sign in as \{email\} at https://\{apex_host\}\{sign_in_path\}",
     ),
     Claim(
         claim="an added address may be at any email domain",

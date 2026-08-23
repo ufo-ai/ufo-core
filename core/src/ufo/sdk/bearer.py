@@ -7,6 +7,9 @@ from ufo.auth.bearer import (
     LOGIN_PATH as LOGIN_PATH,
 )
 from ufo.auth.bearer import (
+    LOGOUT_PATH as LOGOUT_PATH,
+)
+from ufo.auth.bearer import (
     SESSION_COOKIE as SESSION_COOKIE,
 )
 from ufo.auth.bearer import (

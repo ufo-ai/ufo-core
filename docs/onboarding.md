@@ -21,6 +21,7 @@ browser ------>|  waitlist -> D1 + mail queue               |
                +--------------------------------------------+
 ufo client --->|  GET /ufo -> version-stamped POSIX client  |
 browser ------>|  GET /login -> sign-in page (app host)     |
+               |  GET /logout -> clear session -> /login    |
                |  GET /v1/onboard/auth/* -> WorkOS (Google) |
                |  POST /v1/onboard/{channel} (web = JSON)   |
                |       |                                    |
@@ -302,21 +303,46 @@ would read it empty.
 ## Web login
 
 The whole browser sign-in flow is same-origin on the **app host** (`app.<apex>`), the sole
-authenticated host. The apex `GET /login` 302s there (edge worker); on the app host the ingress
-routes the front-door prefixes (`ufo.serve.RESERVED_HOST_PREFIXES`: `/login`, `/v1/onboard`,
-`/ufo`) to `ufo-gateway`, while `/` and `/surface/*` stay on `ufo-serve` (nginx longest-prefix).
-Two invariants hold this up by construction rather than by convention: the serve fleet **fails its
-boot** if it mounts any route under a reserved prefix (`_assert_no_reserved_routes`), and every
-session cookie is set through `ufo.sdk.http.set_session_cookie`, which takes no `Domain` — so a
-cookie is always host-only and a session can never cross a subdomain, environment, or preview host
-(a repo gate forbids raw `set_cookie` elsewhere).
+authenticated host. The apex 302s both browser doors there (edge worker): `GET /login` and
+`GET /logout`, query and all — an apex door is only a hop to the host that binds the cookie, and the
+ask a link carries is read there. On the app host the ingress routes the front-door prefixes
+(`ufo.serve.RESERVED_HOST_PREFIXES`: `/login`, `/logout`, `/v1/onboard`, `/ufo`) to `ufo-gateway`,
+while `/` and `/surface/*` stay on `ufo-serve` (nginx longest-prefix). Two invariants hold this up
+by construction rather than by convention: the serve fleet **fails its boot** if it mounts any route
+under a reserved prefix (`_assert_no_reserved_routes`), and every session cookie is set through
+`ufo.sdk.http.set_session_cookie`, which takes no `Domain` — so a cookie is always host-only and a
+session can never cross a subdomain, environment, or preview host (a repo gate forbids raw
+`set_cookie` elsewhere).
 
-`/login` is the deploy's one sign-in, and every other browser door leads to it. `GET /` on the app
-host redirects to the surface claiming `SurfaceSpec.home` — the portal (`/surface/web`) — which
-serves its shell only to a resolved session and redirects an arrival without one to `/login`; a
-session that expires under an open page leaves the shell offering the same link. The portal takes
-no bearer from a member: the bearer enters through the one automatic POST sign-in makes, so there
-is exactly one place a bearer becomes a session.
+`/login` is the deploy's one sign-in, and every other browser door leads to it. A browser that
+already holds a live `ufo_session` is forwarded from `/login` to the portal — the address the page's
+own handoff would have posted it to, so `?c=` and `?first=1` still land where they name — rather
+than asked again for an address it has proved. Four asks are the page's alone (`FORM_ONLY_ASKS`), and
+the form is drawn for them however live the session is: each reaches this door from a caller a forward
+would send straight back to, or carries a sentence the page alone states. `?debug=1` comes from
+`ufo.ext.operator.OPERATOR_LOGIN_PATH`, and the operator surfaces read `ufo_debug`, which only the
+page's POST binds. `?a=` comes from `ufo.surfaces.artifacts._refusal`, which refused this very
+session the artifact, so it would refuse the forward too. `?invite=1` is what the invitation mail
+links to, and that mail names an address this session may not prove, whose seat is claimed in the
+walk the page runs. `?error=` comes from the auth callback, and the sentence it carries is one the
+page alone states, so a forward would drop a refusal the member is owed.
+
+An ask rides the Google hop with the rest of the carry (`AuthCarry`), so a member who reaches the
+form under one and takes `Continue with Google` returns to the door still holding it — the page runs
+again and finishes the walk, rather than being forwarded away with a claim verified and unresolved.
+
+`GET /logout` is the door back out: it expires every cookie this host binds (`ufo_session`,
+`ufo_debug`, and `__Host-ufo_onboard`) and sends the browser to `/login`, which draws the form for a
+browser holding none of them, so a stale tab, a second click, and a sign-in as somebody else all land
+on the form rather than wait out an expiry. The portal offers it wherever it states who is signed in
+— the account menu and the sidebar's foot — and it is where a refusal that a second address would
+answer leads: the portal's `no-member` screen and a private site's "not signed in" page both name it,
+since the bearer behind either is live.
+`GET /` on the app host redirects to the surface claiming `SurfaceSpec.home` — the portal
+(`/surface/web`) — which serves its shell only to a resolved session and redirects an arrival
+without one to `/login`; a session that expires under an open page leaves the shell offering the
+same link. The portal takes no bearer from a member: the bearer enters through the one automatic
+POST sign-in makes, so there is exactly one place a bearer becomes a session.
 
 A self-hosted node runs no gateway, so it has no sign-in page and verifies no email — the member at
 the terminal is the owner `ufoctl init` seated, and their CLI token is the proof. The WorkOS
@@ -326,9 +352,9 @@ from that page's form to `/surface/web`, and the listener closes behind the requ
 Same route, same act, same cookie as hosted sign-in — the deploy differs, the door does not.
 `ufoctl serve` names the portal and that verb at startup.
 
-`GET /login` serves a self-contained sign-in page — a second renderer of the identical
-`Onboarding` machine, never a second machine. The page names no session at all:
-`POST /v1/onboard/web` mints the `__Host-ufo_onboard` cookie server-side (host-only by the
+`GET /login` serves a self-contained sign-in page to a browser holding no session — a second
+renderer of the identical `Onboarding` machine, never a second machine. The page names no session
+at all: `POST /v1/onboard/web` mints the `__Host-ufo_onboard` cookie server-side (host-only by the
 `__Host-` prefix the browser enforces, so no sibling host can plant it — `HttpOnly`, `Secure`,
 `SameSite=lax`, `Path=/`, no `max_age`) whenever the presented cookie stands behind no live claim,
 so a claim is only started under a session minted here and keyed by it, and every answer the page
@@ -381,7 +407,9 @@ capability, not a destination: the automatic form POSTs the token to the member 
 member, and to that target only when the page was asked for the debug surface by name, with
 `/login?debug=1`. The ask reaches the page the way `?c=` and `?a=` do — an operator surface bounces
 a bearer-less page GET to `/login?debug=1`, and the signed Google state carries the ask back — so
-the click that wanted the debugger returns to it and every other sign-in opens the portal. The debug
+the click that wanted the debugger returns to it and every other sign-in opens the portal. The ask is
+the page's own even for a browser already holding a session: the debug surface authenticates by
+`ufo_debug`, which only this POST binds, so a forward would bounce back here unbound. The debug
 surface exchanges the posted token for its `ufo_debug` cookie and redirects. The bearer never rides
 a URL into the debugger, so no access log captures it — `spec.md` "Surfaces" covers that surface.
 The directive is emitted channel-blind, and the terminal client drops unknown verbs. The gate is the
@@ -568,7 +596,7 @@ servers/control/src/
   schema.rs               the ufo_control schema, shaped by the deploy's `ufo-control migrate`
   rls.rs                  shared database role and policy bootstrap
   db.rs                   the pool over control's own ledgers, and nothing else
-  token.rs                bearer minting; the ufo surface owns verification
+  token.rs                bearer minting, and the claim read back for the sign-in door
   directives.rs           the directive wire both renderers read
   client/ufo              the POSIX installer the gateway serves at /ufo
 ```

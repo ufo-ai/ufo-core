@@ -30,6 +30,7 @@ fn carry(session: &str, conversation: Option<&str>, artifact: Option<&str>) -> A
         artifact: artifact.map(str::to_string),
         first_run: false,
         debug: false,
+        invite: false,
     }
 }
 
@@ -38,6 +39,7 @@ fn a_packed_state_round_trips_its_carry() {
     let original = AuthCarry {
         first_run: true,
         debug: true,
+        invite: true,
         ..carry("session-1", Some(CONVERSATION), Some("/artifacts/abc"))
     };
     let unpacked = unpack_state(&pack_state(&original, SECRET), SECRET).unwrap();

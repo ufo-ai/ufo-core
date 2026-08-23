@@ -819,9 +819,9 @@ spec:
 ---
 # The one authenticated host for every hosted workspace (no per-workspace subdomain — RFC 0011):
 # the whole browser sign-in flow is same-origin here, so the host-only `ufo_session` cookie is set
-# and read on this one host. The gateway's browser-facing login endpoints (`/login`, the web
-# onboarding wire, the `/ufo` install script) are routed here to `ufo-gateway`, while `/` and every
-# `/surface/*` product route stay on `ufo-serve`; nginx's longest-prefix match makes the split
+# and read on this one host. The gateway's browser-facing login endpoints (`/login`, `/logout`, the
+# web onboarding wire, the `/ufo` install script) are routed here to `ufo-gateway`, while `/` and
+# every `/surface/*` product route stay on `ufo-serve`; nginx's longest-prefix match makes the split
 # unambiguous. cert-manager issues TLS; ExternalDNS publishes the record Cloudflare-proxied, so the
 # shared NLB (Cloudflare-only) is reachable only through the proxy. `[connect] public_base_url =
 # https://${shared_host}` matches this host.
@@ -843,6 +843,12 @@ spec:
       http:
         paths:
           - path: /login
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
+          - path: /logout
             pathType: Prefix
             backend:
               service:

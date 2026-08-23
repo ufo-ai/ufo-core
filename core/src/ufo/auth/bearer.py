@@ -14,8 +14,9 @@ is spelled out here once:
 The signing secret is `UFO_TOKEN_SECRET` on every party, and it never crosses the sdk: core reads
 it here, so an extension hands over a token and gets claims back without ever holding the key.
 
-The session's two fixed addresses live beside the codec: `SESSION_COOKIE` names the cookie
-the bearer rides in a browser, and `LOGIN_PATH` the one sign-in door that lands it there."""
+The session's fixed addresses live beside the codec: `SESSION_COOKIE` names the cookie the bearer
+rides in a browser, `LOGIN_PATH` the one sign-in door that lands it there, and `LOGOUT_PATH` the
+door back out, which clears that cookie and returns to the form."""
 
 import base64
 import hashlib
@@ -29,6 +30,7 @@ UFO_TOKEN_SECRET_ENV = "UFO_TOKEN_SECRET"
 TOKEN_SEPARATOR = "."
 SESSION_COOKIE = "ufo_session"
 LOGIN_PATH = "/login"
+LOGOUT_PATH = "/logout"
 
 
 def mint_token(

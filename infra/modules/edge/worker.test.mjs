@@ -629,6 +629,30 @@ test("apex /login 302s to the app host, the sole authenticated origin", async ()
   assert.equal(testing.headers.get("location"), "https://app.testing.ufo.ai/login");
 });
 
+test("an apex door carries the ask it was opened with to the host that reads it", async () => {
+  // The invitation mail links to the apex, and the ask is what makes the door draw the form for a
+  // recipient whose browser already holds another workspace's session. A hop that dropped it would
+  // forward them to that workspace instead.
+  const invited = await request("https://ufo.ai/login?invite=1", { ua: "Mozilla/5.0" });
+  assert.equal(invited.status, 302);
+  assert.equal(invited.headers.get("location"), "https://app.ufo.ai/login?invite=1");
+  const named = await request("https://ufo.ai/login?c=6f1c8038-1111-4222-8333-444455556666", {
+    ua: "Mozilla/5.0",
+  });
+  assert.equal(
+    named.headers.get("location"),
+    "https://app.ufo.ai/login?c=6f1c8038-1111-4222-8333-444455556666",
+  );
+});
+
+test("apex /logout 302s to the app host, where the session cookie is bound", async () => {
+  const prod = await request("https://ufo.ai/logout", { ua: "Mozilla/5.0" });
+  assert.equal(prod.status, 302);
+  assert.equal(prod.headers.get("location"), "https://app.ufo.ai/logout");
+  const testing = await request("https://testing.ufo.ai/logout", { ua: "Mozilla/5.0" });
+  assert.equal(testing.headers.get("location"), "https://app.testing.ufo.ai/logout");
+});
+
 test("/ufo serves byte-identical content to every user agent", async () => {
   const cli = await (await request("https://flyingobject.ai/ufo")).text();
   const browser = await (

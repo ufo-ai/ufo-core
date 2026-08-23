@@ -49,7 +49,7 @@ import html
 from dataclasses import dataclass
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from ufo.sdk.bearer import verify_token
+from ufo.sdk.bearer import LOGOUT_PATH, verify_token
 from ufo.sdk.http import (
     HTMLResponse,
     PlainTextResponse,
@@ -89,10 +89,12 @@ NOT_FOUND_BODY = "no such site"
 UNCONFIGURED_BODY = "Site hosting is not configured on this deployment."
 CSRF_REJECTED_BODY = "the visibility form did not match this session; reload the page and retry"
 HOMEPAGE_FOLLOWS_AGENT_BODY = "this site is an agent's homepage; its visibility follows the agent's"
-LOGIN_PATH = "/login"
+# The sign-out door, not the sign-in one: this page is also what a browser holding a live session
+# for another workspace is answered, and the sign-in door forwards such a browser to its own portal
+# rather than drawing the form. Clearing first reaches the form either way.
 NOT_SIGNED_IN_PAGE = (
     "<main><p>This site is not public, and this browser is not signed in to the workspace that "
-    f'hosts it.</p><p><a href="{LOGIN_PATH}">Sign in</a>, then open this link again.</p></main>'
+    f'hosts it.</p><p><a href="{LOGOUT_PATH}">Sign in</a>, then open this link again.</p></main>'
 )
 IFRAME_SANDBOX = (
     "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads "

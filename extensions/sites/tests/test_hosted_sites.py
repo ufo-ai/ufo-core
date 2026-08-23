@@ -58,7 +58,7 @@ from ufo_ext_sites.store import (
 from ufo_ext_sites.surface import (
     FRAME_PATH,
     GENERIC_SHARE_TITLE,
-    LOGIN_PATH,
+    LOGOUT_PATH,
     SESSION_COOKIE,
     SHARE_CARD_ALT,
     SHARE_CARD_URL,
@@ -1117,8 +1117,11 @@ async def test_an_unauthenticated_viewer_is_sent_to_sign_in_unless_the_site_is_p
     anonymous = await client.get(link)
     assert anonymous.status_code == 200
     assert "not signed in to the workspace" in anonymous.text
-    assert '<a href="/login">Sign in</a>' in anonymous.text
-    assert LOGIN_PATH in RESERVED_HOST_PREFIXES
+    # The door the page names is the sign-out one: a browser holding a live session for another
+    # workspace is answered this same page, and the sign-in door would forward it to its own portal
+    # instead of drawing the form.
+    assert f'<a href="{LOGOUT_PATH}">Sign in</a>' in anonymous.text
+    assert LOGOUT_PATH in RESERVED_HOST_PREFIXES
     assert "<iframe" not in anonymous.text
 
     frame = await client.get(link, headers=_cookie(creator_token))

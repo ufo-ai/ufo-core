@@ -10,6 +10,10 @@ export const SESSION_FAULT_HEADER = "x-ufo-session-fault";
  *  it ended: signing in again is the only act left, and the page they land on asks for it. */
 export const SIGN_IN_PATH = "/login";
 
+/** The way back to the form. The door above forwards a browser that already holds a session, so an
+ *  address other than the one the cookie proves is reached by clearing it first. */
+export const SIGN_OUT_PATH = "/logout";
+
 export type SessionFault = "expired" | "no-member";
 
 /** Which of the two 401s the surface answered: a bearer it could not read, or a live bearer whose

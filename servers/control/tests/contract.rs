@@ -8,7 +8,7 @@
 use chrono::{TimeZone, Utc};
 use serde::Deserialize;
 use ufo_control::directives::directive;
-use ufo_control::token::sign;
+use ufo_control::token::{sign, verified_email};
 
 #[derive(Deserialize)]
 struct Vector {
@@ -20,7 +20,7 @@ struct Vector {
 }
 
 #[test]
-fn every_core_vector_signs_identically_here() {
+fn every_core_vector_signs_and_reads_back_identically_here() {
     let raw = include_str!("bearer_contract.json");
     let vectors: Vec<Vector> = serde_json::from_str(raw).expect("contract vectors parse");
     assert!(
@@ -40,6 +40,16 @@ fn every_core_vector_signs_identically_here() {
             minted, vector.token,
             "vector for {} at {} drifted from core",
             vector.email, vector.exp
+        );
+        assert_eq!(
+            verified_email(
+                &vector.secret,
+                &vector.token,
+                Utc.timestamp_opt(vector.exp - 1, 0).unwrap()
+            ),
+            Some(vector.email.trim().to_lowercase()),
+            "the sign-in door reads back the address core signed for {}",
+            vector.email
         );
     }
 }

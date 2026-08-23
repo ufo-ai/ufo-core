@@ -17,6 +17,7 @@ use harness::ledger_pool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use ufo_control::email::{AwsEndpoints, EmailSender, SesEmailSender};
+use ufo_control::gateway::INVITATION_LOGIN_PATH;
 use ufo_control::invite_delivery::{
     rearm_failed_delivery, InviteDeliveries, ERROR_CHARS, INVITATIONS_PER_WORKSPACE_PER_DAY,
     STATE_DELIVERED, STATE_FAILED, STATE_PENDING,
@@ -472,7 +473,10 @@ async fn a_delivery_states_who_added_them_which_workspace_and_where_to_sign_in()
         .unwrap();
     assert!(body.contains("admin@acme.com added you"), "{body}");
     assert!(body.contains("the acme.com workspace"), "{body}");
-    assert!(body.contains(&format!("https://{APEX}/login")), "{body}");
+    assert!(
+        body.contains(&format!("https://{APEX}{INVITATION_LOGIN_PATH}")),
+        "{body}"
+    );
 
     // The HTML alternative states the same three facts and carries the sign-in page's own look:
     // every rule inline, the card laid out in tables, and the sign-in link drawn as its button.
@@ -483,7 +487,7 @@ async fn a_delivery_states_who_added_them_which_workspace_and_where_to_sign_in()
     assert!(markup.contains("the acme.com workspace"), "{markup}");
     assert!(markup.contains("Sign in as teammate@acme.com"), "{markup}");
     assert!(
-        markup.contains(&format!(r#"href="https://{APEX}/login""#)),
+        markup.contains(&format!(r#"href="https://{APEX}{INVITATION_LOGIN_PATH}""#)),
         "{markup}"
     );
     assert!(markup.contains("background:#FAF9F7"), "{markup}");

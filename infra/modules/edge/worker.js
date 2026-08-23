@@ -233,8 +233,12 @@ export default {
         return fetch(`${env.ORIGIN_BASE}/ufo`);
       case "/fleet":
         return fetch(`${env.ORIGIN_BASE}/fleet`);
+      // The query rides along: an apex door is only a hop to the host that binds the cookie, and the
+      // ask a link carries — the conversation it names, the invitation it answers — is read there.
       case "/login":
-        return Response.redirect(`https://app.${url.hostname}/login`, 302);
+        return Response.redirect(`https://app.${url.hostname}/login${url.search}`, 302);
+      case "/logout":
+        return Response.redirect(`https://app.${url.hostname}/logout${url.search}`, 302);
       default:
         return fetch(request);
     }
