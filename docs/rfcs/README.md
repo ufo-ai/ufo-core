@@ -39,6 +39,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0038](0038-skill-retrieval.md) | Skill retrieval — routing cards, tiered visibility, and retrieval proven in shadow | implemented |
 | [0039](0039-first-class-apps.md) | First-class apps | proposed |
 | [0040](0040-daytona-carrier.md) | Daytona carrier — a second cloud backend, provider-routed | implemented |
+| [0041](0041-core-rust-port.md) | Core in Rust, extensions as components | proposed |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working
