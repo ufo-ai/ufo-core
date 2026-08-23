@@ -45,6 +45,33 @@ resource "cloudflare_zone_setting" "always_use_https" {
   depends_on = [cloudflare_ruleset.flyingobject_redirect]
 }
 
+# The portal serves its assets session-gated with `no-cache` plus a content ETag, so a deploy is
+# visible on the next revalidation — and the edge must not outrank that. Left alone, Cloudflare
+# caches by file extension and stamps the zone's default browser TTL over the origin's header, so
+# every browser holds a rolled-out portal's old assets for hours. The rule turns the edge cache off
+# for the portal hosts and hands the origin's own cache headers through. Worker-managed cache
+# entries (site share cards, artifact bytes) are explicit Cache API reads on their own routes and
+# do not ride this pipeline.
+resource "cloudflare_ruleset" "portal_origin_cache" {
+  zone_id = data.cloudflare_zone.ufo_ai.id
+  name    = "portal hosts serve with the origin's cache headers"
+  kind    = "zone"
+  phase   = "http_request_cache_settings"
+
+  rules = [{
+    ref         = "portal_hosts_respect_origin"
+    description = "no edge cache and origin browser TTL on the portal hosts"
+    expression  = "http.host in {\"app.ufo.ai\" \"app.testing.ufo.ai\"}"
+    action      = "set_cache_settings"
+    action_parameters = {
+      cache = false
+      browser_ttl = {
+        mode = "respect_origin"
+      }
+    }
+  }]
+}
+
 module "prod" {
   source = "../../modules/edge"
 
