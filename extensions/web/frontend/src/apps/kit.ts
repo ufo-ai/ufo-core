@@ -34,7 +34,7 @@ import type { Face, FacetGroup } from "@/kernel/pane";
 import type { PanelState } from "@/kernel/panel";
 import type { ChatRow } from "@/lib/rail";
 import type { Crumb } from "@/lib/title";
-import type { Agent, Member } from "@/lib/types";
+import type { Agent, Conversation, Member } from "@/lib/types";
 import type { PaneView } from "@/views/registry";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -99,6 +99,7 @@ import {
   isPortalChat,
   ownerLabel,
   slackLink,
+  surfaceWord,
   useViewer,
 } from "@/lib/audience";
 import { cn } from "@/lib/cn";
@@ -118,6 +119,7 @@ import {
 import type { WorkspacePlace } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { ChatPane } from "@/views/ChatPane";
+import { ConversationDetail } from "@/views/Conversations";
 
 import "@/theme.css";
 
@@ -148,6 +150,7 @@ export type {
   Agent,
   AppInit,
   ChatRow,
+  Conversation,
   Crumb,
   Face,
   FacetGroup,
@@ -257,6 +260,7 @@ export {
   isPortalChat,
   ownerLabel,
   slackLink,
+  surfaceWord,
   useViewer,
   cn,
   useAgents,
@@ -277,4 +281,5 @@ export {
   workspaceHash,
   formatSize,
   ChatPane,
+  ConversationDetail,
 };

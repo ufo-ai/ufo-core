@@ -4,6 +4,7 @@
 const {
   COLUMN,
   ChatPane,
+  ConversationDetail,
   Header,
   Moment,
   Page,
@@ -15,10 +16,12 @@ const {
   cn,
   founded,
   getJson,
+  isPortalChat,
   mountApp,
   navigate,
   onPlaced,
   routeIs,
+  surfaceWord,
   useAppLinks,
   useCallback,
   useEffect,
@@ -71,7 +74,8 @@ type Shown =
   | { kind: "missing" }
   | { kind: "compose" }
   | { kind: "list"; rows: ConversationRow[]; walk: string | null }
-  | { kind: "open"; row: ConversationRow };
+  | { kind: "open"; row: ConversationRow }
+  | { kind: "reading"; conversation: Conversation };
 
 /** The conversation listing the page holds: walked once and again on a cursor page, and searched
  *  to open a row without a read of its own. */
@@ -158,9 +162,15 @@ function ChatApp({
     }
     let live = true;
     setShown((held) => (held.kind === "open" && held.row.name === wanted ? held : { kind: "loading" }));
-    void getJson<{ chats: ResolvedChat[] }>("/api/chats?conversation=" + wanted).then((sought) => {
+    void getJson<{ chats: ResolvedChat[]; conversation?: Conversation }>(
+      "/api/chats?conversation=" + wanted,
+    ).then((sought) => {
       if (!live) return;
       const chat = sought.ok ? sought.payload.chats[0] : undefined;
+      // A web chat comes back as a rail row this page can carry on. Another surface — a Slack
+      // thread, a terminal session — comes back as a read-only conversation projection instead,
+      // which the page shows as a transcript with the way back to the surface that holds it.
+      const reading = sought.ok ? sought.payload.conversation : undefined;
       setShown(
         chat
           ? {
@@ -174,7 +184,9 @@ function ChatApp({
                 last_at: chat.last_at,
               },
             }
-          : { kind: "missing" },
+          : reading
+            ? { kind: "reading", conversation: reading }
+            : { kind: "missing" },
       );
     });
     return () => {
@@ -302,6 +314,29 @@ function ChatApp({
         crumb={crumb}
         onActivity={() => {}}
       />
+    );
+  }
+  if (shown.kind === "reading") {
+    const convo = shown.conversation;
+    const agent =
+      agents.find((entry) => entry.id === convo.agent?.id) ??
+      ({ id: convo.agent?.id ?? "", name: convo.agent?.name ?? "", model: "" } as Agent);
+    return (
+      <Pane>
+        <Header pinned heading={1} title={convo.description} />
+        <Page>
+          <div className={COLUMN}>
+            <ConversationDetail agent={agent} conversation={convo} headed />
+            <p className="m-0 max-w-hint text-ink-soft">
+              {isPortalChat(convo.surface)
+                ? "This conversation is read-only."
+                : "This conversation is read-only here. Reply in " +
+                  surfaceWord(convo.surface) +
+                  " to continue it."}
+            </p>
+          </div>
+        </Page>
+      </Pane>
     );
   }
   if (!mainAgent) return <PaneNote>No such app.</PaneNote>;

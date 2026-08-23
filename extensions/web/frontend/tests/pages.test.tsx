@@ -22,6 +22,7 @@ import {
   SITE_KIND,
   TASK_KIND,
   TRIGGER_KIND,
+  TURN_ID,
   json,
   objectIndex,
   wire,
@@ -298,4 +299,39 @@ test("the chat page heads one conversation under the crumb the shell handed it",
   const plain = new MouseEvent("click", { bubbles: true, cancelable: true });
   expect(crumb.dispatchEvent(plain)).toBe(false);
   expect(within(path).getByText(CHAT_ROW.title)).toBeTruthy();
+});
+
+test("the chat page opens a Slack or terminal conversation read-only, not as unavailable", async () => {
+  const SLACK = TURN_ID;
+  const slackConversation = {
+    id: SLACK,
+    agent: { id: AGENT.id, name: AGENT.name },
+    surface: "slack",
+    surface_label: "#general",
+    audience: "member:m1",
+    member_email: MEMBER.email,
+    description: "Slack thread",
+    source: "https://slack.example/archives/x/p1",
+    speakers: [MEMBER.email],
+    turn_count: 2,
+    created_at: "2026-08-01T09:00:00",
+    last_turn_at: "2026-08-01T09:00:01",
+    readable: true,
+    disclosable: false,
+  };
+  const { calls } = await runPage("chat", {
+    // The listing is portal-filtered, so a Slack conversation is never in it: the page resolves it
+    // by address, and the resolve answers a read-only conversation rather than a repliable chat.
+    "/objects/conversation": () => json({ objects: [], next_cursor: null }),
+    "/api/chats": () => json({ chats: [], conversation: slackConversation }),
+    "/transcript": () => json({ messages: [], earlier: 0 }),
+  });
+
+  await screen.findByRole("heading", { name: "Chat" });
+  window.postMessage({ ufo: "place", place: { opens: [SLACK] } }, "*");
+
+  // The read-only note stands, the miss never does, and the transcript is fetched by its address.
+  expect(await screen.findByText(/Reply in Slack to continue it/)).toBeTruthy();
+  expect(screen.queryByText("This conversation is not available here.")).toBeNull();
+  expect(calls.some((url) => url.includes("transcript") && url.includes(SLACK))).toBe(true);
 });
