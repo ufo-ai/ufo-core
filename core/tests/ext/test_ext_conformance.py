@@ -87,7 +87,7 @@ from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import ProbeEnv
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.select import select_carrier
+from ufo.sandbox.select import select_carrier, select_carriers
 from ufo.sandbox.session import (
     ExecResult,
     ProbeTokenCodec,
@@ -756,6 +756,57 @@ async def test_a_workspace_write_reaches_the_manifest_contributed_carrier() -> N
 def test_an_unregistered_backend_fails_loud() -> None:
     with pytest.raises(RuntimeError, match="not a registered carrier"):
         select_carrier(_carrier_config("nope"), ())
+
+
+def test_resume_backends_build_beside_the_default() -> None:
+    """The coexistence seam: `[sandbox] resume_backends` keeps a prior backend live for the stored
+    handles bearing its scheme, while new sandboxes open on `backend`."""
+    manifest = _sample_manifest()
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("blobs")),
+        sandbox=SandboxConfig(backend="local", resume_backends=(sample.CARRIER_NAME,)),
+    )
+    selected = select_carriers(config, (manifest,))
+    assert isinstance(selected.carrier, LocalCarrier)
+    resumed, spec = selected.resume[sample.CARRIER_NAME]
+    assert isinstance(resumed, sample.SampleCarrier)
+    assert spec.name == sample.CARRIER_NAME
+
+
+def test_a_resume_backend_no_carrier_registers_fails_loud() -> None:
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("blobs")),
+        sandbox=SandboxConfig(backend="local", resume_backends=("nope",)),
+    )
+    with pytest.raises(RuntimeError, match="not a registered carrier"):
+        select_carriers(config, ())
+
+
+def test_a_resume_backend_duplicating_the_default_fails_loud() -> None:
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("blobs")),
+        sandbox=SandboxConfig(backend="local", resume_backends=("local",)),
+    )
+    with pytest.raises(RuntimeError, match="already the default"):
+        select_carriers(config, ())
+
+
+def test_an_off_cluster_resume_backend_requires_the_public_proxy_url() -> None:
+    remote = Manifest(
+        name="remote",
+        version="0",
+        carriers=(CarrierSpec(name="remote", factory=sample.SampleCarrier, off_cluster=True),),
+    )
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("blobs")),
+        sandbox=SandboxConfig(backend="local", resume_backends=("remote",)),
+    )
+    with pytest.raises(RuntimeError, match="proxy_public_url"):
+        select_carriers(config, (remote,))
 
 
 def test_a_carrier_colliding_with_a_built_in_fails_loud() -> None:

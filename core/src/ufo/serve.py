@@ -153,7 +153,7 @@ from ufo.sandbox.cache import (
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import ProbeEnv
 from ufo.sandbox.preview import PREVIEW_HOST, parse_preview_service
-from ufo.sandbox.select import select_carrier
+from ufo.sandbox.select import select_carriers
 from ufo.sandbox.session import (
     EGRESS_CA_CERT_ENV,
     EGRESS_CONTROL_TOKEN_ENV,
@@ -245,7 +245,8 @@ def run() -> None:
     artifact_secret = os.environ.get(config.artifacts.token_secret_env, "")
     hub = _select_hub(config, manifests)
     dbos_client = replay_safe_client(config.database.system_url)
-    carrier, carrier_spec = select_carrier(config, manifests)
+    carriers = select_carriers(config, manifests)
+    carrier, carrier_spec = carriers.carrier, carriers.spec
     registry = model_registry(config, manifests)
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
@@ -274,6 +275,7 @@ def run() -> None:
             carrier=carrier,
             backend=config.sandbox.backend,
             off_cluster=carrier_spec.off_cluster,
+            resume_carriers=carriers.resume,
             image_ref=SANDBOX_IMAGE_REF,
             proxy=_proxy_endpoint(
                 app, config, manifests, credentials, registry.pricing, run_tokens, blob_backend

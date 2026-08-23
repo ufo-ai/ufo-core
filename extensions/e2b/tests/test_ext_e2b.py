@@ -40,8 +40,6 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
-    CA_SANDBOX_PATH,
-    CA_STAGING_PATH,
     CAP_WORKLOAD_COMMAND,
     CARRIER_NAME,
     CONVERSATION_METADATA_KEY,
@@ -54,17 +52,13 @@ from ufo_ext_e2b import (
     EXEC_TIMEOUT_CODE,
     INSTALL_CA_COMMAND,
     LEASE_MARGIN_SECONDS,
-    NODE_GLOBAL_MODULES,
-    PLAYWRIGHT_BROWSERS_DIR,
     PREPARE_ATTEMPTS,
     RESUME_RETRY_DELAY_SECONDS,
     RESUME_TOTAL_TIMEOUT_SECONDS,
     RESUME_TRANSPORT_RETRIES,
     SANDBOX_LEASE_SECONDS,
-    SENTINEL_MODEL_KEY,
     SILENT_MARK_SECONDS,
     SILENT_PROBE_CMD,
-    SYSTEM_CA_BUNDLE,
     WORKLOAD_CAP_TIMEOUT_SECONDS,
     WORKLOAD_CGROUPS,
     WORKLOAD_MEMORY_RESERVE_KB,
@@ -78,8 +72,14 @@ from ufo import o11y
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import (
+    CA_SANDBOX_PATH,
+    CA_STAGING_PATH,
     NO_PROXY_HOSTS,
+    NODE_GLOBAL_MODULES,
+    PLAYWRIGHT_BROWSERS_DIR,
     SANDBOX_SIZES,
+    SENTINEL_MODEL_KEY,
+    SYSTEM_CA_BUNDLE,
     WORKSPACE_DIR,
     ExecResult,
     ProxyEndpoint,

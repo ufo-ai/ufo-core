@@ -74,6 +74,7 @@ EXTENSIONS = (
     "memory",
     "mcp",
     "e2b",
+    "daytona",
     "documents",
     "connectors",
     "composio",

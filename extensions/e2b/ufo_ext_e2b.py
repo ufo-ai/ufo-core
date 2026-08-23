@@ -47,7 +47,6 @@ import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, overload
-from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -59,30 +58,25 @@ from e2b.sandbox.sandbox_api import SandboxLifecycle, SandboxNetworkOpts
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.o11y import emit_metric, log
 from ufo.sdk.sandbox import (
-    NO_PROXY_HOSTS,
+    CA_SANDBOX_PATH,
+    CA_STAGING_PATH,
+    SANDBOX_ENV,
     SANDBOX_SIZES,
-    SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     CarrierSpec,
     DialTarget,
     ExecResult,
-    ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
+    egress_proxy_env,
     sbxfs_file_op,
 )
 
 CARRIER_NAME = "e2b"
 E2B_API_KEY_ENV = "E2B_API_KEY"
 E2B_TEMPLATES_ENV = "E2B_TEMPLATES"
-NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
-PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
 TRAFFIC_ACCESS_HEADER = "e2b-traffic-access-token"
-SANDBOX_ENV: dict[str, str] = {
-    "NODE_PATH": NODE_GLOBAL_MODULES,
-    "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
-}
 SANDBOX_LEASE_SECONDS = 300
 """The autosuspend span: every create, resume, and renewal leases at least this much, so a sandbox
 pauses — and releases its concurrency slot — within five minutes of its last leased call. Work that
@@ -118,9 +112,6 @@ one that is really gone is re-marked by the next unanswered call rather than rem
 CONVERSATION_METADATA_KEY = "ufo.conversation_id"
 E2B_LIFECYCLE: SandboxLifecycle = {"on_timeout": "pause", "auto_resume": True}
 E2B_NETWORK: SandboxNetworkOpts = {"allow_public_traffic": False}
-CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
-CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
-SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 CA_INSTALL_TIMEOUT_SECONDS = 30
 SANDBOX_USER = "user"
 WORKSPACE_ENSURE_TIMEOUT_SECONDS = 30
@@ -163,44 +154,6 @@ CAP_WORKLOAD_COMMAND = (
     f'echo {WORKLOAD_PIDS_MAX} > "$cg/pids.max" || exit 1; done'
 )
 WORKLOAD_CAP_TIMEOUT_SECONDS = 30
-
-
-def _egress_env(proxy: ProxyEndpoint, run_token: str) -> dict[str, str]:
-    """The environment a sandbox command runs under so its every call off the box routes through the
-    egress proxy: `HTTP(S)_PROXY` dial the proxy at its public base with the turn's run token as the
-    basic-auth username (so the proxy attributes and meters the request to the turn), `NO_PROXY`
-    exempts the sandbox's own loopback (reaching a service this turn started inside the box is not
-    egress), the model keys are the sentinels the proxy swaps for the real key on the wire, and the
-    CA is the one written into the sandbox so the proxy can terminate TLS the sandbox trusts. The
-    signed run token is URL-safe, so it drops into the URL's userinfo unescaped. Off-cluster means
-    the public base is required — absent it (the guard `serve` applies at boot), the sandbox would
-    have no metered route out, so this fails loud rather than build an open sandbox."""
-    if proxy.public_url is None:
-        raise RuntimeError(
-            "the e2b carrier runs off-cluster and needs a reachable egress proxy; "
-            "set [sandbox] proxy_public_url to the externally-reachable proxy URL"
-        )
-    parsed = urlsplit(proxy.public_url)
-    if parsed.scheme != "https" or parsed.hostname is None:
-        raise RuntimeError(
-            "the e2b carrier requires an HTTPS [sandbox] proxy_public_url so its run token is "
-            "encrypted in transit"
-        )
-    proxy_url = f"https://{run_token}:@{parsed.netloc}"
-    return {
-        "HTTP_PROXY": proxy_url,
-        "HTTPS_PROXY": proxy_url,
-        "http_proxy": proxy_url,
-        "https_proxy": proxy_url,
-        "NO_PROXY": NO_PROXY_HOSTS,
-        "no_proxy": NO_PROXY_HOSTS,
-        "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
-        "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
-        "SSL_CERT_FILE": SYSTEM_CA_BUNDLE,
-        "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE,
-        "CURL_CA_BUNDLE": SYSTEM_CA_BUNDLE,
-        "NODE_EXTRA_CA_CERTS": CA_SANDBOX_PATH,
-    }
 
 
 class E2BCommandResult(Protocol):
@@ -386,7 +339,7 @@ class E2BCarrier:
 
         The lease is published only once preparation has succeeded, so what a concurrent open can
         adopt is a box already known good rather than one still being made ready."""
-        egress_env = _egress_env(spec.proxy, spec.run_token)
+        egress_env = egress_proxy_env(spec.proxy, spec.run_token)
         live = self._leased(spec.conversation_id)
         resume_id = (
             spec.resume_id

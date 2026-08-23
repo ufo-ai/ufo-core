@@ -397,6 +397,19 @@ jobs:
           test -n "$E2B_TEMPLATES"
           echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"
 
+      - name: Select daytona snapshots
+        env:
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            DAYTONA_SNAPSHOTS=small=plan-only,medium=plan-only,large=plan-only
+          else
+            uv run python sandbox/build_template.py --daytona
+            DAYTONA_SNAPSHOTS=$(uv run python sandbox/build_template.py --daytona-refs)
+          fi
+          test -n "$DAYTONA_SNAPSHOTS"
+          echo "DAYTONA_SNAPSHOTS=$DAYTONA_SNAPSHOTS" >> "$GITHUB_ENV"
+
       # Staged for the ufo-clientbin push after the apply.
       - uses: actions/download-artifact@v4
         if: github.event_name != 'pull_request' && needs.client.result == 'success'
@@ -437,7 +450,8 @@ jobs:
           fi
           terraform plan -input=false -no-color -lock="$LOCK" \
             -out="$RUNNER_TEMP/testing.tfplan" -var "image_tag=$IMAGE_TAG" \
-            -var "e2b_templates=$E2B_TEMPLATES"
+            -var "e2b_templates=$E2B_TEMPLATES" \
+            -var "daytona_snapshots=$DAYTONA_SNAPSHOTS"
 
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}
@@ -610,6 +624,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       E2B_TEMPLATES: small=ufo-sbx-small,medium=ufo-sbx-medium,large=ufo-sbx-large
+      DAYTONA_SNAPSHOTS: small=plan-only,medium=plan-only,large=plan-only
       TF_DIR: infra/envs/prod
     steps:
       - uses: actions/checkout@v4
@@ -642,6 +657,7 @@ jobs:
             -target=module.platform.aws_secretsmanager_secret.api_keys \
             -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
             -var "e2b_templates=$E2B_TEMPLATES" \
+            -var "daytona_snapshots=$DAYTONA_SNAPSHOTS" \
             -var "deployment_id=plan"
 
       - name: Reject destructive changes

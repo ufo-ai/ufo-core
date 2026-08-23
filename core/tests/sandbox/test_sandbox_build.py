@@ -6,14 +6,17 @@ expected sets and the rendered Dockerfile is asserted to carry the whole install
 render targets (E2B template, Docker image) share `apply_layers`, so this offline check over the
 Dockerfile render also covers what the E2B template bakes."""
 
+import re
 import sys
 from types import SimpleNamespace
 
 from e2b.template.types import BuildInfo
+from ufo_ext_daytona import snapshot_map
 
 import sandbox.build_template as build_template
 from sandbox.build_template import (
     APT_PACKAGES,
+    DAYTONA_TIERS,
     GH_INSTALL_COMMAND,
     NPM_PACKAGES,
     PIP_PACKAGES,
@@ -23,8 +26,13 @@ from sandbox.build_template import (
     SANDBOX_SCRIPTS,
     SANDBOX_TEMPLATE_READY_COMMAND,
     SANDBOX_TIERS,
+    DaytonaSizing,
     Sizing,
     build_definition_digest,
+    daytona_definition_digest,
+    daytona_image,
+    daytona_refs,
+    daytona_snapshot_name,
     pod_dockerfile,
     template_name,
 )
@@ -279,3 +287,52 @@ def test_check_reads_every_tier_against_its_own_digest(monkeypatch) -> None:
         (template_name(size), build_definition_digest(sizing))
         for size, sizing in SANDBOX_TIERS.items()
     ]
+
+
+def test_daytona_snapshot_name_carries_size_and_digest() -> None:
+    name = daytona_snapshot_name("small")
+    digest = daytona_definition_digest("small")
+    assert name == f"ufo-sbx-small-{digest[:12]}"
+    assert re.fullmatch(r"ufo-sbx-small-[0-9a-f]{12}", name)
+
+
+def test_daytona_digest_moves_with_the_docker_definition(monkeypatch) -> None:
+    before = daytona_definition_digest("small")
+    monkeypatch.setattr(build_template, "GH_INSTALL_COMMAND", "changed")
+    assert daytona_definition_digest("small") != before
+
+
+def test_daytona_digest_moves_with_tier_resources_and_the_e2b_digest_does_not(
+    monkeypatch,
+) -> None:
+    daytona_before = daytona_definition_digest("small")
+    e2b_before = build_definition_digest(SANDBOX_TIERS["small"])
+    monkeypatch.setitem(
+        build_template.DAYTONA_TIERS, "small", DaytonaSizing(cpu=2, memory_gb=2, disk_gb=20)
+    )
+    assert daytona_definition_digest("small") != daytona_before
+    assert build_definition_digest(SANDBOX_TIERS["small"]) == e2b_before
+
+
+def test_daytona_refs_round_trip_the_carriers_snapshot_map() -> None:
+    assert snapshot_map(daytona_refs()) == {
+        size: daytona_snapshot_name(size) for size in SANDBOX_SIZES
+    }
+
+
+def test_daytona_tiers_cover_exactly_the_declared_sizes() -> None:
+    assert tuple(DAYTONA_TIERS) == SANDBOX_SIZES
+
+
+def test_daytona_image_bakes_the_same_layers_as_the_dockerfile() -> None:
+    image = daytona_image("small")
+    rendered = image.dockerfile()
+    for command in (
+        "apt-get update",
+        GH_INSTALL_COMMAND.split(" && ")[0],
+        "python3 -m pip install",
+        "npm install -g",
+        f"mkdir -p {build_template.WORKSPACE_DIR}",
+    ):
+        assert command in rendered
+    assert f"USER {RUNTIME_USER}" in rendered

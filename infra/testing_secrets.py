@@ -26,6 +26,7 @@ REQUIRED_PROPERTIES = frozenset(SECRET_INPUTS) | {
     "anthropic-api-key",
     "browserbase-api-key",
     "datadog-api-key",
+    "daytona-api-key",
     "e2b-api-key",
     "turbopuffer-api-key",
 }

@@ -136,7 +136,8 @@ locals {
     backend = "redis"
 
     [sandbox]
-    backend = "e2b"
+    backend = "daytona"
+    resume_backends = ["e2b"]
     proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
     ingress_public_url = "https://${module.platform.hostname}"
     ${local.cache_enabled ? "cache_daemon = \"127.0.0.1:9110\"" : ""}
@@ -226,6 +227,7 @@ data "kubectl_file_documents" "hosted" {
     bundle_image                     = local.bundle_image
     client_version                   = local.client_version
     e2b_templates                    = var.e2b_templates
+    daytona_snapshots                = var.daytona_snapshots
     serve_role_arn                   = module.platform.app_s3_role_arn
     ingress_role_arn                 = module.platform.ingress_s3_role_arn
     workload_ha                      = false

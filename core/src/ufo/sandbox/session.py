@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol, runtime_checkable
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
@@ -66,6 +67,58 @@ ecosystem reads. A sandbox reaching its own loopback is not egress: the proxy ad
 routable addresses, so a proxied loopback request can only 403, and a service the turn started
 inside the container — Chrome's DevTools port, a dev-server preview — would be unreachable from
 inside it. Exempting loopback grants no reach a raw socket does not already have."""
+CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
+CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
+SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
+PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
+SANDBOX_ENV: dict[str, str] = {
+    "NODE_PATH": NODE_GLOBAL_MODULES,
+    "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
+}
+"""Runtime env the sandbox image needs beyond its base: NODE_PATH so node resolves the globally
+installed skill modules from any cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked
+at build time. The image bakes it as ENV; a carrier whose exec does not inherit image ENV merges it
+into every command's env instead."""
+
+
+def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
+    """The environment a remote sandbox's command runs under so its every call off the box routes
+    through the egress proxy: `HTTP(S)_PROXY` dial the proxy at its public base with the turn's run
+    token as the basic-auth username (so the proxy attributes and meters the request to the turn),
+    `NO_PROXY` exempts the sandbox's own loopback (reaching a service this turn started inside the
+    box is not egress), the model keys are the sentinels the proxy swaps for the real key on the
+    wire, and the CA is the one written into the sandbox so the proxy can terminate TLS the sandbox
+    trusts. The signed run token is URL-safe, so it drops into the URL's userinfo unescaped.
+    Off-cluster means the public base is required — absent it (the guard `serve` applies at boot),
+    the sandbox would have no metered route out, so this fails loud rather than build an open
+    sandbox."""
+    if proxy.public_url is None:
+        raise RuntimeError(
+            "an off-cluster carrier runs outside the pod and needs a reachable egress proxy; "
+            "set [sandbox] proxy_public_url to the externally-reachable proxy URL"
+        )
+    parsed = urlsplit(proxy.public_url)
+    if parsed.scheme != "https" or parsed.hostname is None:
+        raise RuntimeError(
+            "an off-cluster carrier requires an HTTPS [sandbox] proxy_public_url so its run "
+            "token is encrypted in transit"
+        )
+    proxy_url = f"https://{run_token}:@{parsed.netloc}"
+    return {
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "NO_PROXY": NO_PROXY_HOSTS,
+        "no_proxy": NO_PROXY_HOSTS,
+        "ANTHROPIC_API_KEY": SENTINEL_MODEL_KEY,
+        "OPENAI_API_KEY": SENTINEL_MODEL_KEY,
+        "SSL_CERT_FILE": SYSTEM_CA_BUNDLE,
+        "REQUESTS_CA_BUNDLE": SYSTEM_CA_BUNDLE,
+        "CURL_CA_BUNDLE": SYSTEM_CA_BUNDLE,
+        "NODE_EXTRA_CA_CERTS": CA_SANDBOX_PATH,
+    }
 
 
 PROBE_TOKEN_KIND = "ufo-probe"
@@ -271,6 +324,12 @@ def sandbox_handle_id(backend: str, value: str) -> str | None:
     load-bearing: a deploy that switched carriers must not resume another backend's id."""
     prefix = f"{backend}{SANDBOX_HANDLE_SEP}"
     return value[len(prefix) :] if value.startswith(prefix) else None
+
+
+def sandbox_handle_backend(value: str) -> str:
+    """The backend scheme a stored `<backend>:<id>` handle bears — what routes a conversation to
+    the carrier that wrote it, where a deploy keeps more than one live."""
+    return value.split(SANDBOX_HANDLE_SEP, 1)[0]
 
 
 @dataclass(frozen=True)

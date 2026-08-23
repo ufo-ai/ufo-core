@@ -36,6 +36,7 @@ from ufo.blob import (
 from ufo.config import load_config
 from ufo.db import init_db, verify_db_reachable, workspace_tx
 from ufo.ext.loader import load_manifests
+from ufo.ext.manifest import CarrierSpec
 from ufo.o11y import init_o11y, log, log_error, warn
 from ufo.proxy_serve import OTLP_ENDPOINT_ENV, owner_dsn
 from ufo.sandbox.ingress_host import SiteLabelError, parse_site_label, site_label
@@ -49,12 +50,13 @@ from ufo.sandbox.ingress_token import (
     mint_ingress_token,
     verify_ingress_token,
 )
-from ufo.sandbox.select import select_carrier
+from ufo.sandbox.select import select_carriers
 from ufo.sandbox.session import (
     Carrier,
     DialTarget,
     SandboxHandle,
     SandboxUnreachable,
+    sandbox_handle_backend,
     sandbox_handle_id,
 )
 from ufo.schema import tables
@@ -277,6 +279,10 @@ class IngressServe:
     """The scheme and rendered `:port` (or empty) of `[sandbox] ingress_public_url` — with
     `base_host`, what `_frame_ancestors` renders a sibling site's origin from."""
     frame_ancestors_cache: dict[UUID, tuple[float, str]] = field(default_factory=dict)
+    resume_carriers: Mapping[str, tuple[Carrier, CarrierSpec]] = field(default_factory=dict)
+    """Backends kept live only for the stored handles bearing their scheme (`[sandbox]
+    resume_backends`): a site whose conversation still runs on a prior provider dials through that
+    provider's carrier."""
 
     def app(self) -> FastAPI:
         """The view path and everything under it is the ingress's, on every method the proxy serves
@@ -438,20 +444,25 @@ class IngressServe:
         by the conversation's own sandbox."""
         with ws(claims.workspace_id):
             stored = await self._stored_handle(claims.workspace_id, claims.conversation_id)
-            container_id = None if stored is None else sandbox_handle_id(self.backend, stored)
+            carrier, backend = self.carrier, self.backend
+            if stored is not None:
+                resumed = self.resume_carriers.get(sandbox_handle_backend(stored))
+                if resumed is not None:
+                    carrier, backend = resumed[0], resumed[1].name
+            container_id = None if stored is None else sandbox_handle_id(backend, stored)
             if not container_id:
                 warn(
                     "ingress.no_container",
                     conversation_id=str(claims.conversation_id),
                     stored_handle=stored,
-                    backend=self.backend,
+                    backend=backend,
                 )
                 return SiteRefusal(503, SITE_GONE)
             handle = SandboxHandle(
                 conversation_id=claims.conversation_id, container_id=container_id
             )
             try:
-                return await self.carrier.dial(handle, claims.port)
+                return await carrier.dial(handle, claims.port)
             except SandboxUnreachable as error:
                 warn(
                     "ingress.dial_failed",
@@ -935,10 +946,12 @@ def run() -> None:
     asyncio.run(verify_db_reachable())
     ingress_secret()
     ingress_base = urlsplit(config.sandbox.ingress_public_url or "")
+    selected = select_carriers(config, manifests)
     server = IngressServe(
         backend=config.sandbox.backend,
         base_host=ingress_base_host(config.sandbox.ingress_public_url),
-        carrier=select_carrier(config, manifests)[0],
+        carrier=selected.carrier,
+        resume_carriers=selected.resume,
         client=upstream_client(),
         blob=blob_store_for(config.blob),
         frame_ancestor=ingress_frame_ancestor(config.connect.public_base_url),

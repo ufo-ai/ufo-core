@@ -24,6 +24,15 @@ variable "e2b_templates" {
   }
 }
 
+variable "daytona_snapshots" {
+  type = string
+
+  validation {
+    condition     = var.daytona_snapshots != ""
+    error_message = "daytona_snapshots must not be empty."
+  }
+}
+
 variable "letsencrypt_email" {
   type        = string
   default     = "ops@flyingobject.ai"

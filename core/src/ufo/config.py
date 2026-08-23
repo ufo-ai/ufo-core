@@ -204,6 +204,11 @@ class SandboxConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     backend: str = "local"
+    resume_backends: tuple[str, ...] = ()
+    """Backends kept live only for the stored handles bearing their scheme — a conversation whose
+    sandbox another provider still holds keeps resuming there, while new sandboxes always open on
+    `backend`. Every name must resolve to a registered carrier, and repeating `backend` here fails
+    loud."""
     workspace_root: Path = Path("./workspaces")
     proxy_port: int = DEFAULT_PROXY_PORT
     proxy_public_url: str | None = None

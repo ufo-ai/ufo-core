@@ -27,19 +27,25 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from daytona import (
+    CreateSandboxFromSnapshotParams,
+    CreateSnapshotParams,
+    Daytona,
+    DaytonaNotFoundError,
+    Resources,
+)
+from daytona import Image as DaytonaImage
+from daytona_api_client import SnapshotState
 from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
-from ufo_ext_e2b import (
-    PLAYWRIGHT_BROWSERS_DIR,
-    SANDBOX_ENV,
-)
 
-from ufo.sdk.sandbox import SANDBOX_SIZES
+from ufo.sdk.sandbox import PLAYWRIGHT_BROWSERS_DIR, SANDBOX_ENV, SANDBOX_SIZES, WORKSPACE_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
 E2B_TEMPLATE_NAME = "ufo-sbx"
@@ -77,6 +83,26 @@ if tuple(SANDBOX_TIERS) != SANDBOX_SIZES:
     raise RuntimeError("SANDBOX_TIERS must define exactly the sizes SANDBOX_SIZES declares")
 DOCKER_BASE_IMAGE = "e2bdev/code-interpreter:latest"
 DOCKER_IMAGE_TAG = "ufo-sandbox:latest"
+DAYTONA_SNAPSHOT_PREFIX = "ufo-sbx"
+DAYTONA_DIGEST_CHARS = 12
+
+
+@dataclass(frozen=True)
+class DaytonaSizing:
+    cpu: int
+    memory_gb: int
+    disk_gb: int
+
+
+# The resources a tier's Daytona snapshot fixes — cpu and memory mirror the E2B tiers, and disk is
+# the axis Daytona adds (its default 3 GiB outgrows on a repository checkout plus a toolchain).
+DAYTONA_TIERS: dict[str, DaytonaSizing] = {
+    "small": DaytonaSizing(cpu=2, memory_gb=2, disk_gb=10),
+    "medium": DaytonaSizing(cpu=4, memory_gb=4, disk_gb=10),
+    "large": DaytonaSizing(cpu=8, memory_gb=8, disk_gb=10),
+}
+if tuple(DAYTONA_TIERS) != SANDBOX_SIZES:
+    raise RuntimeError("DAYTONA_TIERS must define exactly the sizes SANDBOX_SIZES declares")
 START_COMMAND = "tail -f /dev/null"
 # Build as root, run as the base image's non-root user. set_user brackets the layers because
 # to_dockerfile drops the per-step run_cmd/copy user, and a sandbox that runs as root after sudo is
@@ -158,7 +184,7 @@ NPM_PACKAGES = (
     "pdf-lib",
     "playwright",
 )
-# Runtime env the image needs beyond the base — SANDBOX_ENV, defined in ufo_ext_e2b beside its
+# Runtime env the image needs beyond the base — SANDBOX_ENV, defined in core beside its
 # run-boundary consumer: NODE_PATH so node resolves the globally installed skill modules from any
 # cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked at build time. The Docker
 # carrier inherits it from the image ENV (docker exec keeps it); the E2B carrier merges it into
@@ -189,6 +215,33 @@ def template_name(size: str) -> str:
     return f"{E2B_TEMPLATE_NAME}-{size}"
 
 
+def daytona_definition_digest(size: str) -> str:
+    """Content digest of a tier's Daytona snapshot: the Docker-image definition (the snapshot IS
+    that Dockerfile, built by Daytona's own builder) plus the cpu, memory and disk the snapshot
+    fixes — which no layer carries and only a new snapshot can change."""
+    sizing = DAYTONA_TIERS[size]
+    payload = {
+        "docker": build_definition_digest(None),
+        "cpu": sizing.cpu,
+        "memory_gb": sizing.memory_gb,
+        "disk_gb": sizing.disk_gb,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def daytona_snapshot_name(size: str) -> str:
+    """`ufo-sbx-<size>-<digest12>` — the digest in the name is the drift gate: a snapshot exists
+    under exactly the definition that built it, so `--check-daytona` is a name lookup and a changed
+    definition simply names a snapshot that does not exist yet."""
+    digest = daytona_definition_digest(size)[:DAYTONA_DIGEST_CHARS]
+    return f"{DAYTONA_SNAPSHOT_PREFIX}-{size}-{digest}"
+
+
+def daytona_refs() -> str:
+    return ",".join(f"{size}={daytona_snapshot_name(size)}" for size in DAYTONA_TIERS)
+
+
 def build_definition_digest(sizing: Sizing | None) -> str:
     """Content digest of everything apply_layers bakes — base, users, the start/ready commands, the
     apt/pip/npm package sets, the env, and each script (version + content hash) — plus the cpu and
@@ -198,6 +251,7 @@ def build_definition_digest(sizing: Sizing | None) -> str:
     definition is detectable as drift from that tier's live template."""
     payload = {
         "base": E2B_BASE_TEMPLATE,
+        "workspace": WORKSPACE_DIR,
         "sizing": None
         if sizing is None
         else {"cpu_count": sizing.cpu_count, "memory_mb": sizing.memory_mb},
@@ -247,6 +301,9 @@ def apply_layers(builder: object, digest: str) -> object:
         f"PLAYWRIGHT_BROWSERS_PATH={PLAYWRIGHT_BROWSERS_DIR} playwright install chromium"
     )
     builder.run_cmd(f"mkdir -p {UFO_DIR} && chmod 0777 {UFO_DIR}")
+    builder.run_cmd(
+        f"mkdir -p {WORKSPACE_DIR} && chown {RUNTIME_USER}:{RUNTIME_USER} {WORKSPACE_DIR}"
+    )
     builder.run_cmd(f"printf '%s' '{digest}' > {BUILD_DIGEST_PATH}")
     builder.set_envs(SANDBOX_ENV)
     targets = []
@@ -263,6 +320,112 @@ def apply_layers(builder: object, digest: str) -> object:
     builder.run_cmd(f"chmod 0644 {' '.join(modules)}")
     builder.set_user(RUNTIME_USER)
     return builder.set_start_cmd(START_COMMAND, SANDBOX_TEMPLATE_READY_COMMAND)
+
+
+class _DaytonaImageBuilder:
+    """`apply_layers`' builder over the Daytona `Image` — the third render of the one definition.
+    Daytona's builder runs server-side and uploads each copied file as build context, so no
+    registry sits between the definition and the snapshot."""
+
+    def __init__(self) -> None:
+        self.image = DaytonaImage.base(DOCKER_BASE_IMAGE)
+
+    def set_user(self, user: str) -> _DaytonaImageBuilder:
+        self.image = self.image.dockerfile_commands([f"USER {user}"])
+        return self
+
+    def run_cmd(self, command: str) -> _DaytonaImageBuilder:
+        self.image = self.image.run_commands(command)
+        return self
+
+    def copy(self, source: Path, target: str, mode: int) -> _DaytonaImageBuilder:
+        self.image = self.image.add_local_file(ROOT / source, target)
+        return self
+
+    def set_envs(self, envs: dict[str, str]) -> _DaytonaImageBuilder:
+        self.image = self.image.env(envs)
+        return self
+
+    def set_start_cmd(self, start: str, ready: str) -> DaytonaImage:
+        return self.image.entrypoint(["sh", "-c", start])
+
+
+def daytona_image(size: str) -> DaytonaImage:
+    builder = _DaytonaImageBuilder()
+    return apply_layers(builder, daytona_definition_digest(size))
+
+
+def build_daytona_snapshots() -> None:
+    """Publish one snapshot per tier from the shared definition, verify each by booting it and
+    running the baked-tool readiness probe, and print the DAYTONA_SNAPSHOTS wire line. Digest-named
+    means an existing active snapshot is current by construction, so a republish with nothing
+    changed creates nothing; one that fell inactive (two weeks unused) is reactivated."""
+    daytona = Daytona()
+    references = []
+    for size, sizing in DAYTONA_TIERS.items():
+        name = daytona_snapshot_name(size)
+        snapshot = _daytona_snapshot(daytona, name)
+        if snapshot is None:
+            daytona.snapshot.create(
+                CreateSnapshotParams(
+                    name=name,
+                    image=daytona_image(size),
+                    resources=Resources(
+                        cpu=sizing.cpu, memory=sizing.memory_gb, disk=sizing.disk_gb
+                    ),
+                ),
+                on_logs=print,
+            )
+        elif snapshot.state != SnapshotState.ACTIVE:
+            daytona.snapshot.activate(snapshot)
+        verify_daytona_snapshot(daytona, name)
+        references.append(f"{size}={name}")
+    print(",".join(references))
+
+
+def _daytona_snapshot(daytona: Daytona, name: str) -> object | None:
+    try:
+        return daytona.snapshot.get(name)
+    except DaytonaNotFoundError:
+        return None
+
+
+def verify_daytona_snapshot(daytona: Daytona, name: str) -> None:
+    """Publish gate: boot a sandbox from the snapshot and run the baked-tool readiness probe — the
+    same command the E2B template bakes as its ready cmd, run through `exec` because Daytona has no
+    ready hook."""
+    sandbox = daytona.create(CreateSandboxFromSnapshotParams(snapshot=name, auto_stop_interval=5))
+    try:
+        result = sandbox.process.exec(
+            f"sh -c {shlex.quote(SANDBOX_TEMPLATE_READY_COMMAND)}",
+            timeout=READY_VERIFY_TIMEOUT_SECONDS,
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"published snapshot {name} is missing baked runtime tools: {result.result}"
+            )
+    finally:
+        sandbox.delete()
+
+
+def check_daytona_snapshots() -> None:
+    """Drift gate (never publishes): every tier's digest-named snapshot exists and is active, else
+    exit red until someone republishes."""
+    daytona = Daytona()
+    for size in DAYTONA_TIERS:
+        name = daytona_snapshot_name(size)
+        snapshot = _daytona_snapshot(daytona, name)
+        if snapshot is None:
+            raise SystemExit(
+                f"daytona snapshot {name} is missing; "
+                "republish with sandbox/build_template.py --daytona"
+            )
+        if snapshot.state != SnapshotState.ACTIVE:
+            raise SystemExit(
+                f"daytona snapshot {name} is {snapshot.state}, not active; "
+                "republish with sandbox/build_template.py --daytona"
+            )
+        print(f"{name} active")
 
 
 def e2b_template(size: str) -> object:
@@ -348,6 +511,21 @@ def main() -> None:
         action="store_true",
         help="fail if the live E2B template no longer matches the source definition (drift gate)",
     )
+    group.add_argument(
+        "--daytona",
+        action="store_true",
+        help="build, verify, and print the Daytona snapshots (skips digest-named ones that exist)",
+    )
+    group.add_argument(
+        "--daytona-refs",
+        action="store_true",
+        help="print the DAYTONA_SNAPSHOTS wire line from the source definition (no API)",
+    )
+    group.add_argument(
+        "--check-daytona",
+        action="store_true",
+        help="fail unless every tier's digest-named Daytona snapshot exists and is active",
+    )
     args = parser.parse_args()
     if args.dockerfile:
         sys.stdout.write(pod_dockerfile())
@@ -359,6 +537,15 @@ def main() -> None:
         for size, sizing in SANDBOX_TIERS.items():
             check_published_template(template_name(size), build_definition_digest(sizing))
             print(f"{template_name(size)} up to date")
+        return
+    if args.daytona:
+        build_daytona_snapshots()
+        return
+    if args.daytona_refs:
+        print(daytona_refs())
+        return
+    if args.check_daytona:
+        check_daytona_snapshots()
         return
     references = []
     for size, sizing in SANDBOX_TIERS.items():

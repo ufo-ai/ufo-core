@@ -3,7 +3,7 @@ import hashlib
 import json
 import socket
 import threading
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -26,6 +26,7 @@ from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import FilesystemBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import dispose_db, workspace_tx
+from ufo.ext.manifest import CarrierSpec
 from ufo.sandbox import ingress_serve
 from ufo.sandbox.ingress_host import site_label
 from ufo.sandbox.ingress_serve import (
@@ -320,6 +321,7 @@ def _server(
     carrier: Carrier,
     upstream: httpx.AsyncClient,
     frame_ancestor: str = APP_ORIGIN,
+    resume: Mapping[str, tuple[Carrier, CarrierSpec]] | None = None,
     blob: FilesystemBlobStore = UNREAD_BLOBS,
 ) -> IngressServe:
     """Annotated as the `Carrier` it stands in for, with no suppression: a stub that drifts from the
@@ -333,6 +335,7 @@ def _server(
         frame_ancestor=frame_ancestor,
         site_scheme="https",
         site_port_suffix="",
+        resume_carriers=resume if resume is not None else {},
     )
 
 
@@ -652,6 +655,27 @@ async def test_missing_or_foreign_sandbox_handle_is_503(db, ingress) -> None:
     other_ws, other_conv = await _seed_conversation("docker:other")
     await _open(ingress, other_ws, other_conv)
     assert (await ingress.get(f"{_origin(other_conv)}/")).status_code == 503
+
+
+async def test_a_resume_backends_handle_dials_through_its_own_carrier(
+    db, origin_port: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Coexistence on the read path: a stored handle whose scheme names a `resume_carriers` entry
+    dials through that carrier — the site still serves after the deploy's default backend moved
+    on."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    async with upstream_client() as upstream:
+        resumed = _StubCarrier(origin_port)
+        server = _server(
+            _StubCarrier(origin_port),
+            upstream,
+            resume={"old": (resumed, CarrierSpec(name="old", factory=lambda: resumed))},
+        )
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            workspace_id, conversation_id = await _seed_conversation("old:sbx-1")
+            await _open(client, workspace_id, conversation_id)
+            got = await client.get(f"{_origin(conversation_id)}/")
+            assert got.status_code == 200
 
 
 async def test_cross_workspace_session_is_503(db, ingress) -> None:

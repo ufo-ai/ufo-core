@@ -14,8 +14,11 @@ from ufo.blob import FilesystemBlobStore
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
+    CA_SANDBOX_PATH,
     DEFAULT_EXEC_TIMEOUT_SECONDS,
+    NO_PROXY_HOSTS,
     PROXY_ENV_NAMES,
+    SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     ExecResult,
     ProbeToken,
@@ -26,6 +29,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
+    egress_proxy_env,
 )
 from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BashInput, bash_handler
@@ -42,6 +46,26 @@ from ufo.turns.audience import conversation_audience
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
 PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")
+
+
+def test_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
+    proxy = ProxyEndpoint(port=9, ca_cert="PEM", public_url="https://proxy.example.com")
+    env = egress_proxy_env(proxy, "tok-123")
+    assert env["HTTPS_PROXY"] == "https://tok-123:@proxy.example.com"
+    assert env["HTTP_PROXY"] == env["https_proxy"] == env["http_proxy"] == env["HTTPS_PROXY"]
+    assert env["ANTHROPIC_API_KEY"] == SENTINEL_MODEL_KEY
+    assert env["OPENAI_API_KEY"] == SENTINEL_MODEL_KEY
+    assert env["NO_PROXY"] == env["no_proxy"] == NO_PROXY_HOSTS
+    assert env["NODE_EXTRA_CA_CERTS"] == CA_SANDBOX_PATH
+
+
+def test_egress_proxy_env_refuses_missing_or_http_url() -> None:
+    with pytest.raises(RuntimeError, match="proxy_public_url"):
+        egress_proxy_env(ProxyEndpoint(port=9, ca_cert="PEM"), "tok")
+    with pytest.raises(RuntimeError, match="HTTPS"):
+        egress_proxy_env(
+            ProxyEndpoint(port=9, ca_cert="PEM", public_url="http://proxy.example.com"), "tok"
+        )
 
 
 def _basic(username: str) -> str:

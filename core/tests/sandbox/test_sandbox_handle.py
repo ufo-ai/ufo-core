@@ -27,7 +27,7 @@ from ufo.access.credentials import CredentialStore, HostChoice
 from ufo.access.grants import GrantStore, grant_sentinel
 from ufo.agent_scope import agent
 from ufo.db import workspace_tx
-from ufo.ext.manifest import CredentialSlot, InjectionTarget
+from ufo.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.loop.queue import (
     SandboxAuthorizer,
@@ -140,7 +140,12 @@ def _turn(workspace_id: UUID, conversation_id: UUID) -> Turn:
     )
 
 
-def _sandboxes(carrier: Carrier, backend: str, tmp_path: Path) -> ConversationSandbox:
+def _sandboxes(
+    carrier: Carrier,
+    backend: str,
+    tmp_path: Path,
+    resume: Mapping[str, tuple[Carrier, CarrierSpec]] | None = None,
+) -> ConversationSandbox:
     return ConversationSandbox(
         carrier=carrier,
         backend=backend,
@@ -148,6 +153,7 @@ def _sandboxes(carrier: Carrier, backend: str, tmp_path: Path) -> ConversationSa
         image_ref=SANDBOX_IMAGE_REF,
         proxy=PROXY,
         workspace_root=tmp_path / "workspaces",
+        resume_carriers=resume if resume is not None else {},
     )
 
 
@@ -162,6 +168,10 @@ class _ResumeRecordingCarrier:
     specs: list[SandboxSpec] = field(default_factory=list)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        self.specs.append(spec)
+        return SandboxHandle(conversation_id=spec.conversation_id, container_id=self.container_id)
+
+    async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
         self.specs.append(spec)
         return SandboxHandle(conversation_id=spec.conversation_id, container_id=self.container_id)
 
@@ -370,11 +380,73 @@ async def test_open_carries_the_owning_agents_sandbox_size_on_the_spec(
     assert carrier.specs[0].size == "large"
 
 
+async def test_open_routes_a_resume_backends_handle_to_its_own_carrier(
+    db: None, tmp_path: Path
+) -> None:
+    """Coexistence: a stored handle whose scheme names a `resume_backends` carrier opens on that
+    carrier with its resume_id — the conversation's workspace lives on the provider that wrote the
+    handle — and the row keeps that backend's prefix, while the deploy's default carrier is never
+    touched."""
+    workspace_id, conversation_id = await _conversation(handle="e2b:sbx-old")
+    resumed = _ResumeRecordingCarrier(container_id="sbx-old")
+    fresh = _ResumeRecordingCarrier(container_id="never-created")
+    sandboxes = _sandboxes(
+        fresh,
+        "daytona",
+        tmp_path,
+        resume={
+            "e2b": (
+                resumed,
+                CarrierSpec(name="e2b", factory=lambda: resumed, off_cluster=True),
+            )
+        },
+    )
+
+    with ws(workspace_id):
+        await _open_sandbox(
+            sandboxes, RUN_TOKENS, _turn(workspace_id, conversation_id), None, {}, None, ()
+        )
+
+    assert resumed.specs[0].resume_id == "sbx-old"
+    assert fresh.specs == []
+    assert await _stored_handle(conversation_id) == "e2b:sbx-old"
+
+
+async def test_existing_routes_a_resume_backends_handle_to_its_own_carrier(
+    db: None, tmp_path: Path
+) -> None:
+    """The read path routes the same way: a resume backend's stored handle attaches through that
+    carrier, never the default's, and never provisions."""
+    workspace_id, conversation_id = await _conversation(handle="e2b:sbx-old")
+    resumed = _ResumeRecordingCarrier(container_id="sbx-old")
+    fresh = _ResumeRecordingCarrier(container_id="never-created")
+    sandboxes = _sandboxes(
+        fresh,
+        "daytona",
+        tmp_path,
+        resume={
+            "e2b": (
+                resumed,
+                CarrierSpec(name="e2b", factory=lambda: resumed, off_cluster=True),
+            )
+        },
+    )
+
+    with ws(workspace_id):
+        session = await sandboxes.existing(conversation_id)
+
+    assert session is not None
+    assert session.handle.container_id == "sbx-old"
+    assert resumed.specs[0].resume_id == "sbx-old"
+    assert fresh.specs == []
+
+
 async def test_open_sandbox_ignores_a_handle_another_backend_wrote_and_overwrites_it(
     db: None, tmp_path: Path
 ) -> None:
-    """A handle another backend wrote is not this carrier's to resume: resume_id is None (create
-    fresh) and the fresh id overwrites the row under this backend's prefix."""
+    """A handle from a backend this deploy keeps neither as default nor in `resume_backends` is not
+    resumable anywhere: resume_id is None (create fresh) and the fresh id overwrites the row under
+    the default backend's prefix."""
     workspace_id, conversation_id = await _conversation(handle="docker:cid-1")
     carrier = _ResumeRecordingCarrier(container_id="sbx-9")
 

@@ -19,10 +19,14 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
+
+if TYPE_CHECKING:
+    from ufo.ext.manifest import CarrierSpec
 
 from ufo.db import workspace_tx
 from ufo.o11y import warn
@@ -37,6 +41,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
+    sandbox_handle_backend,
     sandbox_handle_id,
     workspace_path,
 )
@@ -89,6 +94,23 @@ class ConversationSandbox:
     single node, a cross-pod transport (Redis) on a shared fleet. Whichever the deploy selects can
     serve a terminal, so a `client:` binding is always admissible: the transport, not the process,
     owns whether the held connection and the turn's workflow reach one terminal."""
+    resume_carriers: Mapping[str, tuple[Carrier, "CarrierSpec"]] = field(default_factory=dict)
+    """Backends kept live only for the stored handles bearing their scheme (`[sandbox]
+    resume_backends`): a conversation whose workspace another provider still holds keeps opening
+    there, while a fresh conversation always opens on the deploy's own carrier."""
+
+    def _route(self, stored: str | None) -> tuple[Carrier, str, bool]:
+        """The carrier a stored handle's backend scheme selects: a resume backend's for the handles
+        bearing its scheme — the conversation's workspace lives on the provider that wrote the
+        handle, so the open follows it there — and the deploy's own for its handles, for a fresh
+        conversation, and for a scheme no configured backend answers to (that workspace is
+        unreachable, so the open falls forward and overwrites the handle)."""
+        if stored is not None:
+            resumed = self.resume_carriers.get(sandbox_handle_backend(stored))
+            if resumed is not None:
+                carrier, spec = resumed
+                return carrier, spec.name, spec.off_cluster
+        return self.carrier, self.backend, self.off_cluster
 
     async def open(
         self,
@@ -159,17 +181,18 @@ class ConversationSandbox:
                 )
             )
             return None if handle is None else SandboxSession(carrier=carrier, handle=handle)
-        resume_id = sandbox_handle_id(self.backend, stored)
+        routed, backend, off_cluster = self._route(stored)
+        resume_id = sandbox_handle_id(backend, stored)
         if resume_id is None:
             return None
-        if self.off_cluster:
+        if off_cluster:
             host_path = (self.workspace_root / str(conversation_id)).resolve()
         else:
             existing = await asyncio.to_thread(self._existing_dir, conversation_id)
             if existing is None:
                 return None
             host_path = existing
-        handle = await self.carrier.attach(
+        handle = await routed.attach(
             SandboxSpec(
                 conversation_id=conversation_id,
                 image_ref=self.image_ref,
@@ -179,7 +202,7 @@ class ConversationSandbox:
                 resume_id=resume_id,
             )
         )
-        return None if handle is None else SandboxSession(carrier=self.carrier, handle=handle)
+        return None if handle is None else SandboxSession(carrier=routed, handle=handle)
 
     async def claim_terminal(self, conversation_id: UUID, cwd: str) -> bool:
         """Bind an unbound conversation to the terminal at `cwd`, reporting whether this call made
@@ -313,26 +336,27 @@ class ConversationSandbox:
                 )
             )
             return CLIENT_BACKEND, carrier, handle
-        if self.off_cluster:
+        routed, backend, off_cluster = self._route(stored)
+        if off_cluster:
             host_path = (self.workspace_root / str(conversation_id)).resolve()
         else:
             host_path = await asyncio.to_thread(self._provisioned_dir, conversation_id)
             if os.geteuid() == 0:
                 await asyncio.to_thread(os.chown, host_path, SANDBOX_UID, SANDBOX_GID)
-        handle = await self.carrier.create(
+        handle = await routed.create(
             SandboxSpec(
                 conversation_id=conversation_id,
                 image_ref=self.image_ref,
                 workspace_host_path=str(host_path),
                 proxy=self.proxy,
                 run_token=run_token,
-                resume_id=None if stored is None else sandbox_handle_id(self.backend, stored),
+                resume_id=None if stored is None else sandbox_handle_id(backend, stored),
                 env=env,
                 size=size,
                 turn_id=turn_id,
             )
         )
-        return self.backend, self.carrier, handle
+        return backend, routed, handle
 
     def _provisioned_dir(self, conversation_id: UUID) -> Path:
         """The conversation's own directory under `workspace_root`, made if absent and then proved:
