@@ -141,8 +141,8 @@ locals {
     backend = "redis"
 
     [sandbox]
-    backend = "daytona"
-    resume_backends = ["e2b"]
+    backend = "e2b"
+    resume_backends = ["daytona"]
     proxy_public_url = "https://sandbox-proxy.${module.platform.hostname}"
     ingress_public_url = "https://${module.platform.hostname}"
     ${local.cache_enabled ? "cache_daemon = \"127.0.0.1:9110\"" : ""}

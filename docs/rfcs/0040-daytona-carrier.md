@@ -120,11 +120,10 @@ publish step reactivates).
 ## Deploy and rollout
 
 `DAYTONA_API_KEY` joins the deploy secrets and terraform vars; `daytona_snapshots` rides beside
-`e2b_templates` in both deploy workflows. Testing flips `[sandbox] backend = "daytona"`,
-`resume_backends = ["e2b"]` first; production follows after soak. Everything E2B — secret,
-templates, extension, build target — stays until the tear-out lands whole: extension, build and
-CI targets, terraform vars and secret, and its stored handles' backends dropped from
-`resume_backends`, in one change.
+`e2b_templates` in both deploy workflows. Both deploys open new sandboxes on E2B; testing carries
+`resume_backends = ["daytona"]`, so the Daytona handles it already holds keep resuming on Daytona.
+Either provider's tear-out lands whole: extension, build and CI targets, terraform vars and secret,
+and its stored handles' backend dropped from `resume_backends`, in one change.
 
 ## Testing
 
