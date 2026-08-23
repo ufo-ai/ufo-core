@@ -18,11 +18,11 @@ from ufo.sources.sync import SOURCE_SYNC_CHECK
 
 ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
-# Terraform template `if`/`endif` directive lines, stripped before a template parses as YAML.
-TEMPLATE_DIRECTIVE = (
-    r'(?m)^%\{ (?:if workload_ha|if cache_enabled|if cache_s3_bucket != ""'
-    r"|if preview_enabled|endif) \}\n?"
-)
+# Terraform template directive lines, stripped before a template parses as YAML. Every condition
+# is stripped rather than a named few: a deploy knob added to the template is not a change to what
+# these tests read, and an allowlist made it one — three copies of it, each failing on the next
+# knob.
+TEMPLATE_DIRECTIVE = r"(?m)^%\{ [^}]*\}\n?"
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 AWAIT_ROLLOUT = ".github/scripts/await_rollout.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
@@ -3519,6 +3519,33 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
             env=environment | overrides,
         )
         assert failed.returncode != 0, overrides
+
+
+def test_portal_source_maps_upload_under_the_service_and_version_the_page_records_with() -> None:
+    """A fault Datadog reports against a recorded session reads as source only where the upload's
+    service and version are the pair the page recorded under — so the upload names the image tag
+    the template hands the page, and the service the bundle states. The maps leave the tree before
+    the image is built: nothing serves a `.map`, and shipping the portal's source to a browser is
+    the one way this stops being a build artifact."""
+    build = _step("bundle", "Build + push bundle image")
+    run = build["run"]
+    assert isinstance(run, str)
+    assert build["env"] == {
+        "DATADOG_API_KEY": "${{ secrets.DD_API_KEY }}",
+        "DATADOG_SITE": "us5.datadoghq.com",
+    }
+    assert "--service=ufo-portal" in run
+    assert '--release-version="$IMAGE_TAG"' in run
+    assert "--minified-path-prefix=/surface/web/static/assets/" in run
+    assert "rm -f extensions/web/ufo_ext_web/static/assets/*.map" in run
+    assert run.index("sourcemaps upload") < run.index("ufoctl bundle")
+
+    template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
+    assert '- {name: UFO_WEB_RUM_VERSION, value: "${image_tag}"}' in template
+    recorder = (ROOT / "extensions" / "web" / "frontend" / "src" / "lib" / "rum.ts").read_text()
+    assert 'const SERVICE = "ufo-portal";' in recorder
+    build_config = (ROOT / "extensions" / "web" / "frontend" / "vite.config.ts").read_text()
+    assert 'sourcemap: "hidden"' in build_config
 
 
 def test_runtime_certificates_match_ingress_tls() -> None:

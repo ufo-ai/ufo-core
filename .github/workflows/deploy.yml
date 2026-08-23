@@ -173,6 +173,9 @@ jobs:
             extensions/web/frontend/package-lock.json
 
       - name: Build + push bundle image
+        env:
+          DATADOG_API_KEY: ${{ secrets.DD_API_KEY }}
+          DATADOG_SITE: us5.datadoghq.com
         run: |
           if aws ecr describe-images --repository-name ufo --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo:$IMAGE_TAG already pushed — skipping"
@@ -181,6 +184,14 @@ jobs:
             npm --prefix extensions/debugger/frontend run build
             npm --prefix extensions/web/frontend ci
             npm --prefix extensions/web/frontend run build
+            # A fault Datadog reports against a recorded session reads as source rather than as
+            # minified frames. The maps upload under the service and version the page records with,
+            # then leave the tree: nothing serves a `.map`, and the image carries none.
+            extensions/web/frontend/node_modules/.bin/datadog-ci sourcemaps upload \
+              extensions/web/ufo_ext_web/static/assets \
+              --service=ufo-portal --release-version="$IMAGE_TAG" \
+              --minified-path-prefix=/surface/web/static/assets/
+            rm -f extensions/web/ufo_ext_web/static/assets/*.map
             UFO_CONFIG=hosted.toml uv run ufoctl bundle --out bundle
             docker build -t "$ECR_REGISTRY/ufo:$IMAGE_TAG" bundle
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"

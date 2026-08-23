@@ -2,8 +2,12 @@ import { createRoot } from "react-dom/client";
 
 import { Portal } from "@/Portal";
 import { markDeployment } from "@/lib/mark";
+import { heldRum, startRum } from "@/lib/rum";
 import { heldScheme, markScheme } from "@/lib/scheme";
 import "@/theme.css";
+
+const recorded = heldRum();
+if (recorded) startRum(recorded);
 
 markScheme(heldScheme());
 void markDeployment(location.hostname);

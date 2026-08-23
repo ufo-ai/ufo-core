@@ -49,8 +49,7 @@ def _documents(workload_ha: bool) -> list[dict[str, object]]:
         flags=re.DOTALL,
     )
     rendered = re.sub(
-        r'(?m)^%\{ (?:if cache_enabled|if cache_s3_bucket != ""|if preview_enabled'
-        r"|endif) \}\n?",
+        r"(?m)^%\{ [^}]*\}\n?",
         "",
         rendered,
     )

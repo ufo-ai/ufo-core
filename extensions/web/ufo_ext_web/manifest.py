@@ -4,9 +4,11 @@ title job that rewrites each conversation's rail label from its opening exchange
 since the rail lists a Slack thread and a CLI session beside a portal chat and names them all the
 same way, so the job's candidates are core's conversations awaiting a summary rather than a key
 space of this extension's own. No credential slots (its session cookie carries the member's own
-token, not a bot secret) and no config knob — installed means mounted, like Slack. The surface
-admits without writeback and tails the hub in its own stream route, and claims the browser home, so
-the deploy's bare host opens the portal."""
+token, not a bot secret) and no config knob — installed means mounted, like Slack. What the deploy
+does decide, in the environment the pod reads, is the Datadog RUM application the portal records
+browser sessions into; naming none records nothing. The surface admits without writeback and tails
+the hub in its own stream route, and claims the browser home, so the deploy's bare host opens the
+portal."""
 
 from ufo.sdk.jobs import JobSpec, unseeded_agent_workspaces, untitled_conversation_workspaces
 from ufo.sdk.manifest import Manifest

@@ -23,6 +23,7 @@ privileged `SurfaceContext` — the SDK surface a CI gate pins."""
 
 import asyncio
 import json
+import os
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -229,6 +230,44 @@ def load_assets(directory: Path) -> dict[str, tuple[bytes, str]]:
     }
 
 
+RUM_ENV = {
+    "applicationId": "UFO_WEB_RUM_APPLICATION_ID",
+    "clientToken": "UFO_WEB_RUM_CLIENT_TOKEN",
+    "site": "UFO_WEB_RUM_SITE",
+    "env": "UFO_WEB_RUM_ENV",
+    "version": "UFO_WEB_RUM_VERSION",
+}
+RUM_BLOCK = re.compile(r'(<script[^>]*id="rum"[^>]*>)null(</script>)')
+
+
+def rum_config(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """What this deploy tells the page about Datadog RUM, or None where it records nothing.
+
+    One image serves every deploy, so the application, its client token, and the environment the
+    sessions are tagged with cannot be built into the bundle — they are read here and written into
+    the shell. A deploy that sets none of them records nothing; one that sets some of them is
+    refused, since a recording that reaches the wrong application, or none, is found by nobody."""
+    held = {field: environ.get(name, "").strip() for field, name in RUM_ENV.items()}
+    if not any(held.values()):
+        return None
+    unset = sorted(RUM_ENV[field] for field, value in held.items() if not value)
+    if unset:
+        raise RuntimeError(f"the portal records sessions but {', '.join(unset)} is unset")
+    return held
+
+
+def portal_shell(html: str, config: Mapping[str, str] | None) -> str:
+    """The shell with this deploy's RUM configuration written into the block the page declares for
+    it. `<` is escaped so no value can close the script element early. The block is the page's own
+    declaration, so a build that lost it is refused rather than served: the page would go on asking
+    for a configuration nothing writes, and record nothing, silently."""
+    written = "null" if config is None else json.dumps(config).replace("<", "\\u003c")
+    shell, filled = RUM_BLOCK.subn(lambda block: block[1] + written + block[2], html)
+    if filled != 1:
+        raise RuntimeError(f"the portal page declares no rum block — run `{PORTAL_BUILD}`")
+    return shell
+
+
 STATIC_ASSETS = load_assets(STATIC_DIR / "assets")
 STATIC_ETAGS = {
     name: f'"{sha256(body).hexdigest()[:32]}"' for name, (body, _) in STATIC_ASSETS.items()
@@ -424,7 +463,8 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     if PORTAL_HTML is None:
         raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
     await _assets_published(ctx.fleet_blob, apps_bundle(ctx))
-    return HTMLResponse(PORTAL_HTML, headers={"cache-control": "no-store"})
+    shell = portal_shell(PORTAL_HTML, rum_config(os.environ))
+    return HTMLResponse(shell, headers={"cache-control": "no-store"})
 
 
 async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | Response:

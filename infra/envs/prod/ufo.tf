@@ -275,6 +275,12 @@ data "kubectl_file_documents" "hosted" {
     # The signup Slack Connect inviter, off until the operator token is populated and proven.
     slack_connect_enabled = var.slack_connect_enabled ? "true" : "false"
     slack_connect_team_id = var.slack_connect_team_id
+
+    # The portal records no browser session in production: the page it serves names no RUM
+    # application, so the recorder never runs.
+    rum_recording = false
+    rum_site      = ""
+    rum_env       = ""
   })
 }
 

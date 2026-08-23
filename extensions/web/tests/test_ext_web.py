@@ -87,6 +87,8 @@ from ufo_ext_web.surface import (
     _sse,
     _subagent_activity,
     load_assets,
+    portal_shell,
+    rum_config,
 )
 from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
@@ -5949,6 +5951,82 @@ def test_only_declared_asset_suffixes_are_served(tmp_path: Path) -> None:
 
     assert sorted(served) == ["assets/index-abc.css", "assets/index-abc.js"]
     assert served["assets/index-abc.js"] == (b"boot()", "text/javascript; charset=utf-8")
+
+
+RUM_DEPLOY = {
+    "UFO_WEB_RUM_APPLICATION_ID": "1ea7beef-0000-4000-8000-000000000001",
+    "UFO_WEB_RUM_CLIENT_TOKEN": "pubdeadbeef",
+    "UFO_WEB_RUM_SITE": "us5.datadoghq.com",
+    "UFO_WEB_RUM_ENV": "testing",
+    "UFO_WEB_RUM_VERSION": "abc12345",
+}
+RUM_SLOT = '<script type="application/json" id="rum">null</script>'
+
+
+def test_a_deploy_naming_no_rum_application_records_no_session() -> None:
+    assert rum_config({}) is None
+
+
+def test_a_deploy_naming_a_rum_application_states_every_field_the_page_reads() -> None:
+    assert rum_config(RUM_DEPLOY) == {
+        "applicationId": "1ea7beef-0000-4000-8000-000000000001",
+        "clientToken": "pubdeadbeef",
+        "site": "us5.datadoghq.com",
+        "env": "testing",
+        "version": "abc12345",
+    }
+
+
+def test_a_half_configured_recording_is_refused_by_the_variables_it_left_unset() -> None:
+    """Recording against an application the deploy half-names reaches the wrong application or
+    none, and nobody looks for the sessions that never arrived — so the page is never served."""
+    named = dict(RUM_DEPLOY)
+    del named["UFO_WEB_RUM_CLIENT_TOKEN"]
+    named["UFO_WEB_RUM_ENV"] = "  "
+
+    with pytest.raises(RuntimeError, match="UFO_WEB_RUM_CLIENT_TOKEN, UFO_WEB_RUM_ENV"):
+        rum_config(named)
+
+
+def test_the_shell_carries_the_recording_configuration_in_the_block_the_page_declares() -> None:
+    shell = portal_shell(f"<head>{RUM_SLOT}</head>", rum_config(RUM_DEPLOY))
+
+    assert '"site": "us5.datadoghq.com"' in shell
+    assert shell.count("</script>") == 1
+
+
+def test_a_configured_value_cannot_close_the_block_it_is_written_into() -> None:
+    shell = portal_shell(f"<head>{RUM_SLOT}</head>", {"env": "</script><script>alert(1)"})
+
+    assert "<script>alert(1)" not in shell
+    assert "\\u003c/script>\\u003cscript>alert(1)" in shell
+    assert shell.count("</script>") == 1
+
+
+def test_a_build_that_declares_no_rum_block_is_refused_rather_than_served() -> None:
+    """A page with no block reads no configuration and records nothing, whatever the deploy sets."""
+    with pytest.raises(RuntimeError, match="declares no rum block"):
+        portal_shell("<head></head>", rum_config(RUM_DEPLOY))
+
+
+async def test_the_portal_page_states_the_recording_configuration_of_its_deploy(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One image serves every deploy, so which application a session reaches is read from the
+    deploy at the page rather than built into the bundle."""
+    client, workspace_id, _agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    for name, value in RUM_DEPLOY.items():
+        monkeypatch.setenv(name, value)
+
+    shell = await client.get("/surface/web", headers=cookie)
+
+    assert shell.status_code == 200
+    held = re.search(r'id="rum">(.*?)</script>', shell.text)
+    assert held is not None
+    assert json.loads(held[1]) == rum_config(RUM_DEPLOY)
 
 
 INLINE_ASSET = "data:"

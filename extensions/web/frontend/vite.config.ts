@@ -20,6 +20,11 @@ export default defineConfig({
   build: {
     outDir: "../ufo_ext_web/static",
     emptyOutDir: true,
+    // Maps for the stack traces Datadog reports, written beside the bundle and never referenced
+    // from it: the deploy uploads them to the RUM application and deletes them before the image is
+    // built, so a member's browser is never offered the portal's source. The surface serves no
+    // `.map` either — its media-type table declares none.
+    sourcemap: "hidden",
   },
   server: {
     // The boot suite imports the built entry from `../ufo_ext_web/static`, and a mark is read from

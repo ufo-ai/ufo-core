@@ -65,7 +65,7 @@ Two of these running at once need different `[serve] port` values in their `$UFO
   a dependency, never after an edit.
 - `npm ci` earns a re-run when `package-lock.json` changes.
 - `npm run build` earns a re-run only for something that reads the built tree: `docker compose`,
-  the four `test_ext_web.py` tests below, and `tests/agenticon.test.tsx`, which reads the built
+  the five `test_ext_web.py` tests below, and `tests/agenticon.test.tsx`, which reads the built
   page and serves the icon sprites out of `static/assets`.
 
 ### Focused checks
@@ -79,7 +79,7 @@ uv run pytest extensions/web/tests/test_ext_web.py -k "sqlite and <name>"   # ~9
 npm --prefix "$FRONTEND" test -- tests/chat.test.tsx                        # ~2s
 ```
 
-The whole of `test_ext_web.py` is ~45s; save it for the finished change. Four of its tests read
+The whole of `test_ext_web.py` is ~45s; save it for the finished change. Five of its tests read
 `ufo_ext_web/static/index.html` and fail with the build command named when the frontend has never
 been built in this worktree.
 

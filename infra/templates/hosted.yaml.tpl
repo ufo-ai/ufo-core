@@ -721,6 +721,27 @@ spec:
             # The terminal client version this deploy serves — the ufo surface tells a stale
             # x-ufo-script to install.
             - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
+%{ if rum_recording }
+            # The portal's session recording (Datadog RUM). A recording is made in the member's
+            # browser, so the page has to name the application it records into — and one image
+            # serves every deploy, so it reads that name here rather than from its own bundle. A
+            # deploy that records nothing sets `rum_recording` false and the page carries none.
+            #
+            # The application and its token are read from the Secret rather than written into this
+            # manifest: Datadog mints both, so a template carrying them is unknown until apply, and
+            # the manifest keys this set is applied under would be unknown with it. The client token
+            # authorizes writes into that one application and reads nothing, which is why the page
+            # may carry it.
+            - name: UFO_WEB_RUM_APPLICATION_ID
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_WEB_RUM_APPLICATION_ID}
+            - name: UFO_WEB_RUM_CLIENT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_WEB_RUM_CLIENT_TOKEN}
+            - {name: UFO_WEB_RUM_SITE, value: "${rum_site}"}
+            - {name: UFO_WEB_RUM_ENV, value: "${rum_env}"}
+            - {name: UFO_WEB_RUM_VERSION, value: "${image_tag}"}
+%{ endif }
 %{ if preview_enabled }
             # The preview service the render-previews job calls directly (RFC 0037): serve reaches its
             # ClusterIP, not the proxy-relayed host the sandbox uses. Set only when preview is enabled,

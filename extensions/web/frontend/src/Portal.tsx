@@ -5,6 +5,7 @@ import { App } from "@/App";
 import { FAULTS, SignIn } from "@/views/SignIn";
 import { BASE, SIGN_IN_PATH, sessionFault, type SessionFault } from "@/lib/api";
 import { parseHash } from "@/lib/route";
+import { identifyRum } from "@/lib/rum";
 import { titled } from "@/lib/title";
 import type { AgentsPayload } from "@/lib/types";
 
@@ -43,6 +44,10 @@ export function Portal() {
       live = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (boot.phase === "ready") identifyRum(boot.payload.member.email);
+  }, [boot]);
 
   useEffect(() => {
     if (boot.phase !== "signed-out") return;
