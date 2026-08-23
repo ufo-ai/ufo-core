@@ -176,6 +176,35 @@ def validation_fault(error: ValidationError) -> str:
     )
 
 
+def response_fault(response: httpx.Response) -> str:
+    """The reason a refused response names, read from the `errors` array a GraphQL endpoint answers
+    with: each entry's `message`, and its `extensions.code` where one rides. Without this a
+    transport-level refusal reaches the record as a status and a URL, which says a request was
+    refused and never which part of it — Linear answers a removed field with `400` and names the
+    field in the body, and nothing else knows it.
+
+    Only those two keys ride, never the body whole: an error body echoes the request that drew it —
+    Slack names the token it rejected under `provided` — and a record is not where a credential
+    lands. A body carrying no `errors` array renders nothing, and the fault stays the status and the
+    URL alone."""
+    try:
+        body = response.json()
+    except (ValueError, httpx.ResponseNotRead):
+        return ""
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if not isinstance(errors, list):
+        return ""
+    reasons = []
+    for item in errors:
+        message = item.get("message") if isinstance(item, dict) else None
+        if not isinstance(message, str) or not message:
+            continue
+        extensions = item.get("extensions")
+        code = extensions.get("code") if isinstance(extensions, dict) else None
+        reasons.append(f"{message} [{code}]" if isinstance(code, str) and code else message)
+    return "; ".join(reasons)
+
+
 class StreamFault(RuntimeError):
     """A `SourceBackend.fetch` raises this when the provider answered with a shape the stream cannot
     read. The run fails and backs off as any fault does, and `reason` reaches the failure event as
@@ -808,22 +837,26 @@ class SyncDriver:
         start. The exception's own text stays out of the record — h11 quotes the raw header value it
         rejects, which is the credential a member pasted, and `_raise_for_status` builds a status
         error's message out of the provider's response body — so a provider fault renders as the
-        status and URL of the request that drew it, query dropped, bounded, a `StreamFault`
-        renders the reason the backend authored for it, and a rejected model renders the field paths
-        and rules that rejected it, never the values; any other class is named by `error_class`
-        alone. The log goes first and each emission is suppressed on its own: this sits on the
-        failure path, where a telemetry fault would replace the error it exists to report and strand
-        the claim the release is about to free, and where a fault reaching the collector would leave
-        a count with nothing to search."""
+        status and URL of the request that drew it, query dropped, bounded, followed by the reason
+        the response's own `errors` array names (`response_fault`, which reads that array and
+        nothing else of the body) so a refused request says which part of it was refused; a
+        `StreamFault` renders the reason the backend authored for it, and a rejected model renders
+        the field paths and rules that rejected it, never the values; any other class is named by
+        `error_class` alone. The log goes first and each emission is suppressed on its own: this
+        sits on the failure path, where a telemetry fault would replace the error it exists to
+        report and strand the claim the release is about to free, and where a fault reaching the
+        collector would leave a count with nothing to search."""
         tags = _stream_tags(source)
         error_class = type(error).__name__
         with suppress(Exception):
             match error:
                 case httpx.HTTPStatusError():
-                    fault = (
+                    request = (
                         f"{error.response.status_code} {error.request.method} "
                         f"{error.request.url.copy_with(query=None)}"
                     )
+                    reason = response_fault(error.response)
+                    fault = f"{request}: {reason}" if reason else request
                 case StreamFault():
                     fault = error.reason
                 case ValidationError():

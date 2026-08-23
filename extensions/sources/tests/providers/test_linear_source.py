@@ -1,19 +1,25 @@
 """The Linear connector over a mock transport: the GraphQL `POST /graphql` shape — one query per
 page, `pageInfo.endCursor` threaded into the next request's `after`, `hasNextPage` ending the walk —
 the incremental `filter: { updatedAt: { gte } }` gate, a full-refresh stream (no `updatedAt` filter)
-threading no variables, the `render` override that lifts an issue/project into readable prose, a 403
-surfacing as `StreamSkipped`, and a GraphQL `errors` array failing loud. No conftest: the shared
+threading no variables, the `render` override that lifts an issue/project into readable prose, the
+two rendered content streams naming only the fields the connector reads, a 403 surfacing as
+`StreamSkipped`, and a GraphQL `errors` array failing loud. No conftest: the shared
 `ufo_testsupport` plugin covers fixtures, and these tests are offline (a canned transport, no
 DB, no token, no broker)."""
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.linear import LinearConnector
+from ufo_ext_sources.providers.linear import (
+    COMMENTS_QUERY,
+    ISSUES_QUERY,
+    LinearConnector,
+)
 
 from ufo.access.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
@@ -44,6 +50,34 @@ async def _fetch(
 
 def _refs(result: SyncResult) -> set[str]:
     return {page.source_ref for page in result.pages}
+
+
+def _node_fields(query: str) -> set[str]:
+    """The field names one page's `nodes` selection asks for, each nested selection collapsed onto
+    the field that carries it."""
+    selection = query.split("nodes {", 1)[1].rsplit("pageInfo", 1)[0]
+    while re.search(r"\{[^{}]*\}", selection):
+        selection = re.sub(r"\{[^{}]*\}", " ", selection)
+    return {token for token in selection.split() if token != "}"}
+
+
+def test_the_rendered_streams_ask_only_for_the_fields_the_connector_reads() -> None:
+    """A field a query names and nothing reads is a field Linear can retire under us: a name its
+    schema no longer has fails the whole document with a transport 400, so the stream syncs nothing
+    rather than losing one value. `issues` and `comments` name the primary key, both timestamps, and
+    what `render` builds each body from — nothing else."""
+    assert _node_fields(ISSUES_QUERY) == {
+        "id",
+        "identifier",
+        "title",
+        "description",
+        "priorityLabel",
+        "state",
+        "assignee",
+        "createdAt",
+        "updatedAt",
+    }
+    assert _node_fields(COMMENTS_QUERY) == {"id", "body", "createdAt", "updatedAt"}
 
 
 def _issue(issue_id: str, title: str, updated: str) -> dict[str, object]:

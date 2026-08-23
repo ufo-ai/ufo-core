@@ -70,22 +70,17 @@ LINEAR_STREAMS: list[StreamSpec] = [
 # `nodes` a page carries plus `pageInfo { hasNextPage endCursor }`. Streams Linear filters by
 # `updatedAt` declare the nullable `$filter`/`$orderBy` variables `paginate` threads for incremental
 # runs; the four full-refresh collections take only `$after`.
+#
+# `issues` and `comments` name only what `render` and the page mapping read: the primary key, both
+# timestamps, and the prose each body is built from. Linear retires schema surface on its own
+# schedule, and one name the schema no longer has fails the whole document with a transport 400
+# rather than a 200 carrying `errors`, so a field selected and never read is a field that can stop
+# the stream. `test_linear_source` holds both selections to what the connector reads.
 ISSUES_QUERY = (
     "query Issues($after: String, $filter: IssueFilter, $orderBy: PaginationOrderBy) "
     "{ issues(after: $after, first: 25, filter: $filter, orderBy: $orderBy) "
-    "{ nodes { id addedToCycleAt addedToProjectAt addedToTeamAt archivedAt "
-    "assignee { id } autoArchivedAt autoClosedAt branchName canceledAt "
-    "completedAt createdAt creator { id } customerTicketCount cycle { id } "
-    "description descriptionState dueDate estimate identifier "
-    "integrationSourceType labelIds number parent { id } previousIdentifiers "
-    "priority priorityLabel prioritySortOrder project { id } "
-    "projectMilestone { id } reactionData snoozedBy { id } snoozedUntilAt "
-    "sortOrder startedAt state { id type } startedTriageAt subIssueSortOrder "
-    "team { id } title trashed triagedAt updatedAt url "
-    "attachments { nodes { id } } sourceComment { id } "
-    "labels { nodes { id name } } slaType slaStartedAt slaMediumRiskAt "
-    "slaHighRiskAt slaBreachesAt relations { nodes { id } } "
-    "subscribers { nodes { id } } } "
+    "{ nodes { id identifier title description priorityLabel state { type } "
+    "assignee { id } createdAt updatedAt } "
     "pageInfo { hasNextPage endCursor } } }"
 )
 
@@ -111,10 +106,8 @@ USERS_QUERY = (
 COMMENTS_QUERY = (
     "query Comments($after: String, $filter: CommentFilter, $orderBy: PaginationOrderBy) "
     "{ comments(after: $after, first: 50, filter: $filter, orderBy: $orderBy) "
-    "{ nodes { archivedAt body bodyData createdAt editedAt id "
-    "issue { id } parent { id } quotedText resolvedAt "
-    "resolvingComment { id } resolvingUser { id } updatedAt url "
-    "user { id } } pageInfo { hasNextPage endCursor } } }"
+    "{ nodes { id body createdAt updatedAt } "
+    "pageInfo { hasNextPage endCursor } } }"
 )
 
 CYCLES_QUERY = (

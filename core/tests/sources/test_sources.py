@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -2765,6 +2766,43 @@ async def test_a_provider_fault_reports_its_status_and_url_and_never_its_body_or
             "error_class": "LocalProtocolError",
         },
     ]
+
+
+async def test_a_graphql_fault_carries_the_reason_its_errors_array_names(
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A GraphQL endpoint refuses a document its schema cannot validate with a transport 400 and
+    names the offending part in the body — Linear names the field. The status and the URL alone say
+    that a request was refused and never which part of it, so the reasons the `errors` array carries
+    ride onto the event, each with the code beside it. The rest of the body stays out: an error body
+    echoes what the request sent."""
+    workspace_id = await _workspace()
+    await _seed_connector_source(workspace_id)
+    request = httpx.Request("POST", "https://api.linear.app/graphql")
+    body = json.dumps(
+        {
+            "errors": [
+                {
+                    "message": 'Cannot query field "descriptionState" on type "Issue".',
+                    "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"},
+                }
+            ],
+            "provided": "lin_api_SUPERSECRET",
+        }
+    )
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        rest._raise_for_status(httpx.Response(400, text=body, request=request))
+    driver = _connector_driver([raised.value], database_url, tmp_path / "blobs")
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    failure = _events(caplog, "source_sync.failed")[0]
+    assert failure.ufo["provider_fault"] == (
+        "400 POST https://api.linear.app/graphql: "
+        'Cannot query field "descriptionState" on type "Issue". [GRAPHQL_VALIDATION_FAILED]'
+    )
+    assert "SUPERSECRET" not in str(failure.ufo)
 
 
 async def test_a_stream_fault_reports_the_reason_the_backend_authored_for_it(
