@@ -39,6 +39,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 MIGRATIONS_DIR = Path(__file__).parent / "schema" / "migrations"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
+STATEMENT_LOG_MAX_CHARS = 2_000
 WORKSPACE_GUC = "app.workspace_id"
 # Every pool below is a ceiling one event loop can reach, and the fleet's total is what has to fit.
 # Measured on the testing instance 2026-07-31: `max_connections` 400, `superuser_reserved` 3, so 397
@@ -365,6 +366,29 @@ async def workspace_tx() -> AsyncIterator[AsyncConnection]:
                 {"guc": WORKSPACE_GUC, "ws": str(workspace_id)},
             )
         yield connection
+
+
+def failed_statement(error: BaseException) -> dict[str, str]:
+    """The driver's own account of a refused statement, as log fields: the SQL it refused and the
+    SQLSTATE it answered with. Empty for anything that is not a database error.
+
+    A `ProgrammingError` says only that the statement was refused — an unknown column or table, a
+    parameter the query cannot bind — and which one it was is in the statement and the code. A
+    failure log carrying neither names no defect at all: the schema the process met has moved on
+    by the time anyone reads the line, so both fields are taken here, where the driver holds them.
+
+    The bound parameters stay out, and so does the message the database returned beside them. The
+    statement text is this repo's own SQL; the values bound into it are a workspace's rows, and a
+    driver message quotes them back — `formatted_stack` withholds a message for the same reason."""
+    if not isinstance(error, sa.exc.DBAPIError):
+        return {}
+    fields = {}
+    if error.statement:
+        fields["statement"] = error.statement[:STATEMENT_LOG_MAX_CHARS]
+    sqlstate = getattr(error.orig, "sqlstate", None) or getattr(error.orig, "pgcode", None)
+    if isinstance(sqlstate, str):
+        fields["sqlstate"] = sqlstate
+    return fields
 
 
 @asynccontextmanager

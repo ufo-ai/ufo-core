@@ -32,11 +32,13 @@ import ufo.db
 from ufo import o11y
 from ufo.db import (
     MIGRATIONS_DIR,
+    STATEMENT_LOG_MAX_CHARS,
     WORKSPACE_GUC,
     _build_engine,
     _opened,
     apply_migrations,
     dispose_db,
+    failed_statement,
     init_db,
     init_owner_db,
     owner_tx,
@@ -47,6 +49,14 @@ from ufo.ext.loader import migration_locations
 from ufo.schema import tables
 from ufo.sdk.sources import binding_name
 from ufo.workspace import ws
+
+
+class _UndefinedColumn(Exception):
+    """A driver error carrying the SQLSTATE a Postgres refusal arrives with, standing in for
+    `asyncpg.exceptions.UndefinedColumnError`: SQLSTATE reaches a log through the driver exception
+    the DBAPI error wraps, and no SQLite refusal carries one."""
+
+    sqlstate = "42703"
 
 
 @dataclass
@@ -2504,6 +2514,28 @@ def test_a_migrated_sqlite_file_needs_no_journal_conversion_from_its_readers(
     finally:
         holder.rollback()
         holder.close()
+
+
+def test_a_refused_statement_reports_its_sql_and_its_sqlstate() -> None:
+    """What a failure log gets to say about a rejected statement: the SQL and the SQLSTATE the
+    database answered with, and neither the bound values nor the driver's message — a Postgres
+    message quotes the row that broke the constraint, which is a workspace's data."""
+    refused = sa.exc.ProgrammingError(
+        "select agent_id from user_skill where workspace_id = $1",
+        {"workspace_id": "0f9e2f4c-11c7-4a52-9c8e-6f1f4b0f2f77"},
+        _UndefinedColumn(),
+    )
+    assert failed_statement(refused) == {
+        "statement": "select agent_id from user_skill where workspace_id = $1",
+        "sqlstate": "42703",
+    }
+
+
+def test_a_refused_statement_is_bounded_and_a_plain_failure_reports_none() -> None:
+    long_statement = "select " + "x" * (STATEMENT_LOG_MAX_CHARS * 2) + " from workspace"
+    bounded = failed_statement(sa.exc.ProgrammingError(long_statement, {}, _UndefinedColumn()))
+    assert len(bounded["statement"]) == STATEMENT_LOG_MAX_CHARS
+    assert failed_statement(TimeoutError("database connect timed out")) == {}
 
 
 def test_a_libpq_owner_dsn_registers_as_the_async_driver() -> None:

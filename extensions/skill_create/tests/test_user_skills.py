@@ -892,6 +892,26 @@ async def test_one_failing_row_logs_and_the_tick_continues(db: None) -> None:
     assert rows["bbb-good"] is not None
 
 
+async def test_a_tick_that_settles_nothing_reports_its_failure(db: None) -> None:
+    """A tick whose every stale card failed indexed nothing, so it fails rather than reporting
+    success: each saved skill of that workspace stays unfindable until somebody acts, and a
+    warning inside a job that returned cleanly reaches no monitor. The per-row tolerance above is
+    untouched — it is what a tick with one healthy card keeps."""
+    workspace_id, agent_id = await _workspace_agent()
+    index = DefaultIndex(transaction=workspace_tx)
+    ctx = context_for(NAME, frozenset(), index, RefusingEmbed(vec((0, 1.0)), "poisoned"))
+    with ws(workspace_id), agent(agent_id):
+        await UserSkillStore(ctx).save(
+            "only-one", {"SKILL.md": _skill_md("only-one", "the poisoned one")}, frozenset()
+        )
+    with ws(workspace_id), pytest.raises(RuntimeError, match="embed refused the poisoned text"):
+        await index_skills(ctx)
+    async with workspace_tx() as connection:
+        row = (await connection.execute(sa.select(user_skill.c.indexed_digest))).one()
+    assert row.indexed_digest is None
+    assert await _skill_chunk_count() == 0
+
+
 async def test_index_body_is_bounded_next_to_the_embed_call(db: None) -> None:
     workspace_id, agent_id = await _workspace_agent()
     ctx, _ = _indexed_ext()

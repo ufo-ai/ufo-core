@@ -30,7 +30,7 @@ from dbos import error as dbos_error
 
 from ufo.billing.accounting import ALLOW, BalanceGate, SpendEvaluator
 from ufo.blob import WorkspaceBlobStore
-from ufo.db import owner_tx, workspace_tx
+from ufo.db import failed_statement, owner_tx, workspace_tx
 from ufo.ext.context import ConversationProbes, ExtensionContext, TurnInvoker, context_for
 from ufo.ext.manifest import (
     PAGE_CHANGE_CURSOR_KEY,
@@ -784,7 +784,13 @@ class JobRunner:
             try:
                 await binding.spec.handler(context)
             except Exception as error:
-                log_error("jobs.failed", job=key, error_class=type(error).__name__)
+                log_error(
+                    "jobs.failed",
+                    job=key,
+                    error_class=type(error).__name__,
+                    stack=formatted_stack(error),
+                    **failed_statement(error),
+                )
                 raise
 
     def _registered(self, key: str) -> _Binding | None:

@@ -370,7 +370,11 @@ async def index_skills(ctx: ExtensionContext) -> None:
     `indexed_digest` — guarded on the digest the card was read at. A guard miss is re-read: a row
     deleted mid-embed gets its scope pruned (undoing the upsert), one re-saved mid-embed stays
     stale for the next tick — either way unindexed content is never marked settled. One failing
-    row logs and the tick continues."""
+    row logs and the tick continues, so a single bad card never holds up the rest; a tick that
+    settled none of its cards raises the last failure instead, because a fault under every card —
+    a statement the schema refuses, an unset key, an index that answers nothing — leaves every
+    saved skill of that workspace unfindable, and a warning inside a job that reports success is
+    the one thing nobody reads."""
     index, embed = ctx.index, ctx.embed
     if index is None or embed is None:
         raise RuntimeError("skill_index requires the index and embed backends; none are wired")
@@ -391,18 +395,26 @@ async def index_skills(ctx: ExtensionContext) -> None:
                 )
             )
         ).all()
+    settled = 0
+    failure: Exception | None = None
     for row in stale:
         try:
             await _index_card(ctx, index, embed, chunker, row)
-        except Exception:
+        except Exception as error:
+            failure = error
             logger.warning(
                 "skill_create.skill_index_failed",
                 extra={
                     "workspace_id": str(ctx.workspace_id),
                     "skill": row.name,
+                    "error_class": type(error).__name__,
                 },
                 exc_info=True,
             )
+        else:
+            settled += 1
+    if failure is not None and settled == 0:
+        raise failure
 
 
 async def _index_card(

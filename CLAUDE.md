@@ -230,6 +230,14 @@ as a portfolio, not a single bet:
   `down_revision` does, and the single-head gate is the guard. When another branch's migration
   merges first, repoint `down_revision` at the new head, rewrite `versions/HEAD`, and keep the
   stamp.
+- **A migration meets the image it replaces.** The deploy runs the migrate Job to completion
+  before the fleet rolls, and the outgoing pods serve until the new ones are ready — every pod
+  shares one `DBOS_APP_VERSION`, so queued work runs on either side. The schema a revision leaves
+  therefore still answers the statements of the release being replaced: add and backfill where a
+  column starts being written, and drop a column, a table or a key in a later revision than the one
+  that stops reading it. A revision that both reshapes a table and hands every row of it to a
+  per-minute job — clearing an `indexed_digest`, say — is the sharpest form: it wakes the outgoing
+  image against the new shape on the next tick.
 - Prove the chain end-to-end: realistic input → durable state → a user or agent can use it.
 - Failed experiments are reverted in the same session, with the revert committed.
 - Docs (spec.md, README.md) update in the same commit as the architectural change they

@@ -154,11 +154,43 @@ async def test_fire_logs_the_exact_failed_job_and_reraises(
 
     record = next(record for record in caplog.records if record.message == "jobs.failed")
     assert record.levelno == logging.ERROR
-    assert record.ufo == {
-        "workspace_id": str(workspace_id),
-        "job": key,
-        "error_class": "TimeoutError",
-    }
+    assert record.ufo["workspace_id"] == str(workspace_id)
+    assert record.ufo["job"] == key
+    assert record.ufo["error_class"] == "TimeoutError"
+    assert "_fail" in record.ufo["stack"]
+    assert "statement" not in record.ufo
+    assert "sqlstate" not in record.ufo
+
+
+async def test_fire_names_the_statement_the_database_refused(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A job that dies on a statement the schema will not accept logs that statement, so the column
+    or table at fault is readable from the failure itself.
+
+    `error_class` alone cannot be diagnosed: it says the driver refused the SQL and nothing about
+    which SQL, and by the time anyone reads the line the schema the process met is gone — a
+    migration that reshaped a table under a fleet still serving the previous image leaves exactly
+    this and no second chance to ask."""
+    workspace_id = await _workspace()
+    key = f"{CORE_EXTENSION}:refused"
+
+    async def _refused(context: ExtensionContext) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(sa.text("select agent_id from workspace"))
+
+    async def _candidate() -> tuple[UUID, ...]:
+        return (workspace_id,)
+
+    spec = JobSpec(name="refused", schedule="* * * * * *", handler=_refused, candidates=_candidate)
+    with caplog.at_level(logging.ERROR, logger="ufo"), pytest.raises(sa.exc.DBAPIError):
+        await _runner((spec,)).fire(key, workspace_id)
+
+    record = next(record for record in caplog.records if record.message == "jobs.failed")
+    assert record.ufo["job"] == key
+    assert record.ufo["workspace_id"] == str(workspace_id)
+    assert record.ufo["statement"] == "select agent_id from workspace"
+    assert "_refused" in record.ufo["stack"]
 
 
 async def test_a_job_runs_its_own_model_calls_on_the_background_jobs_model(db: None) -> None:
