@@ -195,6 +195,10 @@ as a portfolio, not a single bet:
   One file or one test goes through `make test-one FILE=…`, which is serial: every xdist worker
   boots and migrates a database of its own, so `-n auto` only pays above roughly 100 tests.
 - `uv run pytest`, `uv run ruff`. uv for everything Python.
+- **The parallel suite gives each test 120 seconds.** `make test` owns the value and the CI shards
+  use that target. A wedged xdist worker then fails by node id before the 15-minute job ceiling.
+  The target excludes serial, integration, and Docker tests because valid work can exceed 120
+  seconds.
 - **Every pytest run records where its wall-clock went** — the shared plugin writes `.pytest-timings/`
   (gitignored): a row per test in `tests-<worker>.jsonl` and `tests-<worker>.csv` (nodeid, directory,
   outcome, setup/call/teardown seconds, xdist worker, `database_url` param, start/stop), what each

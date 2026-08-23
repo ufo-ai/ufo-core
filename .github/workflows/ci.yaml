@@ -142,7 +142,7 @@ jobs:
         with:
           name: portal-static
           path: extensions/web/ufo_ext_web/static
-      - run: uv run pytest -n auto --shard "${{ matrix.shard }}" -m "not serial and not integration and not docker" -q
+      - run: make test SHARD="${{ matrix.shard }}"
       # Artifact names take no `/`, so the shard is in the index here and spelled in full inside
       # each `run-summary.json`.
       - uses: actions/upload-artifact@v4

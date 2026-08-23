@@ -6,8 +6,10 @@ EMAIL ?= $(shell git config user.email)
 T ?=
 FILE ?=
 WT ?=
+SHARD ?=
 STACK ?= 1
 STACKS := 1 2 3 4 5
+PYTEST_TIMEOUT_SECONDS := 120
 
 ifeq ($(filter $(STACK),$(STACKS)),)
 $(error STACK must be one of: $(STACKS))
@@ -114,8 +116,10 @@ check: ## Run every static gate CI runs — ruff, gates.py, mypy, control
 fmt: ## Format the tree
 	uv run ruff format
 
-test: ## Run the parallel suite; T=<paths> narrows it to a focused run
-	uv run pytest $(if $(T),,-n auto) -m "not serial and not integration and not docker" -q $(T)
+test: ## Run the parallel suite; T=<paths> narrows it; SHARD=1/6 runs one slice
+	uv run pytest $(if $(T),,-n auto) $(if $(SHARD),--shard $(SHARD)) \
+		--timeout $(PYTEST_TIMEOUT_SECONDS) --timeout-method thread \
+		-m "not serial and not integration and not docker" -q $(T)
 
 test-one: ## Run one file or node id serially (FILE=path) — xdist only pays above ~100 tests
 	@test -n "$(FILE)" || { echo "FILE is required: make test-one FILE=core/tests/test_hooks.py"; exit 1; }
