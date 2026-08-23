@@ -423,7 +423,7 @@ def test_the_review_agent_spawns_the_profile_this_pack_registers() -> None:
     (agent,) = manifest.agents
     profile = manifest.subagents[0]
     assert agent.name == coding.CODE_REVIEW_AGENT_NAME
-    assert f"`{profile.name}` subagents" in agent.spec.prompt
+    assert f"`{profile.name}` reviewers" in agent.spec.prompt
 
 
 def test_the_review_agent_runs_the_member_facing_tool_set() -> None:
@@ -433,18 +433,53 @@ def test_the_review_agent_runs_the_member_facing_tool_set() -> None:
     assert agent.tools is None
 
 
-def test_the_review_agent_is_provisioned_for_two_parallel_children() -> None:
-    """Two `coding` children run at once in the one sandbox the conversation holds, each with its
-    own checkout of the same repository."""
+def test_the_review_agent_is_provisioned_for_a_parallel_reviewer_roster() -> None:
+    """Both passes of a head run at once in the one sandbox the conversation holds, up to seven
+    `coding` children in each, and every child takes its own checkout of the same repository."""
     (agent,) = coding.manifest().agents
     assert agent.spec.sandbox_size == "large"
     assert agent.spec.reasoning == "high"
-    assert "spawn exactly two `coding` subagents" in agent.spec.prompt
+    assert "Each pass gets 3 to 7 `coding` reviewers in the background" in agent.spec.prompt
     assert "Do not spawn preparation, synthesis, or adjudication subagents" in agent.spec.prompt
     assert "Resolve disagreements yourself" in agent.spec.prompt
-    assert "Spawn exactly two `coding` subagents for each head SHA" in agent.spec.prompt
-    assert "spawn one replacement for that focus and that same head" in agent.spec.prompt
-    assert "Replace a focus at most once per head" in agent.spec.prompt
+    assert "spawn a complete roster for it, both passes" in agent.spec.prompt
+    assert (
+        "spawn one replacement with the same head SHA, pass, focus, reviewer number, and "
+        "reviewer count" in agent.spec.prompt
+    )
+    assert "Replace a reviewer at most once per head" in agent.spec.prompt
+
+
+def test_the_review_agent_sizes_the_roster_and_gives_every_file_one_reader() -> None:
+    """A roster covers the head only when its size is fixed by the changed-file count, when each
+    in-scope path falls to exactly one reviewer of a pass, and when publication waits for that
+    whole roster. Any of the three left open publishes a verdict over files nothing read."""
+    (agent,) = coding.manifest().agents
+    prompt = agent.spec.prompt
+    assert (
+        "Use 3 reviewers for up to 8 changed files, 4 for 9 to 15, 5 for 16 to 24, 6 for 25 to "
+        "40, and 7 for more than 40." in prompt
+    )
+    assert "Use 3 reviewers if that call fails or reports no count." in prompt
+    assert "Never use more reviewers in a pass than the number of changed files." in prompt
+    assert "Use the same reviewer count for both passes" in prompt
+    assert "every file in scope belongs to exactly one reviewer" in prompt
+    assert (
+        "Publish a head's verdict when every reviewer spawned for that head SHA has returned a "
+        "valid result." in prompt
+    )
+    assert "an incomplete roster publishes nothing" in prompt
+
+
+def test_the_review_agent_keeps_the_merge_base_its_file_split_needs() -> None:
+    """The file split and the complete diff both read `<base>...<head>`, which needs the common
+    ancestor of the two commits. A shallow fetch grafts them, so git exits with `no merge base`
+    and the reviewer never gets its file list."""
+    (agent,) = coding.manifest().agents
+    prompt = agent.spec.prompt
+    assert "git diff --name-only <base>...<head>" in prompt
+    assert "fetch the two commits with `--filter=blob:none`" in prompt
+    assert "Never fetch shallow" in prompt
 
 
 def test_the_review_agent_never_cancels_and_keeps_each_head_separate() -> None:
