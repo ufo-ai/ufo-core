@@ -1,6 +1,8 @@
 import { afterEach, expect, test, vi } from "vitest";
 
-import { attachBridge, endpointFor, navigationAllowed, type BridgeHandle } from "@/lib/bridge";
+import { attachBridge, endpointFor, type BridgeHandle } from "@/lib/bridge";
+import { framedNavigation } from "@/lib/route";
+import { heldRoute } from "@/lib/router";
 
 const MEMBER = { email: "member@example.com", admin: true };
 const AGENT_ID = "11111111-1111-1111-1111-111111111111";
@@ -64,16 +66,21 @@ test("the endpoint table admits its rows and their fills, and nothing else", () 
   expect(endpointFor("DELETE", "objects/scheduled_task/nightly")).toBeNull();
 });
 
+/** The fence is a column on the route table rather than a second list of kinds held here: the kinds
+ *  a frame may reach are stated beside the rows that read them, and the shell and the page's own link
+ *  handler ask the same question of it. */
 test("navigation admits conversations, apps, new chats, and sections, and refuses the rest", () => {
-  expect(navigationAllowed("#/c/" + CONVERSATION_ID)).toBe(true);
-  expect(navigationAllowed("#/new/" + AGENT_ID)).toBe(true);
-  expect(navigationAllowed("#/agents/" + AGENT_ID)).toBe(true);
-  expect(navigationAllowed("#/connectors")).toBe(true);
-  expect(navigationAllowed("#/wiki?open=run%2Fabc")).toBe(true);
-  expect(navigationAllowed("#/admin")).toBe(false);
-  expect(navigationAllowed("#/workspace/team")).toBe(false);
-  expect(navigationAllowed("#/")).toBe(false);
-  expect(navigationAllowed("https://evil.example.com")).toBe(false);
+  expect(framedNavigation("#/c/" + CONVERSATION_ID)).toBe(true);
+  expect(framedNavigation("#/new/" + AGENT_ID)).toBe(true);
+  expect(framedNavigation("#/agents/" + AGENT_ID)).toBe(true);
+  expect(framedNavigation("#/connectors")).toBe(true);
+  expect(framedNavigation("#/wiki?open=run%2Fabc")).toBe(true);
+  expect(framedNavigation("#/workspace/connectors")).toBe(true);
+  expect(framedNavigation("#/admin")).toBe(false);
+  expect(framedNavigation("#/workspace/team")).toBe(false);
+  expect(framedNavigation("#/agents/" + AGENT_ID + "/conversations/" + CONVERSATION_ID + "/slots/changes")).toBe(false);
+  expect(framedNavigation("#/")).toBe(false);
+  expect(framedNavigation("https://evil.example.com")).toBe(false);
 });
 
 test("ready is answered with the member's own init payload", async () => {
@@ -327,6 +334,23 @@ test("an accepted navigation target moves the shell; a refused one does not", ()
   expect(location.hash).toBe("#/c/" + CONVERSATION_ID);
   deliver({ ufo: "navigate", to: "#/admin" }, iframe.contentWindow);
   expect(location.hash).toBe("#/c/" + CONVERSATION_ID);
+});
+
+/** A page's navigation is a navigation like any other, so the router writes it and the route every
+ *  screen renders from names the conversation as the message lands. A bare hash write left that route
+ *  to the browser's own `hashchange`, a task later, so the drawer over the page stayed open and the
+ *  arrival never landed. A refused target moves neither the address nor the route. */
+test("heldRoute names the conversation a frame's navigate message asked for", () => {
+  const { iframe } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+
+  deliver({ ufo: "navigate", to: "#/c/" + CONVERSATION_ID }, iframe.contentWindow);
+
+  expect(heldRoute()).toEqual({ kind: "chat", conversationId: CONVERSATION_ID });
+
+  deliver({ ufo: "navigate", to: "#/admin" }, iframe.contentWindow);
+
+  expect(heldRoute()).toEqual({ kind: "chat", conversationId: CONVERSATION_ID });
 });
 
 test("a call with no usable id is dropped without a reply or a throw", async () => {

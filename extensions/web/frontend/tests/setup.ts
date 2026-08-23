@@ -2,6 +2,8 @@ import { cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
 
 import { resetChatStore } from "@/lib/chatStore";
+import { resetRailStore } from "@/lib/railStore";
+import { resetRouter } from "@/lib/router";
 import { resetStreams } from "@/lib/turnStream";
 
 // A CI failure's DOM dump is the one record of what actually rendered there; the default limit
@@ -90,6 +92,8 @@ afterEach(() => {
   const faults = keyFaults;
   keyFaults = [];
   resetChatStore();
+  resetRailStore();
+  resetRouter();
   resetStreams();
   if (typeof localStorage !== "undefined") localStorage.clear();
   if (typeof sessionStorage !== "undefined") sessionStorage.clear();

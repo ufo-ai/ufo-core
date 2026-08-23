@@ -29,6 +29,7 @@ import {
   workspaceHash,
   type Section,
 } from "@/lib/route";
+import { navigate } from "@/lib/router";
 import { searchEverywhere, type Group } from "@/lib/search";
 import type { Agent } from "@/lib/types";
 import { SECTION_VIEWS } from "@/views/registry";
@@ -71,17 +72,18 @@ const PLACES: { label: string; hash: string; icon: TablerIcon }[] = [
  *  and Enter takes the row under it; picking a hit opens the place holding it and shuts the dialog.
  *
  *  Only the acts a member can express as a route or a message stand here: the palette lands them in
- *  a chat with their words already in the composer, and the sending is theirs. */
+ *  a chat with their words already in the composer, and the sending is theirs.
+ *
+ *  Every row is an address and the router writes it. The bar stands in the sidebar and again on the
+ *  phone bar, and a hit taken in either one moves the page by the same act. */
 export function Spotlight({
   agents,
   className,
   label,
-  onOpen,
 }: {
   agents: Agent[];
   className?: string;
   label?: React.ReactNode;
-  onOpen: (hash: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
@@ -132,7 +134,7 @@ export function Spotlight({
 
   const take = (hash: string) => {
     show(false);
-    onOpen(hash);
+    navigate(hash);
   };
 
   const started = named

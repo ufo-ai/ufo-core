@@ -50,6 +50,17 @@ function groupChats(rows: ChatRow[], now: Date): RailGroup[] {
 
 export type RailSort = "recency" | "agent";
 
+const HELD_SORT = "rail-sort";
+
+/** Which ladder the rail draws its rows in, held across sessions. */
+export function heldRailSort(): RailSort {
+  return localStorage.getItem(HELD_SORT) === "agent" ? "agent" : "recency";
+}
+
+export function holdRailSort(sort: RailSort): void {
+  localStorage.setItem(HELD_SORT, sort);
+}
+
 /** The agent sort's groups. Rows bucket under the name as stored — that name is the agent's
  *  identity, and two agents whose names differ only in case are two agents — and the heading is
  *  that name drawn the way every other surface draws it. */
@@ -113,6 +124,36 @@ export function holdRailShut(shut: string[]): void {
  *  has stopped drawing stays in the set and governs nothing until it is drawn again. */
 export function railShut(held: string[] | null, labels: string[]): string[] {
   return held ?? labels.slice(1);
+}
+
+const HELD_SIDEBAR = "sidebar";
+
+/** Whether the sidebar stands folded to its glyph rail. The shell opens on the rail: the sidebar is
+ *  a place a member goes to find a conversation by name, not the screen they came for, so the width
+ *  it takes belongs to the screen until they ask for it — and once they have asked, that choice is
+ *  theirs on every load after. */
+export function heldSidebar(): boolean {
+  return localStorage.getItem(HELD_SIDEBAR) !== "expanded";
+}
+
+export function holdSidebar(collapsed: boolean): void {
+  localStorage.setItem(HELD_SIDEBAR, collapsed ? "collapsed" : "expanded");
+}
+
+const HELD_PINNED = "pinned-rows";
+
+/** What the member pinned into the sidebar — apps by id, in the order they pinned them. A browser
+ *  holding nothing (`null`) has never had a pin touched, which is not the same as one holding an
+ *  empty set: until then the workspace's shipped apps stand pinned, so the sidebar arrives holding
+ *  its own destinations. A stored id no live agent answers — an app since removed — resolves to
+ *  nothing rather than a row. */
+export function heldPinned(): string[] | null {
+  const held = localStorage.getItem(HELD_PINNED);
+  return held === null ? null : held.split("\n").filter(Boolean);
+}
+
+export function holdPinned(pinned: string[]): void {
+  localStorage.setItem(HELD_PINNED, pinned.join("\n"));
 }
 
 function admits(row: ChatRow, shown: RailShown): boolean {

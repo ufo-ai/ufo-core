@@ -53,6 +53,15 @@ const REVIEWER = {
   icon: "code",
 };
 
+/** An app that still needs a grant before it can work, as its own settings read states it. */
+const NEEDS_SETUP = {
+  ...SETTINGS,
+  agent: {
+    ...SETTINGS.agent,
+    setup: { connectors: ["github"], instructions: "Connect the GitHub account." },
+  },
+};
+
 /** The message the portal sends on the wizard's own behalf, so the run opens with the agent's
  *  proposal instead of an empty box. */
 const OPENING = "Build me a new app.";
@@ -1044,6 +1053,29 @@ test("the settings dialog reads the drawn name and the intent it posts carries t
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0].name).toBe("code reviewer");
+});
+
+/** The setup act moves the page like every other act, so the router writes it: the member lands on
+ *  the app's new conversation, the dialog the act was pressed in goes with the screen under it, and
+ *  the composer that stands there is the one they read. The act founds nothing — a grant binds to the
+ *  speaker in the conversation it is made in, so the words are the member's to send. */
+test("Start setup lands the member on the app's new conversation, founding nothing", async () => {
+  const { calls } = wire({
+    "/settings": () => json(NEEDS_SETUP),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const dialog = within(await openAgentSettings());
+
+  await userEvent.click(await dialog.findByRole("button", { name: "Start setup" }));
+
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(calls.filter((url) => url.includes("/chat?conversation="))).toEqual([]);
+  expect(StreamFake.opened).toEqual([]);
 });
 
 /** Starting a conversation with the open app is an act of its own band, standing with the acts at

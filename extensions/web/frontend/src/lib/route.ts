@@ -61,6 +61,11 @@ export type RouteKind = Route["kind"];
  *  the same member of the union rather than about `Route` at large. */
 export type RouteOf<Kind extends RouteKind> = Extract<Route, { kind: Kind }>;
 
+/** The chat surface's start screen, as the address spells it: a track whose head is this stands the
+ *  composer and its starters rather than a conversation. It is an address token — it rides the
+ *  track key — so it is declared with the table that reads and writes it. */
+export const COMPOSE = "compose";
+
 const TRACK_KEY = "open";
 const TRACK_SEPARATOR = "~";
 
@@ -416,6 +421,85 @@ export function routeIs<Kind extends RouteKind>(
   kind: Kind,
 ): route is RouteOf<Kind> {
   return route.kind === kind;
+}
+
+/** Whether the shell sends the member where a framed app page asks: a conversation permalink, a new
+ *  conversation, an app, or a built-in section. Everything else — home, administration, a workspace
+ *  tab, an external URL that parses to `home` — is refused, so a frame cannot bounce the member into
+ *  an arbitrary place (RFC 0039's navigation fence, and the whole of it: the shell acts on a frame's
+ *  request under the viewer's own session).
+ *
+ *  It is a column of the table rather than a second list of kinds held beside it. The record is typed
+ *  over every kind the table declares, so a route the table gains states here whether a frame may
+ *  reach it, and one that states nothing is a compile error rather than a fence that quietly admits
+ *  it. A row reading to two kinds — the workspace prefix, which answers a section at the address that
+ *  screen used to have — is answered by the kind it read, so the legacy address reaches exactly what
+ *  its own screen reaches. */
+const FRAMED: { [Kind in RouteKind]: boolean } = {
+  home: false,
+  "first-run": false,
+  admin: false,
+  agents: false,
+  chat: true,
+  "conversation-slot": false,
+  "new-chat": true,
+  agent: true,
+  workspace: false,
+  section: true,
+  "bad-link": false,
+};
+
+/** Whether the shell will send the member to `to` on a framed page's request. */
+export function framedNavigation(to: string): boolean {
+  return FRAMED[parseHash(to).kind];
+}
+
+/** A place a control can name to ask whether the member is already standing there. Three id spaces
+ *  reach this — an app's own id, a slot standing on a screen, a screen with one name — and a name
+ *  means nothing across them, so the space leads the name, exactly as the track store's keys do. */
+export type Stand = `agent:${string}` | `open:${string}` | "workspace" | `section:${Section}`;
+
+/** The composer, as a place. The chat app opened at its start screen carries it as the head of its
+ *  own track; the home screen and a new conversation are the same place with no app around them. One
+ *  stand covers all three, so the sidebar's New conversation row asks one question however the
+ *  workspace is shipped. */
+export const COMPOSING: Stand = `open:${COMPOSE}`;
+
+/** Where a route leaves the member standing. A route stands in more than one place at once: an app
+ *  holding a conversation stands both on that app and on the conversation, and the row for each
+ *  marks itself. Exhaustive over the kinds the table declares, so a route it gains says where it
+ *  stands rather than marking nothing. */
+function stands(route: Route): Stand[] {
+  switch (route.kind) {
+    case "home":
+    case "new-chat":
+      return [COMPOSING];
+    case "chat":
+    case "conversation-slot":
+      return [`open:${route.conversationId}`];
+    case "agent": {
+      const head = route.place.opens?.[0];
+      const app: Stand = `agent:${route.agentId}`;
+      return head === undefined ? [app] : [app, `open:${head}`];
+    }
+    case "workspace":
+      return ["workspace"];
+    case "section":
+      return [`section:${route.section}`];
+    case "agents":
+    case "first-run":
+    case "admin":
+    case "bad-link":
+      return [];
+  }
+  const missed: never = route;
+  return missed;
+}
+
+/** The "am I here" test every sidebar row and every rail row wears, read off the table rather than
+ *  inlined as a comparison of route fields at each row. */
+export function standing(route: Route, stand: Stand): boolean {
+  return stands(route).includes(stand);
 }
 
 export function artifactTarget(search: string): string | null {

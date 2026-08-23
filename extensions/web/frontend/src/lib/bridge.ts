@@ -1,5 +1,6 @@
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
-import { parseHash, type Route, type WorkspacePlace } from "@/lib/route";
+import { framedNavigation, type WorkspacePlace } from "@/lib/route";
+import { navigate } from "@/lib/router";
 import type { Member } from "@/lib/types";
 
 /** The portal shell's side of the app bridge (RFC 0039, `docs/apps-prototype-contracts.md`
@@ -12,8 +13,8 @@ import type { Member } from "@/lib/types";
  *
  *  Prototype trust (deferred, documented in RFC 0039's security debt): the shell acts on the
  *  frame's requests under the viewer's own session with no per-message gate, and replies are posted
- *  with a `*` target origin. The endpoint table and the navigation target set are the only fences,
- *  and they bound what the frame can reach, not who authored it. */
+ *  with a `*` target origin. The endpoint table and the route table's own frame column are the only
+ *  fences, and they bound what the frame can reach, not who authored it. */
 
 type BodyKind = "json" | "text" | "urlencoded";
 
@@ -79,16 +80,6 @@ ENDPOINTS.push(STREAM_ENDPOINT);
 /** How many live turn streams one frame may hold open at once — a page tails the turns it is
  *  watching, not every turn it ever saw. */
 const STREAM_CAP = 8;
-
-/** The route kinds a frame may send the member to: a conversation permalink, a new conversation, an
- *  app, or a built-in section. Everything else — home, admin, workspace tabs, an external URL that
- *  parses to `home` — is refused, so a frame cannot bounce the member into an arbitrary place. */
-const ACCEPTED_NAVIGATION: ReadonlySet<Route["kind"]> = new Set([
-  "chat",
-  "new-chat",
-  "agent",
-  "section",
-]);
 
 type BridgeMessage =
   | { ufo: "ready" }
@@ -169,11 +160,6 @@ export function endpointFor(method: string, path: string): Endpoint | null {
         }),
     ) ?? null
   );
-}
-
-/** Whether the shell will send the member to `to` on a frame's request. */
-export function navigationAllowed(to: string): boolean {
-  return ACCEPTED_NAVIGATION.has(parseHash(to).kind);
 }
 
 function isBridgeMessage(data: unknown): data is BridgeMessage {
@@ -411,8 +397,11 @@ export function attachBridge({
       case "close":
         if (typeof message.id === "string") streams.get(message.id)?.abort();
         return;
+      /* A page's navigation is a navigation like any other, so the router writes it: the drawer over
+         the page shuts and the arrival lands, where a bare hash write left the shell to catch up a
+         task later. */
       case "navigate":
-        if (typeof message.to === "string" && navigationAllowed(message.to)) location.hash = message.to;
+        if (typeof message.to === "string" && framedNavigation(message.to)) navigate(message.to);
         return;
       case "founded":
         if (

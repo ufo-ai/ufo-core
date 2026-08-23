@@ -5,10 +5,10 @@ import { connect, installShims, navigate, onPlaced, type AppInit } from "@/apps/
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { getJson } from "@/lib/api";
 import { Viewer } from "@/lib/audience";
-import { navigationAllowed } from "@/lib/bridge";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import {
   agentHash,
+  framedNavigation,
   parseHash,
   serializePlace,
   type PlaceStep,
@@ -37,7 +37,7 @@ export function useAppLinks(claim: (route: Route) => boolean): void {
       if (!to) return;
       event.preventDefault();
       if (claim(parseHash(to))) return;
-      if (navigationAllowed(to)) navigate(to);
+      if (framedNavigation(to)) navigate(to);
     };
     document.addEventListener("click", onClick);
     return () => document.removeEventListener("click", onClick);

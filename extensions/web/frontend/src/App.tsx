@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconAdjustments,
@@ -29,7 +29,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
+import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
 import { Agents, AppsIndex } from "@/views/Agents";
@@ -56,11 +56,9 @@ import {
 } from "@/lib/audience";
 import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
-import { heldTrack, holdTrack, type TrackScreen } from "@/lib/tracks";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
-import { CHAT_SURFACE, COMPOSE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
-import { getJson } from "@/lib/api";
+import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, heldScheme, holdScheme, type Scheme } from "@/lib/scheme";
 import { pageTitle } from "@/lib/title";
@@ -75,42 +73,46 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { RAIL_SHOWN_OPTIONS, railGroups, railShut, stampIso } from "@/lib/rail";
 import {
-  RAIL_SHOWN_OPTIONS,
-  bumpChat,
-  heldRailShown,
-  heldRailShut,
-  holdRailShown,
-  holdRailShut,
-  mergeChats,
-  railGroups,
-  railShut,
-  stampIso,
-  type ChatRow,
-  type ChatsPayload,
-  type RailShown,
-  type RailSort,
-} from "@/lib/rail";
+  foldSidebar,
+  pickPinned,
+  pickRailShown,
+  pickRailShut,
+  pickRailSort,
+  quietRail,
+  railActivity,
+  railFounded,
+  readRail,
+  seekChat,
+  useRail,
+} from "@/lib/railStore";
 import {
-  ADMIN_HASH,
-  AGENTS_HASH,
-  BUILDER_HASH,
-  HOME_HASH,
-  agentHash,
-  artifactTarget,
-  bootRoute,
-  FIRST_RUN_HASH,
-  chatHash,
-  newChatHash,
-  parseHash,
-  sectionHash,
+  forwardAgents,
+  heldRoute,
+  openAdmin,
+  openAgent,
+  openAgentPlace,
+  openAgents,
+  openBuilder,
+  openChat,
+  openHome,
+  openNewChat,
+  openSlot,
+  placeAgent,
+  placeSection,
+  placeWorkspace,
+  startRouter,
+  useRoute,
+} from "@/lib/router";
+import {
+  COMPOSE,
+  COMPOSING,
   WORKSPACE_TABS,
-  workspaceHash,
-  type PlaceStep,
+  standing,
   type Route,
   type Section,
   type WorkspacePlace,
-  type WorkspaceTab,
 } from "@/lib/route";
 import type { Agent, Member, OwnedConversation } from "@/lib/types";
 
@@ -120,144 +122,25 @@ export type AppProps = {
   onAgents: () => void;
 };
 
-type Rail = { phase: "loading" | "failed" | "ready"; rows: ChatRow[] };
-
-
-type Sought =
-  | { kind: "answered" }
-  | { kind: "signed-out" }
-  | { kind: "failed"; message: string };
-
-/** A screen a track can stand on: the screen's own name in the store, the track its address states,
- *  and what that screen becomes once a track is written back onto it. Three route kinds carry a
- *  place; a route carrying none carries no track either. */
-type Standing = {
-  screen: TrackScreen;
-  opens: string[] | undefined;
-  land: (held: string[]) => { route: Route; hash: string };
-};
-
-function standingOn(route: Route | null): Standing | null {
-  if (route === null) return null;
-  if (route.kind === "agent") {
-    return {
-      screen: `agent:${route.agentId}`,
-      opens: route.place.opens,
-      land: (held) => {
-        const place = { ...route.place, opens: held };
-        return {
-          route: { kind: "agent", agentId: route.agentId, place },
-          hash: agentHash(route.agentId, place),
-        };
-      },
-    };
-  }
-  if (route.kind === "workspace") {
-    return {
-      screen: `workspace:${route.view}`,
-      opens: route.place.opens,
-      land: (held) => {
-        const place = { ...route.place, opens: held };
-        return {
-          route: { kind: "workspace", view: route.view, place },
-          hash: workspaceHash(route.view, place),
-        };
-      },
-    };
-  }
-  if (route.kind === "section") {
-    return {
-      screen: `section:${route.section}`,
-      opens: route.place.opens,
-      land: (held) => {
-        const place = { ...route.place, opens: held };
-        return {
-          route: { kind: "section", section: route.section, place },
-          hash: sectionHash(route.section, place),
-        };
-      },
-    };
-  }
-  return null;
-}
-
-/** Which of the address and the store owns a screen's track, decided once for every way a member
- *  reaches a screen — boot, a hash the browser moved, and every act that moves the page.
- *
- *  An address stating a track states it on purpose: a link a member was sent, a bookmark, a step
- *  back onto one. It wins, and the store is written to match. An address stating none is the member
- *  arriving from somewhere else — a sidebar row, a pinned row, a spotlight hit, all of which name a
- *  screen and nothing on it — so the store hands back the track the screen was left holding and the
- *  address is written to match in the same tick, leaving the two no frame to stand apart in. Coming
- *  back to a screen is not a new place, so that address is replaced: pushed, Back would walk the
- *  member through their own arrivals instead of out of the screen.
- *
- *  Standing on the screen already, the address owns whatever it says, an empty track included —
- *  that is the member closing the last slot, and a store answering over it would reopen what they
- *  had just shut. */
-function arrive(next: Route, before: Route | null): Route {
-  const standing = standingOn(next);
-  if (!standing) return next;
-  if (standing.opens || standing.screen === standingOn(before)?.screen) {
-    holdTrack(standing.screen, standing.opens ?? []);
-    return next;
-  }
-  const kept = heldTrack(standing.screen);
-  if (!kept.length) return next;
-  const landed = standing.land(kept);
-  history.replaceState(null, "", landed.hash);
-  return landed.route;
-}
-
 export function App({ agents, member, onAgents }: AppProps) {
-  const [route, setRoute] = useState<Route>(() =>
-    arrive(bootRoute(location.hash, location.search), null),
-  );
-  useEffect(() => {
-    const target = artifactTarget(location.search);
-    if (target) location.replace(target);
-  }, []);
-  const [rail, setRail] = useState<Rail>({ phase: "loading", rows: [] });
-  const [toast, setToast] = useState<ToastState>(SILENT);
-  const [reloads, setReloads] = useState(0);
-  const [sought, setSought] = useState<Readonly<Record<string, Sought>>>({});
-  const [linked, setLinked] = useState<Record<string, OwnedConversation>>({});
-  const [railSort, setRailSort] = useState<RailSort>(() =>
-    localStorage.getItem("rail-sort") === "agent" ? "agent" : "recency",
-  );
-  const setRailSortHeld = useCallback((next: RailSort) => {
-    setRailSort(next);
-    localStorage.setItem("rail-sort", next);
-  }, []);
-  const [railShown, setRailShown] = useState<RailShown>(heldRailShown);
-  const setRailShownHeld = useCallback((next: RailShown) => {
-    setRailShown(next);
-    holdRailShown(next);
-  }, []);
+  const route = useRoute();
+  const rail = useRail();
   const [menu, setMenu] = useState(false);
   const shutMenu = useCallback(() => setMenu(false), []);
   const narrow = useNarrow();
   useScrollMark();
-  /** The shell opens on the rail. The sidebar is a place a member goes to find a conversation by
-   *  name, not the screen they came for, so the width it takes belongs to the screen until they ask
-   *  for it — and once they have asked, that choice is theirs on every load after. */
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebar") !== "expanded");
-  const setSidebarCollapsed = useCallback((next: boolean) => {
-    setCollapsed(next);
-    localStorage.setItem("sidebar", next ? "collapsed" : "expanded");
-  }, []);
-  const [pinnedHeld, setPinnedHeld] = useState<string[] | null>(heldPinned);
-  const pinned = pinnedHeld ?? defaultPins(agents);
-  const togglePin = useCallback(
-    (agentId: string) => {
-      const next = pinned.includes(agentId)
-        ? pinned.filter((id) => id !== agentId)
-        : [...pinned, agentId];
-      holdPinned(next);
-      setPinnedHeld(next);
-    },
-    [pinned],
-  );
+  const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
+
+  /** The router owns the address: it states the boot address in the bar, lands the arrival on the
+   *  track the screen was left holding, and follows the browser from there. It starts here rather
+   *  than while the shell renders, because it writes the address and the track store both. */
+  useEffect(startRouter, []);
+
+  useEffect(readRail, []);
+
+  /** The drawer stands over the page, so every act that moves the page shuts it. The router
+   *  publishes a route for each of those acts, whether or not the address it wrote had changed. */
+  useEffect(() => setMenu(false), [route]);
 
   /** A drawer left open while the window grows past the breakpoint would trap focus behind a
    *  hamburger the layout no longer draws. */
@@ -265,272 +148,37 @@ export function App({ agents, member, onAgents }: AppProps) {
     if (!narrow) setMenu(false);
   }, [narrow]);
 
-  const [railShut, setRailShut] = useState<string[] | null>(heldRailShut);
-  const setRailShutHeld = useCallback((next: string[]) => {
-    setRailShut(next);
-    holdRailShut(next);
-  }, []);
-  const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
-  const routeRef = useRef(route);
-  routeRef.current = route;
-
   useEffect(() => {
-    const booted = routeRef.current;
-    if (!location.hash && booted.kind === "chat") {
-      history.replaceState(null, "", chatHash(booted.conversationId));
-    }
-    const onHash = () => setRoute(arrive(parseHash(location.hash), routeRef.current));
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
+    document.title = pageTitle(route, agents, rail.rows, rail.linked, mainAgent);
+  }, [route, agents, rail.rows, rail.linked, mainAgent]);
 
+  // A workspace with no agent to talk to has no first run to stand in, so the member is sent to the
+  // one screen they can act on.
   useEffect(() => {
-    document.title = pageTitle(route, agents, rail.rows, linked, mainAgent);
-  }, [route, agents, rail.rows, linked, mainAgent]);
+    if (route.kind === "first-run" && !mainAgent) openHome();
+  }, [mainAgent, route.kind]);
 
+  /** A conversation the rail does not carry — a permalink to one another surface holds, or one past
+   *  the rail's own bound — is resolved by a read of its own, once the rail has answered. */
   useEffect(() => {
-    let live = true;
-    setRail((current) => ({ phase: "loading", rows: current.rows }));
-    getJson<ChatsPayload>("/api/chats").then((result) => {
-      if (!live) return;
-      if (!result.ok && result.status !== 401) {
-        setToast({ title: "Conversations did not refresh.", description: result.message });
-      }
-      setRail((current) =>
-        result.ok
-          ? { phase: "ready", rows: mergeChats(result.payload.chats, current.rows) }
-          : { phase: "failed", rows: current.rows },
-      );
-    });
-    return () => {
-      live = false;
-    };
-  }, [reloads]);
-
-  /** Every act that moves the page comes through here, so the drawer standing over that page is
-   *  shut here too — whether the member picked a destination, a conversation, or an app. */
-  const go = useCallback((hash: string, next: Route) => {
-    if (location.hash !== hash) location.hash = hash;
-    setRoute(arrive(next, routeRef.current));
-    setMenu(false);
-  }, []);
-
-  // The card reaches the first run by query, since a fragment never reaches the server; the address
-  // replaces it in the bar so what the member sees is somewhere they can return to. A workspace
-  // with no agent to talk to has no first run and falls back to the home screen.
-  useEffect(() => {
-    if (route.kind !== "first-run") return;
-    if (!mainAgent) {
-      go(HOME_HASH, { kind: "home" });
-      return;
-    }
-    if (location.hash !== FIRST_RUN_HASH) {
-      history.replaceState(null, "", FIRST_RUN_HASH);
-    }
-  }, [go, mainAgent, route.kind]);
-
-  const openHome = useCallback(() => go(HOME_HASH, { kind: "home" }), [go]);
-
-  const openChat = useCallback(
-    (conversationId: string) => go(chatHash(conversationId), { kind: "chat", conversationId }),
-    [go],
-  );
-
-  /** The agent whose app is the chat surface: conversations are read and answered inside its
-   *  pane. Null on a deploy that ships no chat app, where the shell's own chat pane stands in. */
-  const chatApp = useMemo(() => chatSurface(agents), [agents]);
-
-  /** Where a rail row lands. A chat that directs an app — one whose agent is an app's own —
-   *  reopens as that app's right-side chat, beside the page it edits. Every other conversation is
-   *  a regular chat and loads in the chat app's single column, the way a new conversation does;
-   *  the shell's chat screen stands in where no chat app ships. */
-  const openConversation = useCallback(
-    (conversationId: string, agentId: string) => {
-      const owner = agents.find((agent) => agent.id === agentId);
-      const pane = owner?.app ? owner : chatApp;
-      if (pane === null || pane === undefined) {
-        openChat(conversationId);
-        return;
-      }
-      const place = { opens: [conversationId] };
-      go(agentHash(pane.id, place), { kind: "agent", agentId: pane.id, place });
-    },
-    [agents, chatApp, go, openChat],
-  );
-
-  const openNewChat = useCallback(
-    (agentId: string) => go(newChatHash(agentId), { kind: "new-chat", agentId }),
-    [go],
-  );
-
-  const openAgents = useCallback(() => go(AGENTS_HASH, { kind: "agents" }), [go]);
+    if (route.kind === "chat" && rail.phase === "ready") seekChat(route.conversationId);
+  }, [route, rail]);
 
   /** The wizard mounts only behind a member's press or a run already in flight: its address alone
    *  must not found a conversation, or Back and reload would send model turns nobody asked for. */
   const [wantedBuild, setWantedBuild] = useState(false);
-
-  const openBuilder = useCallback(() => {
+  const startBuild = useCallback(() => {
     setWantedBuild(true);
-    go(BUILDER_HASH, { kind: "agents", build: true });
-  }, [go]);
-
-  const exitBuilder = useCallback(() => {
+    openBuilder();
+  }, []);
+  const exitBuild = useCallback(() => {
     setWantedBuild(false);
     openAgents();
-  }, [openAgents]);
-
-  /** Where an unbacked wizard address forwards: the same screen, written over the address rather
-   *  than stacked on it, so Back does not land on the forwarder again. */
-  const replaceAgents = useCallback(() => {
+  }, []);
+  const forwardBuild = useCallback(() => {
     setWantedBuild(false);
-    history.replaceState(null, "", AGENTS_HASH);
-    setRoute({ kind: "agents" });
+    forwardAgents();
   }, []);
-
-  /** An agent opened at a place rather than at its head — what the bare apps hash, which shows the
-   *  main agent without having navigated to it, turns a place change into. */
-  const openAgentPlace = useCallback(
-    (agentId: string, place: WorkspacePlace) =>
-      go(agentHash(agentId, place), { kind: "agent", agentId, place }),
-    [go],
-  );
-
-  const openAgent = useCallback(
-    (agentId: string) => go(agentHash(agentId), { kind: "agent", agentId, place: {} }),
-    [go],
-  );
-
-  const stepPlace = useCallback(
-    (step: PlaceStep, held: boolean, next: () => { route: Route; hash: string } | null) => {
-      if (step !== "push" && !held) return;
-      if (step === "back") {
-        history.back();
-        return;
-      }
-      const target = next();
-      if (!target) return;
-      if (step === "replace") {
-        history.replaceState(null, "", target.hash);
-        setRoute(arrive(target.route, routeRef.current));
-        return;
-      }
-      go(target.hash, target.route);
-    },
-    [go],
-  );
-
-  const placeAgent = useCallback(
-    (place: WorkspacePlace, step: PlaceStep) => {
-      const seen = routeRef.current;
-      stepPlace(step, seen.kind === "agent", () =>
-        seen.kind === "agent"
-          ? {
-              route: { kind: "agent", agentId: seen.agentId, place },
-              hash: agentHash(seen.agentId, place),
-            }
-          : null,
-      );
-    },
-    [stepPlace],
-  );
-
-  const openSlot = useCallback(
-    (conversationId: string, slot: string | null) =>
-      go(chatHash(conversationId, slot ?? undefined), {
-        kind: "chat",
-        conversationId,
-        ...(slot ? { slot } : {}),
-      }),
-    [go],
-  );
-
-  const placeWorkspace = useCallback(
-    (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => {
-      const seen = routeRef.current;
-      stepPlace(step, seen.kind === "workspace" && seen.view === view, () => ({
-        route: { kind: "workspace", view, place },
-        hash: workspaceHash(view, place),
-      }));
-    },
-    [stepPlace],
-  );
-
-  const placeSection = useCallback(
-    (section: Section, place: WorkspacePlace, step: PlaceStep) => {
-      const seen = routeRef.current;
-      stepPlace(step, seen.kind === "section" && seen.section === section, () => ({
-        route: { kind: "section", section, place },
-        hash: sectionHash(section, place),
-      }));
-    },
-    [stepPlace],
-  );
-
-  const openAdmin = useCallback(() => go(ADMIN_HASH, { kind: "admin" }), [go]);
-
-  const created = useCallback(
-    (agent: Agent, conversationId: string, title: string) => {
-      const row: ChatRow = {
-        conversation_id: conversationId,
-        agent_id: agent.id,
-        agent_name: agent.name,
-        title,
-        last_at: stampIso(new Date()),
-        surface: WEB_SURFACE,
-        surface_label: null,
-        mine: true,
-        speaker: null,
-      };
-      setRail((current) => ({ ...current, rows: mergeChats(current.rows, [row]) }));
-      const seen = routeRef.current;
-      // Every screen that draws an unfounded chat hands the member to the conversation their
-      // message founded. A screen left standing on one would redraw an empty composer over what
-      // they just sent.
-      const started =
-        seen.kind === "home" || (seen.kind === "new-chat" && seen.agentId === agent.id);
-      if (started) openChat(conversationId);
-    },
-    [openChat],
-  );
-
-  const activity = useCallback((conversationId: string) => {
-    setRail((current) => ({
-      ...current,
-      rows: bumpChat(current.rows, conversationId, new Date()),
-    }));
-  }, []);
-
-  useEffect(() => {
-    if (route.kind !== "chat" || rail.phase !== "ready") return;
-    const wanted = route.conversationId;
-    if (
-      rail.rows.some((row) => row.conversation_id === wanted && isPortalChat(row.surface)) ||
-      wanted in sought
-    ) {
-      return;
-    }
-    let live = true;
-    getJson<ChatsPayload>("/api/chats?conversation=" + wanted).then((result) => {
-      if (!live) return;
-      const outcome: Sought = result.ok
-        ? { kind: "answered" }
-        : result.status === 401
-          ? { kind: "signed-out" }
-          : { kind: "failed", message: result.message };
-      setSought((current) => ({ ...current, [wanted]: outcome }));
-      if (!result.ok) return;
-      if (result.payload.chats.length) {
-        setRail((current) => ({ ...current, rows: mergeChats(current.rows, result.payload.chats) }));
-      }
-      const conversation = result.payload.conversation;
-      if (conversation) {
-        setLinked((current) => ({ ...current, [wanted]: conversation }));
-      }
-    });
-    return () => {
-      live = false;
-    };
-  }, [route, rail, sought]);
 
   /** The first run draws no shell. It is the one destination a member reaches before the workspace
    *  is theirs to move around in, so the bar's four places are all somewhere they cannot use yet —
@@ -561,20 +209,13 @@ export function App({ agents, member, onAgents }: AppProps) {
             <div
               className={cn(
                 "grid h-dvh max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
-                collapsed
+                rail.collapsed
                   ? "grid-cols-[var(--container-rail)_1fr]"
                   : "grid-cols-[var(--container-sidebar)_1fr]",
               )}
             >
               {narrow ? (
-                <NarrowBar
-                  agents={agents}
-                  member={member}
-                  menu={menu}
-                  onMenu={setMenu}
-                  onHome={openHome}
-                  onAdmin={openAdmin}
-                />
+                <NarrowBar agents={agents} member={member} menu={menu} onMenu={setMenu} />
               ) : null}
               <WorkspaceSidebar
                 route={route}
@@ -582,56 +223,47 @@ export function App({ agents, member, onAgents }: AppProps) {
                 member={member}
                 mainAgent={mainAgent}
                 narrow={narrow}
-                collapsed={collapsed && !narrow}
-                onCollapsed={setSidebarCollapsed}
-                rail={rail}
-                sort={railSort}
-                onSort={setRailSortHeld}
-                shown={railShown}
-                onShown={setRailShownHeld}
-                shut={railShut}
-                onShut={setRailShutHeld}
-                chatApp={chatApp}
-                onNewChat={openNewChat}
-                onOpenAgentPlace={openAgentPlace}
-                onOpen={openConversation}
-                onRetry={() => setReloads((count) => count + 1)}
-                onOpenAgent={openAgent}
-                onBuild={openBuilder}
-                onSection={(section) => placeSection(section, {}, "push")}
-                onWorkspace={() => placeWorkspace("team", {}, "push")}
-                onAdmin={openAdmin}
-                pinned={pinned}
-                onPin={togglePin}
+                onBuild={startBuild}
               />
               <RoutedPane
                 route={route}
                 agents={agents}
                 member={member}
                 mainAgent={mainAgent}
-                rail={rail}
                 onAgents={onAgents}
-                onExitBuilder={exitBuilder}
-                onForwardAgents={replaceAgents}
+                onExitBuilder={exitBuild}
+                onForwardAgents={forwardBuild}
                 buildWanted={wantedBuild}
-                onCreated={created}
-                onActivity={activity}
-                onOpenAgent={openAgent}
-                onOpenAgentPlace={openAgentPlace}
-                onOpenSlot={openSlot}
-                onPlaceWorkspace={placeWorkspace}
-                onPlaceSection={placeSection}
-                onPlaceAgent={placeAgent}
-                sought={sought}
-                linked={linked}
               />
-              <Toast state={toast} onDone={() => setToast(SILENT)} />
+              <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
             </div>
           </DrawerHost>
         </TooltipProvider>
       </MainAgentProvider>
     </Viewer.Provider>
   );
+}
+
+/** A conversation a send has just founded: the rail carries the row at once rather than waiting for
+ *  its next read, and the screen that drew the unfounded chat hands the member to the conversation
+ *  their message founded — a screen left standing on one would redraw an empty composer over what
+ *  they just sent. */
+function founded(agent: Agent, conversationId: string, title: string): void {
+  railFounded({
+    conversation_id: conversationId,
+    agent_id: agent.id,
+    agent_name: agent.name,
+    title,
+    last_at: stampIso(new Date()),
+    surface: WEB_SURFACE,
+    surface_label: null,
+    mine: true,
+    speaker: null,
+  });
+  const seen = heldRoute();
+  if (seen.kind === "home" || (seen.kind === "new-chat" && seen.agentId === agent.id)) {
+    openChat(conversationId);
+  }
 }
 
 /** The bar a phone width keeps: the hamburger that opens the drawer holding the sidebar, the mark
@@ -642,15 +274,11 @@ function NarrowBar({
   member,
   menu,
   onMenu,
-  onHome,
-  onAdmin,
 }: {
   agents: Agent[];
   member: Member;
   menu: boolean;
   onMenu: (open: boolean) => void;
-  onHome: () => void;
-  onAdmin: () => void;
 }) {
   return (
     <header className="relative flex items-center gap-md border-b border-edge bg-sidebar px-lg py-md">
@@ -666,7 +294,7 @@ function NarrowBar({
       <button
         type="button"
         aria-label="ufo"
-        onClick={onHome}
+        onClick={openHome}
         className="absolute start-1/2 -translate-x-1/2 border-0 bg-transparent p-0 text-inherit rtl:translate-x-1/2"
       >
         <span
@@ -679,9 +307,8 @@ function NarrowBar({
       <Spotlight
         agents={agents}
         className="ml-auto flex h-(--size-row) items-center rounded-full border-0 bg-transparent px-md text-inherit hover:bg-fill"
-        onOpen={(hash) => (location.hash = hash)}
       />
-      <AccountMenu member={member} onAdmin={onAdmin} />
+      <AccountMenu member={member} />
       <NavDrawer open={menu} onClose={() => onMenu(false)} />
     </header>
   );
@@ -729,7 +356,7 @@ function NavDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
 /** The submenu trigger states the palette the member picked, not the one the browser resolved:
  *  `System` is a choice they can read back, and a value that flipped itself at dusk would say they
  *  had picked light. */
-function AccountMenu({ member, onAdmin }: { member: Member; onAdmin: () => void }) {
+function AccountMenu({ member }: { member: Member }) {
   const [scheme, setScheme] = useState<Scheme>(heldScheme);
   const pick = (next: Scheme) => {
     holdScheme(next);
@@ -775,7 +402,7 @@ function AccountMenu({ member, onAdmin }: { member: Member; onAdmin: () => void 
           </DropdownMenuSubContent>
         </DropdownMenuSub>
         {member.admin ? (
-          <DropdownMenuItem onSelect={onAdmin}>Administration</DropdownMenuItem>
+          <DropdownMenuItem onSelect={openAdmin}>Administration</DropdownMenuItem>
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -785,27 +412,13 @@ function AccountMenu({ member, onAdmin }: { member: Member; onAdmin: () => void 
 const NAV_ROW =
   "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill";
 
-/** What the member pinned into the sidebar — apps by id, in the order they pinned them. Until
- *  they have touched a pin (`null`), the workspace's shipped apps stand pinned, so the sidebar
- *  arrives holding its own destinations. A stored id no live agent answers (an app since removed)
- *  resolves to nothing rather than a row. */
-const PINNED_KEY = "pinned-rows";
-
-/** Chat leads: it is the app a member reaches for first, and the rest read in name order. */
-
-function heldPinned(): string[] | null {
-  const held = localStorage.getItem(PINNED_KEY);
-  return held === null ? null : held.split("\n").filter(Boolean);
-}
-
+/** The rows the sidebar pins where the member has pinned none themselves: the workspace's shipped
+ *  apps, in name order, so the sidebar arrives holding its own destinations. The chat app is not one
+ *  of them — the New conversation row above is the way to it. */
 function defaultPins(agents: Agent[]): string[] {
   const apps = agents.filter((agent) => agent.app && agent.app !== CHAT_SURFACE);
   apps.sort((a, b) => a.name.localeCompare(b.name));
   return apps.map((agent) => agent.id);
-}
-
-function holdPinned(pinned: string[]): void {
-  localStorage.setItem(PINNED_KEY, pinned.join("\n"));
 }
 
 const GLYPH = "size-(--size-glyph) shrink-0";
@@ -945,7 +558,6 @@ function ApplicationsFlyout({
   collapsed,
   pinned,
   onPin,
-  onOpenAgent,
   onBuild,
 }: {
   route: Route;
@@ -953,7 +565,6 @@ function ApplicationsFlyout({
   collapsed: boolean;
   pinned: string[];
   onPin: (agentId: string) => void;
-  onOpenAgent: (agentId: string) => void;
   onBuild: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1022,7 +633,7 @@ function ApplicationsFlyout({
             onPin={onPin}
             onOpen={(agentId) => {
               setOpen(false);
-              onOpenAgent(agentId);
+              openAgent(agentId);
             }}
             onBuild={() => {
               setOpen(false);
@@ -1045,56 +656,21 @@ function WorkspaceSidebar({
   agents,
   member,
   mainAgent,
-  chatApp,
   narrow,
-  collapsed,
-  onCollapsed,
-  rail,
-  sort,
-  onSort,
-  shown,
-  onShown,
-  shut,
-  onShut,
-  onNewChat,
-  onOpen,
-  onOpenAgentPlace,
-  onRetry,
-  onOpenAgent,
   onBuild,
-  onSection,
-  onWorkspace,
-  onAdmin,
-  pinned,
-  onPin,
 }: {
   route: Route;
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
-  chatApp: Agent | null;
   narrow: boolean;
-  collapsed: boolean;
-  onCollapsed: (next: boolean) => void;
-  rail: Rail;
-  sort: RailSort;
-  onSort: (sort: RailSort) => void;
-  shown: RailShown;
-  onShown: (shown: RailShown) => void;
-  shut: string[] | null;
-  onShut: (shut: string[]) => void;
-  onNewChat: (agentId: string) => void;
-  onOpen: (conversationId: string, agentId: string) => void;
-  onOpenAgentPlace: (agentId: string, place: WorkspacePlace) => void;
-  onRetry: () => void;
-  onOpenAgent: (agentId: string) => void;
   onBuild: () => void;
-  onSection: (section: Section) => void;
-  onWorkspace: () => void;
-  onAdmin: () => void;
-  pinned: string[];
-  onPin: (agentId: string) => void;
 }) {
+  const rail = useRail();
+  /* A drawer is always drawn whole, so the fold a desk width holds is ignored while it stands. */
+  const collapsed = rail.collapsed && !narrow;
+  const pinned = rail.pinned ?? defaultPins(agents);
+  const chatApp = chatSurface(agents);
   return useDrawerList(
     <nav
       aria-label="Workspace"
@@ -1118,7 +694,7 @@ function WorkspaceSidebar({
         <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
           <SidebarToggle
             label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={() => onCollapsed(!collapsed)}
+            onClick={() => foldSidebar(!collapsed)}
           />
         </SidebarTooltip>
       </div>
@@ -1133,7 +709,6 @@ function WorkspaceSidebar({
                   Search
                 </span>
               }
-              onOpen={(hash) => (location.hash = hash)}
             />
           </li>
         )}
@@ -1141,18 +716,13 @@ function WorkspaceSidebar({
           <li>
             <NavRow
               icon={<NewChatGlyph />}
-              current={
-                route.kind === "new-chat" ||
-                route.kind === "home" ||
-                (chatApp !== null &&
-                  route.kind === "agent" &&
-                  route.agentId === chatApp.id &&
-                  route.place.opens?.[0] === COMPOSE)
-              }
+              current={standing(route, COMPOSING)}
               collapsed={collapsed}
               label="New conversation"
               onClick={() =>
-                chatApp ? onOpenAgentPlace(chatApp.id, { opens: [COMPOSE] }) : onNewChat(mainAgent.id)
+                chatApp
+                  ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
+                  : openNewChat(mainAgent.id)
               }
             >
               New conversation
@@ -1166,8 +736,13 @@ function WorkspaceSidebar({
           agents={agents}
           collapsed={collapsed}
           pinned={pinned}
-          onPin={onPin}
-          onOpenAgent={onOpenAgent}
+          onPin={(agentId) =>
+            pickPinned(
+              pinned.includes(agentId)
+                ? pinned.filter((id) => id !== agentId)
+                : [...pinned, agentId],
+            )
+          }
           onBuild={onBuild}
         />
         <ul className="m-0 flex list-none flex-col gap-px p-0">
@@ -1178,10 +753,10 @@ function WorkspaceSidebar({
               <li key={agent.id}>
                 <NavRow
                   icon={<AgentIcon name={agent.icon} className="size-(--size-glyph) shrink-0" />}
-                  current={route.kind === "agent" && route.agentId === agent.id}
+                  current={standing(route, `agent:${agent.id}`)}
                   collapsed={collapsed}
                   label={agentName(agent.name)}
-                  onClick={() => onOpenAgent(agent.id)}
+                  onClick={() => openAgent(agent.id)}
                 >
                   {agentName(agent.name)}
                 </NavRow>
@@ -1191,7 +766,7 @@ function WorkspaceSidebar({
         </ul>
       </div>
       <div className={cn("shrink-0 px-sm", collapsed && "hidden")}>
-        <RailSettingsFlyout sort={sort} onSort={onSort} shown={shown} onShown={onShown} />
+        <RailSettingsFlyout />
       </div>
       <div
         className={cn(
@@ -1199,27 +774,16 @@ function WorkspaceSidebar({
           collapsed && "hidden",
         )}
       >
-        <RailList
-          rail={rail}
-          route={route}
-          mainAgent={mainAgent}
-          chatApp={chatApp}
-          sort={sort}
-          shown={shown}
-          shut={shut}
-          onShut={onShut}
-          onOpen={onOpen}
-          onRetry={onRetry}
-        />
+        <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
       </div>
       <ul className="m-0 mt-auto flex shrink-0 list-none flex-col gap-px px-sm py-0">
         <li>
           <NavRow
             icon={SECTION_GLYPHS.connectors}
-            current={route.kind === "section" && route.section === "connectors"}
+            current={standing(route, "section:connectors")}
             collapsed={collapsed}
             label={CONNECTORS.label}
-            onClick={() => onSection("connectors")}
+            onClick={() => placeSection("connectors", {}, "push")}
           >
             {CONNECTORS.label}
           </NavRow>
@@ -1227,10 +791,10 @@ function WorkspaceSidebar({
         <li>
           <NavRow
             icon={<WorkspaceGlyph />}
-            current={route.kind === "workspace"}
+            current={standing(route, "workspace")}
             collapsed={collapsed}
             label="Workspace"
-            onClick={onWorkspace}
+            onClick={() => placeWorkspace("team", {}, "push")}
           >
             Workspace
           </NavRow>
@@ -1257,7 +821,7 @@ function WorkspaceSidebar({
             <button
               type="button"
               aria-label="Administration"
-              onClick={onAdmin}
+              onClick={openAdmin}
               className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
             >
               <IconSettings className={GLYPH} aria-hidden />
@@ -1271,16 +835,8 @@ function WorkspaceSidebar({
 
 /** A section address whose screen ships as an app: the name outlives who renders it, so the
  *  address lands on that app with its place carried rather than dying as a bad link. */
-function SectionLanding({
-  agentId,
-  place,
-  onLand,
-}: {
-  agentId: string;
-  place: WorkspacePlace;
-  onLand: (agentId: string, place: WorkspacePlace) => void;
-}) {
-  useEffect(() => onLand(agentId, place), [agentId, place, onLand]);
+function SectionLanding({ agentId, place }: { agentId: string; place: WorkspacePlace }) {
+  useEffect(() => openAgentPlace(agentId, place), [agentId, place]);
   return null;
 }
 
@@ -1289,42 +845,21 @@ function RoutedPane({
   agents,
   member,
   mainAgent,
-  rail,
   onAgents,
   onExitBuilder,
   onForwardAgents,
   buildWanted,
-  onCreated,
-  onActivity,
-  onOpenAgent,
-  onOpenAgentPlace,
-  onOpenSlot,
-  onPlaceWorkspace,
-  onPlaceSection,
-  onPlaceAgent,
-  sought,
-  linked,
 }: {
   route: Route;
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
-  rail: Rail;
   onAgents: () => void;
   onExitBuilder: () => void;
   onForwardAgents: () => void;
   buildWanted: boolean;
-  onCreated: (agent: Agent, conversationId: string, title: string) => void;
-  onActivity: (conversationId: string) => void;
-  onOpenAgent: (agentId: string) => void;
-  onOpenAgentPlace: (agentId: string, place: WorkspacePlace) => void;
-  onOpenSlot: (conversationId: string, slot: string | null) => void;
-  onPlaceWorkspace: (view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep) => void;
-  onPlaceSection: (section: Section, place: WorkspacePlace, step: PlaceStep) => void;
-  onPlaceAgent: (place: WorkspacePlace, step: PlaceStep) => void;
-  sought: Readonly<Record<string, Sought>>;
-  linked: Readonly<Record<string, OwnedConversation>>;
 }) {
+  const rail = useRail();
   switch (route.kind) {
     case "admin":
       return <Admin />;
@@ -1338,7 +873,7 @@ function RoutedPane({
           views={WORKSPACE_VIEWS}
           view={route.view}
           place={route.place}
-          onPlace={onPlaceWorkspace}
+          onPlace={placeWorkspace}
         />
       );
     case "section": {
@@ -1346,9 +881,7 @@ function RoutedPane({
       if (view === undefined) {
         const shipped = agents.find((agent) => agent.app === route.section);
         if (!shipped) return <PaneNote>This link is not valid.</PaneNote>;
-        return (
-          <SectionLanding agentId={shipped.id} place={route.place} onLand={onOpenAgentPlace} />
-        );
+        return <SectionLanding agentId={shipped.id} place={route.place} />;
       }
       return (
         <TabbedPane
@@ -1357,7 +890,7 @@ function RoutedPane({
           views={{ [route.section]: view } as Record<Section, PaneView>}
           view={route.section}
           place={route.place}
-          onPlace={onPlaceSection}
+          onPlace={placeSection}
         />
       );
     }
@@ -1374,9 +907,9 @@ function RoutedPane({
           opens={route.kind === "agent" ? (route.place.opens ?? []) : []}
           onMove={(opens) =>
             route.kind === "agent"
-              ? onPlaceAgent({ ...route.place, opens }, "replace")
+              ? placeAgent({ ...route.place, opens }, "replace")
               : shown
-                ? onOpenAgentPlace(shown.id, { opens })
+                ? openAgentPlace(shown.id, { opens })
                 : undefined
           }
         >
@@ -1385,7 +918,7 @@ function RoutedPane({
             selected={selected}
             build={route.kind === "agents" && route.build === true}
             chats={rail.phase === "ready" ? rail.rows : null}
-            onCreated={onCreated}
+            onCreated={founded}
             place={route.kind === "agent" ? route.place : {}}
             /* The bare apps hash shows the main agent without having navigated to it, so a
                place set from that screen has no agent in the address to hang on: it names the
@@ -1394,9 +927,9 @@ function RoutedPane({
                opens. */
             onPlace={(place, step) =>
               route.kind === "agent"
-                ? onPlaceAgent(place, step)
+                ? placeAgent(place, step)
                 : shown
-                  ? onOpenAgentPlace(shown.id, place)
+                  ? openAgentPlace(shown.id, place)
                   : undefined
             }
             onAgents={onAgents}
@@ -1416,7 +949,7 @@ function RoutedPane({
           conversationId={route.conversationId}
           slot={route.slot}
           rootConversationId={route.rootConversationId}
-          onOpenAgent={onOpenAgent}
+          onOpenAgent={openAgent}
         />
       );
     }
@@ -1424,7 +957,7 @@ function RoutedPane({
       const row = rail.rows.find(
         (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
       );
-      const linkedConversation = linked[route.conversationId];
+      const linkedConversation = rail.linked[route.conversationId];
       if (!row && linkedConversation) {
         const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent.id);
         if (!linkedAgent) return <PaneNote>No such app.</PaneNote>;
@@ -1435,8 +968,7 @@ function RoutedPane({
             agent={linkedAgent}
             conversation={linkedConversation}
             slot={route.slot}
-            onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
-            onOpenAgent={onOpenAgent}
+            onSelectSlot={(slot) => openSlot(route.conversationId, slot)}
           />
         );
       }
@@ -1449,7 +981,7 @@ function RoutedPane({
       if (!row || !agent) {
         if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;
         if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
-        const outcome = sought[route.conversationId];
+        const outcome = rail.sought[route.conversationId];
         if (!outcome) return <PaneNote>Loading…</PaneNote>;
         if (outcome.kind === "signed-out") {
           return (
@@ -1469,12 +1001,12 @@ function RoutedPane({
           agent={agent}
           member={member}
           conversationId={row.conversation_id}
-          onActivity={onActivity}
+          onActivity={railActivity}
           title={row.title}
           conversationOnly={!listedAgent}
-          onOpenAgent={onOpenAgent}
+          onOpenAgent={openAgent}
           slot={route.slot}
-          onSelectSlot={(slot) => onOpenSlot(route.conversationId, slot)}
+          onSelectSlot={(slot) => openSlot(route.conversationId, slot)}
         />
       );
     }
@@ -1501,8 +1033,8 @@ function RoutedPane({
           agent={agent}
           member={member}
           conversationId={null}
-          onCreated={(conversationId, title) => onCreated(agent, conversationId, title)}
-          onActivity={onActivity}
+          onCreated={(conversationId, title) => founded(agent, conversationId, title)}
+          onActivity={railActivity}
         />
       );
     }
@@ -1520,13 +1052,11 @@ function LinkedPane({
   conversation,
   slot,
   onSelectSlot,
-  onOpenAgent,
 }: {
   agent: Agent;
   conversation: OwnedConversation;
   slot?: string;
   onSelectSlot: (slot: string | null) => void;
-  onOpenAgent: (agentId: string) => void;
 }) {
   const [disclosed, setDisclosed] = useState(false);
   const viewer = useViewer();
@@ -1535,7 +1065,7 @@ function LinkedPane({
     <Pane>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Header
-          parent={{ label: agentName(agent.name), onGo: () => onOpenAgent(agent.id) }}
+          parent={{ label: agentName(agent.name), onGo: () => openAgent(agent.id) }}
           title={subject(conversation, viewer)}
           acts={<SurfaceMark conversation={conversation} />}
           pinned
@@ -1585,17 +1115,8 @@ const RAIL_PANEL_ID = "conversation-settings-flyout";
  *  the same panel the Applications header carries, so the two sections read and act as one
  *  system. The rows adjust the rail in place, so the panel stays up while the member reads what
  *  each press did. */
-function RailSettingsFlyout({
-  sort,
-  onSort,
-  shown,
-  onShown,
-}: {
-  sort: RailSort;
-  onSort: (sort: RailSort) => void;
-  shown: RailShown;
-  onShown: (shown: RailShown) => void;
-}) {
+function RailSettingsFlyout() {
+  const { sort, shown } = useRail();
   const [open, setOpen] = useState(false);
   useEffect(() => {
     if (!open) return;
@@ -1635,10 +1156,10 @@ function RailSettingsFlyout({
           )}
         >
           <PanelSub label="Sort by">
-            <PanelRow active={sort === "recency"} onPick={() => onSort("recency")}>
+            <PanelRow active={sort === "recency"} onPick={() => pickRailSort("recency")}>
               Recency
             </PanelRow>
-            <PanelRow active={sort === "agent"} onPick={() => onSort("agent")}>
+            <PanelRow active={sort === "agent"} onPick={() => pickRailSort("agent")}>
               App
             </PanelRow>
           </PanelSub>
@@ -1649,7 +1170,7 @@ function RailSettingsFlyout({
             <PanelRow
               key={option.surface}
               active={shown[option.surface]}
-              onPick={() => onShown({ ...shown, [option.surface]: !shown[option.surface] })}
+              onPick={() => pickRailShown({ ...shown, [option.surface]: !shown[option.surface] })}
             >
               {option.label}
             </PanelRow>
@@ -1780,33 +1301,41 @@ function useScrollMark(): void {
   }, []);
 }
 
+/** Where a rail row lands. A chat that directs an app — one whose agent is an app's own — reopens
+ *  as that app's right-side chat, beside the page it edits. Every other conversation is a regular
+ *  chat and loads in the chat app's single column, the way a new conversation does; the shell's own
+ *  chat screen stands in where no chat app ships. */
+function openRailRow(
+  agents: Agent[],
+  chatApp: Agent | null,
+  conversationId: string,
+  agentId: string,
+): void {
+  const owner = agents.find((agent) => agent.id === agentId);
+  const pane = owner?.app ? owner : chatApp;
+  if (!pane) {
+    openChat(conversationId);
+    return;
+  }
+  openAgentPlace(pane.id, { opens: [conversationId] });
+}
+
 function RailList({
-  rail,
   route,
+  agents,
   mainAgent,
   chatApp,
-  sort,
-  shown,
-  shut,
-  onShut,
-  onOpen,
-  onRetry,
 }: {
-  rail: Rail;
   route: Route;
+  agents: Agent[];
   mainAgent: Agent | null;
   chatApp: Agent | null;
-  sort: RailSort;
-  shown: RailShown;
-  shut: string[] | null;
-  onShut: (shut: string[]) => void;
-  onOpen: (conversationId: string, agentId: string) => void;
-  onRetry: () => void;
 }) {
+  const rail = useRail();
   const now = new Date();
-  const groups = railGroups(rail.rows, sort, shown, now);
-  const standing = railShut(
-    shut,
+  const groups = railGroups(rail.rows, rail.sort, rail.shown, now);
+  const folded = railShut(
+    rail.shut,
     groups.map((group) => group.label),
   );
   return (
@@ -1819,7 +1348,7 @@ function RailList({
           <span>Couldn't load conversations.</span>
           <button
             type="button"
-            onClick={onRetry}
+            onClick={readRail}
             className="w-fit border-0 bg-transparent px-0 py-2xs text-left text-inherit underline"
           >
             Retry
@@ -1830,12 +1359,10 @@ function RailList({
         <Collapsible
           key={group.label}
           asChild
-          open={!standing.includes(group.label)}
+          open={!folded.includes(group.label)}
           onOpenChange={(open) =>
-            onShut(
-              open
-                ? standing.filter((label) => label !== group.label)
-                : [...standing, group.label],
+            pickRailShut(
+              open ? folded.filter((label) => label !== group.label) : [...folded, group.label],
             )
           }
         >
@@ -1860,16 +1387,11 @@ function RailList({
                   return (
                     <li key={row.conversation_id}>
                       <RailRow
-                        current={
-                          ((route.kind === "chat" || route.kind === "conversation-slot") &&
-                            route.conversationId === row.conversation_id) ||
-                          (chatApp !== null &&
-                            route.kind === "agent" &&
-                            route.agentId === chatApp.id &&
-                            route.place.opens?.[0] === row.conversation_id)
-                        }
+                        current={standing(route, `open:${row.conversation_id}`)}
                         facts={facts.length ? facts.join(" · ") : null}
-                        onClick={() => onOpen(row.conversation_id, row.agent_id)}
+                        onClick={() =>
+                          openRailRow(agents, chatApp, row.conversation_id, row.agent_id)
+                        }
                       >
                         <span className="min-w-0 flex-1 truncate">{row.title}</span>
                         <SurfaceGlyph surface={row.surface} />

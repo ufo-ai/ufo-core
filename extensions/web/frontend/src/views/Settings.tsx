@@ -10,6 +10,7 @@ import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
 import { postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { newChatHash, workspaceHash } from "@/lib/route";
+import { navigate } from "@/lib/router";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { Moment } from "@/lib/moments";
@@ -172,7 +173,7 @@ export function Settings({ agent }: { agent: Agent }) {
         // conversation tab, and a connect link that lives only on the live tail.
         function startSetup() {
           setPendingAsk(agent.id, SETUP_ASK, false);
-          window.location.hash = newChatHash(agent.id);
+          navigate(newChatHash(agent.id));
         }
 
         return (
