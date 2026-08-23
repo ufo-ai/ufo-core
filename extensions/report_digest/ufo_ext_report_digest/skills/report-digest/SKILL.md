@@ -1,6 +1,6 @@
 ---
 name: report-digest
-description: Load when a member asks what their scheduled reports said, or asks to catch up on, skim, or roll up recent reports. Not for writing a report, not for scheduling one, and not for the private daily brief.
+description: Load when a member asks what their scheduled reports said, or asks to catch up on, skim, or roll up recent reports. Not for writing a report and not for scheduling one.
 ---
 # Report digest
 

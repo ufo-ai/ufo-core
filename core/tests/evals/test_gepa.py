@@ -248,7 +248,7 @@ def test_the_evidence_reader_uses_the_structured_record_not_the_reason_line() ->
                     "calls": [
                         {
                             "name": "load_skill",
-                            "input": {"name": "daily-brief"},
+                            "input": {"name": "research-report"},
                             "result": "loaded",
                             "hasResult": True,
                             "isError": False,
@@ -258,7 +258,7 @@ def test_the_evidence_reader_uses_the_structured_record_not_the_reason_line() ->
                     "judge": [
                         {"criterion": "attributes each finding", "passed": False, "reason": "none"}
                     ],
-                    "grader": {"skill": "daily-brief"},
+                    "grader": {"skill": "research-report"},
                 }
             ],
         )

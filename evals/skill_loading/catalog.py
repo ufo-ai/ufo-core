@@ -508,20 +508,6 @@ SCAN_PDF = WorkspaceFile("pdfs/scan.pdf", PDF_STUB)
 LOCKED_PDF = WorkspaceFile("pdfs/statement-locked.pdf", PDF_STUB)
 CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
-        "daily-brief-review",
-        "Prepare my private daily brief from today's work, conversations, pages, and outside "
-        "context. Include drafts I can approve later.",
-        expected="daily-brief",
-        forbidden=("research-report", "task-scheduling"),
-    ),
-    SkillLoadCase(
-        "daily-brief-approval",
-        "I approve only the first task draft from this morning's daily brief. Apply that draft "
-        "and leave the other drafts unchanged.",
-        expected="daily-brief",
-        forbidden=("task-scheduling",),
-    ),
-    SkillLoadCase(
         "daily-brief-application",
         "Create a private Daily Brief app that reviews my work each morning, publishes the brief "
         "in Radar, and keeps its homepage current.",
@@ -538,35 +524,28 @@ CASES: tuple[SkillLoadCase, ...] = (
         "daily-brief-generic-report",
         "Write a one-time project status report from these notes and share it as Markdown.",
         expected="research-report",
-        forbidden=("daily-brief", "task-scheduling"),
-    ),
-    SkillLoadCase(
-        "daily-brief-not-a-digest",
-        "Put my own private brief together for this morning — my work, my messages, my pages. "
-        "Nobody else sees it.",
-        expected="daily-brief",
-        forbidden=("report-digest",),
+        forbidden=("task-scheduling",),
     ),
     SkillLoadCase(
         "digest-stacked-up-reports",
         "I have been out since Monday and eight reports are sitting unread. Boil each one down "
         "to a couple of lines so I can decide which ones are worth opening.",
         expected="report-digest",
-        forbidden=("daily-brief", "research-report", "task-scheduling"),
+        forbidden=("research-report", "task-scheduling"),
     ),
     SkillLoadCase(
         "digest-what-the-competitor-report-found",
         "What did Friday's competitor report turn up? Give me the short version — the findings, "
         "not the whole thing.",
         expected="report-digest",
-        forbidden=("research-report", "daily-brief"),
+        forbidden=("research-report",),
     ),
     SkillLoadCase(
         "digest-report-benchmark-question",
         "The competitor report says their p95 search latency is down to 180ms. Is that actually "
         "fast for a search API these days, or is it table stakes now?",
         expects_no_load=True,
-        forbidden=("report-digest", "research-report", "daily-brief"),
+        forbidden=("report-digest", "research-report"),
     ),
     SkillLoadCase(
         "coding-trace-webhook",
@@ -608,7 +587,7 @@ CASES: tuple[SkillLoadCase, ...] = (
     ),
     SkillLoadCase(
         "setup-installed-agent",
-        "The daily-brief agent still is not answering anyone — can you get it set up?",
+        "The radar agent still is not answering anyone — can you get it set up?",
         expected="agent-setup",
         forbidden=("create-application",),
     ),
@@ -952,7 +931,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Turn the research findings in research/findings.md into a concise Markdown report with "
         "an executive summary, findings, and cited sources.",
         expected="research-report",
-        forbidden=("research-assistant", "create-skill", "daily-brief"),
+        forbidden=("research-assistant", "create-skill"),
         workspace_files=(RESEARCH_FINDINGS,),
     ),
     SkillLoadCase(
@@ -998,7 +977,6 @@ CASES: tuple[SkillLoadCase, ...] = (
         "schedule-daily-escalations",
         "Every weekday at 8:30 AM, send me a summary of new high-priority support escalations.",
         expected="task-scheduling",
-        forbidden=("daily-brief",),
     ),
     SkillLoadCase(
         "schedule-new-weekly-report",
@@ -1073,12 +1051,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "site-internal-daily-brief",
         "Build an internal daily brief page for the team.",
         expected="website-building",
-        forbidden=(
-            "website-building/webapp",
-            "create-application",
-            "daily-brief",
-            "task-scheduling",
-        ),
+        forbidden=("website-building/webapp", "create-application", "task-scheduling"),
     ),
     SkillLoadCase(
         "site-application-homepage",

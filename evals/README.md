@@ -175,7 +175,7 @@ error.
 ```toml
 name = "digest-routing"
 base = "origin/main"
-suites = ["report_digest", "skill_routing", "daily_brief"]
+suites = ["report_digest", "skill_routing"]
 cases = ["report-digest-attributed-findings", "report-digest-outside-companies"]
 controls = ["board-visual-narrative", "forecast-assumption-model"]
 unscorable = ["connector-composio-install"]

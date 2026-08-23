@@ -78,7 +78,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
                 {
                     "id": brief_id,
                     "workspace_id": workspace_id,
-                    "name": "daily-brief",
+                    "name": "digest",
                     "prompt": "Brief.",
                     "model": "auto",
                     "is_main": False,
@@ -120,17 +120,17 @@ async def test_workspace_agents_carry_the_roster_with_owners(db: None) -> None:
         await connection.execute(
             sa.update(tables.agent)
             .where(tables.agent.c.id == brief_id)
-            .values(owner_member_id=member_id, tools=["load_skill", "sweep_newspaper"])
+            .values(owner_member_id=member_id, tools=["load_skill", "rebuild_report_digest"])
         )
     with ws(workspace_id):
-        context = context_for("sweep", frozenset(), member_context_read=True)
+        context = context_for("report_digest", frozenset(), member_context_read=True)
         agents = await context.workspace_agents()
-    assert {a.name for a in agents} == {"assistant", "notes", "daily-brief"}
+    assert {a.name for a in agents} == {"assistant", "notes", "digest"}
     owners = {a.id: a.owner_member_id for a in agents}
     assert owners[brief_id] == member_id
     assert [owner for agent_id, owner in owners.items() if agent_id != brief_id] == [None, None]
     allowlists = {a.id: a.tools for a in agents}
-    assert allowlists[brief_id] == ("load_skill", "sweep_newspaper")
+    assert allowlists[brief_id] == ("load_skill", "rebuild_report_digest")
     assert [tools for agent_id, tools in allowlists.items() if agent_id != brief_id] == [None, None]
 
 
@@ -143,7 +143,7 @@ async def test_agent_visibilities_answer_by_id_without_member_context(db: None) 
             .values(visibility="workspace")
         )
     with ws(workspace_id):
-        context = context_for("sweep", frozenset())
+        context = context_for("report_digest", frozenset())
         visibilities = await context.agent_visibilities()
     assert visibilities[brief_id] == "workspace"
     assert {level for agent_id, level in visibilities.items() if agent_id != brief_id} == {
@@ -154,18 +154,18 @@ async def test_agent_visibilities_answer_by_id_without_member_context(db: None) 
 async def test_member_reads_are_gated_on_member_context(db: None) -> None:
     workspace_id, member_id, _other_member_id, _brief_id = await _seed()
     with ws(workspace_id):
-        context = context_for("sweep", frozenset())
+        context = context_for("report_digest", frozenset())
         with pytest.raises(PermissionError):
             await context.workspace_agents()
         with pytest.raises(PermissionError):
             await context.earliest_seated_admin()
         with pytest.raises(PermissionError):
             await context.scheduled_member_timezone()
-        unbound = context_for("sweep", frozenset(), member_context_read=True)
+        unbound = context_for("report_digest", frozenset(), member_context_read=True)
         with pytest.raises(PermissionError):
             await unbound.scheduled_member_timezone()
         bound = context_for(
-            "sweep",
+            "report_digest",
             frozenset(),
             member_context_read=True,
             scheduled_member_id=member_id,
@@ -189,7 +189,7 @@ async def test_earliest_seated_admin_is_deterministic(db: None) -> None:
             .values(is_admin=True, seated_at=late)
         )
     with ws(workspace_id):
-        context = context_for("sweep", frozenset(), member_context_read=True)
+        context = context_for("report_digest", frozenset(), member_context_read=True)
         assert await context.earliest_seated_admin() == other_member_id
         async with workspace_tx() as connection:
             await connection.execute(
@@ -486,7 +486,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
         await blob.put(f"pages/{page_id}", b"Granted page text.")
         await blob.put(f"pages/{invalid_page_id}", b"\x96")
         context = context_for(
-            "sweep",
+            "report_digest",
             frozenset(),
             member_context_blob=blob,
             member_context_read=True,

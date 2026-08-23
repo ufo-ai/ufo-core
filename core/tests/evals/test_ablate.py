@@ -227,7 +227,7 @@ def test_the_preflight_narrows_the_skill_loading_suite(tmp_path: Path) -> None:
         name="exp",
         base="origin/main",
         suites=("skill_loading",),
-        cases=("daily-brief-review", "daily-brief-approval"),
+        cases=("daily-brief-generic-report", "digest-stacked-up-reports"),
         budget_usd=50.0,
         template={"pack": {"name": "assistant_hosted"}},
         arm=(ArmSpec(name="knockout", files={}),),

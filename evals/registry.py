@@ -28,7 +28,6 @@ from evals.suites import (
     connector_connections,
     connector_refs,
     credential_handoff,
-    daily_brief,
     dead_route_repeat,
     document_visual,
     fanout,
@@ -83,7 +82,6 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
         judge_model=SEMANTIC_JUDGE_MODEL,
     ),
     capability_task("object_tools", object_tools.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
-    capability_task("daily_brief", daily_brief.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     scenario_task(
         "object_tools_flows",
         object_tools.SCENARIOS,

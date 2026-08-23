@@ -83,7 +83,6 @@ research = "ufo_ext_research.manifest:manifest"
 sample = "ufo_ext_sample:manifest"
 sandbox_chrome = "ufo_ext_sandbox_chrome:manifest"
 scheduled_tasks = "ufo_ext_scheduled_tasks.manifest:manifest"
-sweep = "ufo_ext_sweep.manifest:manifest"
 self_improvement = "ufo_ext_self_improvement.manifest:manifest"
 sites = "ufo_ext_sites.manifest:manifest"
 skill_create = "ufo_ext_skill_create.manifest:manifest"
@@ -178,7 +177,6 @@ packages = [
     "extensions/repl/ufo_ext_repl",
     "extensions/research/ufo_ext_research",
     "extensions/scheduled_tasks/ufo_ext_scheduled_tasks",
-    "extensions/sweep/ufo_ext_sweep",
     "extensions/self_improvement/ufo_ext_self_improvement",
     "extensions/sites/ufo_ext_sites",
     "extensions/skill_create/ufo_ext_skill_create",

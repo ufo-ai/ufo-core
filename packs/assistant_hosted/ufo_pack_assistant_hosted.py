@@ -65,7 +65,6 @@ EXTENSIONS = (
     "sites",
     "scheduled_tasks",
     "report_digest",
-    "sweep",
     "research",
     "repl",
     "redis_hub",

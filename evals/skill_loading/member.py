@@ -569,7 +569,7 @@ MEMBER_VS_DEPLOY_CASES = (
         expected="weekly-metrics-note",
         trap="weekly-metrics-note",
         corpus=(WEEKLY_METRICS_NOTE, *SMALL_SPREAD),
-        forbidden=("daily-brief", "research-report"),
+        forbidden=("research-report",),
     ),
 )
 

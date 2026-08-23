@@ -108,7 +108,7 @@ CASES = (
         "not open it again, and do not write a report of your own. I run the platform team.\n\n"
         f"{WEEKLY_REPORT}\n\n{REPLY_SHAPE}",
         combine(
-            skill_scorer("report-digest", "daily-brief"),
+            skill_scorer("report-digest", "research-report"),
             predicate_scorer(
                 (
                     *_bounds(WEEKLY_GENRE),

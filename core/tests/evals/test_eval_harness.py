@@ -322,8 +322,6 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["authority_handoff"].simulator_model is None
     assert tasks["object_tools"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["object_tools"].simulator_model is None
-    assert tasks["daily_brief"].judge_model == SEMANTIC_JUDGE_MODEL
-    assert tasks["daily_brief"].simulator_model is None
     assert tasks["object_tools_flows"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["object_tools_flows"].simulator_model == SCENARIO_SIMULATOR_MODEL
     assert tasks["document_visual"].judge_model == VISUAL_JUDGE_MODEL
@@ -366,7 +364,6 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "scenario_env",
             "authority_handoff",
             "object_tools",
-            "daily_brief",
             "object_tools_flows",
             "new_application",
             "document_visual",
