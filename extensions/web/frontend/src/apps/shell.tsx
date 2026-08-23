@@ -1,13 +1,20 @@
 import { StrictMode, useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
-import { connect, installShims, navigate, onOpenTarget, type AppInit } from "@/apps/runtime";
+import { connect, installShims, navigate, onPlaced, type AppInit } from "@/apps/runtime";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { getJson } from "@/lib/api";
 import { Viewer } from "@/lib/audience";
 import { navigationAllowed } from "@/lib/bridge";
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { agentHash, parseHash, type Route, type WorkspacePlace, type PlaceStep } from "@/lib/route";
+import {
+  agentHash,
+  parseHash,
+  serializePlace,
+  type PlaceStep,
+  type Route,
+  type WorkspacePlace,
+} from "@/lib/route";
 import type { Agent, AgentsPayload } from "@/lib/types";
 import { TabbedPane } from "@/views/TabbedPane";
 import type { PaneView } from "@/views/registry";
@@ -37,9 +44,10 @@ export function useAppLinks(claim: (route: Route) => boolean): void {
   }, [claim]);
 }
 
-/** One section screen standing as the whole page, its place in page state and seeded by the record
- *  the pane was opened at. A link back into the same section is a place change here, never a trip
- *  through the portal. */
+/** One section screen standing as the whole page, its place in page state and seeded by the place the
+ *  pane was opened at — the whole place, so the screen inside the frame stands where the address
+ *  outside it says. A link back into the same section is a place change here, never a trip through
+ *  the portal. */
 export function SectionApp({
   tab,
   view,
@@ -49,7 +57,7 @@ export function SectionApp({
   view: PaneView;
   init: AppInit;
 }) {
-  const [place, setPlace] = useState<WorkspacePlace>(init.open ? { opens: [init.open] } : {});
+  const [place, setPlace] = useState<WorkspacePlace>(init.place);
   const onPlace = useCallback(
     (_tab: string, next: WorkspacePlace, _step: PlaceStep) => {
       setPlace(next);
@@ -57,13 +65,12 @@ export function SectionApp({
     },
     [init.agentId],
   );
+  // The pane's own place changes are taken as they arrive, and one the page itself just reported is
+  // not taken twice: the address is what says two places are the same place.
   useEffect(
     () =>
-      onOpenTarget((target) =>
-        setPlace((held) => {
-          if ((held.opens?.[0] ?? null) === target) return held;
-          return target ? { opens: [target] } : {};
-        }),
+      onPlaced((next) =>
+        setPlace((held) => (serializePlace(held) === serializePlace(next) ? held : next)),
       ),
     [],
   );

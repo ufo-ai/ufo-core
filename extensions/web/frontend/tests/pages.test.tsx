@@ -40,7 +40,7 @@ function pageSource(app: string): string {
 const INIT = {
   member: { email: MEMBER.email, admin: true },
   agentId: AGENT.id,
-  open: null,
+  place: {},
   portal: location.origin,
 };
 

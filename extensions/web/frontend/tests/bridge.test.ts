@@ -5,6 +5,7 @@ import { attachBridge, endpointFor, navigationAllowed, type BridgeHandle } from 
 const MEMBER = { email: "member@example.com", admin: true };
 const AGENT_ID = "11111111-1111-1111-1111-111111111111";
 const CONVERSATION_ID = "22222222-2222-2222-2222-222222222222";
+const PLACE = { q: "tokens", range: "90d", opens: [CONVERSATION_ID] };
 
 /** A stand-in for the framed page's window: the shell compares sources by identity against
  *  `iframe.contentWindow` (or a window one level under it) and replies to the source itself. */
@@ -84,17 +85,20 @@ test("ready is answered with the member's own init payload", async () => {
     ufo: "init",
     member: MEMBER,
     agentId: AGENT_ID,
-    open: null,
+    place: {},
     portal: location.origin,
   });
 });
 
-test("init carries the pane's open target", async () => {
+/** The page holds a place the way a portal tab does, so every key of it crosses the frame. A
+ *  boundary carrying one field would leave the page to guess the rest of the screen the member
+ *  asked for. */
+test("init carries the pane's whole place", async () => {
   const { iframe, posted } = fakeFrame();
-  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID, open: CONVERSATION_ID });
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID, place: PLACE });
   deliver({ ufo: "ready" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(1));
-  expect(posted[0]).toMatchObject({ ufo: "init", open: CONVERSATION_ID });
+  expect(posted[0]).toMatchObject({ ufo: "init", place: PLACE });
 });
 
 test("a tabled GET is forwarded and its payload returned", async () => {
@@ -375,24 +379,24 @@ test("the doubly framed site's own window is answered directly", async () => {
     ufo: "init",
     member: MEMBER,
     agentId: AGENT_ID,
-    open: null,
+    place: {},
     portal: location.origin,
   });
   expect(posted[1]).toMatchObject({ ufo: "data", id: "r9", ok: true });
   expect(frames).toHaveLength(0);
 });
 
-test("a target changing while the frame stands is posted, and a later ready carries it", async () => {
+test("a place changing while the frame stands is posted, and a later ready carries it", async () => {
   const { iframe, posted } = fakeFrame();
-  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID, open: null });
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
   deliver({ ufo: "ready" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(1));
-  bridge.open(CONVERSATION_ID);
+  bridge.place(PLACE);
   await vi.waitFor(() => expect(posted).toHaveLength(2));
-  expect(posted[1]).toEqual({ ufo: "open", target: CONVERSATION_ID });
+  expect(posted[1]).toEqual({ ufo: "place", place: PLACE });
   deliver({ ufo: "ready" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(3));
-  expect(posted[2]).toMatchObject({ ufo: "init", open: CONVERSATION_ID });
+  expect(posted[2]).toMatchObject({ ufo: "init", place: PLACE });
 });
 
 test("a message from another window is ignored", async () => {

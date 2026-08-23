@@ -1,11 +1,9 @@
-import { useState } from "react";
-
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th, tableFloor } from "@/components/ui/table";
+import type { Placement } from "@/kernel/pager";
 import { Panel, PanelBlank, Section, usePanelRead } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { money } from "@/lib/money";
-import { workspaceHash } from "@/lib/route";
 
 const HOUR_SECONDS = 3600;
 const RANGES = ["7d", "30d", "90d", "all"] as const;
@@ -83,9 +81,10 @@ export type WorkspaceUsageReport = UsageReport & {
   } | null;
 };
 
-function rangeFromHash(): Range {
-  const value = new URLSearchParams(location.hash.split("?", 2)[1] ?? "").get("range");
-  return RANGES.find((range) => range === value) ?? "30d";
+/** The range the screen stands at, which is the place's own `range` key. A range the codec does not
+ *  carry — an older link, a hand-typed address — reads as the default rather than as no screen. */
+function rangeOf(place: Placement): Range {
+  return RANGES.find((range) => range === place.range) ?? "30d";
 }
 
 function hours(seconds: number): string {
@@ -322,13 +321,15 @@ function named(line: BreakdownLine): BreakdownLine {
 }
 
 
-export function WorkspaceUsage() {
-  const [range, setRange] = useState<Range>(rangeFromHash);
+export function WorkspaceUsage({
+  place,
+  onPlace,
+}: {
+  place: Placement;
+  onPlace: (place: Placement) => void;
+}) {
+  const range = rangeOf(place);
   const state = usePanelRead<WorkspaceUsageReport>("/workspace/usage?range=" + range);
-  function pickRange(next: Range) {
-    setRange(next);
-    history.replaceState(null, "", workspaceHash("usage", { range: next }));
-  }
   return (
     <Panel state={state}>
       {(payload) => {
@@ -336,7 +337,7 @@ export function WorkspaceUsage() {
         return (
           <>
             <Section title="Usage">
-              <RangeControl range={range} onRange={pickRange} />
+              <RangeControl range={range} onRange={(next) => onPlace({ range: next })} />
               <Figures details={report} range={range} />
             </Section>
             <Section title="Daily usage"><DailyHistory rows={report.daily} /></Section>

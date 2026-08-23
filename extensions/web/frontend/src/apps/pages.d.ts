@@ -16,6 +16,7 @@ declare global {
   type ReactNode = import("react").ReactNode;
   type RefObject<T> = import("react").RefObject<T>;
   type ReactMouseEvent<T = Element> = import("react").MouseEvent<T>;
+  type WorkspacePlace = Kit.WorkspacePlace;
 }
 
 export {};

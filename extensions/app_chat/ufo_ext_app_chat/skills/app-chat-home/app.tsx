@@ -18,7 +18,7 @@ const {
   isPortalChat,
   mountApp,
   navigate,
-  onOpenTarget,
+  onPlaced,
   routeIs,
   useAppLinks,
   useCallback,
@@ -33,6 +33,14 @@ const {
  *  link inside a reply opens here; every other link leaves over the bridge. */
 
 const COMPOSE = "compose";
+
+/** The conversation the pane's place asks this page to stand on: the first slot of its track, with
+ *  the fresh sentinel read as the composer. The place carries every key the address does, and this
+ *  page holds one of them. */
+function wantedIn(place: WorkspacePlace): string | null {
+  const target = place.opens?.[0] ?? null;
+  return target === "new" ? COMPOSE : target;
+}
 
 type Shown =
   | { kind: "loading" }
@@ -53,7 +61,7 @@ function ChatApp({
   agents: Agent[];
 }) {
   const mainAgent = useMainAgent();
-  const [wanted, setWanted] = useState<string | null>(open === "new" ? COMPOSE : open);
+  const [wanted, setWanted] = useState<string | null>(open);
   const [shown, setShown] = useState<Shown>({ kind: "loading" });
   useEffect(() => {
     if (wanted === COMPOSE) {
@@ -80,7 +88,7 @@ function ChatApp({
       live = false;
     };
   }, [wanted]);
-  useEffect(() => onOpenTarget((target) => setWanted(target === "new" ? COMPOSE : target)), []);
+  useEffect(() => onPlaced((at) => setWanted(wantedIn(at))), []);
   const place = useCallback(
     (target: string | null) => {
       setWanted(target);
@@ -181,5 +189,5 @@ function ChatApp({
 }
 
 mountApp(document.getElementById("root")!, (init, agents) => (
-  <ChatApp open={init.open} appId={init.agentId} member={init.member} agents={agents} />
+  <ChatApp open={wantedIn(init.place)} appId={init.agentId} member={init.member} agents={agents} />
 ));

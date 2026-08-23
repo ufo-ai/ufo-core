@@ -13,7 +13,7 @@ type Runtime = typeof import("@/apps/runtime");
 const INIT = {
   member: { email: MEMBER.email, admin: true },
   agentId: AGENT.id,
-  open: null,
+  place: {},
   portal: location.origin,
 };
 
@@ -234,7 +234,7 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
           init={{
             member: { email: MEMBER.email, admin: true },
             agentId: AGENT.id,
-            open: null,
+            place: {},
             portal: location.origin,
           }}
           view={{

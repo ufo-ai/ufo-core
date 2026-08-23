@@ -1,4 +1,5 @@
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
+import type { WorkspacePlace } from "@/lib/route";
 
 /** The app page's side of the bridge (RFC 0039, `docs/apps-prototype-contracts.md` Contract 1),
  *  shaped so the portal's own modules run in the page unchanged: `connect` performs the
@@ -10,7 +11,9 @@ import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 export type AppInit = {
   member: { email: string; admin: boolean };
   agentId: string;
-  open: string | null;
+  /** The place the pane opened the page at, whole: the same record a portal tab stands on, so a page
+   *  reads its screen off the address the member arrived with rather than off one field of it. */
+  place: WorkspacePlace;
   /** The portal's origin, which is where the page's own loader fetched the kit from. */
   portal: string;
 };
@@ -38,7 +41,7 @@ const READY_ATTEMPTS = 30;
 let counter = 0;
 const CALLS = new Map<string, (reply: DataReply) => void>();
 const STREAMS = new Map<string, StreamHandlers>();
-const OPEN_LISTENERS = new Set<(target: string | null) => void>();
+const PLACE_LISTENERS = new Set<(place: WorkspacePlace) => void>();
 let init: AppInit | null = null;
 let announce: ((init: AppInit) => void) | null = null;
 
@@ -70,9 +73,9 @@ window.addEventListener("message", (event: MessageEvent) => {
       }
       return;
     }
-    case "open": {
-      const target = (event.data as { target?: string | null }).target ?? null;
-      for (const listener of OPEN_LISTENERS) listener(target);
+    case "place": {
+      const place = (event.data as { place?: WorkspacePlace }).place ?? {};
+      for (const listener of PLACE_LISTENERS) listener(place);
       return;
     }
     case "opened":
@@ -127,12 +130,12 @@ export function founded(agentId: string, conversationId: string, title: string):
   send({ ufo: "founded", agent_id: agentId, conversation_id: conversationId, title });
 }
 
-/** The pane's open target as it changes while the page stands — the live half of `init`'s `open`.
- *  Returns the unsubscribe. */
-export function onOpenTarget(listener: (target: string | null) => void): () => void {
-  OPEN_LISTENERS.add(listener);
+/** The pane's place as it changes while the page stands — the live half of `init`'s `place`. Returns
+ *  the unsubscribe. */
+export function onPlaced(listener: (place: WorkspacePlace) => void): () => void {
+  PLACE_LISTENERS.add(listener);
   return () => {
-    OPEN_LISTENERS.delete(listener);
+    PLACE_LISTENERS.delete(listener);
   };
 }
 

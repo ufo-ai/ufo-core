@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { Placement } from "@/kernel/pager";
-import type { PlaceStep, WorkspacePlace } from "@/lib/route";
+import { mergePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
 
 type Outcome = { view: string; notice: string | undefined; acts: number };
 
 /** The place bookkeeping every pane that holds a listing shares: the outcome notice a mutation
  *  leaves, the remount key that carries it to the next mount, and the push/replace/back step a
  *  place change earns. One owner, so the workspace's tabs and a top-level section cannot disagree
- *  about what opening a row does to history. */
+ *  about what opening a row does to history. The patch itself is merged by the codec, so this owner
+ *  holds no list of place keys to fall behind the type. */
 export function usePlaceRecorder({
   view,
   place,
@@ -55,15 +56,7 @@ export function usePlaceRecorder({
       setOutcome((prev) => ({ ...prev, notice: undefined }));
     }
     const held = live.current;
-    const next: WorkspacePlace = {
-      kind: "kind" in patch ? patch.kind : held.kind,
-      after: "after" in patch ? patch.after : held.after,
-      q: "q" in patch ? patch.q : held.q,
-      chip: "chip" in patch ? patch.chip : held.chip,
-      face: "face" in patch ? patch.face : held.face,
-      scope: "scope" in patch ? patch.scope : held.scope,
-      opens: "opens" in patch ? patch.opens : held.opens,
-    };
+    const next = mergePlace(held, patch);
     const moved =
       (next.after !== undefined && next.after !== held.after) ||
       (next.kind !== undefined && next.kind !== held.kind);

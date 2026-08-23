@@ -1,5 +1,5 @@
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
-import { parseHash, type Route } from "@/lib/route";
+import { parseHash, type Route, type WorkspacePlace } from "@/lib/route";
 import type { Member } from "@/lib/types";
 
 /** The portal shell's side of the app bridge (RFC 0039, `docs/apps-prototype-contracts.md`
@@ -127,9 +127,11 @@ export type BridgeConfig = {
   iframe: HTMLIFrameElement;
   member: Member;
   agentId: string;
-  /** The record the pane was opened at (`place.open`), handed to the page in `init` so a sidebar
-   *  or search landing can focus one conversation's tile. */
-  open?: string | null;
+  /** The place the page stands at, handed to it in `init` so a sidebar or search landing opens the
+   *  tile it named. It is the whole record the address carries, not one field of it: a page holds a
+   *  place the way a portal tab does, and a frame handed one key of it could only stand the screen
+   *  the member asked for by guessing the rest. */
+  place?: WorkspacePlace;
   /** A conversation the page's own send founded, told to the shell so the rail carries the row
    *  without waiting for its next read. The page could only have founded it through this bridge's
    *  own chat call, so the report claims nothing the shell did not broker. */
@@ -141,12 +143,12 @@ export type BridgeConfig = {
   chatSurface?: boolean;
 };
 
-/** The attached bridge: `detach` releases it when the frame unmounts, and `open` follows the
- *  pane's place while the frame stays mounted — the page got its `init` once, so a target that
+/** The attached bridge: `detach` releases it when the frame unmounts, and `place` follows the
+ *  pane's place while the frame stays mounted — the page got its `init` once, so a place that
  *  changes afterwards is posted as its own message and carried into any `init` still to come. */
 export type BridgeHandle = {
   detach: () => void;
-  open: (target: string | null) => void;
+  place: (place: WorkspacePlace) => void;
 };
 
 /** The endpoint row a method and path resolve to, or null where the table admits neither. */
@@ -223,12 +225,12 @@ export function attachBridge({
   iframe,
   member,
   agentId,
-  open,
+  place,
   onCreated,
   chatSurface = false,
 }: BridgeConfig): BridgeHandle {
   const streams = new Map<string, AbortController>();
-  let openTarget: string | null = open ?? null;
+  let standing: WorkspacePlace = place ?? {};
   let page: MessageEventSource | null = null;
 
   /** Relay one server-sent-event response as `frame` messages, then one `end`. A minimal SSE
@@ -288,7 +290,7 @@ export function attachBridge({
           ufo: "init",
           member: { email: member.email, admin: member.admin },
           agentId,
-          open: openTarget,
+          place: standing,
           portal: location.origin,
         });
         return;
@@ -454,9 +456,9 @@ export function attachBridge({
       streams.clear();
       page = null;
     },
-    open: (target: string | null) => {
-      openTarget = target;
-      page?.postMessage({ ufo: "open", target }, { targetOrigin: "*" });
+    place: (next: WorkspacePlace) => {
+      standing = next;
+      page?.postMessage({ ufo: "place", place: next }, { targetOrigin: "*" });
     },
   };
 }

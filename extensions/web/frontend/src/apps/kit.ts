@@ -18,7 +18,7 @@ import {
 
 import type { ReactNode } from "react";
 
-import { connect, founded, installShims, navigate, onOpenTarget } from "@/apps/runtime";
+import { connect, founded, installShims, navigate, onPlaced } from "@/apps/runtime";
 import type { AppInit } from "@/apps/runtime";
 import { mountApp, SectionApp, useAppLinks } from "@/apps/shell";
 import type { ObjectAddress, ObjectRow } from "@/kernel/objects";
@@ -103,6 +103,7 @@ import {
   sectionHash,
   workspaceHash,
 } from "@/lib/route";
+import type { WorkspacePlace } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { ChatPane } from "@/views/ChatPane";
 
@@ -144,6 +145,7 @@ export type {
   PanelState,
   Placement,
   ReactNode,
+  WorkspacePlace,
 };
 
 export {
@@ -163,7 +165,7 @@ export {
   founded,
   installShims,
   navigate,
-  onOpenTarget,
+  onPlaced,
   mountApp,
   SectionApp,
   useAppLinks,

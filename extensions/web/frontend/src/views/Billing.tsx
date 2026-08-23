@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Table, Td, Th, tableFloor } from "@/components/ui/table";
+import type { Placement } from "@/kernel/pager";
 import {
   Notice,
   type NoticeState,
@@ -175,11 +176,20 @@ function Credits({ rows }: { rows: Purchase[] }) {
  *  every turn: a card cannot be saved in chat once the gate is closed, and a refill is refused
  *  until a card is on file. The refill control is therefore drawn even with no card, disabled and
  *  stating what unblocks it, so the member reads the whole path at once. */
-export function WorkspaceBilling() {
+export function WorkspaceBilling({
+  place,
+  onPlace,
+}: {
+  place: Placement;
+  onPlace: (place: Placement) => void;
+}) {
   const mainAgent = useMainAgent();
   const [state, setState] = useState<BillingState>({ phase: "asking" });
   const [reloads, setReloads] = useState(0);
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
+  // What an act left, split the way every placed screen splits it: an act that applied is the
+  // pane's own outcome and rides the place, and a refusal belongs to this mount alone.
+  const [refusal, setRefusal] = useState<NoticeState>(QUIET);
+  const notice: NoticeState = refusal.text ? refusal : { text: place.notice ?? "", refused: false };
   const [link, setLink] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [amount, setAmount] = useState(String(REFILL_DOLLARS));
@@ -213,8 +223,13 @@ export function WorkspaceBilling() {
       below_dollars: belowDollars,
     });
     setBusy(false);
-    setNotice(outcomeNotice(outcome));
-    if (outcome.applied) setReloads((count) => count + 1);
+    if (outcome.applied) {
+      setRefusal(QUIET);
+      onPlace({ notice: outcome.message });
+      setReloads((count) => count + 1);
+      return;
+    }
+    setRefusal(outcomeNotice(outcome));
   }
 
   async function saveCard() {
@@ -223,7 +238,7 @@ export function WorkspaceBilling() {
     const outcome = await postIntent(mainAgent.id, { verb: "save_card", kind: "billing" });
     setBusy(false);
     setLink(outcome.url ?? null);
-    setNotice(outcome.url ? QUIET : outcomeNotice(outcome));
+    setRefusal(outcome.url ? QUIET : outcomeNotice(outcome));
   }
 
   if (state.phase === "asking") return null;

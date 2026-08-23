@@ -49,6 +49,26 @@ const NEWER = { ...OLDER, id: "a2", filename: "report.txt", created_at: "2026-07
 
 const OLDER_KEY = OLDER.id;
 
+const NO_TOKENS = { tokens: 0, token_micro_usd: 0, total_micro_usd: 0 };
+
+/** A usage read with nothing in it. What this file tests about the usage tab is the range the
+ *  address carries, so the report holds no lines for the screen to draw. */
+const NO_USAGE = {
+  window_seconds: null,
+  total_micro_usd: 0,
+  by_dimension: [],
+  caps: [],
+  usage: {
+    selected: NO_TOKENS,
+    all_time: NO_TOKENS,
+    first_used_at: null,
+    previous_tokens: null,
+    daily: [],
+    by_execution: [],
+    by_model: [],
+  },
+  workspace: null,
+};
 
 const MIXED_CASE_CONVO_ID = "8C0ACA03-8d29-4959-af47-8ae69bed7e48";
 
@@ -104,6 +124,7 @@ function serve() {
           ],
         });
       }
+      if (url.includes("/workspace/usage")) return json(NO_USAGE);
       if (url.includes("/api/chats")) return json({ chats: [] });
       if (url.includes("/transcript")) return json({ messages: [] });
       return new Response("file body");
@@ -119,6 +140,8 @@ test("a workspace tab and a section carry the same place and parse back to it", 
     q: "roadmap",
     chip: "Workspace",
     face: "table",
+    scope: "mine",
+    range: "7d",
     opens: [OLDER_KEY],
   };
   expect(parseHash(workspaceHash("sources", place))).toEqual({
@@ -410,6 +433,24 @@ test("paging with slots standing pushes and leaves nothing to unwind", () => {
   expect(steps).toEqual(["push", "push", "push", "back"]);
 });
 
+/** The codec merges the patch, so a place change holds every key the patch says nothing about. The
+ *  merge written by hand listed the keys and omitted `range`, so a search, a page step or a lane
+ *  opened on the usage tab erased the range the member had picked. */
+test("a place change holds the keys its patch does not name", () => {
+  const { steps, places, record } = stepping({ range: "7d", chip: "Workspace" });
+
+  record({ opens: [CONVO_ID] });
+  record({ q: "roadmap" });
+  record({ after: "c-older" });
+
+  expect(steps).toEqual(["push", "replace", "push"]);
+  expect(places).toEqual([
+    { range: "7d", chip: "Workspace", opens: [CONVO_ID] },
+    { range: "7d", chip: "Workspace", q: "roadmap", opens: [CONVO_ID] },
+    { range: "7d", chip: "Workspace", q: "roadmap", after: "c-older", opens: [CONVO_ID] },
+  ]);
+});
+
 test("a hash under the torn-out subagent namespace names no route", () => {
   expect(parseHash("#/subagents/deep_research")).toEqual({ kind: "bad-link" });
   expect(parseHash("#/subagents/deep_research/conversations/" + CONVO_ID)).toEqual({
@@ -539,6 +580,32 @@ test("a tab click releases the filters, so returning starts unfiltered", async (
   await waitFor(() => expect(location.hash).toBe("#/workspace/sources"));
   expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
   expect(await screen.findByText("notion")).toBeTruthy();
+});
+
+/** The usage tab read the range off the address itself and wrote it back by hand, so the shell's
+ *  route and the address disagreed until the next navigation. The range is a place key like every
+ *  other one: pressing a range moves the address, the read follows it, and a link naming a range
+ *  lands on it. */
+test("the usage range rides the address, and a link naming one lands on it", async () => {
+  location.hash = workspaceHash("usage");
+  const calls = serve();
+  const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "7 days" }));
+
+  await waitFor(() => expect(location.hash).toBe("#/workspace/usage?range=7d"));
+  await waitFor(() =>
+    expect(calls.some((url) => url.includes("/workspace/usage?range=7d"))).toBe(true),
+  );
+  view.unmount();
+
+  location.hash = workspaceHash("usage", { range: "90d" });
+  const reloaded = serve();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const pressed = await screen.findByRole("button", { name: "90 days" });
+  expect(pressed.getAttribute("aria-pressed")).toBe("true");
+  expect(reloaded.some((url) => url.includes("/workspace/usage?range=90d"))).toBe(true);
 });
 
 

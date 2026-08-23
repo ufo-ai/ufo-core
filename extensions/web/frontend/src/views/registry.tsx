@@ -14,6 +14,9 @@ import { WorkspaceUsage } from "@/views/Usage";
 
 export type PaneView = {
   label: string;
+  /** Every view is handed the place it stands at and the way to change it — a row that took neither
+   *  had to read the address itself and write its own, which is how one screen's route and the
+   *  address came to disagree until the next navigation. */
   render: (place: Placement, onPlace: (place: Placement) => void) => ReactNode;
   /** Remount when the placement changes, so a mutation's outcome notice reaches the new mount. */
   remountOnPlace: boolean;
@@ -61,12 +64,12 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   usage: {
     label: "Usage",
     remountOnPlace: false,
-    render: () => <WorkspaceUsage />,
+    render: (place, onPlace) => <WorkspaceUsage place={place} onPlace={onPlace} />,
   },
   billing: {
     label: "Billing",
     remountOnPlace: false,
-    render: () => <WorkspaceBilling />,
+    render: (place, onPlace) => <WorkspaceBilling place={place} onPlace={onPlace} />,
   },
 };
 

@@ -20,7 +20,7 @@ import { cn } from "@/lib/cn";
 import type { ChatRow } from "@/lib/rail";
 import { Chat } from "@/views/Chat";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
-import type { PlaceStep, WorkspacePlace } from "@/lib/route";
+import { mergePlace, serializePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
 import type { Agent, Conversation, Member } from "@/lib/types";
 
 /** The homepage the app's binding names, the answer that one is being built, or the answer that
@@ -188,15 +188,17 @@ export function AgentPane({
     listed.phase === "ready";
   // The bridge is how the framed page reads the member's data and drives navigation; it is bound to
   // the live frame and rebound when a redeploy remounts it under a new key, so each set of bytes
-  // talks to exactly one listener. A target the pane does not hold as a slot is the page's open
-  // target — one meaning per channel, so nothing is opened twice. It rides `init` on a fresh frame
-  // and the bridge's own `open` message while the frame stands, because a rail click lands on a
-  // page that already booted.
+  // talks to exactly one listener. The page stands at this pane's own place, less the track the pane
+  // holds as a slot itself — one meaning per channel, so nothing is opened twice. The place rides
+  // `init` on a fresh frame and the bridge's own `place` message while the frame stands, because a
+  // rail click lands on a page that already booted. It crosses whole: a frame handed one key of a
+  // place could only stand the screen the address names by guessing the rest.
   const frameRef = useRef<HTMLIFrameElement>(null);
   const bridgeRef = useRef<BridgeHandle | null>(null);
-  const heldOpen = conversational ? null : (target ?? null);
-  const openRef = useRef(heldOpen);
-  openRef.current = heldOpen;
+  const framed = mergePlace(place, conversational ? { opens: undefined } : {});
+  const framedRef = useRef(framed);
+  framedRef.current = framed;
+  const framedAt = serializePlace(framed);
   const foundedRef = useRef<(agentId: string, conversationId: string, title: string) => void>(
     () => {},
   );
@@ -214,7 +216,7 @@ export function AgentPane({
       iframe: frame,
       member,
       agentId: agent.id,
-      open: openRef.current,
+      place: framedRef.current,
       chatSurface: agent.app === CHAT_SURFACE,
       onCreated: (agentId, conversationId, title) =>
         foundedRef.current(agentId, conversationId, title),
@@ -226,8 +228,8 @@ export function AgentPane({
     };
   }, [member, agent.id, agent.app, url, generation]);
   useEffect(() => {
-    bridgeRef.current?.open(heldOpen);
-  }, [heldOpen]);
+    bridgeRef.current?.place(framedRef.current);
+  }, [framedAt]);
 
   /** The conversation, whole. Its own band is drawn where the conversation is the screen; standing
    *  in a lane, the lane's header already states the name and draws the way out, and a second band

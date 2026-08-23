@@ -796,9 +796,11 @@ test("a workspace usage read shows the member's own spend and the admin rollup w
   expect(screen.getByRole("img", { name: "7.2K tokens across 1 daily buckets" })).toBeTruthy();
   expect(usageWire.calls.some((url) => url.includes("range=30d"))).toBe(true);
 
+  // The range is a place the pane holds, not state the screen keeps to itself: the press reports it
+  // and the screen redraws at the range the place came back with.
   await userEvent.click(screen.getByRole("button", { name: "90 days" }));
   await waitFor(() => expect(usageWire.calls.some((url) => url.includes("range=90d"))).toBe(true));
-  expect(location.hash).toBe("#/workspace/usage?range=90d");
+  expect(screen.getByRole("button", { name: "90 days" }).getAttribute("aria-pressed")).toBe("true");
 });
 
 test("a member with no rollup sees only their own figure and no workspace section", async () => {

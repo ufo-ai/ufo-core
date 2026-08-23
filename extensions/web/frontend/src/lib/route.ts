@@ -61,47 +61,120 @@ export type RouteKind = Route["kind"];
  *  the same member of the union rather than about `Route` at large. */
 export type RouteOf<Kind extends RouteKind> = Extract<Route, { kind: Kind }>;
 
-const PLACE_KEYS = ["kind", "after", "q", "chip", "face", "scope", "range"] as const;
-
 const TRACK_KEY = "open";
 const TRACK_SEPARATOR = "~";
+
+type PlaceKey = keyof WorkspacePlace;
+
+/** How one place key crosses an address: the read that takes it off the query, and the write that
+ *  puts it back. A read answering `null` means the key was there and held what no screen can stand
+ *  on, which makes the whole address a bad link. */
+type PlaceField<Key extends PlaceKey> = {
+  read: (params: URLSearchParams) => WorkspacePlace[Key] | null;
+  write: (params: URLSearchParams, value: WorkspacePlace[Key]) => void;
+};
+
+/** A key carried as its own text under its own name, which is every place key but the track. */
+function text(key: string): {
+  read: (params: URLSearchParams) => string | undefined;
+  write: (params: URLSearchParams, value: string | undefined) => void;
+} {
+  return {
+    read: (params) => params.get(key) || undefined,
+    write: (params, value) => {
+      if (value) params.set(key, value);
+    },
+  };
+}
+
+/** The track, carried as one `~`-joined key. The read admits exactly the rows a screen can be left
+ *  holding and turns the address away otherwise; the write refuses a row that read would not admit,
+ *  raising at the call that made it up rather than at the link a member is handed. */
+const TRACK: PlaceField<"opens"> = {
+  read: (params) => {
+    const track = params.get(TRACK_KEY);
+    if (!track) return undefined;
+    const opens = track.split(TRACK_SEPARATOR);
+    return holdableTrack(opens) ? opens : null;
+  },
+  write: (params, opens = []) => {
+    const carried = opens.find((id) => id.includes(TRACK_SEPARATOR));
+    if (carried !== undefined) {
+      throw new Error("A slot id cannot hold " + TRACK_SEPARATOR + ": " + JSON.stringify(carried));
+    }
+    const fault = unholdable(opens);
+    if (fault) throw new Error(fault);
+    if (opens.length) params.set(TRACK_KEY, opens.join(TRACK_SEPARATOR));
+  },
+};
+
+/** Every key a place holds, each with the one way it is read, written and carried forward. The
+ *  record is typed over `WorkspacePlace` itself, so a key the type gains and this record does not is
+ *  a compile error rather than a key that quietly leaves the address on the next place change.
+ *  Declaration order is the order an address spells the keys in. */
+const PLACE_CODEC: { [Key in PlaceKey]: PlaceField<Key> } = {
+  kind: text("kind"),
+  after: text("after"),
+  q: text("q"),
+  chip: text("chip"),
+  face: text("face"),
+  scope: text("scope"),
+  range: text("range"),
+  opens: TRACK,
+};
+
+const PLACE_KEYS = Object.keys(PLACE_CODEC) as PlaceKey[];
+
+function readKey<Key extends PlaceKey>(
+  place: WorkspacePlace,
+  key: Key,
+  params: URLSearchParams,
+): boolean {
+  const value = PLACE_CODEC[key].read(params);
+  if (value === null) return false;
+  place[key] = value;
+  return true;
+}
+
+function writeKey<Key extends PlaceKey>(
+  params: URLSearchParams,
+  place: WorkspacePlace,
+  key: Key,
+): void {
+  PLACE_CODEC[key].write(params, place[key]);
+}
+
+function carryKey<Key extends PlaceKey>(next: WorkspacePlace, from: WorkspacePlace, key: Key): void {
+  next[key] = from[key];
+}
 
 function parsePlace(raw: string | undefined): WorkspacePlace | null {
   if (!raw) return {};
   const params = new URLSearchParams(raw);
   const place: WorkspacePlace = {};
   for (const key of PLACE_KEYS) {
-    const value = params.get(key);
-    if (value) place[key] = value;
+    if (!readKey(place, key, params)) return null;
   }
-  const track = params.get(TRACK_KEY);
-  if (!track) return place;
-  const opens = track.split(TRACK_SEPARATOR);
-  if (!holdableTrack(opens)) return null;
-  place.opens = opens;
   return place;
 }
 
-/** The address for a place. The track it carries is exactly the one `parsePlace` admits — the same
- *  rule, read off the same module — plus the one rule this separator adds, so a link this writes is
- *  a link the next read stands a screen on rather than turning away as invalid. A track no screen
- *  could be left holding raises here, at the call that made it up. */
-function serializePlace(place: WorkspacePlace): string {
+/** The address for a place, over every key the codec knows — the same keys the read admits, so a
+ *  link this writes is a link the next read stands a screen on. */
+export function serializePlace(place: WorkspacePlace): string {
   const params = new URLSearchParams();
-  for (const key of PLACE_KEYS) {
-    const value = place[key];
-    if (value) params.set(key, value);
-  }
-  const opens = place.opens ?? [];
-  const carried = opens.find((id) => id.includes(TRACK_SEPARATOR));
-  if (carried !== undefined) {
-    throw new Error("A slot id cannot hold " + TRACK_SEPARATOR + ": " + JSON.stringify(carried));
-  }
-  const fault = unholdable(opens);
-  if (fault) throw new Error(fault);
-  if (opens.length) params.set(TRACK_KEY, opens.join(TRACK_SEPARATOR));
+  for (const key of PLACE_KEYS) writeKey(params, place, key);
   const raw = params.toString();
   return raw ? "?" + raw : "";
+}
+
+/** The place a patch leaves: a key the patch names it takes, and a key the patch does not name
+ *  stays as it stood. Total over the codec's own keys, so no place change can drop one — a merge
+ *  that listed the keys by hand omitted `range`, and every search, filter, page step and lane open
+ *  on the usage tab erased the range from the address. */
+export function mergePlace(held: WorkspacePlace, patch: WorkspacePlace): WorkspacePlace {
+  const next: WorkspacePlace = {};
+  for (const key of PLACE_KEYS) carryKey(next, key in patch ? patch : held, key);
+  return next;
 }
 
 function isWorkspaceTab(name: string): name is WorkspaceTab {
