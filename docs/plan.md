@@ -156,4 +156,3 @@ wrap · **import boundaries (from U1)**: declared edges between role-owning modu
 `loop/`, jobs, `sandbox/proxy/`); a cross-role in-memory import fails CI — roles talk through
 queues/blob/hub/HTTP only · **core skills (from U5)**: a skill in core naming a non-core tool
 fails CI; core's skill set is exactly {`sandbox`}.
-
