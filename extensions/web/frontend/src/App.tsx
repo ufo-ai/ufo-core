@@ -62,7 +62,7 @@ import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
-import { pageTitle } from "@/lib/title";
+import { pageCrumb, pageTitle, type Crumb } from "@/lib/title";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -848,6 +848,10 @@ function RoutedPane({
   buildWanted: boolean;
 }) {
   const rail = useRail();
+  /** Where the member came from, off the trail that makes the tab title: every band on this screen
+   *  names the trail's innermost step, so they all draw this one step over it and none of them
+   *  derives it a second time. */
+  const crumb = pageCrumb(route, agents, rail.rows, rail.linked, mainAgent);
   switch (route.kind) {
     case "admin":
       return <Admin />;
@@ -860,6 +864,7 @@ function RoutedPane({
           tabs={WORKSPACE_TABS}
           views={WORKSPACE_VIEWS}
           view={route.view}
+          crumb={crumb}
           place={route.place}
           onPlace={placeWorkspace}
         />
@@ -877,6 +882,7 @@ function RoutedPane({
           tabs={[route.section]}
           views={{ [route.section]: view } as Record<Section, PaneView>}
           view={route.section}
+          crumb={crumb}
           place={route.place}
           onPlace={placeSection}
         />
@@ -937,7 +943,7 @@ function RoutedPane({
           conversationId={route.conversationId}
           slot={route.slot}
           rootConversationId={route.rootConversationId}
-          onOpenAgent={openAgent}
+          crumb={crumb}
         />
       );
     }
@@ -955,6 +961,7 @@ function RoutedPane({
             key={linkedConversation.id}
             agent={linkedAgent}
             conversation={linkedConversation}
+            crumb={crumb}
             slot={route.slot}
             onSelectSlot={(slot) => openSlot(route.conversationId, slot)}
           />
@@ -992,7 +999,7 @@ function RoutedPane({
           onActivity={railActivity}
           title={row.title}
           conversationOnly={!listedAgent}
-          onOpenAgent={openAgent}
+          crumb={crumb}
           slot={route.slot}
           onSelectSlot={(slot) => openSlot(route.conversationId, slot)}
         />
@@ -1038,11 +1045,13 @@ function RoutedPane({
 function LinkedPane({
   agent,
   conversation,
+  crumb,
   slot,
   onSelectSlot,
 }: {
   agent: Agent;
   conversation: OwnedConversation;
+  crumb?: Crumb;
   slot?: string;
   onSelectSlot: (slot: string | null) => void;
 }) {
@@ -1053,7 +1062,7 @@ function LinkedPane({
     <Pane>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Header
-          parent={{ label: agentName(agent.name), onGo: () => openAgent(agent.id) }}
+          crumb={crumb}
           title={subject(conversation, viewer)}
           acts={<SurfaceMark conversation={conversation} />}
           pinned

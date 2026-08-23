@@ -358,7 +358,9 @@ export function HeldRecords({
  *
  *  `from` is what the lane was opened out of, said as the crumb over it: a lane paged one to a
  *  screen has no lane standing to its left to read as the way back. A screen that stands its lanes
- *  beside each other passes none, because the lane to the left is that way back. */
+ *  beside each other passes none, because the lane to the left is that way back. It is a name and no
+ *  address — a lane on the screen is not a place a link reaches — so it states where the record came
+ *  from and the lane's own way out shuts it. */
 export function HeldRecord({
   id,
   title,
@@ -379,7 +381,7 @@ export function HeldRecord({
     id,
     kind,
     title,
-    parent: from === undefined ? undefined : { label: from, onGo: onClose },
+    crumb: from === undefined ? undefined : { label: from },
     onClose,
   });
 }

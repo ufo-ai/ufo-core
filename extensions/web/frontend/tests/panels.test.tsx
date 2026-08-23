@@ -4,6 +4,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { agentHash } from "@/lib/route";
+import { agentCrumb } from "@/lib/title";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 
 import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
@@ -1169,7 +1171,7 @@ test("a slot standing on its own address is headed by its name under the app", a
       conversationId={CONVO_ID}
       slot="artifacts"
       summary={{ id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifact", count: 0 }}
-      onOpenAgent={() => {}}
+      crumb={agentCrumb(AGENT)}
     />,
   );
 
@@ -1177,4 +1179,7 @@ test("a slot standing on its own address is headed by its name under the app", a
   const path = screen.getByRole("navigation", { name: "Breadcrumb" });
   expect(path.contains(head)).toBe(true);
   expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  expect(within(path).getByRole("link", { name: "Back to Assistant" }).getAttribute("href")).toBe(
+    agentHash(AGENT.id),
+  );
 });

@@ -1,6 +1,7 @@
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 import { framedNavigation, type WorkspacePlace } from "@/lib/route";
 import { navigate } from "@/lib/router";
+import type { Crumb } from "@/lib/title";
 import type { Member } from "@/lib/types";
 
 /** The portal shell's side of the app bridge (RFC 0039, `docs/apps-prototype-contracts.md`
@@ -119,6 +120,12 @@ export type BridgeConfig = {
    *  place the way a portal tab does, and a frame handed one key of it could only stand the screen
    *  the member asked for by guessing the rest. */
   place?: WorkspacePlace;
+  /** Where the page itself stands in the portal, as the trail names it. The page draws it as the
+   *  crumb over its own band whenever that band names something the shell never read — a report, a
+   *  member's page — because the shell's trail ends at the page and the band stands one step past
+   *  it. It rides `init` and no further: the frame that outlives a place change does not outlive the
+   *  screen this crumb names. */
+  crumb?: Crumb;
   /** A conversation the page's own send founded, told to the shell so the rail carries the row
    *  without waiting for its next read. The page could only have founded it through this bridge's
    *  own chat call, so the report claims nothing the shell did not broker. */
@@ -208,6 +215,7 @@ export function attachBridge({
   member,
   agentId,
   place,
+  crumb,
   onCreated,
   chatSurface = false,
 }: BridgeConfig): BridgeHandle {
@@ -274,6 +282,10 @@ export function attachBridge({
           agentId,
           place: standing,
           open: standing.opens?.[0] ?? null,
+          crumb:
+            crumb?.at && framedNavigation(crumb.at)
+              ? { ...crumb, at: new URL(crumb.at, location.origin + BASE).href }
+              : crumb,
           portal: location.origin,
         });
         return;

@@ -730,7 +730,7 @@ test("a private extension conversation opens the live chat", async () => {
   // The agent holds the conversation but is not one this member can open, so it is named and not
   // linked.
   expect(crumb.getByText("Daily-Brief")).toBeTruthy();
-  expect(crumb.queryByRole("button", { name: "Back to daily-brief" })).toBeNull();
+  expect(crumb.queryByRole("link")).toBeNull();
   expect(screen.getByLabelText("Message the app")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
@@ -879,7 +879,7 @@ test("a terminal conversation is marked with its surface and no way out", async 
   const header = within(screen.getByRole("main"));
   expect(header.getByText("Deploy the branch")).toBeTruthy();
   expect(header.getByText("Terminal")).toBeTruthy();
-  expect(header.queryByRole("link")).toBeNull();
+  expect(header.getByText("Terminal").closest("a")).toBeNull();
   expect(
     screen.getByText("This conversation is read-only here. Reply in Terminal to continue it."),
   ).toBeTruthy();
@@ -1058,7 +1058,7 @@ test("the chat header names the agent holding the conversation and what it is ca
   expect(crumb.getByText("Assistant")).toBeTruthy();
   expect(crumb.queryByText(AGENT.model)).toBeNull();
 
-  await userEvent.click(crumb.getByRole("button", { name: "Back to Assistant" }));
+  await userEvent.click(crumb.getByRole("link", { name: "Back to Assistant" }));
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 });
 

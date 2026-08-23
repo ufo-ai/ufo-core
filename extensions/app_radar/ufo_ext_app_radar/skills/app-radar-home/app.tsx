@@ -144,19 +144,26 @@ const STATUS_NOTES: Record<string, string> = {
  *  read in and standing a second app's task beside the first leaves the first where it was.
  *
  *  The band over it says where the member is: the app's own name at the feed, and — standing on one
- *  report — that report under it, where pressing the app's name is the way back to the feed. The
- *  report names itself from the document it published, which lands after the page does, so the name
- *  is held here beside the run it belongs to; a name kept without its run would head the next
- *  report the member opened with the last one's title.
+ *  report — that report under it, under the crumb back to the page. That crumb is the shell's own,
+ *  carried in over the bridge, so the step it names is the step the portal's tab title names and the
+ *  page states no second answer to where it stands. The report names itself from the document it
+ *  published, which lands after the page does, so the name is held here beside the run it belongs to;
+ *  a name kept without its run would head the next report the member opened with the last one's
+ *  title.
+ *
+ *  Shutting the report is the band's own way out, not the crumb: the crumb goes to an address and
+ *  closing a lane is a verb of the lane.
  *
  *  The one act on the whole feed stands on that band, and only there: a member reading one report
  *  is reading it, not maintaining the list they reached it from. */
 function Radar({
   title,
+  crumb,
   place,
   onPlace,
 }: {
   title: string;
+  crumb?: Crumb;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
@@ -172,8 +179,10 @@ function Radar({
       <Header
         pinned
         heading={1}
-        parent={{ label: title, onGo: () => onPlace({ opens: closed(opens, pin) }) }}
+        crumb={crumb}
         title={page}
+        closes={page}
+        onClose={() => onPlace({ opens: closed(opens, pin) })}
       />
     ),
   );
@@ -802,7 +811,9 @@ mountApp(document.getElementById("root")!, (init) => (
       label: "Radar",
       remountOnPlace: false,
       ownsHeader: true,
-      render: (place, onPlace) => <Radar title="Radar" place={place} onPlace={onPlace} />,
+      render: (place, onPlace) => (
+        <Radar title="Radar" crumb={init.crumb} place={place} onPlace={onPlace} />
+      ),
     }}
   />
 ));

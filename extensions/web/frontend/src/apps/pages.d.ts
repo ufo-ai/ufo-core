@@ -5,6 +5,7 @@ declare global {
   type Agent = Kit.Agent;
   type AppInit = Kit.AppInit;
   type ChatRow = Kit.ChatRow;
+  type Crumb = Kit.Crumb;
   type Face = Kit.Face;
   type FacetGroup = Kit.FacetGroup;
   type Member = Kit.Member;

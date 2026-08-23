@@ -7,6 +7,7 @@ import { usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
+import type { Crumb } from "@/lib/title";
 import type { ConversationAgent } from "@/lib/types";
 import {
   ConversationSlotPane,
@@ -23,7 +24,9 @@ export type ChatPaneProps = ChatProps & {
   conversationOnly?: boolean;
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
-  onOpenAgent?: (agentId: string) => void;
+  /** The app holding the conversation, as the trail names it: the shell derives it once for the tab
+   *  title and this band alike, so the two cannot name one app two ways. */
+  crumb?: Crumb;
 };
 
 /** A conversation's own named pane — its files, its diffs, its sources — standing in the track
@@ -78,7 +81,7 @@ export function ChatPane({
   conversationOnly = false,
   slot,
   onSelectSlot,
-  onOpenAgent,
+  crumb,
 }: ChatPaneProps) {
   const [slotReloads, setSlotReloads] = useState(0);
   const slots = usePanelRead<ConversationSlotsPayload>(
@@ -94,10 +97,7 @@ export function ChatPane({
    *  yet opened is headed by nothing at all. */
   const header = conversationId ? (
     <Header
-      parent={{
-        label: agentName(agent.name),
-        onGo: onOpenAgent && !conversationOnly ? () => onOpenAgent(agent.id) : undefined,
-      }}
+      crumb={crumb}
       title={title ?? agentName(agent.name)}
       acts={
         !conversationOnly && slots.phase === "ready" && slots.payload.slots.length

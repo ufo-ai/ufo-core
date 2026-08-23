@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 
 import { Header } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
+import type { Crumb } from "@/lib/title";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 
 /** What stands in a slot, which is the whole of what decides the width it takes. */
@@ -330,11 +331,12 @@ function SlotHost({
  *  every sibling lane as it mounted.
  *
  *  The lane's band is the portal's one header, so a lane, a page and a record state their name, what
- *  they hold and the way out of them in the same places. `parent` is the surface the lane was
- *  reached from, said there as a crumb: a lane paged one to a screen has no lane standing to its
- *  left to read as the way back, so the band carries it. The name is a heading under the page's own
- *  either way — the crumb is the way back, not the name, so a lane that states where it came from
- *  is no less a section of the screen than one that does not.
+ *  they hold and the way out of them in the same places. `crumb` is the surface the lane was reached
+ *  from, said there as a step of the trail: a lane paged one to a screen has no lane standing to its
+ *  left to read as the way back, so the band carries it. It states where the lane came from and
+ *  never shuts it — the way out of a lane is the lane's own verb. The name is a heading under the
+ *  page's own either way — the crumb is context, not the name, so a lane that states where it came
+ *  from is no less a section of the screen than one that does not.
  *
  *  A lane that can be shut is one the member opened: it takes focus as it lands, answers Escape by
  *  shutting, and hands focus back to the act that raised it — but only if it still holds it, since
@@ -356,13 +358,13 @@ export function useSlot(
     acts?: ReactNode;
     /** The id of the line inside the lane that states what it does. */
     describes?: string;
-    parent?: { label: string; onGo?: () => void };
+    crumb?: Crumb;
     onClose?: () => void;
   },
 ): ReactNode {
   const { hosted, hosts, place, drop, move } = useContext(TrackContext);
   const here = useContext(HereContext);
-  const { id, kind = "reading", title, acts, describes, parent, onClose } = slot;
+  const { id, kind = "reading", title, acts, describes, crumb, onClose } = slot;
   const on = node !== null;
   const held = useRef<HTMLElement | null>(null);
   const host = hosts.get(id);
@@ -429,7 +431,7 @@ export function useSlot(
           pinned
           heading={2}
           glyph={<Glyph aria-hidden />}
-          parent={parent}
+          crumb={crumb}
           title={title}
           acts={
             acts === undefined ? undefined : (

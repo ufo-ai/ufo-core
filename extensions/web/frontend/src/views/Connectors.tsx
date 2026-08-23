@@ -56,6 +56,7 @@ import { BASE, getJson, postIntent, type Fetched } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { ProviderGlyph } from "@/lib/providerGlyph";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
+import type { Crumb } from "@/lib/title";
 import type { Agent } from "@/lib/types";
 import {
   CONNECT_VERB,
@@ -501,7 +502,7 @@ export function WorkspaceConnectors({
         viewer={viewer}
         attachTo={agents}
         holders={entry.agents ?? []}
-        parent={{ label: LIBRARY, onGo: () => shut(id) }}
+        crumb={{ label: LIBRARY }}
         onDone={(outcome) => {
           setNotice(outcome);
           setReloads((count) => count + 1);
@@ -823,7 +824,7 @@ function CoverageRecord({ legs, onClose }: { legs: Fact[]; onClose: () => void }
       id: COVERAGE,
       kind: "panel",
       title: "GitHub",
-      parent: { label: LIBRARY, onGo: onClose },
+      crumb: { label: LIBRARY },
       onClose,
     },
   );
@@ -842,7 +843,7 @@ function ConnectionRecord({
   viewer,
   attachTo,
   holders,
-  parent,
+  crumb,
   onDone,
   onClose,
 }: {
@@ -850,7 +851,8 @@ function ConnectionRecord({
   viewer: string | null;
   attachTo: Agent[];
   holders: { id: string; name: string }[];
-  parent?: { label: string; onGo: () => void };
+  /** The listing this record was opened out of, where it stands one lane to a screen. */
+  crumb?: Crumb;
   onDone: (notice: NoticeState) => void;
   onClose: () => void;
 }) {
@@ -951,7 +953,7 @@ function ConnectionRecord({
       id: CONNECTION + entry.grant,
       kind: "panel",
       title: connectionName(entry),
-      parent,
+      crumb,
       onClose,
     },
   );

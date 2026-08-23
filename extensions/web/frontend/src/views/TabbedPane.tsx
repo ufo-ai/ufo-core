@@ -7,6 +7,7 @@ import { BANDS, COLUMN, Header, Page, PageActs, PageHead, PageSearch, Pane } fro
 import { usePlaceRecorder } from "@/kernel/place";
 import { cn } from "@/lib/cn";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
+import type { Crumb } from "@/lib/title";
 import type { PaneView } from "@/views/registry";
 
 /** A destination the sidebar reaches: a tab array and one registry. Workspace, Customize and each
@@ -25,12 +26,17 @@ import type { PaneView } from "@/views/registry";
  *  edge it heads and would scroll away with the words.
  *
  *  A view that names itself takes the band instead: its name arrives with its own read, long after
- *  the shell stood, so the shell holds the place and the view fills it through `PageHead`. */
+ *  the shell stood, so the shell holds the place and the view fills it through `PageHead`.
+ *
+ *  The band names the view, so the crumb over it is the landmark that holds the view — the same step
+ *  the tab title puts after the name, handed down rather than written here, so the two say one
+ *  thing. A destination that is its own landmark passes none. */
 export function TabbedPane<Tab extends string>({
   group,
   views,
   tabs,
   view,
+  crumb,
   place,
   onPlace,
 }: {
@@ -38,6 +44,7 @@ export function TabbedPane<Tab extends string>({
   tabs: readonly Tab[];
   views: Record<Tab, PaneView>;
   view: Tab;
+  crumb?: Crumb;
   place: WorkspacePlace;
   onPlace: (view: Tab, place: WorkspacePlace, step: PlaceStep) => void;
 }) {
@@ -59,6 +66,7 @@ export function TabbedPane<Tab extends string>({
         <Header
           pinned
           heading={1}
+          crumb={crumb}
           title={views[view].label}
           acts={<span ref={setAct} className="contents" />}
           bar={

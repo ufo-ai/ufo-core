@@ -15,6 +15,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import type { Crumb } from "@/lib/title";
 import { Empty } from "@/kernel/panel";
 import { SlotTrack } from "@/kernel/slots";
 import {
@@ -143,6 +144,11 @@ const NAME = "flex min-w-(--container-title) flex-1 items-center gap-sm max-narr
  *  beside it. Omitted, the name is plain text: a surface the landmark it stands in already names
  *  takes no second name.
  *
+ *  `crumb` is where the member came from and nothing else. It carries an address, not a verb: a
+ *  crumb to a place is navigation, so it is a link that can be opened in a second tab, and shutting
+ *  the surface is `onClose` — a verb of the lane, which is a different act with a different word for
+ *  it. A crumb standing at no address is the landmark's name, drawn as text.
+ *
  *  A screen states one heading at level 1, and this band is where it stands. A view whose name is
  *  prose the band's one line cannot hold states it whole in its own body as well — the crumb is cut
  *  to the width it has, never to what a reader hears — and the body's copy is the one that is not a
@@ -154,7 +160,7 @@ const NAME = "flex min-w-(--container-title) flex-1 items-center gap-sm max-narr
  *  content passes beneath. */
 export function Header({
   heading,
-  parent,
+  crumb,
   glyph,
   title,
   note,
@@ -166,10 +172,9 @@ export function Header({
   pinned = false,
 }: {
   heading?: 1 | 2;
-  /** The surface this one came out of, and the verb that goes back to it. Every parent in this
-   *  portal is reached by a callback rather than an address — an agent's own conversation lives in
-   *  a place on its agent's hash, not at one of its own — so this takes the verb, not a URL. */
-  parent?: { label: string; onGo?: () => void };
+  /** The step above this surface, as the trail states it: the label the member reads, and the
+   *  address it stands at where it has one. */
+  crumb?: Crumb;
   /** The mark for the kind of thing the surface holds, read before its name. It stands inside the
    *  measure the name is guaranteed rather than beside it, so a surface at its narrowest spends
    *  that measure on the mark and the name together instead of losing the acts to their sum. */
@@ -219,7 +224,7 @@ export function Header({
           "max-narrow:h-auto max-narrow:flex-col max-narrow:items-stretch",
         )}
       >
-        {parent === undefined && title === undefined ? (
+        {crumb === undefined && title === undefined ? (
           <span className="flex-1 max-narrow:hidden" />
         ) : (
           <div className={NAME}>
@@ -231,16 +236,16 @@ export function Header({
                 {glyph}
               </span>
             ) : null}
-            {parent ? (
+            {crumb ? (
               <Breadcrumb className="min-w-0 flex-1">
                 <BreadcrumbList className="min-w-0 flex-nowrap">
                   <BreadcrumbItem>
-                    {parent.onGo ? (
-                      <BreadcrumbLink aria-label={"Back to " + parent.label} onClick={parent.onGo}>
-                        {parent.label}
+                    {crumb.at ? (
+                      <BreadcrumbLink href={crumb.at} aria-label={"Back to " + crumb.label}>
+                        {crumb.label}
                       </BreadcrumbLink>
                     ) : (
-                      parent.label
+                      crumb.label
                     )}
                   </BreadcrumbItem>
                   <BreadcrumbSeparator />

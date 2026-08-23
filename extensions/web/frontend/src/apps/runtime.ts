@@ -1,5 +1,6 @@
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 import type { WorkspacePlace } from "@/lib/route";
+import type { Crumb } from "@/lib/title";
 
 /** The app page's side of the bridge (RFC 0039, `docs/apps-prototype-contracts.md` Contract 1),
  *  shaped so the portal's own modules run in the page unchanged: `connect` performs the
@@ -18,6 +19,12 @@ export type AppInit = {
    *  takes, carried beside the whole record because a deployed page reads whichever of the two its
    *  source was written against, and the kit serves every deployed page. */
   open: string | null;
+  /** Where this page stands in the portal, as the shell's own trail names it: the label and the
+   *  address it stands at. The page's band draws it as its crumb whenever that band names something
+   *  deeper than the page — a report, a member's page — so where the member is reads the same inside
+   *  the frame as the tab title says outside it. One band per page: the crumb joins the page's own
+   *  band rather than restoring a band above it. */
+  crumb?: Crumb;
   /** The portal's origin, which is where the page's own loader fetched the kit from. */
   portal: string;
 };

@@ -1,20 +1,24 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import type { AppInit } from "@/apps/runtime";
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
+import { agentHash } from "@/lib/route";
 
 import {
   AGENT,
   ARRIVAL_ID,
+  CHAT_ROW,
   CONVO_ID,
   MEMBER,
   NO_ARTIFACTS,
   NO_RUNS,
   NO_TASKS,
   NO_TRIGGERS,
+  SECOND_ID,
   SITE_KIND,
   TASK_KIND,
   TRIGGER_KIND,
@@ -39,22 +43,26 @@ function pageSource(app: string): string {
   );
 }
 
-const INIT = {
+const INIT: AppInit = {
   member: { email: MEMBER.email, admin: true },
   agentId: AGENT.id,
   place: {},
+  open: null,
   portal: location.origin,
 };
 
 /** The shell's side of the bridge: `init` answers the page's `ready`, and each `call` is served
  *  through the wire handler captured before the page replaced fetch. A path the test left unwired
  *  answers as a refusal naming itself, so the screen that fails states which route was missing. */
-function shell(handler: (url: string, init?: RequestInit) => Response | Promise<Response>): () => void {
+function shell(
+  handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
+  init: Partial<AppInit> = {},
+): () => void {
   const listener = (event: MessageEvent) => {
     const message = event.data as { ufo?: string } | null;
     if (!message || typeof message.ufo !== "string") return;
     if (message.ufo === "ready") {
-      window.postMessage({ ufo: "init", ...INIT }, "*");
+      window.postMessage({ ufo: "init", ...INIT, ...init }, "*");
       return;
     }
     if (message.ufo !== "call") return;
@@ -96,10 +104,14 @@ function shell(handler: (url: string, init?: RequestInit) => Response | Promise<
   return () => window.removeEventListener("message", listener);
 }
 
-async function runPage(app: string, routes: Record<string, Route>): Promise<{ calls: string[] }> {
+async function runPage(
+  app: string,
+  routes: Record<string, Route>,
+  init: Partial<AppInit> = {},
+): Promise<{ calls: string[] }> {
   vi.resetModules();
   const { calls, handler } = wire({ "/api/agents": () => json({ agents: [AGENT] }), ...routes });
-  cleanups.push(shell(handler));
+  cleanups.push(shell(handler, init));
   const kit = await import("@/apps/kit");
   vi.stubGlobal("UfoAppKit", kit);
   new Function(kit.compile(pageSource(app)))();
@@ -155,6 +167,36 @@ test("the wiki page mounts and draws the workspace article", async () => {
   expect(await screen.findByRole("heading", { name: "Wiki" })).toBeTruthy();
   expect(await screen.findByRole("heading", { name: "People" })).toBeTruthy();
   expect(await screen.findByText("Everyone in this workspace.")).toBeTruthy();
+});
+
+/** A page standing one step deeper than the shell's trail draws that step as its crumb, so where the
+ *  member is reads the same inside the frame as the tab title says outside it. The crumb goes to the
+ *  app's own address; shutting the page is the band's own act beside it. */
+test("the wiki page heads one member under the crumb the shell handed it", async () => {
+  const email = "colleague@example.com";
+  await runPage(
+    "wiki",
+    {
+      "/workspace/memory": () => json({ available: true, matches: [] }),
+      "/objects/memory": () => json({ objects: [] }),
+      "/objects/member": () =>
+        json({ objects: [{ name: email, email, admin: false, seated: true }] }),
+    },
+    {
+      place: { opens: ["member/" + email] },
+      crumb: {
+        label: "Wiki",
+        at: new URL(agentHash(AGENT.id), location.origin + BASE).href,
+      },
+    },
+  );
+
+  expect(await screen.findByRole("heading", { level: 1, name: email })).toBeTruthy();
+  const path = screen.getByRole("navigation", { name: "Breadcrumb" });
+  expect(within(path).getByRole("link", { name: "Back to Wiki" }).getAttribute("href")).toBe(
+    new URL(agentHash(AGENT.id), location.origin + BASE).href,
+  );
+  expect(screen.getByRole("button", { name: "Close " + email })).toBeTruthy();
 });
 
 test("the artifacts page mounts and draws the empty shelf with its search", async () => {
@@ -221,4 +263,39 @@ test("the chat page opens a conversation without re-listing, and switching opens
   // Switching the open target re-reads only the target's transcript — never the whole
   // conversation listing, which the page already holds and the switch does not change.
   expect(listReads()).toBe(listedForA);
+});
+
+/** The listing holds conversations of other apps too, so the conversation's own app is not where
+ *  this page stands. The crumb is the shell's, which is what keeps the band and the tab title naming
+ *  one app, and it carries the address back to it. */
+test("the chat page heads one conversation under the crumb the shell handed it", async () => {
+  await runPage(
+    "chat",
+    {
+      "/api/chats": () =>
+        json({ chats: [{ ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "second" }] }),
+      "/transcript": () => json({ messages: [] }),
+      "/slots": () => json({ slots: [] }),
+    },
+    {
+      place: { opens: [CONVO_ID] },
+      crumb: {
+        label: "Chat",
+        at: new URL(agentHash(AGENT.id), location.origin + BASE).href,
+      },
+    },
+  );
+
+  const path = await screen.findByRole("navigation", { name: "Breadcrumb" });
+  const crumb = within(path).getByRole("link", { name: "Back to Chat" });
+  expect(crumb.getAttribute("href")).toBe(
+    new URL(agentHash(AGENT.id), location.origin + BASE).href,
+  );
+  const modified = new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true });
+  expect(crumb.dispatchEvent(modified)).toBe(true);
+  const middle = new MouseEvent("click", { bubbles: true, button: 1, cancelable: true });
+  expect(crumb.dispatchEvent(middle)).toBe(true);
+  const plain = new MouseEvent("click", { bubbles: true, cancelable: true });
+  expect(crumb.dispatchEvent(plain)).toBe(false);
+  expect(within(path).getByText(CHAT_ROW.title)).toBeTruthy();
 });

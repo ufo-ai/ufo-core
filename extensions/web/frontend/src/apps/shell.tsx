@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 
 import { connect, installShims, navigate, onPlaced, type AppInit } from "@/apps/runtime";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { getJson } from "@/lib/api";
+import { BASE, getJson } from "@/lib/api";
 import { Viewer } from "@/lib/audience";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import {
@@ -28,12 +28,20 @@ import type { PaneView } from "@/views/registry";
 
 /** Route every in-page link: a route the app claims changes its own place; anything else the shell
  *  may take goes over the bridge. Either way the click never mutates the frame's address. */
-export function useAppLinks(claim: (route: Route) => boolean): void {
+export function useAppLinks(claim: (route: Route) => boolean, portal: string): void {
   useEffect(() => {
     const onClick = (event: MouseEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.button !== 0) return;
-      const anchor = (event.target as Element | null)?.closest?.("a[href^='#/']");
-      const to = anchor?.getAttribute("href");
+      const anchor = (event.target as Element | null)?.closest?.("a[href]");
+      const stated = anchor?.getAttribute("href");
+      const address = stated && !stated.startsWith("#/") ? new URL(stated, location.href) : null;
+      const to =
+        stated?.startsWith("#/") ||
+        (address?.origin === portal &&
+          address.pathname === BASE &&
+          framedNavigation(address.hash))
+          ? (address?.hash ?? stated)
+          : null;
       if (!to) return;
       event.preventDefault();
       if (claim(parseHash(to))) return;
@@ -41,7 +49,7 @@ export function useAppLinks(claim: (route: Route) => boolean): void {
     };
     document.addEventListener("click", onClick);
     return () => document.removeEventListener("click", onClick);
-  }, [claim]);
+  }, [claim, portal]);
 }
 
 /** One section screen standing as the whole page, its place in page state and seeded by the place the
@@ -84,6 +92,7 @@ export function SectionApp({
       },
       [tab, init.agentId],
     ),
+    init.portal,
   );
   return (
     <div

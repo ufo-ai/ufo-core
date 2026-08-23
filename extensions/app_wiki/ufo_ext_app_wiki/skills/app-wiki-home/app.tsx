@@ -215,11 +215,19 @@ function memberAt(opens: string[]): string | null {
  *  bullet opens stands in the track beside the page as the path the member took to it, so a second
  *  bullet takes the first record's place and reading two at once is asked for with a cmd- or
  *  middle-press. Each lane names the app it is read in, since a memory reaches the page through the
- *  app that filed it and one page draws several apps' memories. */
+ *  app that filed it and one page draws several apps' memories.
+ *
+ *  Standing on one member, the band names them under the crumb back to the page. That crumb is the
+ *  shell's own, carried in over the bridge, so the step it names is the step the portal's tab title
+ *  names and the page states no second answer to where it stands. Shutting the member's page is the
+ *  band's own way out, not the crumb: the crumb goes to an address and closing a page of the track is
+ *  a verb of the track. */
 function Wiki({
+  crumb,
   place,
   onPlace,
 }: {
+  crumb?: Crumb;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
@@ -233,7 +241,13 @@ function Wiki({
         {member === null ? (
           <Workspace viewer={viewer} opens={opens} onPlace={onPlace} />
         ) : (
-          <Member id={member} viewer={viewer} opens={opens} onPlace={onPlace} />
+          <Member
+            id={member}
+            viewer={viewer}
+            crumb={crumb}
+            opens={opens}
+            onPlace={onPlace}
+          />
         )}
       </div>
 
@@ -571,11 +585,13 @@ function People({
 function Member({
   id,
   viewer,
+  crumb,
   opens,
   onPlace,
 }: {
   id: string;
   viewer: string | null;
+  crumb?: Crumb;
   opens: string[];
   onPlace: (place: Placement) => void;
 }) {
@@ -611,12 +627,11 @@ function Member({
     <Header
       pinned
       heading={1}
-      parent={{
-        label: WIKI,
-        onGo: () => onPlace({ opens: closed(opens, MEMBER_PREFIX + id) }),
-      }}
+      crumb={crumb}
       title={found?.email ?? MEMBER}
       acts={<Acts updated={updated} onReload={() => setReloads((run) => run + 1)} />}
+      closes={found?.email ?? MEMBER}
+      onClose={() => onPlace({ opens: closed(opens, MEMBER_PREFIX + id) })}
     />,
   );
 
@@ -925,7 +940,9 @@ mountApp(document.getElementById("root")!, (init) => (
       label: "Wiki",
       remountOnPlace: false,
       ownsHeader: true,
-      render: (place, onPlace) => <Wiki place={place} onPlace={onPlace} />,
+      render: (place, onPlace) => (
+        <Wiki crumb={init.crumb} place={place} onPlace={onPlace} />
+      ),
     }}
   />
 ));

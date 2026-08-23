@@ -29,7 +29,12 @@ const {
 /** The chat app's page. Bare, it is a simple list of the member's conversations; opened at one,
  *  that conversation whole; opened at the compose target, the start screen — composer and
  *  starters — on the main agent, and the conversation a send founds takes the page over. A chat
- *  link inside a reply opens here; every other link leaves over the bridge. */
+ *  link inside a reply opens here; every other link leaves over the bridge.
+ *
+ *  Standing on one conversation, the band names it under the crumb back to the page. That crumb is
+ *  the shell's own, carried in over the bridge, so the step it names is the step the portal's tab
+ *  title names and the page states no second answer to where it stands — a conversation the list
+ *  holds for another app is still read inside this one. */
 
 const COMPOSE = "compose";
 
@@ -80,11 +85,15 @@ function ChatApp({
   appId,
   member,
   agents,
+  crumb,
+  portal,
 }: {
   arrived: WorkspacePlace;
   appId: string;
   member: Member;
   agents: Agent[];
+  crumb?: Crumb;
+  portal: string;
 }) {
   const mainAgent = useMainAgent();
   const [at, setAt] = useState<WorkspacePlace>(arrived);
@@ -208,6 +217,7 @@ function ChatApp({
       },
       [place],
     ),
+    portal,
   );
   if (shown.kind === "loading") return <PaneNote>Loading…</PaneNote>;
   if (shown.kind === "missing") {
@@ -289,6 +299,7 @@ function ChatApp({
         member={member}
         conversationId={shown.row.name}
         title={shown.row.title}
+        crumb={crumb}
         onActivity={() => {}}
       />
     );
@@ -310,5 +321,12 @@ function ChatApp({
 }
 
 mountApp(document.getElementById("root")!, (init, agents) => (
-  <ChatApp arrived={init.place} appId={init.agentId} member={init.member} agents={agents} />
+  <ChatApp
+    arrived={init.place}
+    appId={init.agentId}
+    member={init.member}
+    agents={agents}
+    crumb={init.crumb}
+    portal={init.portal}
+  />
 ));

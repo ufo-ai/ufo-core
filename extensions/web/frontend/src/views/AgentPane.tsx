@@ -14,6 +14,7 @@ import type { ChatRow } from "@/lib/rail";
 import { Chat } from "@/views/Chat";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { mergePlace, serializePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
+import { agentCrumb } from "@/lib/title";
 import type { Agent, Conversation, Homepage, Member } from "@/lib/types";
 
 /** What the half is called before a conversation exists to name it, and the act that starts one.
@@ -200,6 +201,10 @@ export function AgentPane({
   // `init` on a fresh frame and the bridge's own `place` message while the frame stands, because a
   // rail click lands on a page that already booted. It crosses whole: a frame handed one key of a
   // place could only stand the screen the address names by guessing the rest.
+  //
+  // The page's own step of the trail crosses with it, as the crumb its band draws over a name the
+  // shell never read. The app is where the page stands, so this is that step and the shell derives
+  // no second answer to it.
   const frameRef = useRef<HTMLIFrameElement>(null);
   const bridgeRef = useRef<BridgeHandle | null>(null);
   const framed = mergePlace(place, conversational ? { opens: undefined } : {});
@@ -256,6 +261,7 @@ export function AgentPane({
       member,
       agentId: agent.id,
       place: framedRef.current,
+      crumb: agentCrumb(agent),
       chatSurface: agent.app === CHAT_SURFACE,
       onCreated: (agentId, conversationId, title) =>
         foundedRef.current(agentId, conversationId, title),
@@ -461,4 +467,3 @@ export function AgentPane({
     </>
   );
 }
-

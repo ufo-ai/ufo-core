@@ -33,6 +33,7 @@ import type { Placement } from "@/kernel/pager";
 import type { Face, FacetGroup } from "@/kernel/pane";
 import type { PanelState } from "@/kernel/panel";
 import type { ChatRow } from "@/lib/rail";
+import type { Crumb } from "@/lib/title";
 import type { Agent, Member } from "@/lib/types";
 import type { PaneView } from "@/views/registry";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -147,6 +148,7 @@ export type {
   Agent,
   AppInit,
   ChatRow,
+  Crumb,
   Face,
   FacetGroup,
   Member,

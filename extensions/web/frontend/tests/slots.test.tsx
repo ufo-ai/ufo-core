@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useEffect, useState, type ReactNode } from "react";
-import { expect, test, vi } from "vitest";
+import { expect, test } from "vitest";
 
 import { SlotTrack, appended, beside, closed, opened, useSlot, type SlotKind } from "@/kernel/slots";
+import type { Crumb } from "@/lib/title";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 
 function Opener({ name, kind = "reading" }: { name: string; kind?: SlotKind }) {
@@ -50,15 +51,15 @@ function Held({
 function Standing({
   name,
   kind,
-  parent,
+  crumb,
   children,
 }: {
   name: string;
   kind: SlotKind;
-  parent?: { label: string; onGo?: () => void };
+  crumb?: Crumb;
   children: ReactNode;
 }) {
-  return useSlot(children, { id: name, kind, title: name, parent });
+  return useSlot(children, { id: name, kind, title: name, crumb });
 }
 
 /** A screen with a place: the address holds the track, every act writes it, and the lanes are drawn
@@ -583,14 +584,14 @@ test("a slot states its name, the kind of thing it holds, and how to shut it", a
 });
 
 /** A lane holding a record reached from a list is "Radar / morning-digest", and the crumb is what a
- *  lane paged one to a screen has instead of the lane that would otherwise stand to its left. At the
- *  floor the track shrinks a lane to there is room for exactly that band: the measure the name is
- *  guaranteed, and the way out beside it. */
-test("a lane names the surface it was reached from, and that band fits the lane's floor", async () => {
-  const went = vi.fn();
+ *  lane paged one to a screen has instead of the lane that would otherwise stand to its left. It
+ *  states where the record came from and shuts nothing: a lane on the screen is no address, and the
+ *  way out of the lane is its own verb. At the floor the track shrinks a lane to there is room for
+ *  exactly that band: the measure the name is guaranteed, and the way out beside it. */
+test("a lane names the surface it was reached from, and that band fits the lane's floor", () => {
   render(
     <SlotTrack>
-      <Standing name="morning-digest" kind="panel" parent={{ label: "Radar", onGo: went }}>
+      <Standing name="morning-digest" kind="panel" crumb={{ label: "Radar" }}>
         <p>the story</p>
       </Standing>
     </SlotTrack>,
@@ -599,8 +600,8 @@ test("a lane names the surface it was reached from, and that band fits the lane'
   const path = screen.getByRole("navigation", { name: "Breadcrumb" });
   expect(within(path).getByText("morning-digest").getAttribute("aria-current")).toBe("page");
   expect(path.parentElement!.className).toContain("min-w-(--container-title)");
-  await userEvent.click(within(path).getByRole("button", { name: "Back to Radar" }));
-  expect(went).toHaveBeenCalledOnce();
+  expect(path.textContent).toBe("Radar/morning-digest");
+  expect(within(path).queryByRole("link")).toBeNull();
 
   expect(
     token("--container-title") +

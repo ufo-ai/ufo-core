@@ -3,8 +3,8 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
-import { chatHash, type Route } from "@/lib/route";
-import { pageTitle } from "@/lib/title";
+import { agentHash, chatHash, type Route } from "@/lib/route";
+import { pageCrumb, pageTitle } from "@/lib/title";
 import type { OwnedConversation } from "@/lib/types";
 
 import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
@@ -30,6 +30,9 @@ const LINKED: OwnedConversation = {
 
 const titled = (route: Route, linked: Record<string, OwnedConversation> = {}) =>
   pageTitle(route, [AGENT, SECOND], [CHAT_ROW], linked, AGENT);
+
+const crumbed = (route: Route, linked: Record<string, OwnedConversation> = {}) =>
+  pageCrumb(route, [AGENT, SECOND], [CHAT_ROW], linked, AGENT);
 
 beforeEach(() => {
   useStreamFake();
@@ -66,6 +69,33 @@ test("a conversation is named by its own subject, and one still unread by the pr
   expect(titled({ kind: "chat", conversationId: "linked" }, { linked: LINKED })).toBe(
     "Ship the release · Assistant · ufo",
   );
+});
+
+/** A band draws the trail's innermost step as its own name, so its crumb is the step the tab title
+ *  states after that name: one derivation answers both, and the two cannot disagree. The step carries
+ *  the address it stands at, and a page that is its own landmark has no step above it. */
+test("the crumb is the step the tab title names after the page", () => {
+  expect(crumbed({ kind: "home" })).toEqual({ label: "Assistant", at: agentHash(AGENT_ID) });
+  expect(crumbed({ kind: "chat", conversationId: CONVO_ID })).toEqual({
+    label: "Assistant",
+    at: agentHash(AGENT_ID),
+  });
+  expect(crumbed({ kind: "chat", conversationId: "linked" }, { linked: LINKED })).toEqual({
+    label: "Assistant",
+    at: agentHash(AGENT_ID),
+  });
+  expect(crumbed({ kind: "workspace", view: "team", ...PLACE })).toEqual({ label: "Workspace" });
+  expect(crumbed({ kind: "agents" })).toBeUndefined();
+  expect(crumbed({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBeUndefined();
+});
+
+/** A conversation carried on an extension's own surface is held by an app no roster row of this
+ *  member's answers for, so the step names that app and stands at no address: there is nowhere for a
+ *  press to go, and the crumb is the name alone. */
+test("a step no roster row reaches is the app's name and nothing to press", () => {
+  const held = { ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "daily-brief" };
+  const route: Route = { kind: "chat", conversationId: CONVO_ID };
+  expect(pageCrumb(route, [AGENT], [held], {}, AGENT)).toEqual({ label: "Daily-Brief" });
 });
 
 test("the tab follows the hash the member opens", async () => {

@@ -36,15 +36,16 @@ export function BreadcrumbItem({ className, ...props }: ComponentProps<"li">) {
   );
 }
 
-/** A crumb the member can go back to. It is a button rather than an anchor because the portal
- *  moves by hash and the caller already holds the verb that gets there. */
-export function BreadcrumbLink({ className, ...props }: ComponentProps<"button">) {
+/** A crumb the member can go back to, drawn as the address it stands at: the step is navigation, so
+ *  it is an anchor a member can open in a second tab or press with a modifier, and inside a framed
+ *  page it is the link that page's own handler carries over the bridge. A step no address reaches is
+ *  not this — it is the landmark's name, and text is all it is. */
+export function BreadcrumbLink({ className, ...props }: ComponentProps<"a">) {
   return (
-    <button
-      type="button"
+    <a
       data-slot="breadcrumb-link"
       className={cn(
-        "m-0 border-0 bg-transparent p-0 text-inherit",
+        "m-0 cursor-pointer p-0 text-inherit no-underline",
         "transition-colors duration-100 ease-control hover:text-ink",
         className,
       )}

@@ -335,22 +335,24 @@ test("the kind's mark stands inside the name's measure, not beside it", () => {
 
 /** A band carrying a crumb ends it with the name, marked as the page the path leads to. Where the
  *  caller states no level the crumb is all it is, so a surface the landmark around it already names
- *  takes no second name. */
-test("a header with a parent and no level names the surface through the crumb alone", async () => {
-  const went = vi.fn();
-  render(<Header parent={{ label: "Reviewer", onGo: went }} title="Tracked issue" />);
+ *  takes no second name. The step is an address, so it is a link: pressing it is navigation, and a
+ *  member can take it into a second tab. */
+test("a header with a crumb and no level names the surface through the crumb alone", () => {
+  render(<Header crumb={{ label: "Reviewer", at: "#/agents/reviewer" }} title="Tracked issue" />);
 
   expect(screen.queryByRole("heading")).toBeNull();
   expect(screen.getByText("Tracked issue").getAttribute("aria-current")).toBe("page");
-  await userEvent.click(screen.getByRole("button", { name: "Back to Reviewer" }));
-  expect(went).toHaveBeenCalledOnce();
+  expect(screen.getByRole("link", { name: "Back to Reviewer" }).getAttribute("href")).toBe(
+    "#/agents/reviewer",
+  );
 });
 
 /** The crumb's last step and the heading are the same words, so a band that draws both draws one
  *  element: the leaf is the heading. A screen whose name is only ever a crumb would otherwise state
- *  no heading at all, and a heading drawn beside the crumb would say the place twice. */
-test("a header with a parent makes the crumb's leaf the heading the caller asked for", () => {
-  render(<Header heading={1} parent={{ label: "Wiki" }} title="member@example.com" />);
+ *  no heading at all, and a heading drawn beside the crumb would say the place twice. A step at no
+ *  address is the landmark's name and nothing to press: there is nowhere for a press to go. */
+test("a header with a crumb makes the crumb's leaf the heading the caller asked for", () => {
+  render(<Header heading={1} crumb={{ label: "Wiki" }} title="member@example.com" />);
 
   const head = screen.getByRole("heading", { level: 1, name: "member@example.com" });
   const path = screen.getByRole("navigation", { name: "Breadcrumb" });
@@ -358,6 +360,7 @@ test("a header with a parent makes the crumb's leaf the heading the caller asked
   expect(path.textContent).toBe("Wiki/member@example.com");
   expect(screen.getByText("member@example.com").getAttribute("aria-current")).toBe("page");
   expect(screen.getAllByRole("heading")).toHaveLength(1);
+  expect(screen.queryByRole("link")).toBeNull();
 });
 
 /** Where the band stands is what says whether it takes an inset, so no call site decides it twice.

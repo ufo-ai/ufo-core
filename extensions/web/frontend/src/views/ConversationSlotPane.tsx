@@ -3,10 +3,10 @@ import { useState } from "react";
 import { ArtifactText, isTextMedia } from "@/kernel/artifact";
 import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
-import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import { Markdown } from "@/lib/markdown";
 import { Moment } from "@/lib/moments";
+import type { Crumb } from "@/lib/title";
 import type { ConversationAgent } from "@/lib/types";
 import { formatSize } from "@/lib/size";
 
@@ -128,7 +128,7 @@ export function ConversationSlotPane({
   rootConversationId,
   summary,
   embedded = false,
-  onOpenAgent,
+  crumb,
 }: {
   agent: ConversationAgent;
   conversationId: string;
@@ -140,7 +140,8 @@ export function ConversationSlotPane({
    *  names it, since a second landmark inside that one, reading the same word, is a place a member
    *  moving by landmark arrives at twice. */
   embedded?: boolean;
-  onOpenAgent?: (agentId: string) => void;
+  /** The app holding the conversation this pane is one of, as the trail names it. */
+  crumb?: Crumb;
 }) {
   const inventory = usePanelRead<ConversationSlotsPayload>(
     summary || embedded ? null : slotsPath(agent.id, conversationId, rootConversationId),
@@ -177,11 +178,7 @@ export function ConversationSlotPane({
     <Pane className={COLUMN}>
       <Header
         heading={1}
-        parent={
-          onOpenAgent
-            ? { label: agentName(agent.name), onGo: () => onOpenAgent(agent.id) }
-            : undefined
-        }
+        crumb={crumb}
         title={label}
         note={
           resolved ? (

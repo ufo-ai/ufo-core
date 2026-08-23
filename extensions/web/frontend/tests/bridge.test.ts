@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 import { attachBridge, endpointFor, type BridgeHandle } from "@/lib/bridge";
+import { BASE } from "@/lib/api";
 import { framedNavigation } from "@/lib/route";
 import { heldRoute } from "@/lib/router";
 
@@ -8,6 +9,7 @@ const MEMBER = { email: "member@example.com", admin: true };
 const AGENT_ID = "11111111-1111-1111-1111-111111111111";
 const CONVERSATION_ID = "22222222-2222-2222-2222-222222222222";
 const PLACE = { q: "tokens", range: "90d", opens: [CONVERSATION_ID] };
+const CRUMB = { label: "Radar", at: "#/agents/" + AGENT_ID };
 
 /** A stand-in for the framed page's window: the shell compares sources by identity against
  *  `iframe.contentWindow` (or a window one level under it) and replies to the source itself. */
@@ -112,6 +114,23 @@ test("init carries the pane's whole place", async () => {
   deliver({ ufo: "ready" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(1));
   expect(posted[0]).toMatchObject({ ufo: "init", place: PLACE });
+});
+
+/** The page's own step of the trail crosses with it, so the band inside the frame names where the
+ *  member is with the words the tab title uses. It rides `init` and no further: a place change is a
+ *  new screen inside the page, not a new step above it. */
+test("init carries the addressed step the page stands at, and a place change does not", async () => {
+  const { iframe, posted } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID, crumb: CRUMB });
+  deliver({ ufo: "ready" }, iframe.contentWindow);
+  await vi.waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({
+    ufo: "init",
+    crumb: { ...CRUMB, at: new URL(CRUMB.at, location.origin + BASE).href },
+  });
+  bridge.place(PLACE);
+  await vi.waitFor(() => expect(posted).toHaveLength(3));
+  expect(posted[1]).toEqual({ ufo: "place", place: PLACE });
 });
 
 test("a tabled GET is forwarded and its payload returned", async () => {
