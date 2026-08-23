@@ -93,6 +93,7 @@ test("ready is answered with the member's own init payload", async () => {
     member: MEMBER,
     agentId: AGENT_ID,
     place: {},
+    open: null,
     portal: location.origin,
   });
 });
@@ -404,6 +405,7 @@ test("the doubly framed site's own window is answered directly", async () => {
     member: MEMBER,
     agentId: AGENT_ID,
     place: {},
+    open: null,
     portal: location.origin,
   });
   expect(posted[1]).toMatchObject({ ufo: "data", id: "r9", ok: true });
@@ -416,11 +418,12 @@ test("a place changing while the frame stands is posted, and a later ready carri
   deliver({ ufo: "ready" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(1));
   bridge.place(PLACE);
-  await vi.waitFor(() => expect(posted).toHaveLength(2));
-  expect(posted[1]).toEqual({ ufo: "place", place: PLACE });
-  deliver({ ufo: "ready" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(3));
-  expect(posted[2]).toMatchObject({ ufo: "init", place: PLACE });
+  expect(posted[1]).toEqual({ ufo: "place", place: PLACE });
+  expect(posted[2]).toEqual({ ufo: "open", target: CONVERSATION_ID });
+  deliver({ ufo: "ready" }, iframe.contentWindow);
+  await vi.waitFor(() => expect(posted).toHaveLength(4));
+  expect(posted[3]).toMatchObject({ ufo: "init", place: PLACE, open: CONVERSATION_ID });
 });
 
 test("a message from another window is ignored", async () => {

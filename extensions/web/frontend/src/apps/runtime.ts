@@ -14,6 +14,10 @@ export type AppInit = {
   /** The place the pane opened the page at, whole: the same record a portal tab stands on, so a page
    *  reads its screen off the address the member arrived with rather than off one field of it. */
   place: WorkspacePlace;
+  /** The place's first lane — the single-record reading a page that stands on one open target
+   *  takes, carried beside the whole record because a deployed page reads whichever of the two its
+   *  source was written against, and the kit serves every deployed page. */
+  open: string | null;
   /** The portal's origin, which is where the page's own loader fetched the kit from. */
   portal: string;
 };
@@ -132,6 +136,12 @@ export function founded(agentId: string, conversationId: string, title: string):
 
 /** The pane's place as it changes while the page stands — the live half of `init`'s `place`. Returns
  *  the unsubscribe. */
+/** The place's first lane as it changes while the page stands — the single-target reading of
+ *  `onPlaced`, for a page whose screen stands on one open record. Returns the unsubscribe. */
+export function onOpenTarget(listener: (target: string | null) => void): () => void {
+  return onPlaced((place) => listener(place.opens?.[0] ?? null));
+}
+
 export function onPlaced(listener: (place: WorkspacePlace) => void): () => void {
   PLACE_LISTENERS.add(listener);
   return () => {

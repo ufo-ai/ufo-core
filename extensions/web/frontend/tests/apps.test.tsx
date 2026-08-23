@@ -14,6 +14,7 @@ const INIT = {
   member: { email: MEMBER.email, admin: true },
   agentId: AGENT.id,
   place: {},
+  open: null,
   portal: location.origin,
 };
 
@@ -235,6 +236,7 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
             member: { email: MEMBER.email, admin: true },
             agentId: AGENT.id,
             place: {},
+            open: null,
             portal: location.origin,
           }}
           view={{
@@ -286,4 +288,15 @@ test("the kit publishes every route builder and the route-kind test", async () =
   expect(builders.length).toBeGreaterThan(0);
   for (const name of builders) expect(kit[name]).toBe(route[name]);
   expect(kit.routeIs).toBe(route.routeIs);
+});
+
+test("the open target is the place's first lane, live across place messages", async () => {
+  const runtime = await connected(() => {});
+  const seen: (string | null)[] = [];
+  cleanups.push(runtime.onOpenTarget((target) => seen.push(target)));
+
+  window.postMessage({ ufo: "place", place: { opens: ["run-1"] } }, "*");
+  await vi.waitFor(() => expect(seen).toContain("run-1"));
+  window.postMessage({ ufo: "place", place: {} }, "*");
+  await vi.waitFor(() => expect(seen).toContain(null));
 });

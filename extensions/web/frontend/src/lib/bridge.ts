@@ -277,6 +277,7 @@ export function attachBridge({
           member: { email: member.email, admin: member.admin },
           agentId,
           place: standing,
+          open: standing.opens?.[0] ?? null,
           portal: location.origin,
         });
         return;
@@ -448,6 +449,7 @@ export function attachBridge({
     place: (next: WorkspacePlace) => {
       standing = next;
       page?.postMessage({ ufo: "place", place: next }, { targetOrigin: "*" });
+      page?.postMessage({ ufo: "open", target: next.opens?.[0] ?? null }, { targetOrigin: "*" });
     },
   };
 }

@@ -18,7 +18,14 @@ import {
 
 import type { ReactNode } from "react";
 
-import { connect, founded, installShims, navigate, onPlaced } from "@/apps/runtime";
+import {
+  connect,
+  founded,
+  installShims,
+  navigate,
+  onOpenTarget,
+  onPlaced,
+} from "@/apps/runtime";
 import type { AppInit } from "@/apps/runtime";
 import { mountApp, SectionApp, useAppLinks } from "@/apps/shell";
 import type { ObjectAddress, ObjectRow } from "@/kernel/objects";
@@ -165,6 +172,7 @@ export {
   founded,
   installShims,
   navigate,
+  onOpenTarget,
   onPlaced,
   mountApp,
   SectionApp,
