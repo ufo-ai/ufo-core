@@ -36,6 +36,12 @@ locals {
   request_shutdown_seconds  = 30
   graceful_shutdown_seconds = 600
 
+  # The Datadog organization the fleet reports to, and the tag that separates this deploy's
+  # telemetry from testing's — worn by the collector's exports, the service checks, and the
+  # portal's recordings.
+  datadog_site = "us5.datadoghq.com"
+  datadog_env  = "prod"
+
   # The digest-pinned runtime image used by migration, proxy, and serve.
   bundle_image = "${module.platform.ecr_registry}/ufo@${data.aws_ecr_image.ufo.image_digest}"
 
@@ -152,10 +158,12 @@ resource "kubernetes_secret_v1" "ufo_serve" {
     namespace = local.system_namespace
   }
   data = {
-    "ufo.toml"                = local.serve_config
-    UFO_CONTROL_SERVE_DSN     = module.platform.serve_dsn
-    UFO_CREDENTIAL_KEY        = module.platform.serve_credential_key
-    UFO_ARTIFACT_TOKEN_SECRET = module.platform.serve_artifact_token
+    "ufo.toml"                 = local.serve_config
+    UFO_CONTROL_SERVE_DSN      = module.platform.serve_dsn
+    UFO_CREDENTIAL_KEY         = module.platform.serve_credential_key
+    UFO_ARTIFACT_TOKEN_SECRET  = module.platform.serve_artifact_token
+    UFO_WEB_RUM_APPLICATION_ID = datadog_rum_application.portal.id
+    UFO_WEB_RUM_CLIENT_TOKEN   = datadog_rum_application.portal.client_token
   }
   depends_on = [kubernetes_namespace_v1.ufo_system]
 }
@@ -276,11 +284,11 @@ data "kubectl_file_documents" "hosted" {
     slack_connect_enabled = var.slack_connect_enabled ? "true" : "false"
     slack_connect_team_id = var.slack_connect_team_id
 
-    # The portal records no browser session in production: the page it serves names no RUM
-    # application, so the recorder never runs.
-    rum_recording = false
-    rum_site      = ""
-    rum_env       = ""
+    # The portal records browser sessions into this deploy's own RUM application, which it reads
+    # from the ufo-serve Secret above.
+    rum_recording = true
+    rum_site      = local.datadog_site
+    rum_env       = local.datadog_env
   })
 }
 
@@ -308,8 +316,8 @@ data "kubectl_file_documents" "observability" {
     # 0.114.0 pinned by its amd64 digest: the :0.115.0 tag does not exist and the :0.116.0 build's
     # binary fails to exec on the nodes; this digest is verified running the datadog exporter.
     collector_image = "otel/opentelemetry-collector-contrib@sha256:94ac10da6c15fdad4f8091c4292a8c6814b467cd3bcf575ba2279e9dc6346e63"
-    dd_site         = "us5.datadoghq.com"
-    dd_env          = "prod"
+    dd_site         = local.datadog_site
+    dd_env          = local.datadog_env
     secret_api_keys = module.platform.secret_names.api_keys
   })
 }
