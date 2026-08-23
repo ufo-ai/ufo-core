@@ -68,6 +68,13 @@ type Shown =
   | { kind: "list"; rows: ConversationRow[]; walk: string | null }
   | { kind: "open"; row: ConversationRow };
 
+/** The conversation listing the page holds: walked once and again on a cursor page, and searched
+ *  to open a row without a read of its own. */
+type Listing =
+  | { kind: "loading" }
+  | { kind: "failed" }
+  | { kind: "ready"; rows: ConversationRow[]; walk: string | null };
+
 function ChatApp({
   arrived,
   appId,
@@ -83,50 +90,79 @@ function ChatApp({
   const [at, setAt] = useState<WorkspacePlace>(arrived);
   const wanted = wantedIn(at);
   const after = at.after ?? "";
+  // The listing, walked once and again only when the cursor pages — never when the open target
+  // changes. Held so opening a row resolves against it rather than re-walking it, and so a row the
+  // listing already carries — including a workspace-shared conversation the member does not own —
+  // opens without a second read that would not find it.
+  const [list, setList] = useState<Listing>({ kind: "loading" });
+  useEffect(() => {
+    let live = true;
+    setList({ kind: "loading" });
+    const params = new URLSearchParams({ order_by: "last_at", order: "desc", portal: "true" });
+    if (after) params.set("cursor", after);
+    void getJson<{ objects: ConversationRow[]; next_cursor: string | null }>(
+      "/objects/conversation?" + params.toString(),
+    ).then((answer) => {
+      if (!live) return;
+      setList(
+        answer.ok
+          ? { kind: "ready", rows: answer.payload.objects, walk: answer.payload.next_cursor }
+          : { kind: "failed" },
+      );
+    });
+    return () => {
+      live = false;
+    };
+  }, [after]);
+
   const [shown, setShown] = useState<Shown>({ kind: "loading" });
   useEffect(() => {
     if (wanted === COMPOSE) {
       setShown({ kind: "compose" });
       return;
     }
-    let live = true;
-    setShown((held) => (wanted === null && held.kind === "list" ? held : { kind: "loading" }));
-    const params = new URLSearchParams({ order_by: "last_at", order: "desc", portal: "true" });
-    if (after) params.set("cursor", after);
-    void getJson<{ objects: ConversationRow[]; next_cursor: string | null }>(
-      "/objects/conversation?" + params.toString(),
-    ).then(async (answer) => {
-      if (!live) return;
-      if (!answer.ok) {
-        setShown({ kind: "missing" });
-        return;
-      }
-      const rows = answer.payload.objects;
-      if (wanted === null) {
-        setShown({ kind: "list", rows, walk: answer.payload.next_cursor });
-        return;
-      }
-      const row = rows.find((entry) => entry.name === wanted);
-      if (row) {
-        setShown({ kind: "open", row });
-        return;
-      }
-      const sought = await getJson<{ chats: ResolvedChat[] }>(
-        "/api/chats?conversation=" + wanted,
+    if (wanted === null) {
+      // A cursor step is not a new screen: while the next page loads, the rows in hand stand rather
+      // than flashing a skeleton over the list the member was reading.
+      setShown((held) =>
+        list.kind === "ready"
+          ? { kind: "list", rows: list.rows, walk: list.walk }
+          : list.kind === "failed"
+            ? { kind: "missing" }
+            : held.kind === "list"
+              ? held
+              : { kind: "loading" },
       );
+      return;
+    }
+    if (list.kind === "loading") {
+      setShown((held) => (held.kind === "open" && held.row.name === wanted ? held : { kind: "loading" }));
+      return;
+    }
+    // Opening a conversation the listing already carries needs no read of its own — the row is in
+    // hand, workspace-shared rows included. Only one the listing does not carry is read by its own
+    // address, and a conversation no read answers states the miss.
+    const carried = list.kind === "ready" ? list.rows.find((row) => row.name === wanted) : undefined;
+    if (carried) {
+      setShown({ kind: "open", row: carried });
+      return;
+    }
+    let live = true;
+    setShown((held) => (held.kind === "open" && held.row.name === wanted ? held : { kind: "loading" }));
+    void getJson<{ chats: ResolvedChat[] }>("/api/chats?conversation=" + wanted).then((sought) => {
       if (!live) return;
-      const held = sought.ok ? sought.payload.chats[0] : undefined;
+      const chat = sought.ok ? sought.payload.chats[0] : undefined;
       setShown(
-        held
+        chat
           ? {
               kind: "open",
               row: {
-                name: held.conversation_id,
-                agent_id: held.agent_id,
-                agent_name: held.agent_name,
-                title: held.title,
-                surface: held.surface,
-                last_at: held.last_at,
+                name: chat.conversation_id,
+                agent_id: chat.agent_id,
+                agent_name: chat.agent_name,
+                title: chat.title,
+                surface: chat.surface,
+                last_at: chat.last_at,
               },
             }
           : { kind: "missing" },
@@ -135,7 +171,7 @@ function ChatApp({
     return () => {
       live = false;
     };
-  }, [wanted, after]);
+  }, [wanted, list]);
   useEffect(() => onPlaced(setAt), []);
   const place = useCallback(
     (target: string | null) => {

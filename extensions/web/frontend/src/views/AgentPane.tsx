@@ -3,7 +3,6 @@ import { IconMessage, IconSettings } from "@tabler/icons-react";
 
 import { attachBridge, type BridgeHandle } from "@/lib/bridge";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Header } from "@/kernel/pane";
 import { PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
@@ -15,21 +14,7 @@ import type { ChatRow } from "@/lib/rail";
 import { Chat } from "@/views/Chat";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { mergePlace, serializePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
-import type { Agent, Conversation, Member } from "@/lib/types";
-
-/** The homepage the app's binding names, the answer that one is being built, or the answer that
- *  it has none. `deploy_generation` bumps on every redeploy of the bound page, so the frame
- *  remounts onto fresh bytes at the same URL (RFC 0039 Contract 2); an older payload without it
- *  reads as 0. */
-type HomepageRead =
-  | { state: "set"; url: string; deploy_generation?: number }
-  | { state: "building" }
-  | { state: "none" };
-
-/** How often the half asks again while a homepage is being built. A build is minutes of work the
- *  member is watching for the end of, so the read runs faster than the pane's resting rate — and
- *  only while it is running, because the answer cannot change on its own once it has settled. */
-const BUILDING_POLL_MS = 5_000;
+import type { Agent, Conversation, Homepage, Member } from "@/lib/types";
 
 /** What the half is called before a conversation exists to name it, and the act that starts one.
  *  The act stands with the acts at the far end of the band, where every act on the whole surface
@@ -100,13 +85,32 @@ export function AgentPane({
   const [settles, setSettles] = useState(0);
   const viewer = useViewer();
   const agents = useAgents();
+  const target = place.opens?.[0];
+  // The boot read paints the page the instant an app opens, so switching apps never blocks on a
+  // homepage round-trip — the sidebar entry already knows the page. A background poll of only this
+  // app's page then keeps it live: a redeploy's new generation, or a first page arriving where
+  // there was none, lands within one poll rather than on the member's next reload, swapping the
+  // page the member has for the next one. An app with no page draws its conversation, never a
+  // placeholder — a page still building has simply not arrived, and the member talks to the app
+  // until it does.
+  const boot: Homepage = agent.homepage ?? { state: "none" };
+  const site = usePanelRead<Homepage>("/agents/" + agent.id + "/homepage", settles);
+  const home: Homepage = site.phase === "ready" ? site.payload : boot;
   // Two reads, each authoritative for a different question. The index says which conversations the
   // app has at all — every surface it has ever spoken on. The rail says which of them the portal
   // can carry on, because the chat transport answers only for a conversation the web surface
   // founded. Neither answers the other's question: an index row on Slack has no composer, and a
   // rail filtered to this app is not the app's history.
+  //
+  // The index is read only when a conversation is on screen: one the address opens, or — for an
+  // agent whose page is not set — the editing conversation the pane stands on by default, since
+  // there the conversation is the screen. An app showing its own set page with nothing open needs
+  // none of it, so switching between apps does not pull each one's conversation history; the chat
+  // toggle resumes the editing conversation from the rail the shell already holds.
   const listed = usePanelRead<{ conversations: Conversation[] }>(
-    "/agents/" + agent.id + "/conversations",
+    target !== undefined || home.state !== "set"
+      ? "/agents/" + agent.id + "/conversations"
+      : null,
     settles,
   );
   const rows = listed.phase === "ready" ? (listed.payload.conversations ?? []) : [];
@@ -134,7 +138,6 @@ export function AgentPane({
   // portal-side: the page is the screen that knows how to stand on it. An address naming nothing
   // opens the newest conversation the member can speak in, so arriving lands on the work rather
   // than on a list of it, and on an app they have only ever read, on the composer.
-  const target = place.opens?.[0];
   const conversational =
     target !== undefined && (target === FRESH || rows.some((entry) => entry.id === target));
   const held = conversational ? target : undefined;
@@ -155,10 +158,6 @@ export function AgentPane({
         : (rows.find((entry) => entry.id === editing?.conversation_id) ??
           rows.find((entry) => live.has(entry.id)) ??
           null)));
-  // The read polls at its own rate while a build is running, so the page arrives on its own rather
-  // than on the member's next reload; the rate is read off the last answer, so it drops back to the
-  // pane's resting one the moment the build settles.
-  const [building, setBuilding] = useState(false);
   // What the half is drawing, named rather than spelled inline: four states read as a chain of
   // conditions no one can follow. Nothing is drawn while the reads that decide are still in
   // flight — a composer put up for that frame is one the member could type into, and the words
@@ -171,24 +170,12 @@ export function AgentPane({
   const gated = opened !== null && !walled && !opened.readable && disclosed !== opened.id;
   const reading = opened !== null && !walled && !gated && live !== null && !live.has(opened.id);
 
-  const site = usePanelRead<HomepageRead>(
-    "/agents/" + agent.id + "/homepage",
-    settles,
-    building ? BUILDING_POLL_MS : undefined,
-  );
-  // A read that failed says so and stops claiming a build is running: a half stuck on the skeleton
-  // polls no more (the read gives up after a failure) and would never come back on its own.
-  const state = site.phase === "ready" ? site.payload.state : site.phase === "failed" ? "none" : null;
-  if (state !== null && building !== (state === "building")) setBuilding(state === "building");
-  const url = site.phase === "ready" && site.payload.state === "set" ? site.payload.url : null;
-  const generation =
-    site.phase === "ready" && site.payload.state === "set"
-      ? (site.payload.deploy_generation ?? 0)
-      : 0;
-  // The half stands for a homepage that exists and for one being made; an app that has neither
-  // draws one column, because a column whose only content is the sentence that it is empty takes
-  // half the screen to say what the app having no homepage already says.
-  const beside = url !== null || building;
+  const url = home.state === "set" ? home.url : null;
+  const generation = home.state === "set" ? (home.deploy_generation ?? 0) : 0;
+  // The half stands for a homepage that exists; an app with none draws one column, because a column
+  // whose only content is the sentence that it is empty takes half the screen to say what the app
+  // having no homepage already says.
+  const beside = url !== null;
   // A target the pane cannot hold is the page's to stand on — but an app with no page has nowhere
   // to hand it. A conversation the rail knows is drawn here under its own agent, so a rail click
   // works in the window before the app's page exists; anything else states the miss, because
@@ -205,7 +192,6 @@ export function AgentPane({
     !conversational &&
     !beside &&
     railAgent === null &&
-    state !== null &&
     listed.phase === "ready";
   // The bridge is how the framed page reads the member's data and drives navigation; it is bound to
   // the live frame and rebound when a redeploy remounts it under a new key, so each set of bytes
@@ -383,7 +369,6 @@ export function AgentPane({
       <>
         <section
           aria-label={agentName(agent.name) + " homepage"}
-          aria-busy={url === null}
           className="relative flex min-h-0 min-w-0 flex-1 flex-col"
         >
           {/* The page heads itself — it is the portal's own screen and draws the band a section
@@ -412,41 +397,40 @@ export function AgentPane({
               )}
               onClick={() =>
                 held === undefined
-                  ? onPlace({ ...place, opens: [opened?.id ?? FRESH] }, "push")
+                  ? onPlace(
+                      { ...place, opens: [opened?.id ?? editing?.conversation_id ?? FRESH] },
+                      "push",
+                    )
                   : onPlace({ ...place, opens: [] }, "replace")
               }
             >
               <IconMessage aria-hidden />
             </Button>
           </div>
-          {url === null ? (
-            <Building />
-          ) : (
-            /* The frame is the app's own trusted page and carries the sandbox around the
-               model-authored bytes itself, so these iframes take no sandbox attribute — sandbox
-               flags inherit, and the inner site is promised scripts. Each frame's key carries the
-               deploy generation, so a redeploy at the same URL mounts a fresh copy rather than
-               showing the page the member last loaded — arriving invisible over the standing one
-               and fading in on its own load, so the swap never paints the blank document. The box
-               and the frames wear the pane's own background and the portal's color-scheme, so what
-               shows through an empty frame is the pane rather than a browser's white canvas. */
-            <div className="relative min-h-0 flex-1 bg-surface">
-              {frames.map((frame, index) => (
-                <iframe
-                  key={frame.key}
-                  ref={index === frames.length - 1 ? frameRef : undefined}
-                  src={frame.url}
-                  title={agentName(agent.name) + " homepage"}
-                  onLoad={() => landed(frame.key)}
-                  className={cn(
-                    "absolute inset-0 size-full border-0 bg-surface",
-                    "transition-opacity duration-200 ease-out [color-scheme:light_dark]",
-                    frame.loaded ? "opacity-100" : "pointer-events-none opacity-0",
-                  )}
-                />
-              ))}
-            </div>
-          )}
+          {/* The frame is the app's own trusted page and carries the sandbox around the
+              model-authored bytes itself, so these iframes take no sandbox attribute — sandbox
+              flags inherit, and the inner site is promised scripts. Each frame's key carries the
+              deploy generation, so a redeploy at the same URL mounts a fresh copy rather than
+              showing the page the member last loaded — arriving invisible over the standing one
+              and fading in on its own load, so the swap never paints the blank document. The box
+              and the frames wear the pane's own background and the portal's color-scheme, so what
+              shows through an empty frame is the pane rather than a browser's white canvas. */}
+          <div className="relative min-h-0 flex-1 bg-surface">
+            {frames.map((frame, index) => (
+              <iframe
+                key={frame.key}
+                ref={index === frames.length - 1 ? frameRef : undefined}
+                src={frame.url}
+                title={agentName(agent.name) + " homepage"}
+                onLoad={() => landed(frame.key)}
+                className={cn(
+                  "absolute inset-0 size-full border-0 bg-surface",
+                  "transition-opacity duration-200 ease-out [color-scheme:light_dark]",
+                  frame.loaded ? "opacity-100" : "pointer-events-none opacity-0",
+                )}
+              />
+            ))}
+          </div>
         </section>
         {slot}
       </>
@@ -475,22 +459,6 @@ export function AgentPane({
     <>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">{conversation}</div>
     </>
-  );
-}
-
-/** The page while it is being written: the shape a page takes — a heading, a rule under it, a few
- *  lines of body — rather than a spinner, so the half holds the frame's own rhythm and the built
- *  page lands into a column the eye is already reading. The bars are three because the count says
- *  nothing about the page coming; what they say is that this half is a page and not a control. */
-function Building() {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-lg overflow-hidden p-2xl">
-      <Skeleton className="h-(--size-notice) w-2/5" />
-      <div className="border-b border-edge" />
-      <Skeleton className="h-(--size-notice) w-full" />
-      <Skeleton className="h-(--size-notice) w-full" />
-      <Skeleton className="h-(--size-notice) w-full" />
-    </div>
   );
 }
 

@@ -858,10 +858,19 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
-    _member_id, email, audience = resolved
+    member_id, email, audience = resolved
     grants = None
     if audience.admin:
         grants = await granted_emails(web_extension().store)
+    # The agent carries its homepage — an app's own page or the answer it has none — so a screen
+    # opens the page from the boot read and never asks per agent as the member moves between them.
+    # The bundle is digested and published once here; a deploy's next boot carries the fresh digest.
+    apps = apps_bundle(ctx)
+    await _assets_published(ctx.fleet_blob, apps)
+    homepages = {
+        agent.id: await _homepage_state(ctx, agent, member_id, audience.admin, apps)
+        for agent in audience.agents
+    }
     return JSONResponse(
         {
             "member": {"email": email, "admin": audience.admin},
@@ -873,6 +882,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "model": agent.model,
                     "icon": agent.icon,
                     "app": _app_slug(agent.provisioned_by),
+                    "homepage": homepages[agent.id],
                     **(
                         {"web_audience": list(grants.get(agent.id, ()))}
                         if grants is not None
@@ -4100,26 +4110,46 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
     own column is dormant while bound) and this handler applies the agent rule itself; a binding
     that no longer resolves and an agent that never bound one answer the same absent state.
 
-    Three states, because the page a member is waiting for is not the page that is not there:
-    `building` while the seed run that builds an agent's first homepage is still working, `set`
-    once a homepage is bound, and `none` where none exists and nothing is making one."""
+    Two states: `set` once a page is bound or shipped, and `none` where none exists yet — the pane
+    draws its conversation over `none` and polls until a page arrives, so a first build in flight is
+    simply a page not there yet, never a state of its own."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     member_id, _email, audience, agent_id = gated
     summary = next(a for a in audience.agents if a.id == agent_id)
-    if (
-        summary.visibility != "workspace"
-        and member_id != summary.owner_member_id
-        and not audience.admin
-    ):
-        return JSONResponse({"state": "none"})
+    apps = apps_bundle(ctx)
+    await _assets_published(ctx.fleet_blob, apps)
+    return JSONResponse(await _homepage_state(ctx, summary, member_id, audience.admin, apps))
+
+
+async def _homepage_state(
+    ctx: SurfaceContext,
+    summary: AgentSummary,
+    member_id: UUID,
+    admin: bool,
+    apps: tuple[dict[str, bytes], str],
+) -> dict[str, JsonValue]:
+    """One agent's homepage: `set` for a forked hosted_site row or the shipped bundle, `none` when
+    it has no page — a first page still building is simply `none` until it registers, and a page
+    being rebuilt keeps its prior version (the forked row's url and generation, or the bundle still
+    serving) so it answers `set` throughout. The boot index carries it on the agent object, so a
+    screen paints the page from what boot resolved; the granular `/homepage` route answers the same
+    shape for the pane's own poll, which lands a redeploy's new generation or a first page's arrival
+    within one poll. `apps` is the deploy-wide bundle the caller has already published, passed in so
+    a batch resolving every visible agent digests and publishes it once. The agent rule gates it — a
+    private agent's page answers `none` to anyone but its owner and an admin — the same rule the
+    frame gates each visit on, so the read never hands out a link that renders a refusal. A shipped
+    page's `deploy_generation` is the digest folded to a JS-safe int, so the frame's identity moves
+    onto the new bundle across the next boot."""
+    if summary.visibility != "workspace" and member_id != summary.owner_member_id and not admin:
+        return {"state": "none"}
     page = await ctx.list_member_objects(
         SITE_KIND,
-        agent_id,
+        summary.id,
         member_id,
         admin=True,
-        query=ObjectListQuery(filters={"homepage_agent": str(agent_id)}),
+        query=ObjectListQuery(filters={"homepage_agent": str(summary.id)}),
     )
     bound = (
         next((row for row in page.rows if "site_url" in row.fields), None)
@@ -4127,69 +4157,18 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
         else None
     )
     if bound is not None:
-        return JSONResponse(
-            {
-                "state": "set",
-                "url": bound.fields["site_url"],
-                "deploy_generation": bound.fields.get("deploy_generation", 0),
-            }
-        )
-    shipped = await _shipped_homepage(ctx, summary)
-    if shipped is not None:
-        return shipped
-    return JSONResponse(
-        {"state": "building"} if await _seeding_homepage(ctx, agent_id) else {"state": "none"}
-    )
-
-
-async def _shipped_homepage(ctx: SurfaceContext, summary: AgentSummary) -> Response | None:
-    """The shipped-app homepage for an app-slug agent with no forked row, or None for any other
-    agent — the second step of the homepage resolution, tried after a forked row and before the
-    seed path. The page is row-less: the current apps bundle is published (so the bytes are in the
-    fleet store before the link is handed out), and the read answers with a frame link carrying the
-    synthetic anchor's shipped claim (slug + current digest). `deploy_generation` is the digest
-    folded to a JS-safe int, so `AgentPane` remounts onto the new bundle the moment a deploy changes
-    it. None where the agent carries no app slug, its slug is not in the bundle, or the deploy hosts
-    no reachable link — each falling through to the seed/none answer the caller draws."""
+        return {
+            "state": "set",
+            "url": bound.fields["site_url"],
+            "deploy_generation": bound.fields.get("deploy_generation", 0),
+        }
     slug = _app_slug(summary.provisioned_by)
-    if slug is None:
-        return None
-    tree, digest = apps_bundle(ctx)
-    if f"{slug}/index.html" not in tree:
-        return None
-    await _assets_published(ctx.fleet_blob, (tree, digest))
-    url = shipped_site_url(ctx.public_base_url, ctx.workspace_id, summary.id, slug, digest)
-    if url is None:
-        return None
-    return JSONResponse({"state": "set", "url": url, "deploy_generation": int(digest[:13], 16)})
-
-
-async def _seeding_homepage(ctx: SurfaceContext, agent_id: UUID) -> bool:
-    """Whether the agent's first homepage is being built right now. The seed is the one build this
-    read can see: its marker holds the member the turn rode on behalf of, which with the agent is
-    the whole of the queue key it opened the conversation under, so the conversation's own latest
-    turn says whether the work is still running. A marker holding anything else — the settled note
-    for an agent whose allowlist withholds the site tools — names no conversation and is building
-    nothing.
-
-    A bound homepage answers `set` whatever its agent is doing, and deliberately. A rebuild asked
-    for in a portal chat runs in that chat's own sandbox and registers its own site row, so the
-    bound row's conversation is not where the work is happening; reading that conversation's turns
-    would answer `building` for every unrelated thing the member says to the app, and would still
-    miss the rebuild. Until a site carries a build state of its own, a page that exists is a page
-    this read hands over."""
-    acting = await web_extension().store.get(f"{HOMEPAGE_SEED_PREFIX}{agent_id}")
-    if not isinstance(acting, str):
-        return False
-    try:
-        member = UUID(acting)
-    except ValueError:
-        return False
-    conversation = await ctx.find_conversation(f"homepage/{agent_id}/{member}")
-    if conversation is None:
-        return False
-    turn = await ctx.latest_turn(conversation)
-    return turn is not None and not await ctx.turn_is_terminal(turn)
+    tree, digest = apps
+    if slug is not None and f"{slug}/index.html" in tree:
+        url = shipped_site_url(ctx.public_base_url, ctx.workspace_id, summary.id, slug, digest)
+        if url is not None:
+            return {"state": "set", "url": url, "deploy_generation": int(digest[:13], 16)}
+    return {"state": "none"}
 
 
 PREVIEW_KINDS = {

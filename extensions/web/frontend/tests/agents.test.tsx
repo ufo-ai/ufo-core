@@ -180,6 +180,31 @@ test("the opening message founds one conversation however many times the wizard 
   expect(StreamFake.opened.length).toBe(1);
 });
 
+test("an app page draws its homepage from the boot agent, without pulling its conversation index", async () => {
+  const SITE = { state: "set", url: "https://ingress.test/site", deploy_generation: 3 };
+  const RADAR = {
+    ...AGENT,
+    id: SECOND_ID,
+    name: "radar",
+    main: false,
+    app: "radar",
+    icon: "aten",
+    homepage: SITE,
+  };
+  const { calls } = wire({
+    "/api/agents": () => boot([AGENT, RADAR], ADMIN),
+    "/homepage": () => json(SITE),
+  });
+  render(<Portal />);
+  location.hash = "#/agents/" + SECOND_ID;
+
+  // The page rides the agent from the boot read — the frame carries boot's own url — so the pane
+  // does not pull the app's conversation index for a set page with nothing open.
+  const region = await screen.findByRole("region", { name: /radar homepage/i });
+  expect(region.querySelector("iframe")?.getAttribute("src")).toBe("https://ingress.test/site");
+  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
+});
+
 /** The opening send is not the only send that can found the run's conversation: when it fails, the
  *  member's own next message founds one, and the wizard has to be bound to that conversation or the
  *  pane keeps reading a store key the founding send already migrated away from. */
@@ -967,7 +992,9 @@ test("a status read that fails after answering keeps polling and recovers", asyn
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents";
+  // Off the apps pane, so the flyout is the only reader of the status route — the poll under test
+  // is its own, not one the pane also runs.
+  location.hash = "";
   vi.useFakeTimers();
   try {
     render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);

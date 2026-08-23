@@ -1,9 +1,21 @@
+/** An app's homepage: the frame link of the page it stands on, or the answer that it has none — a
+ *  page not yet built is simply none until it arrives. It rides the agent object for the pane's
+ *  instant paint, and a background poll of the same shape keeps it live. `deploy_generation` bumps
+ *  with the page's (re)deploy, so the frame's identity moves with a redeploy within one poll; an
+ *  older payload without it reads as 0. */
+export type Homepage =
+  | { state: "set"; url: string; deploy_generation?: number }
+  | { state: "none" };
+
 /** An agent as the boot read names it — the set a member may open and message. */
 export type Agent = {
   id: string;
   name: string;
   model: string;
   main: boolean;
+  /** The homepage the agent stands on, resolved once at boot and carried here. The boot read always
+   *  sends it; a payload without it (or an agent built without one) reads as having none. */
+  homepage?: Homepage;
   /** The mark this app is drawn with. `AGENT_ICONS` is the ordered set the picker offers and the
    *  bundle carries; any other name a tabler outline mark answers still draws. */
   icon: string;

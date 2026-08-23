@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import type { Agent } from "@/lib/types";
 
 import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, useStreamFake, wire } from "./harness";
 
@@ -37,16 +38,25 @@ beforeEach(() => {
   useStreamFake();
 });
 
-function open(routes: Parameters<typeof wire>[0]) {
-  wire({ "/transcript": () => json({ messages: [] }), ...routes });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+/** The main agent carrying its homepage the way the boot read does, for the pane's instant paint;
+ *  the wire answers the live `/homepage` poll that keeps it current. `open` sets both to the same
+ *  page unless a route overrides the poll — a redeploy drives the poll past what boot carried. */
+function withHome(homepage: unknown): Agent {
+  return { ...AGENT, homepage: homepage as Agent["homepage"] };
+}
+
+function open(routes: Parameters<typeof wire>[0], homepage?: unknown) {
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json(homepage ?? { state: "none" }),
+    ...routes,
+  });
+  render(<App agents={[withHome(homepage)]} member={MEMBER} onAgents={() => {}} />);
 }
 
 test("a set homepage frames the bound site beside the conversation", async () => {
   location.hash = "#/agents/" + AGENT_ID;
-  open({
-    "/homepage": () => json(SET),
-  });
+  open({}, SET);
 
   const frame = await screen.findByTitle("Assistant homepage");
   expect(frame.tagName).toBe("IFRAME");
@@ -72,13 +82,12 @@ test("a set homepage frames the bound site beside the conversation", async () =>
 test("a redeploy keeps the standing page until the fresh frame loads, then swaps", async () => {
   let generation = 1;
   location.hash = "#/agents/" + AGENT_ID;
-  wire({
-    "/transcript": () => json({ messages: [] }),
-    "/homepage": () => json({ ...SET, deploy_generation: generation }),
-  });
   vi.useFakeTimers();
   try {
-    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+    open(
+      { "/homepage": () => json({ ...SET, deploy_generation: generation }) },
+      { ...SET, deploy_generation: 1 },
+    );
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
       await Promise.resolve();
@@ -132,13 +141,12 @@ test("a redeploy keeps the standing page until the fresh frame loads, then swaps
 test("a load from a frame already being replaced does not resurrect it", async () => {
   let generation = 1;
   location.hash = "#/agents/" + AGENT_ID;
-  wire({
-    "/transcript": () => json({ messages: [] }),
-    "/homepage": () => json({ ...SET, deploy_generation: generation }),
-  });
   vi.useFakeTimers();
   try {
-    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+    open(
+      { "/homepage": () => json({ ...SET, deploy_generation: generation }) },
+      { ...SET, deploy_generation: 1 },
+    );
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
       await Promise.resolve();
@@ -175,9 +183,7 @@ test("a load from a frame already being replaced does not resurrect it", async (
  *  there, or the name and the way out would each be stated twice. */
 test("the conversation beside a page is headed by the lane it stands in", async () => {
   location.hash = "#/agents/" + AGENT_ID;
-  open({
-    "/homepage": () => json(SET),
-  });
+  open({}, SET);
 
   await screen.findByTitle("Assistant homepage");
   await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
@@ -192,11 +198,13 @@ test("the conversation beside a page is headed by the lane it stands in", async 
  *  there is, and the sidebar is the list of the rest. */
 test("the right-side chat carries no New act and no conversation menu", async () => {
   location.hash = "#/agents/" + AGENT_ID;
-  open({
-    "/homepage": () => json(SET),
-    ...chatsOnWire([CHAT_ROW]),
-    "/conversations$": () => json({ conversations: [LISTED] }),
-  });
+  open(
+    {
+      ...chatsOnWire([CHAT_ROW]),
+      "/conversations$": () => json({ conversations: [LISTED] }),
+    },
+    SET,
+  );
 
   await screen.findByTitle("Assistant homepage");
   expect(screen.queryByRole("region", { name: "Conversations" })).toBeNull();
@@ -213,22 +221,24 @@ test("the right-side chat carries no New act and no conversation menu", async ()
 test("the chat toggle opens the newest directive conversation", async () => {
   const newer = "66666666-6666-4666-8666-666666666666";
   location.hash = "#/agents/" + AGENT_ID;
-  open({
-    "/homepage": () => json(SET),
-    ...chatsOnWire([
-      CHAT_ROW,
-      {
-        ...CHAT_ROW,
-        conversation_id: newer,
-        title: "Bold titles",
-        last_at: "2026-08-09T09:00:00.000Z",
-      },
-    ]),
-    "/conversations$": () =>
-      json({
-        conversations: [LISTED, { ...LISTED, id: newer, description: "Bold titles" }],
-      }),
-  });
+  open(
+    {
+      ...chatsOnWire([
+        CHAT_ROW,
+        {
+          ...CHAT_ROW,
+          conversation_id: newer,
+          title: "Bold titles",
+          last_at: "2026-08-09T09:00:00.000Z",
+        },
+      ]),
+      "/conversations$": () =>
+        json({
+          conversations: [LISTED, { ...LISTED, id: newer, description: "Bold titles" }],
+        }),
+    },
+    SET,
+  );
 
   await screen.findByTitle("Assistant homepage");
   await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
@@ -240,9 +250,7 @@ test("the chat toggle opens the newest directive conversation", async () => {
  *  and the send that founds one makes it the editing chat from then on. */
 test("the chat toggle opens the composer when no directive conversation exists", async () => {
   location.hash = "#/agents/" + AGENT_ID;
-  open({
-    "/homepage": () => json(SET),
-  });
+  open({}, SET);
 
   await screen.findByTitle("Assistant homepage");
   await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
@@ -251,21 +259,41 @@ test("the chat toggle opens the composer when no directive conversation exists",
   expect(await screen.findByLabelText("Message the app")).toBeTruthy();
 });
 
-test("a homepage being built draws the page's shape rather than the page", async () => {
+/** An app whose page has not been built yet has none, and the pane draws its conversation — never a
+ *  build placeholder. When the first page registers, the poll lands it and the frame appears on its
+ *  own, without the member reloading. */
+test("an app whose first page arrives shows it without a reload", async () => {
   location.hash = "#/agents/" + AGENT_ID;
-  open({ "/homepage": () => json({ state: "building" }) });
+  let answer: unknown = { state: "none" };
+  vi.useFakeTimers();
+  try {
+    open({ "/homepage": () => json(answer) }, { state: "none" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // No page yet: the app's conversation stands, and there is no frame.
+    expect(screen.getByRole("region", { name: "Assistant" })).toBeTruthy();
+    expect(document.querySelector("iframe")).toBeNull();
 
-  const half = await screen.findByRole("region", { name: "Assistant homepage" });
-  expect(half.getAttribute("aria-busy")).toBe("true");
-  expect(half.querySelector("iframe")).toBeNull();
-  expect(half.querySelectorAll('[data-slot="skeleton"]').length).toBeGreaterThan(0);
-  // Nothing to open until the build settles.
-  expect(screen.queryByRole("link", { name: "Open Assistant homepage" })).toBeNull();
+    answer = SET;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const frame = screen.getByTitle("Assistant homepage");
+    expect(frame.tagName).toBe("IFRAME");
+    expect(frame.getAttribute("src")).toBe(HOMEPAGE_URL);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("an app with no homepage draws one column and no second half", async () => {
   location.hash = "#/agents/" + AGENT_ID;
-  open({ "/homepage": () => json({ state: "none" }) });
+  open({}, { state: "none" });
 
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
   expect(screen.queryByRole("region", { name: "Assistant homepage" })).toBeNull();

@@ -1,13 +1,15 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 
 import {
   AGENT,
+  ARRIVAL_ID,
+  CONVO_ID,
   MEMBER,
   NO_ARTIFACTS,
   NO_RUNS,
@@ -94,13 +96,14 @@ function shell(handler: (url: string, init?: RequestInit) => Response | Promise<
   return () => window.removeEventListener("message", listener);
 }
 
-async function runPage(app: string, routes: Record<string, Route>): Promise<void> {
+async function runPage(app: string, routes: Record<string, Route>): Promise<{ calls: string[] }> {
   vi.resetModules();
-  const { handler } = wire({ "/api/agents": () => json({ agents: [AGENT] }), ...routes });
+  const { calls, handler } = wire({ "/api/agents": () => json({ agents: [AGENT] }), ...routes });
   cleanups.push(shell(handler));
   const kit = await import("@/apps/kit");
   vi.stubGlobal("UfoAppKit", kit);
   new Function(kit.compile(pageSource(app)))();
+  return { calls };
 }
 
 const cleanups: (() => void)[] = [];
@@ -112,7 +115,14 @@ beforeEach(() => {
   document.body.innerHTML = '<div id="root"></div>';
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // The kit mounts each page on its own React root this harness cannot unmount, so drain the
+  // page's pending bridge round-trips and their React work here — while the shell and fetch it
+  // tunnels through still stand — rather than letting them fire after the test's jsdom is torn down
+  // (which surfaces as an unhandled `window is not defined`).
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
   for (const cleanup of cleanups.splice(0)) cleanup();
   window.fetch = nativeFetch;
   (window as { EventSource: typeof EventSource }).EventSource = nativeEventSource;
@@ -163,4 +173,52 @@ test("the chat page mounts and draws the empty conversation list", async () => {
   });
   expect(await screen.findByRole("heading", { name: "Chat" })).toBeTruthy();
   expect(await screen.findByText("No conversations yet.")).toBeTruthy();
+});
+
+test("the chat page opens a conversation without re-listing, and switching opens does not re-list", async () => {
+  const A = CONVO_ID;
+  const B = ARRIVAL_ID;
+  const conversationRow = (id: string, title: string) => ({
+    name: id,
+    agent_id: AGENT.id,
+    agent_name: AGENT.name,
+    title,
+    surface: "web",
+    last_at: "2026-08-01T09:00:00.000Z",
+  });
+  const resolvedChat = (id: string, title: string) => ({
+    conversation_id: id,
+    agent_id: AGENT.id,
+    agent_name: AGENT.name,
+    title,
+    surface: "web",
+    last_at: "2026-08-01T09:00:00.000Z",
+  });
+  const { calls } = await runPage("chat", {
+    "/objects/conversation": () =>
+      json({ objects: [conversationRow(A, "Alpha"), conversationRow(B, "Bravo")], next_cursor: null }),
+    "/api/chats": (url) =>
+      json({ chats: [url.includes(B) ? resolvedChat(B, "Bravo") : resolvedChat(A, "Alpha")] }),
+    "/transcript": () => json({ messages: [], earlier: 0 }),
+  });
+  const listReads = () => calls.filter((url) => url.includes("/objects/conversation")).length;
+
+  // Wait for the page to finish the bridge handshake and subscribe to place messages before
+  // driving one, or the post races the mount and is lost.
+  await screen.findByRole("heading", { name: "Chat" });
+
+  window.postMessage({ ufo: "place", place: { opens: [A] } }, "*");
+  await vi.waitFor(() =>
+    expect(calls.some((url) => url.includes("transcript") && url.includes(A))).toBe(true),
+  );
+  const listedForA = listReads();
+
+  window.postMessage({ ufo: "place", place: { opens: [B] } }, "*");
+  await vi.waitFor(() =>
+    expect(calls.some((url) => url.includes("transcript") && url.includes(B))).toBe(true),
+  );
+
+  // Switching the open target re-reads only the target's transcript — never the whole
+  // conversation listing, which the page already holds and the switch does not change.
+  expect(listReads()).toBe(listedForA);
 });
