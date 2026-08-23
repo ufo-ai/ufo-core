@@ -120,7 +120,6 @@ except ContainmentError as error:
 MAX_SITE_FILES = 1000
 MAX_SITE_TOTAL_BYTES = 100 * 1024 * 1024
 ENUMERATE_TIMEOUT_SECONDS = 120
-SOURCE_DETAIL_CHARS = 500
 ENUMERATE_PROG = """
 import hashlib
 import json
