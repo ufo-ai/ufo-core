@@ -40,6 +40,7 @@ from ufo.sandbox.session import (
     ExecResult,
     SandboxHandle,
     SandboxSpec,
+    host_argv,
     sbxfs_file_op,
 )
 
@@ -175,7 +176,7 @@ class LocalCarrier:
         own leaves its group alone: a backgrounded descendant outliving the exec that launched it
         is how a turn starts a server."""
         root = _root(handle)
-        rewritten = tuple(arg.replace(WORKSPACE_DIR, str(root)) for arg in argv)
+        rewritten = host_argv(argv, str(root))
         process = await asyncio.create_subprocess_exec(
             *rewritten,
             cwd=str(root),

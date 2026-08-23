@@ -38,6 +38,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
+    host_argv,
 )
 
 CLIENT_BACKEND = "client"
@@ -623,9 +624,7 @@ class TerminalCarrier:
         the same bundle by installing the CA into the system store, which a member's machine is
         never asked to accept."""
         root = _root(handle)
-        return await self._exec(
-            handle, tuple(arg.replace(WORKSPACE_DIR, root) for arg in argv), timeout_s
-        )
+        return await self._exec(handle, host_argv(argv, root), timeout_s)
 
     async def _exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int

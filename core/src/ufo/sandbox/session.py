@@ -9,9 +9,10 @@ holds no credential for."""
 import base64
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -21,24 +22,25 @@ from ufo.auth.token_signing import SignedTokenError, sign_token, verify_token
 
 WORKSPACE_DIR = "/workspace"
 WORKSPACE_WRITE_MODE = 0o644
+CONTAINMENT_SOURCE = (Path(__file__).parent / "containment.py").read_text()
 SANDBOX_MODULE_BOOTSTRAP = (
-    "import os, shutil, sys\n"
-    "_sbxfs = shutil.which('sbxfs')\n"
-    "if _sbxfs is None:\n"
-    "    raise SystemExit('sbxfs is not on PATH: this sandbox predates the containment guard')\n"
-    "sys.path.insert(0, os.path.dirname(_sbxfs))\n"
+    "import sys, types\n"
+    "containment = types.ModuleType('containment')\n"
+    "sys.modules['containment'] = containment\n"
+    f"exec(compile({CONTAINMENT_SOURCE!r}, 'containment.py', 'exec'), containment.__dict__)\n"
 )
-"""Put the directory holding the baked guard on `sys.path`, located through `sbxfs` because which
-directory that is differs by carrier. An image built before the guard was baked has neither, and
-what it does have is a workspace the agent writes — so the miss is named here and the program exits,
-rather than `dirname(None)` raising a TypeError that reads like a bug in the program itself."""
+"""Make the guard importable as `containment` by carrying its source in the program that needs it,
+so an in-sandbox program runs the guard this process ships and asks the sandbox for nothing but an
+interpreter. The alternative — reading it off a path — makes the guard whatever that sandbox holds:
+a member's own machine holds none, and an image holds the copy it was built with. The module is
+registered before its own source runs, the order an import itself uses: a dataclass in it resolves
+its module through `sys.modules` while the class is being built, and finds nothing otherwise."""
 SANDBOX_PYTHON_FLAG = "-I"
-"""Isolated mode, which is what makes the bootstrap above a hardening step rather than an ingress of
-its own: `python3 -c` otherwise puts the process cwd at `sys.path[0]`, and a carrier runs commands
-with cwd inside the workspace the agent writes to, so `import shutil` — then `import containment`
-itself — would resolve against a module the agent planted there, before the guard has checked
-anything. `-I` drops cwd and the `PYTHON*` variables from module resolution, leaving the stdlib and
-the directory the bootstrap names."""
+"""Isolated mode, which is what keeps the program's own imports out of the workspace: `python3 -c`
+otherwise puts the process cwd at `sys.path[0]`, and a carrier runs commands with cwd inside the
+workspace the agent writes to, so `import hashlib` — or `import base64`, or `os` — would resolve
+against a module the agent planted there, before the guard has checked anything. `-I` drops cwd and
+the `PYTHON*` variables from module resolution, leaving the stdlib."""
 COPY_IN_PROG = """
 import sys
 from containment import ContainmentError, contained_file
@@ -476,6 +478,26 @@ async def sbxfs_file_op(
     if isinstance(failure, str):
         raise ValueError(failure)
     return parsed
+
+
+WORKSPACE_ROOT_SEGMENT = re.compile(
+    r"(?<![\w.~%$@+)}-])" + re.escape(WORKSPACE_DIR) + r"(?![\w.-])"
+)
+
+
+def host_argv(argv: tuple[str, ...], root: str) -> tuple[str, ...]:
+    """The argv for a carrier whose `/workspace` is a host directory: every logical path in it
+    named under `root`.
+
+    A `/workspace` in argv text is rewritten only where it spans a whole path segment — nothing
+    continuing a name before it, nothing continuing one after. The substring also arrives as text
+    that is not this workspace, and each of those crosses untouched: a blob key under `workspaces/`
+    inside a presigned URL, a `$HOME/workspace` of the member's own, a sibling `/workspace-old`.
+    The signed URL is the sharp one — an upload PUTs exactly the key the store signed, so a rewrite
+    inside it sends a request nothing signed and the store answers 403, and the upload legs of
+    hosted publishing and file sharing both ride one.
+    """
+    return tuple(WORKSPACE_ROOT_SEGMENT.sub(lambda _: root, arg) for arg in argv)
 
 
 def workspace_path(path: str) -> str:

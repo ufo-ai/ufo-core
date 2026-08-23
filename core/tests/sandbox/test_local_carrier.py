@@ -10,6 +10,7 @@ interpreter present, no container."""
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -45,6 +46,9 @@ PROBE_ENV_HELPER = "probe-env-helper-that-never-runs"
 PROBE_PARAMS_HELPER = "probe-params-helper-that-never-runs"
 PROBE_ASKPASS_USER = "probe-askpass-user"
 PROMPTS_DISABLED = "terminal prompts disabled"
+PRESIGNED_PUT = 'curl -sS --fail-with-body -T "$1" --url "$2"'
+BARE_PATH = "/usr/bin:/bin"
+PAGE = "<!doctype html><title>hello</title>"
 LOOPBACK_PROBE = (
     "import urllib.request;"
     "print(urllib.request.urlopen('http://127.0.0.1:{port}/json/version', timeout=2).read())"
@@ -350,6 +354,41 @@ async def test_exec_reaches_a_service_on_the_sandbox_loopback(tmp_path: Path) ->
     assert "live!" in result.stdout
 
 
+async def test_an_upload_reaches_the_key_its_url_was_signed_for(tmp_path: Path) -> None:
+    """The upload leg of hosted publishing and file sharing: one `curl -T` over a workspace path
+    and a presigned URL, each its own argv element. Every blob key begins `workspaces/`, so the
+    logical root's name rides inside the signed URL — the path lands under the host root and the
+    URL arrives byte for byte, or the store gets a PUT for a key no signature covers and answers
+    403 with nothing wrong at the path end."""
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    (workspace / "index.html").write_text(PAGE)
+    stored: list[tuple[str, bytes]] = []
+
+    async def store(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = (await reader.readuntil(b"\r\n\r\n")).decode().split("\r\n")
+        headers = dict(line.split(": ", 1) for line in head[1:] if ": " in line)
+        body = await reader.readexactly(int(headers["Content-Length"]))
+        stored.append((head[0].split(" ")[1], body))
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(store, "127.0.0.1", 0)
+    key = f"workspaces/{uuid4()}/sites/hello/index.html"
+    url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/{key}?X-Amz-Signature=abc"
+    async with server:
+        result = await carrier.exec(
+            handle,
+            ("sh", "-c", PRESIGNED_PUT, "sh", f"{WORKSPACE_DIR}/index.html", url),
+            30,
+        )
+
+    assert result.exit_code == 0, result.stderr
+    assert stored == [(f"/{key}?X-Amz-Signature=abc", PAGE.encode())]
+
+
 async def test_write_creates_parents_for_a_payload_too_large_for_a_command_line(
     tmp_path: Path,
 ) -> None:
@@ -548,6 +587,35 @@ async def test_an_in_sandbox_program_cannot_be_pointed_at_a_planted_guard(tmp_pa
 
     reachable = await session.python(GUARD_PROBE_PROG, "/workspace/real.txt", "/workspace")
 
+    assert reachable.exit_code == 0 and "accepted" in reachable.stdout
+
+
+async def test_an_in_sandbox_program_carries_the_guard_it_runs(tmp_path: Path) -> None:
+    """A carrier whose sandbox is the member's own machine provisions nothing onto its PATH — the
+    terminal carrier ships no `sbxfs` there, since the file ops that would need it are the client's
+    own natively. The guard travels inside the program instead, so a program decides its verdict
+    with the module this process ships wherever it runs, and a sandbox holding no helper at all
+    still guards the paths it is handed. The system interpreter is the one a member's machine
+    answers `python3` with, which is what the program has to run under."""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "host-secret.txt"
+    outside.write_bytes(b"host secret")
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    bare = replace(handle, egress_env={**handle.egress_env, "PATH": BARE_PATH})
+    session = SandboxSession(carrier=carrier, handle=bare)
+    (workspace / "link.txt").symlink_to(outside)
+    (workspace / "real.txt").write_bytes(b"the workspace's own file")
+    _plant_fake_guard(workspace)
+
+    assert shutil.which("sbxfs", path=BARE_PATH) is None
+
+    refused = await session.python(GUARD_PROBE_PROG, "/workspace/link.txt", "/workspace")
+    reachable = await session.python(GUARD_PROBE_PROG, "/workspace/real.txt", "/workspace")
+
+    assert refused.exit_code == 1
+    assert "not a regular file" in refused.stderr
+    assert "accepted" not in refused.stdout
     assert reachable.exit_code == 0 and "accepted" in reachable.stdout
 
 

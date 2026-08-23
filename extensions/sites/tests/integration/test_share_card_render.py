@@ -23,7 +23,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from functools import cache
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -51,9 +50,7 @@ from ufo_ext_sites.share_card import (
 )
 from ufo_ext_sites.tools import PREVIEW_HEIGHT, PREVIEW_WIDTH
 
-from ufo.sandbox import containment
-from ufo.sandbox.local import SANDBOX_MODULES
-from ufo.sandbox.session import SANDBOX_PYTHON_FLAG
+from ufo.sandbox.session import SANDBOX_MODULE_BOOTSTRAP, SANDBOX_PYTHON_FLAG
 
 BROWSERS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
 CARD_BYTES_MAX = 5 * 1024 * 1024
@@ -125,12 +122,6 @@ DRAWN_PIXELS_MIN = 2000
 headline and a paragraph in black — measured above 17000 dark pixels at 1200x900 — and a capture at
 the load event drew exactly none, so this sits far below the one and far above the other."""
 DARK_VALUE = 128
-SBXFS = "sbxfs"
-SBXFS_STUB = "#!/bin/sh\nexit 0\n"
-"""What stands in for the baked `sbxfs`: the shipped bootstrap locates the guard by the directory
-that program sits in, and this module stages the guard itself, so the name has to be on PATH and
-never has to run."""
-
 PROBE_SECONDS = 10
 """The precondition's own wall. A browser that draws draws a page in well under a second, so this is
 long enough for the slowest cold start and short enough that a browser which never draws costs the
@@ -142,41 +133,17 @@ of its own, so the kill below does not reach it and it can hold these pipes open
 the wall this read must not sit behind. What is there is reported; what is not is given up."""
 
 
-@cache
-def _baked() -> Path:
-    """The directory the sandbox image bakes the guard in: the modules the carrier stages, and an
-    `sbxfs` beside them.
-
-    The shipped shot program imports `containment`, and the bootstrap it carries finds that module
-    by the directory `sbxfs` sits in — so a run of the shipped command needs both here, and this
-    directory goes on PATH for every one of them. Nothing else is put here: the guard's own source
-    directory is the `ufo.sandbox` package, which also carries `select.py`, and that name on the
-    path shadows the standard library module the driver polls the browser's pipe with."""
-    staged = Path(tempfile.mkdtemp(prefix="sandbox-modules-"))
-    source = Path(containment.__file__).parent
-    for name in SANDBOX_MODULES:
-        (staged / name).write_bytes((source / name).read_bytes())
-    stub = staged / SBXFS
-    stub.write_text(SBXFS_STUB)
-    stub.chmod(0o755)
-    return staged
-
-
 def _walled(command: list[str], wall: int) -> tuple[subprocess.CompletedProcess[str], bool]:
     """`command` under `wall` seconds, answering what it did and whether the wall ended it.
 
     The child gets its own process group: a stalled chromium leaves crashpad handlers holding the
-    pipes this read waits on, so killing the child alone would still hang until the job budget. Its
-    PATH carries the baked directory first, which is where the shipped program's own bootstrap looks
-    for the guard."""
+    pipes this read waits on, so killing the child alone would still hang until the job budget."""
     walled = False
-    environment = dict(os.environ, PATH=f"{_baked()}{os.pathsep}{os.environ['PATH']}")
     with subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=environment,
         start_new_session=True,
     ) as child:
         try:
@@ -264,18 +231,6 @@ def _dark(shot: Path) -> int:
 
 
 @pytest.fixture(scope="module")
-def guard() -> Path:
-    """The directory the child's `sys.path` gets: the modules the sandbox bakes, and nothing else.
-
-    `SANDBOX_MODULE_BOOTSTRAP` names the directory `sbxfs` sits in, and the carrier puts exactly
-    `SANDBOX_MODULES` there — so the guard is importable as `containment` and no other name is. The
-    guard's own source directory is the `ufo.sandbox` package, which also carries `select.py`: on
-    `sys.path[0]` that shadows the standard library `select` an interpreter builds `subprocess` on,
-    Pillow's JPEG plugin then fails to import, and the encode program exits non-zero."""
-    return _baked()
-
-
-@pytest.fixture(scope="module")
 def served(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     """The settle pages on loopback, with `NEVER_PATH` answering nothing, and the base url of them.
 
@@ -307,26 +262,30 @@ def served(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         server.server_close()
 
 
-def _program(guard: Path, program: str, *args: str) -> str:
+def _program(program: str, *args: str) -> str:
     """One of the shipped in-sandbox programs, run the way the sandbox runs it: isolated, with the
-    containment guard importable as `containment` — the module the image bakes beside `sbxfs`, which
-    the session's own bootstrap puts on the path the same way."""
-    bootstrap = f"import sys\nsys.path.insert(0, {str(guard)!r})\n"
+    guard importable as `containment` off the shipped bootstrap the program carries — the same text
+    the session prepends, so the module under test here is the module a sandbox gets."""
     result = _run(
         f"the in-sandbox program over {args}",
-        [sys.executable, SANDBOX_PYTHON_FLAG, "-c", bootstrap + program, *args],
+        [
+            sys.executable,
+            SANDBOX_PYTHON_FLAG,
+            "-c",
+            SANDBOX_MODULE_BOOTSTRAP + program,
+            *args,
+        ],
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
 
 
-def _compose(guard: Path, root: Path, name: str, shot: Path, drawn: str) -> tuple[Path, str]:
+def _compose(root: Path, name: str, shot: Path, drawn: str) -> tuple[Path, str]:
     """The composition exactly as `_compose` drives it in the sandbox: the page is written with the
     token in it, the program puts the shot in, chromium draws the card, the program encodes it."""
     page = root / "share-card.html"
     page.write_text(card_page(name, drawn))
     _program(
-        guard,
         PAGE_PROG.format(limit=SHOT_BYTES_MAX, token=SHOT_TOKEN),
         str(page),
         str(shot),
@@ -336,13 +295,12 @@ def _compose(guard: Path, root: Path, name: str, shot: Path, drawn: str) -> tupl
     card_png = root / "share-card.png"
     _shoot(str(page), CARD_WIDTH, CARD_HEIGHT, 1, card_png)
     card = root / "share-card.jpg"
-    digest = _program(guard, ENCODE_PROG.format(quality=86), str(card_png), str(card), str(root))
+    digest = _program(ENCODE_PROG.format(quality=86), str(card_png), str(card), str(root))
     return card, digest
 
 
 def test_the_card_is_the_measured_composition_at_the_size_every_platform_draws(
     tmp_path: Path,
-    guard: Path,
 ) -> None:
     """The card the deploy path produces, drawn for real from a shot taken at the card's own width.
 
@@ -354,7 +312,7 @@ def test_the_card_is_the_measured_composition_at_the_size_every_platform_draws(
     shot = root / "card-shot.png"
     _shoot(str(site), SHOT_WIDTH, CARD_HEIGHT, CARD_SHOT_SCALE, shot)
 
-    card, digest = _compose(guard, root, SITE_NAME, shot, CARD_SHOT_DRAWN)
+    card, digest = _compose(root, SITE_NAME, shot, CARD_SHOT_DRAWN)
 
     payload = card.read_bytes()
     assert digest == hashlib.sha256(payload).hexdigest()
@@ -370,10 +328,7 @@ def test_the_card_is_the_measured_composition_at_the_size_every_platform_draws(
     assert not _close(pixels.getpixel((CARD_WIDTH - 40, 8)), _rgb(VOID))
 
 
-def test_a_site_with_only_a_stored_page_shot_still_gets_a_card(
-    tmp_path: Path,
-    guard: Path,
-) -> None:
+def test_a_site_with_only_a_stored_page_shot_still_gets_a_card(tmp_path: Path) -> None:
     """The fallback path, for every site deployed before cards existed: the stored 1200x900 picture
     is drawn at 1:1 and cropped to the box from its top-left, never fitted into it — so the page's
     own text stays at the size it was rendered at."""
@@ -383,7 +338,7 @@ def test_a_site_with_only_a_stored_page_shot_still_gets_a_card(
     stored = root / "preview.png"
     _shoot(str(site), PREVIEW_WIDTH, PREVIEW_HEIGHT, 1, stored)
 
-    card, _digest = _compose(guard, root, SITE_NAME, stored, STORED_SHOT_DRAWN)
+    card, _digest = _compose(root, SITE_NAME, stored, STORED_SHOT_DRAWN)
 
     drawn = Image.open(card).convert("RGB")
     assert drawn.size == (CARD_WIDTH, CARD_HEIGHT)

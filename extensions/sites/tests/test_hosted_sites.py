@@ -86,6 +86,7 @@ from ufo_ext_sites.tools import (
     PREVIEW_WIDTH,
     PUBLISH_WEBSITE_TOOL,
     SET_HOMEPAGE_TOOL,
+    SOURCE_SKIP_NAMES,
 )
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import (
@@ -3437,6 +3438,7 @@ def test_the_enumeration_program_lists_and_bounds_the_source_tree(tmp_path: Path
                 str(tmp_path),
                 max_files,
                 max_bytes,
+                ",".join(SOURCE_SKIP_NAMES),
             ],
             capture_output=True,
             text=True,

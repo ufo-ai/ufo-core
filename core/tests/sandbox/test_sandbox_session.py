@@ -30,6 +30,7 @@ from ufo.sandbox.session import (
     SandboxSession,
     SandboxSpec,
     egress_proxy_env,
+    host_argv,
 )
 from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BashInput, bash_handler
@@ -228,6 +229,38 @@ def test_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
     authorized = base.authorize(member, frozenset(), {})
 
     assert authorized.handle.turn_id == turn_id
+
+
+def test_host_argv_names_a_logical_path_under_the_host_root() -> None:
+    root = "/Users/member/proj"
+
+    assert host_argv(("cat", f"{WORKSPACE_DIR}/hello/index.html"), root) == (
+        "cat",
+        "/Users/member/proj/hello/index.html",
+    )
+    assert host_argv(
+        ("bash", "-lc", f'cd {WORKSPACE_DIR} && cat "{WORKSPACE_DIR}/a.txt"'), root
+    ) == ("bash", "-lc", 'cd /Users/member/proj && cat "/Users/member/proj/a.txt"')
+    assert host_argv(
+        (f"PYTHONPATH=/lib:{WORKSPACE_DIR}/pkg", f"file://{WORKSPACE_DIR}/staged"), root
+    ) == ("PYTHONPATH=/lib:/Users/member/proj/pkg", "file:///Users/member/proj/staged")
+
+
+def test_host_argv_leaves_the_substring_that_is_not_this_workspace() -> None:
+    """Every blob key begins `workspaces/`, so a presigned URL carries the substring inside text a
+    signature covers: naming that under the host root PUTs a key nothing signed and the store
+    answers 403. A path of the member's own that merely reads like the name is theirs too."""
+    untouched = (
+        "https://bucket.s3.amazonaws.com/workspaces/f795c197/sites/i.html?X-Amz-Signature=a",
+        "sites/workspaces/nested",
+        "$HOME/workspace",
+        "${HOME}/workspace",
+        "./workspace",
+        "/workspace-old/index.html",
+        "/workspaces",
+    )
+
+    assert host_argv(untouched, "/Users/member/proj") == untouched
 
 
 class _RecordingCarrier:

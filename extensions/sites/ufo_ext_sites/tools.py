@@ -109,6 +109,12 @@ except ContainmentError as error:
 MAX_SITE_FILES = 1000
 MAX_SITE_TOTAL_BYTES = 100 * 1024 * 1024
 ENUMERATE_TIMEOUT_SECONDS = 120
+SOURCE_SKIP_NAMES = (".git", "node_modules", "__pycache__", ".venv", ".DS_Store")
+"""What a page's directory holds that the page is not. A member names the directory they built in —
+a repository checkout on their own machine under the terminal carrier, so the walk meets the tree
+they work in — and its history, its installed packages and its caches are neither bytes a visitor
+asks for nor bytes the caps were written for: `.git` alone can outrun both, and every byte that
+lands in the store is served at the site's own origin."""
 ENUMERATE_PROG = """
 import hashlib
 import json
@@ -118,6 +124,7 @@ from containment import ContainmentError, NotRegularFile, contained_dir, contain
 
 project, workspace = sys.argv[1], sys.argv[2]
 max_files, max_bytes = int(sys.argv[3]), int(sys.argv[4])
+skipped = set(sys.argv[5].split(","))
 try:
     root = contained_dir(project, workspace)
 except ContainmentError as error:
@@ -125,10 +132,14 @@ except ContainmentError as error:
 files = {}
 total = 0
 for base, dirs, names in os.walk(root):
-    dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(base, name))]
+    dirs[:] = [
+        name
+        for name in dirs
+        if name not in skipped and not os.path.islink(os.path.join(base, name))
+    ]
     for name in names:
         full = os.path.join(base, name)
-        if os.path.islink(full):
+        if name in skipped or os.path.islink(full):
             continue
         path = os.path.relpath(full, root).replace(os.sep, "/")
         digest = hashlib.sha256()
@@ -391,14 +402,16 @@ def _site_media_type(path: str) -> str:
 
 
 async def _source_listing(ctx: ToolContext, project: str) -> dict[str, dict[str, object]]:
-    """Every regular file under the project directory, sized and digested inside the sandbox —
-    where the bytes are — and refused there when the tree outgrows what a static site may hold."""
+    """Every regular file under the project directory that a visitor could ask for, sized and
+    digested inside the sandbox — where the bytes are — and refused there when the tree outgrows
+    what a static site may hold. `SOURCE_SKIP_NAMES` is what the walk does not descend into."""
     listed = await ctx.sandbox.python(
         ENUMERATE_PROG,
         project,
         WORKSPACE_DIR,
         str(MAX_SITE_FILES),
         str(MAX_SITE_TOTAL_BYTES),
+        ",".join(SOURCE_SKIP_NAMES),
         timeout_s=ENUMERATE_TIMEOUT_SECONDS,
     )
     if listed.exit_code != 0:

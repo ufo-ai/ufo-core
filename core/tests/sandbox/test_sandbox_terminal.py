@@ -295,6 +295,42 @@ async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply(
     assert result.exit_code == 0 and result.stdout == "out\n"
 
 
+async def test_exec_keeps_a_presigned_url_whole_beside_the_path_it_uploads() -> None:
+    """A member's machine is where the upload leg of hosted publishing runs: `curl -T` over a
+    workspace path and a presigned URL, each its own argv element. Every blob key begins
+    `workspaces/`, so the logical root's name rides inside a URL a signature covers — the path is
+    named under the bound directory and the URL crosses byte for byte, or the store gets a PUT for
+    a key no signature covers and answers 403."""
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/Users/member/proj", None)
+    handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
+    url = "https://bucket.s3.amazonaws.com/workspaces/f795c197/sites/i.html?X-Amz-Signature=a"
+    script = 'curl -sS --fail-with-body -T "$1" --url "$2"'
+    reply = json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode()
+
+    running = asyncio.ensure_future(
+        carrier.exec(
+            handle,
+            ("sh", "-c", script, "sh", f"{WORKSPACE_DIR}/index.html", url),
+            timeout_s=30,
+        )
+    )
+    await asyncio.sleep(0)
+    op = await _answer(terminals, conversation_id, reply)
+    await running
+
+    assert _op_params(op)["argv"] == [
+        "sh",
+        "-c",
+        script,
+        "sh",
+        "/Users/member/proj/index.html",
+        url,
+    ]
+
+
 async def test_exec_decodes_a_base64_reply() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
