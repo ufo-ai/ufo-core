@@ -108,6 +108,7 @@ MAX_IMAGES_PER_MESSAGE = 20
 MAX_IMAGES_PER_REQUEST = 100
 MAX_IMAGE_BYTES_PER_REQUEST = 20 * 1024 * 1024
 IMAGE_OMITTED_TEXT = "[image omitted: over the provider image limit]"
+IMAGE_UNSUPPORTED_TEXT = "[image omitted: model accepts text input only]"
 
 
 class Message(BaseModel):
@@ -233,7 +234,21 @@ def trim_images(messages: tuple[Message, ...]) -> tuple[Message, ...]:
     drop = set(positions) - within_budget
     if not drop:
         return messages
-    return tuple(_trim_message(index, message, drop) for index, message in enumerate(messages))
+    return tuple(
+        _trim_message(index, message, drop, IMAGE_OMITTED_TEXT)
+        for index, message in enumerate(messages)
+    )
+
+
+def omit_images(messages: tuple[Message, ...]) -> tuple[Message, ...]:
+    """Replace every image with an explicit text marker for a model that accepts text input only."""
+    drop = set(_image_positions(messages))
+    if not drop:
+        return messages
+    return tuple(
+        _trim_message(index, message, drop, IMAGE_UNSUPPORTED_TEXT)
+        for index, message in enumerate(messages)
+    )
 
 
 def _image_data_len(messages: tuple[Message, ...], position: tuple[int, int, int | None]) -> int:
@@ -274,20 +289,23 @@ def _image_positions(
 
 
 def _trim_message(
-    message_index: int, message: Message, drop: set[tuple[int, int, int | None]]
+    message_index: int,
+    message: Message,
+    drop: set[tuple[int, int, int | None]],
+    replacement: str,
 ) -> Message:
     if isinstance(message.content, str):
         return message
     blocks: list[ContentBlock] = []
     for block_index, block in enumerate(message.content):
         if (message_index, block_index, None) in drop:
-            blocks.append(TextBlock(text=IMAGE_OMITTED_TEXT))
+            blocks.append(TextBlock(text=replacement))
         elif isinstance(block, ToolResultBlock) and isinstance(block.content, tuple):
             blocks.append(
                 block.model_copy(
                     update={
                         "content": tuple(
-                            TextBlock(text=IMAGE_OMITTED_TEXT)
+                            TextBlock(text=replacement)
                             if (message_index, block_index, sub_index) in drop
                             else part
                             for sub_index, part in enumerate(block.content)

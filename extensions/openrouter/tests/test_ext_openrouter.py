@@ -36,10 +36,14 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.ext.context import context_for
 from ufo.models.interface import (
+    IMAGE_UNSUPPORTED_TEXT,
+    ImageBlock,
+    ImageSource,
     Message,
     ModelRequest,
     ModelResponseTruncated,
     ModelStreamStart,
+    TextBlock,
     TextDelta,
     ToolResultBlock,
     ToolSchema,
@@ -352,6 +356,42 @@ def test_google_tool_result_at_the_size_cap_does_not_exceed_the_parser_depth() -
     assert json.loads(rendered[-1]["content"]) == {"text": result}
 
 
+def test_text_only_model_omits_tool_result_images_before_provider_call() -> None:
+    spec = {item.id: item for item in openrouter.OPENROUTER_MODEL_SPECS}["z-ai/glm-5.3"]
+    request = REQUEST.model_copy(
+        update={
+            "model": spec.id,
+            "messages": (
+                Message(role="user", content="inspect"),
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id="c1", name="browser", input={}),),
+                ),
+                Message(
+                    role="user",
+                    content=(
+                        ToolResultBlock(
+                            tool_use_id="c1",
+                            content=(
+                                TextBlock(text="audit passed"),
+                                ImageBlock(source=ImageSource(media_type="image/png", data=PNG)),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        }
+    )
+
+    messages = _client(ScriptedCreate([]), spec)._create_kwargs(request, frozenset())["messages"]
+
+    assert messages[-1] == {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": f"audit passed\n{IMAGE_UNSUPPORTED_TEXT}",
+    }
+
+
 async def test_dead_provider_completion_reroutes_excluding_that_provider() -> None:
     dead = [_chunk(finish="stop", provider="deadco"), _chunk(usage=_usage(1, 0))]
     good = [_chunk(content="recovered"), _chunk(finish="stop"), _chunk(usage=_usage(2, 3))]
@@ -386,11 +426,26 @@ def test_manifest_registers_slug_pinned_specs() -> None:
         "google/gemini-3.7-flash",
         "google/gemini-2.5-pro",
         "z-ai/glm-5.2",
+        "z-ai/glm-5.3",
         "moonshotai/kimi-k3",
         "anthropic/claude-fable-5",
     }
     assert by_id["z-ai/glm-5.2"].price.output == 3_000_000
     assert by_id["z-ai/glm-5.2"].knowledge_cutoff == "2026-03"
+
+
+def test_glm_53_spec_carries_its_route_price_window_and_required_reasoning() -> None:
+    spec = {s.id: s for s in openrouter.manifest().models}["z-ai/glm-5.3"]
+    assert openrouter.openrouter_slug(spec.id) == "z-ai/glm-5.3"
+    assert spec.price.input == 1_400_000
+    assert spec.price.output == 4_400_000
+    assert spec.price.cache_read == 260_000
+    assert spec.context_window == 1_048_576
+    assert spec.reasoning.default_on
+    assert not spec.reasoning.can_disable
+    assert not spec.accepts_image_input
+    assert spec.wire_reasoning("off", ()) == "low"
+    assert spec.wire_reasoning("high", ()) == "high"
 
 
 def test_gemini_37_flash_spec_carries_its_route_price_window_and_reasoning() -> None:
@@ -403,6 +458,7 @@ def test_gemini_37_flash_spec_carries_its_route_price_window_and_reasoning() -> 
     assert spec.knowledge_cutoff == "2026-03"
     assert spec.reasoning.default_on
     assert not spec.reasoning.can_disable
+    assert spec.accepts_image_input
     assert spec.wire_reasoning("off", ()) == "low"
     assert spec.wire_reasoning("high", ()) == "high"
 

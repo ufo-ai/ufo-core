@@ -29,6 +29,7 @@ from ufo.models.anthropic import AnthropicClient, anthropic_sdk_client
 from ufo.models.catalog import core_model_specs
 from ufo.models.interface import (
     IMAGE_OMITTED_TEXT,
+    IMAGE_UNSUPPORTED_TEXT,
     ImageBlock,
     ImageSource,
     Message,
@@ -45,6 +46,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolSchema,
     ToolUseBlock,
+    omit_images,
     trim_images,
 )
 from ufo.models.openai import MAX_EMPTY_PROVIDER_RETRIES as OPENAI_MAX_EMPTY_RETRIES
@@ -487,6 +489,26 @@ def test_trim_images_trims_images_nested_in_a_tool_result() -> None:
     dropped = [part for part in parts if isinstance(part, TextBlock)]
     assert len(kept) == 20 and len(dropped) == 2
     assert kept[0].source.data == "2"
+
+
+def test_omit_images_replaces_top_level_and_nested_images() -> None:
+    result = ToolResultBlock(
+        tool_use_id="t1",
+        content=(TextBlock(text="audit passed"), *_images(1)),
+    )
+    messages = (
+        Message(role="user", content=_images(1)),
+        Message(role="user", content=(result,)),
+    )
+
+    omitted = omit_images(messages)
+
+    assert omitted[0].content == (TextBlock(text=IMAGE_UNSUPPORTED_TEXT),)
+    nested = omitted[1].content[0].content
+    assert nested == (
+        TextBlock(text="audit passed"),
+        TextBlock(text=IMAGE_UNSUPPORTED_TEXT),
+    )
 
 
 async def test_anthropic_maps_deltas_then_single_usage() -> None:

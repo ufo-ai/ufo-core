@@ -42,8 +42,9 @@ class ReasoningSupport:
 @dataclass(frozen=True)
 class ModelSpec:
     """Everything one model is: its provider and client builder, its price, its knowledge cutoff,
-    its context window, its reasoning capability, and the api surface it is called on. The registry
-    keys these by `id`; a seam reads `registry.spec(id).<fact>` instead of owning a per-model dict.
+    its context window, its reasoning and image-input capabilities, and the api surface it is
+    called on. The registry keys these by `id`; a seam reads `registry.spec(id).<fact>` instead of
+    owning a per-model dict.
 
     `client` builds the `ModelClient` from this spec and the api key the registry resolves, once per
     turn. `knowledge_cutoff` is a machine date (`YYYY-MM`) rendered to a human month at the prompt
@@ -60,6 +61,7 @@ class ModelSpec:
     api_surface: ApiSurface
     key_slot: str = ""
     key_env: str = ""
+    accepts_image_input: bool = True
 
     def __post_init__(self) -> None:
         if not KNOWLEDGE_CUTOFF_RE.match(self.knowledge_cutoff):

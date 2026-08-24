@@ -49,6 +49,7 @@ from ufo.sdk.models import (
     ToolCallStart,
     ToolResultBlock,
     Usage,
+    omit_images,
     openai_messages,
     openai_sdk_client,
 )
@@ -315,8 +316,13 @@ def _contains_json_reference(value: object) -> bool:
 
 
 def _openrouter_messages(
-    model: str, system: str, messages: tuple[Message, ...]
+    model: str,
+    system: str,
+    messages: tuple[Message, ...],
+    accepts_image_input: bool,
 ) -> list[dict[str, object]]:
+    if not accepts_image_input:
+        messages = omit_images(messages)
     rendered = openai_messages(system, messages)
     if not openrouter_slug(model).startswith("google/"):
         return rendered
@@ -484,7 +490,12 @@ class OpenRouterModelClient:
             extra_body["provider"] = {"ignore": sorted(ignore_providers)}
         kwargs: dict[str, Any] = {
             "model": openrouter_slug(request.model),
-            "messages": _openrouter_messages(request.model, request.system, request.messages),
+            "messages": _openrouter_messages(
+                request.model,
+                request.system,
+                request.messages,
+                self.spec.accepts_image_input,
+            ),
             "max_tokens": request.max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -518,6 +529,7 @@ def _openrouter(
     cutoff: str,
     context_window: int = OPENROUTER_CONTEXT_WINDOW,
     reasoning: ReasoningSupport = _REASONS,
+    accepts_image_input: bool = True,
 ) -> ModelSpec:
     return ModelSpec(
         id=id,
@@ -530,6 +542,7 @@ def _openrouter(
         api_surface="chat",
         key_slot=OPENROUTER_KEY_SLOT,
         key_env=OPENROUTER_API_KEY_ENV,
+        accepts_image_input=accepts_image_input,
     )
 
 
@@ -550,6 +563,15 @@ OPENROUTER_MODEL_SPECS = (
         "z-ai/glm-5.2",
         ModelPrice(1_000_000, 3_000_000, 0, 0, 0),
         "2026-03",
+        accepts_image_input=False,
+    ),
+    _openrouter(
+        "z-ai/glm-5.3",
+        ModelPrice(1_400_000, 4_400_000, 260_000, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
+        accepts_image_input=False,
     ),
     _openrouter(
         "moonshotai/kimi-k3",

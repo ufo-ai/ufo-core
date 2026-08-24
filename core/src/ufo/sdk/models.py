@@ -63,6 +63,9 @@ from ufo.models.interface import (
     ToolUseBlock as ToolUseBlock,
 )
 from ufo.models.interface import (
+    omit_images as omit_images,
+)
+from ufo.models.interface import (
     trim_images as trim_images,
 )
 from ufo.models.openai import (
