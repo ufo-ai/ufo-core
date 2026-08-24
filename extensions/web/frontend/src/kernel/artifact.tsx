@@ -8,6 +8,7 @@ import {
 import { useEffect, useState, type ReactNode } from "react";
 
 import { buttonVariants } from "@/components/ui/button";
+import { Waiting } from "@/kernel/panel";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/cn";
 import { formatSize } from "@/lib/size";
@@ -232,7 +233,12 @@ export function ArtifactText({
   const { body, bounded, message } = useTextArtifact(url, byteLimit);
 
   if (message) return <div className="font-mono text-small text-ink-soft">{message}</div>;
-  if (body === null) return <div>Loading…</div>;
+  if (body === null)
+    return (
+      <div>
+        <Waiting />
+      </div>
+    );
   if (mediaType === HTML_MEDIA_TYPE && bounded)
     return (
       <div className="font-mono text-small text-ink-soft">

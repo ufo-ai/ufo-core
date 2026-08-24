@@ -10,6 +10,7 @@ import {
   Page,
   Pane,
   PaneNote,
+  Waiting,
   agentHash,
   agentName,
   cn,
@@ -230,7 +231,12 @@ function ChatApp({
     ),
     portal,
   );
-  if (shown.kind === "loading") return <PaneNote>Loading…</PaneNote>;
+  if (shown.kind === "loading")
+    return (
+      <PaneNote>
+        <Waiting />
+      </PaneNote>
+    );
   if (shown.kind === "missing") {
     return <PaneNote>This conversation is not available here.</PaneNote>;
   }

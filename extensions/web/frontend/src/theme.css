@@ -535,15 +535,29 @@
     }
   }
 
-  --animate-skeleton: hold 0.35s ease-out, working 1.4s ease-in-out 0.35s infinite;
+  /* Nothing is drawn for a wait the member never notices. Nielsen puts the limit of an
+     uninterrupted train of thought at one second and asks for no feedback below it; Next.js holds
+     its own pending state 100ms and React's docs hold theirs 200ms. 250ms is the midpoint, and the
+     one number every wait on this surface is held to, so a screen that answers inside a quarter
+     second goes straight from the last one to its records. The wait starts out of sight rather
+     than out of flow — it reserves the space the answer will take, so its arrival moves nothing —
+     and the delay carries it, never a timer in a component, which would cost a render and could
+     land after the answer already had. */
+  --delay-waiting: 250ms;
+  --duration-waiting: 150ms;
 
-  @keyframes hold {
-    0%,
-    55% {
+  --animate-waiting: waiting var(--duration-waiting) ease-out var(--delay-waiting) both;
+
+  @keyframes waiting {
+    from {
+      visibility: hidden;
       opacity: 0;
     }
   }
 
+  --animate-skeleton:
+    waiting var(--duration-waiting) ease-out var(--delay-waiting) both,
+    working 1.4s ease-in-out calc(var(--delay-waiting) + var(--duration-waiting)) infinite;
 }
 
 @layer base {
@@ -711,10 +725,16 @@
 
 /* An infinite sweep is a cycle rather than an arrival, so the global rule cutting every duration to
    nothing would strobe it rather than settle it: stillness has to end it outright, which leaves the
-   words in the resting tone they spend most of the cycle in anyway. */
+   words in the resting tone they spend most of the cycle in anyway. A placeholder keeps its delay
+   through the same rule: when it appears is timing, not motion, and the member who asked for
+   stillness is asking to be spared the pulse, not to be shown a wait they would not have seen. */
 @media (prefers-reduced-motion: reduce) {
   [data-cut] {
     animation: none;
+  }
+
+  [data-part="skeleton"] {
+    animation: var(--animate-waiting);
   }
 }
 

@@ -96,10 +96,17 @@ const SKELETON_ROWS = 5;
 const SKELETON_CARDS = 4;
 const SKELETON_FIELDS = 3;
 
-/** What is coming, drawn at its own size. A centred `Loading…` sits where no record ever will,
- *  then jumps aside as the answer lands; a skeleton holds the column and row rhythm the payload
- *  will take, ruled and bounded the way that payload is, so the page settles instead of
- *  rearranging. */
+/** The one line a screen states while it has nothing else, and the only place the words are
+ *  written. It reserves its line from the first frame and appears on the theme's threshold, so a
+ *  read that answers before then leaves no trace on the way past — the timing is the theme's, and
+ *  the same threshold governs every placeholder on the surface. */
+export function Waiting() {
+  return <span className="animate-waiting">Loading…</span>;
+}
+
+/** What is coming, drawn at its own size. A centred sentence sits where no record ever will, then
+ *  jumps aside as the answer lands; a skeleton holds the column and row rhythm the payload will
+ *  take, ruled and bounded the way that payload is, so the page settles instead of rearranging. */
 export function PanelSkeleton({ shape }: { shape: PanelShape }) {
   if (shape === "cards")
     return (

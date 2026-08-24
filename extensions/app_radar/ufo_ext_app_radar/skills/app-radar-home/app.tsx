@@ -24,6 +24,7 @@ import {
   Section,
   SectionApp,
   Sheet,
+  Waiting,
   agentHash,
   agentName,
   appended,
@@ -735,7 +736,12 @@ function Report({
   }, [onTitle, read.title]);
 
   if (message) return <div className="font-mono text-small text-ink-soft">{message}</div>;
-  if (body === null) return <div>Loading…</div>;
+  if (body === null)
+    return (
+      <div>
+        <Waiting />
+      </div>
+    );
   return (
     <>
       <div className="text-body leading-reading">

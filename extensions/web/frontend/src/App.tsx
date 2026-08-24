@@ -59,6 +59,7 @@ import {
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
+import { Waiting } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
@@ -981,10 +982,20 @@ function RoutedPane({
           ? { id: row.agent_id, name: row.agent_name, model: "" }
           : undefined);
       if (!row || !agent) {
-        if (rail.phase === "loading") return <PaneNote>Loading…</PaneNote>;
+        if (rail.phase === "loading")
+          return (
+            <PaneNote>
+              <Waiting />
+            </PaneNote>
+          );
         if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
         const outcome = rail.sought[route.conversationId];
-        if (!outcome) return <PaneNote>Loading…</PaneNote>;
+        if (!outcome)
+          return (
+            <PaneNote>
+              <Waiting />
+            </PaneNote>
+          );
         if (outcome.kind === "signed-out") {
           return (
             <Pane className={COLUMN}>
@@ -1274,7 +1285,9 @@ function RailList({
   return (
     <>
       {rail.phase === "loading" ? (
-        <div className="p-sm text-ink-soft">Loading…</div>
+        <div className="p-sm text-ink-soft">
+          <Waiting />
+        </div>
       ) : null}
       {rail.phase === "failed" ? (
         <div className="flex flex-col gap-2xs p-sm text-ink-soft">

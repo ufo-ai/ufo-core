@@ -261,6 +261,28 @@ test("the working pulse yields to reduced motion in the built sheet", () => {
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
 });
 
+/** The waiting mark is timing, not decoration: it reserves its box from the first frame and paints
+ *  nothing until the threshold, so a screen that answers before then leaves no trace on the way
+ *  past. The whole of that is one delay and a backwards fill in the built sheet, and neither is
+ *  visible to a test that reads a class name — so they are read off the bytes here. */
+test("the waiting mark holds its threshold in the built sheet", () => {
+  const css = packedStyles();
+  expect(css).toContain("--delay-waiting:.25s");
+  expect(css).toContain("--animate-waiting:waitingvar(--duration-waiting)ease-outvar(--delay-waiting)both");
+  expect(css).toContain("@keyframeswaiting{0%{visibility:hidden;opacity:0}}");
+  expect(css).toContain(".animate-waiting{animation:var(--animate-waiting)}");
+});
+
+/** The global stillness rule cuts every duration to nothing. It must not cut the delay with it: a
+ *  member who asked for no motion still gets no waiting mark on a fast screen, because the
+ *  threshold is when the mark appears rather than how it moves. */
+test("stillness shortens the waiting fade and leaves its threshold standing", () => {
+  const css = packedStyles();
+  expect(css).toContain("animation-duration:.01ms!important");
+  expect(css).not.toContain("animation-delay");
+  expect(css).toContain("[data-part=skeleton]{animation:var(--animate-waiting)}");
+});
+
 const BRANDS = join(import.meta.dirname, "..", "src", "assets", "brands");
 
 /** Tailwind scans this directory, so a mark's own words reach the compiler as class candidates and

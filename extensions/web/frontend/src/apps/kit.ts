@@ -83,7 +83,15 @@ import {
   ViewSwitch,
   usePageHead,
 } from "@/kernel/pane";
-import { Empty, Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
+import {
+  Empty,
+  Panel,
+  PanelBlank,
+  PanelEmpty,
+  Section,
+  Waiting,
+  usePanelRead,
+} from "@/kernel/panel";
 import { RebuildDialog } from "@/kernel/rebuild";
 import { RowLines } from "@/kernel/rows";
 import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
@@ -229,6 +237,9 @@ export {
   PanelBlank,
   PanelEmpty,
   Section,
+  /* The waiting line as page API: one mark, drawn on the theme's delay, so a page states what a
+     portal screen states and a read that answers first leaves no trace on the way past. */
+  Waiting,
   usePanelRead,
   RebuildDialog,
   RowLines,

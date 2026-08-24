@@ -41,7 +41,7 @@ SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "cancel", "list", "inspect"})
 PORTAL_SOURCE = Path("extensions/web/frontend/src")
-APP_PAGE_GLOB = "extensions/app_*/ufo_ext_*/skills/*/app.tsx"
+APP_PAGE_GLOB = "extensions/app_*/ufo_ext_*/skills/*/**/*.tsx"
 PORTAL_ENTRIES = frozenset({PORTAL_SOURCE / "main.tsx", PORTAL_SOURCE / "apps" / "kit.ts"})
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
 PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
@@ -60,6 +60,10 @@ PORTAL_CLASS_REFUSALS = (
 RAW_CSS_VALUE = re.compile(
     r"#[0-9a-fA-F]|\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vh|vw|vmin|vmax|%)(?![\w-])"
 )
+WAITING_MODULE = PORTAL_SOURCE / "kernel" / "panel.tsx"
+WAITING_COMPONENT = "export function Waiting("
+WAITING_LINE = re.compile(r"Loading(?:…|\.\.\.)")
+WAITING_CLOSE = re.compile(r"^}$", re.M)
 UFO_SURFACE_MODULE = Path("extensions/ufo/ufo_ext_ufo/surface.py")
 GATEWAY_MODULES = (
     Path("servers/control/src/gateway.rs"),
@@ -1565,6 +1569,47 @@ def _portal_style_failures() -> list[str]:
     return failures
 
 
+def _waiting_line_failures() -> list[str]:
+    """The waiting mark's words are written once. `Waiting` states the line a screen shows while it
+    has nothing else, and it appears on the theme's threshold, so the same literal spelled anywhere
+    else draws a second mark at a different moment — the one that lands above rows already drawn
+    while a re-read is in flight. What is read is that literal, not the idea of waiting: a screen
+    that invents its own words for it passes here and answers to a reviewer instead. A sentence
+    naming what is coming (`Loading earlier messages…`, `Loading skill`) is another idiom with its
+    own rule and is left alone. The exempt span is the component's own declaration, not its file,
+    so a second mark beside it fails; the walk covers the portal source and every module of an
+    extension's app pages, since a page is built against the kit that publishes the component."""
+    source = ROOT / PORTAL_SOURCE
+    if not source.is_dir():
+        return [f"{PORTAL_SOURCE}: the portal source is missing"]
+    drawn = ROOT / WAITING_MODULE
+    if not drawn.is_file():
+        return [f"{WAITING_MODULE}: the waiting component is missing"]
+    text = drawn.read_text()
+    start = text.find(WAITING_COMPONENT)
+    if start < 0:
+        return [f"{WAITING_MODULE}: {WAITING_COMPONENT!r} — the waiting component is missing"]
+    closing = WAITING_CLOSE.search(text, start + len(WAITING_COMPONENT))
+    if closing is None:
+        return [f"{WAITING_MODULE}: the waiting component does not close — the gate lost its span"]
+    written = range(start, closing.end())
+    failures = []
+    if not any(found.start() in written for found in WAITING_LINE.finditer(text)):
+        failures.append(f"{WAITING_MODULE}: Waiting states no line — the gate lost its mark")
+    pages = sorted(ROOT.glob(APP_PAGE_GLOB))
+    if not pages:
+        failures.append(f"{APP_PAGE_GLOB}: no app pages found — the gate lost its subjects")
+    walked = [path for path in sorted(source.rglob("*")) if path.suffix in PORTAL_MODULE_SUFFIXES]
+    for path in [*walked, *pages]:
+        rel = path.relative_to(ROOT)
+        failures.extend(
+            f"{rel}: {found.group(0)!r} outside Waiting — the surface has one waiting mark"
+            for found in WAITING_LINE.finditer(path.read_text())
+            if rel != WAITING_MODULE or found.start() not in written
+        )
+    return failures
+
+
 def _luminance(color: str) -> float:
     channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
     linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
@@ -1696,6 +1741,7 @@ def main() -> int:
     failures.extend(_migration_failures(trees))
     failures.extend(_registered_naming_failures())
     failures.extend(_portal_style_failures())
+    failures.extend(_waiting_line_failures())
     terraform = _env_terraform()
     if not terraform:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")
