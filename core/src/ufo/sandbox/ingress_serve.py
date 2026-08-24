@@ -267,18 +267,18 @@ class IngressServe:
     a stored site's bytes are read from here and its sandbox is never dialed."""
     frame_ancestor: str
     """The one deploy-wide source expression a hosted site may be framed by — the app origin, where
-    the frame page that reads a site lives — or `'none'` when no app base is configured. Framing is
-    core's invariant rather than an accident of what each agent's server emitted: `_open` binds the
-    session `SameSite=Lax`, so a cross-site framer already gets no cookie and lands on 403, but
-    every site label shares one registrable domain — so without this, site A frames site B and the
-    viewer's session cookie for B rides along.
+    the portal's homepage iframe and the ordinary site frame live — or `'none'` when no app base is
+    configured. Framing is core's invariant rather than an accident of what each agent's server
+    emitted: `_open` binds the session `SameSite=Lax`, so a cross-site framer already gets no cookie
+    and lands on 403, but every site label shares one registrable domain — so without this, site A
+    frames site B and the viewer's session cookie for B rides along.
 
-    `_frame_ancestors` appends the responding site's sibling origins per response: an app page
-    embeds another site's live view through the app-origin frame page, and a browser checks
-    `frame-ancestors` against every ancestor in that chain, so the outer app's origin must be named
-    alongside the frame page's. Both row-backed sites and row-less shipped apps are named from the
-    responding site's own workspace — that is the embed chain, and it keeps a site in another
-    workspace of the same deploy from wrapping this one around the viewer's session.
+    `_frame_ancestors` appends the responding site's sibling origins per response: an app page can
+    itself embed another site's live view, and a browser checks `frame-ancestors` against every
+    ancestor in that chain, so the outer site's origin must be named alongside the app origin. Both
+    row-backed sites and row-less shipped apps are named from the responding site's own workspace —
+    that is the embed chain, and it keeps a site in another workspace of the same deploy from
+    wrapping this one around the viewer's session.
 
     Carried as our own header rather than appended to the origin's: a site commonly sends no policy
     at all, which is the case this exists for, and several policies combine restrictively — so one

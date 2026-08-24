@@ -38,7 +38,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, JsonValue, ValidationError
-from ufo_ext_sites.surface import shipped_site_url
+from ufo_ext_sites.surface import homepage_embed_url, shipped_homepage_url
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import audience_subjects, conversation_audience
@@ -4162,15 +4162,18 @@ async def _homepage_state(
         else None
     )
     if bound is not None:
+        site_url = bound.fields["site_url"]
+        if not isinstance(site_url, str):
+            raise TypeError("site_url must be a string")
         return {
             "state": "set",
-            "url": bound.fields["site_url"],
+            "url": homepage_embed_url(site_url),
             "deploy_generation": bound.fields.get("deploy_generation", 0),
         }
     slug = shipped_app_slug(summary.provisioned_by)
     tree, digest = apps
     if slug is not None and f"{slug}/index.html" in tree:
-        url = shipped_site_url(ctx.public_base_url, ctx.workspace_id, summary.id, slug, digest)
+        url = shipped_homepage_url(ctx.public_base_url, ctx.workspace_id, summary.id, slug, digest)
         if url is not None:
             return {"state": "set", "url": url, "deploy_generation": int(digest[:13], 16)}
     return {"state": "none"}

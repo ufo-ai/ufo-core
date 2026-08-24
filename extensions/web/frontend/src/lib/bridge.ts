@@ -201,15 +201,11 @@ function bodyFault(endpoint: Endpoint, body: unknown): string | null {
 
 /** Attach the shell side of the bridge to one homepage iframe. Returns a detach function; call it
  *  when the frame unmounts (a redeploy remounts it under a new key, so each frame gets its own
- *  attach/detach). The app page is doubly framed — the pane's iframe loads the sites frame page,
- *  which nests the site itself in a second iframe — so the client posts to `window.top` and the
- *  accepted sources are the pane's own frame and any window exactly one level under it; replies go
- *  to the window that asked, never to the frame page between. The frame announces itself with
- *  `ready`; the shell replies `init`. Because the frame may post `ready` before this listener is
- *  installed, its client retries `ready` until an `init` arrives. Every `call` carrying a string
- *  `id` is answered with exactly one `data` reply — a malformed field answers `ok: false` rather
- *  than silence, so a client promise never waits forever; only a message with no usable `id` has
- *  nothing to correlate a reply to. */
+ *  attach/detach). The frame announces itself with `ready`; the shell replies `init`. Because the
+ *  frame may post `ready` before this listener is installed, its client retries `ready` until an
+ *  `init` arrives. Every `call` carrying a string `id` is answered with exactly one `data` reply —
+ *  a malformed field answers `ok: false` rather than silence, so a client promise never waits
+ *  forever; only a message with no usable `id` has nothing to correlate a reply to. */
 export function attachBridge({
   iframe,
   member,
@@ -429,19 +425,8 @@ export function attachBridge({
     }
   }
 
-  const fromPane = (source: MessageEventSource | null): source is MessageEventSource => {
-    const pane = iframe.contentWindow;
-    if (!pane || !source) return false;
-    if (source === pane) return true;
-    try {
-      return "parent" in source && source.parent === pane;
-    } catch {
-      return false;
-    }
-  };
-
   const onMessage = (event: MessageEvent) => {
-    if (!fromPane(event.source)) return;
+    if (!iframe.contentWindow || event.source !== iframe.contentWindow) return;
     if (!isBridgeMessage(event.data)) return;
     page = event.source;
     void handle(event.data, event.source);

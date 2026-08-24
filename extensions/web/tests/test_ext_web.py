@@ -45,6 +45,7 @@ from ufo_ext_scheduled_tasks.tools import SCHEDULED_TASK_OBJECT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import site_object_name
 from ufo_ext_sites.store import HostedSites, hosted_site
+from ufo_ext_sites.surface import shipped_address, site_address
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import user_skill
 from ufo_ext_slack.manifest import manifest as slack_manifest
@@ -9188,6 +9189,8 @@ async def test_homepage_read_carries_the_bound_site(
     assert payload["url"].startswith("https://web/surface/sites/")
     assert set(payload) == {"state", "url", "deploy_generation"}
     assert payload["deploy_generation"] > 0
+    address = site_address(payload["url"].rpartition("/")[2])
+    assert address is not None and address.portal_embed
 
 
 async def test_homepage_read_hands_over_a_bound_page_whatever_the_agent_is_doing(
@@ -9623,6 +9626,7 @@ async def test_homepage_read_serves_a_row_less_shipped_app_page(
     assert payload["state"] == "set"
     assert payload["url"].startswith("https://web/surface/sites/")
     assert set(payload) == {"state", "url", "deploy_generation"}
+    assert shipped_address(payload["url"].rpartition("/")[2]) is not None
     keys = {entry.key for entry in await fleet.list(web_surface.APPS_STORE_PREFIX)}
     digests = {key.split("/")[1] for key in keys}
     assert len(digests) == 1

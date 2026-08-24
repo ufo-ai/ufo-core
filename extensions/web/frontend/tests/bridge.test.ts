@@ -12,7 +12,7 @@ const PLACE = { q: "tokens", range: "90d", opens: [CONVERSATION_ID] };
 const CRUMB = { label: "Radar", at: "#/agents/" + AGENT_ID };
 
 /** A stand-in for the framed page's window: the shell compares sources by identity against
- *  `iframe.contentWindow` (or a window one level under it) and replies to the source itself. */
+ *  `iframe.contentWindow` and replies to the source itself. */
 function fakeFrame(): { iframe: HTMLIFrameElement; posted: unknown[] } {
   const posted: unknown[] = [];
   const contentWindow = { postMessage: (message: unknown) => void posted.push(message) };
@@ -20,19 +20,7 @@ function fakeFrame(): { iframe: HTMLIFrameElement; posted: unknown[] } {
   return { iframe, posted };
 }
 
-/** The site's own window, one nesting level under the pane: the sites frame page stands between
- *  the pane's iframe and the app page, so the shell accepts a source whose parent is the pane. */
-function nestedSite(iframe: HTMLIFrameElement): { site: unknown; posted: unknown[] } {
-  const posted: unknown[] = [];
-  const site = {
-    parent: iframe.contentWindow,
-    postMessage: (message: unknown) => void posted.push(message),
-  };
-  return { site, posted };
-}
-
-/** Deliver a message to the shell as if it came from the frame's window (or another `source`, to
- *  prove the shell ignores it). */
+/** Deliver a message to the shell as if it came from the frame's window. */
 function deliver(data: unknown, source: unknown): void {
   const event = new MessageEvent("message", { data });
   Object.defineProperty(event, "source", { value: source });
@@ -415,27 +403,6 @@ test("a stream row relays its events as frames and closes with end", async () =>
   expect(posted[4]).toEqual({ ufo: "end", id: "s1" });
 });
 
-test("the doubly framed site's own window is answered directly", async () => {
-  const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ chats: [] }));
-  vi.stubGlobal("fetch", fetchMock);
-  const { iframe, posted: frames } = fakeFrame();
-  const { site, posted } = nestedSite(iframe);
-  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
-  deliver({ ufo: "ready" }, site);
-  deliver({ ufo: "call", id: "r9", method: "GET", path: "api/agents" }, site);
-  await vi.waitFor(() => expect(posted).toHaveLength(2));
-  expect(posted[0]).toEqual({
-    ufo: "init",
-    member: MEMBER,
-    agentId: AGENT_ID,
-    place: {},
-    open: null,
-    portal: location.origin,
-  });
-  expect(posted[1]).toMatchObject({ ufo: "data", id: "r9", ok: true });
-  expect(frames).toHaveLength(0);
-});
-
 test("a place changing while the frame stands is posted, and a later ready carries it", async () => {
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
@@ -450,10 +417,13 @@ test("a place changing while the frame stands is posted, and a later ready carri
   expect(posted[3]).toMatchObject({ ufo: "init", place: PLACE, open: CONVERSATION_ID });
 });
 
-test("a message from another window is ignored", async () => {
+test("a message from a child of the homepage window is ignored", async () => {
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
-  deliver({ ufo: "ready" }, { postMessage: () => {} });
+  deliver(
+    { ufo: "ready" },
+    { parent: iframe.contentWindow, postMessage: () => {} },
+  );
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(posted).toHaveLength(0);
 });

@@ -11,9 +11,6 @@
   var openCb = null;
 
   function send(obj) {
-    // The page is doubly framed: the portal pane frames the sites frame page, which frames this
-    // page. The shell listens on the portal's own window — the top — and accepts sources one
-    // level under its pane, so this posts past the frame page in between.
     window.top.postMessage(obj, "*");
   }
 

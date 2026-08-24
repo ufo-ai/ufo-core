@@ -61,7 +61,11 @@ test("a set homepage frames the bound site beside the conversation", async () =>
   const frame = await screen.findByTitle("Assistant homepage");
   expect(frame.tagName).toBe("IFRAME");
   expect(frame.getAttribute("src")).toBe(HOMEPAGE_URL);
-  expect(frame.hasAttribute("sandbox")).toBe(false);
+  expect(frame.getAttribute("sandbox")).toBe(
+    "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock",
+  );
+  expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
+  expect(frame.getAttribute("allow")).toBe("fullscreen");
   // What shows through a frame whose page is still arriving is the pane's own background, in the
   // portal's color-scheme — never a browser's default white canvas.
   expect(frame.className).toContain("bg-surface");

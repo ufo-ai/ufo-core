@@ -342,15 +342,15 @@ async def memories(ctx: SurfaceContext, request: Request) -> Response
 
 
 ### Hosted site frames
-Public site routes resolve permanent links, enforce viewer permissions, and embed the hosted site from its separate origin.
+Public site routes resolve permanent links, enforce viewer permissions, and open the hosted site on its separate origin.
 
 ### `extensions/sites/ufo_ext_sites/surface.py`
 
 `io_transport` · `request handling`
 
-A hosted site link is meant to be shareable, but the link itself is not permission to view everything. This file is the gatekeeper and picture frame. When someone opens a site URL, it first checks that the token in the URL is genuine and says which workspace, conversation, and site name it belongs to. Then it looks up the site, checks whether the browser is signed in through the `ufo_session` cookie, and applies the site's visibility rules: public, workspace-only, or private. If the site is being used as an agent homepage, the agent's visibility rules take over instead.
+A hosted site link is meant to be shareable, but the link itself is not permission to view everything. This file is the gatekeeper. When someone opens a site URL, it first checks that the token in the URL is genuine and says which workspace, conversation, and site name it belongs to. Then it looks up the site, checks whether the browser is signed in through the `ufo_session` cookie, and applies the site's visibility rules: public, workspace-only, or private. If the site is being used as an agent homepage, the agent's visibility rules take over instead.
 
-The file does not serve the site's files directly. Instead, it returns a small HTML page containing an `<iframe>` that points to the site's own ingress address. An iframe is like a window cut into the page: the viewer sees the site, but the embedded site is kept apart from the main app's cookies and routes. The iframe also uses browser safety settings so model-created site code cannot easily steer the user's main tab somewhere misleading.
+The file does not serve the site's files directly. A permanent site link returns a small HTML page containing an `<iframe>` that points to the site's own ingress address. A signed portal homepage link redirects an iframe request to that ingress address; opening the link outside an iframe keeps the wrapper. In both cases, the site stays apart from the main app's cookies and routes, and model-created site code cannot steer the user's main tab somewhere misleading.
 
 Creators can change a normal site's visibility from this frame. That form is protected with a CSRF token, which is a signed proof tied to the current browser session, so another website cannot secretly submit the creator's form.
 
@@ -422,9 +422,9 @@ async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Resp
 async def frame(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Serves the actual visible frame page for a hosted site. It checks the link, checks the viewer, applies visibility rules, and returns HTML that embeds the site's own origin in an iframe.
+**Purpose**: Opens a hosted site. It checks the link, checks the viewer, applies visibility rules, then redirects a portal homepage iframe to ingress or returns the site's frame page.
 
-**Data flow**: It receives the surface context and web request. It resolves the site from the token, identifies the viewer from the session cookie if possible, checks whether the viewer may see the site or agent homepage, builds an ingress URL for the embedded site path, optionally mints a CSRF token for the creator's visibility form, and returns an HTML response. If anything should not be visible, it returns either a sign-in page for unauthenticated non-public access or a 404 response.
+**Data flow**: It receives the surface context and web request. It resolves the site from the token, identifies the viewer from the session cookie if possible, checks whether the viewer may see the site or agent homepage, and builds an ingress URL for the site path. A homepage receives that URL as a redirect. A normal site receives an HTML frame with an optional creator CSRF token. If anything should not be visible, it returns either a sign-in page for unauthenticated non-public access or a 404 response.
 
 **Call relations**: This is the main GET route for both the site root and deep links. It calls `_resolve` to load the site, `_viewer` to identify the browser, `_viewer_is_admin` when admin status matters, and `_frame_page` to assemble the final HTML.
 
@@ -569,12 +569,12 @@ def _page(title: str, style: str, body: str) -> str
 ##### `_frame_page`  (lines 277–313)
 
 ```
-def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: str, *, bare: bool=False) -> str
+def _frame_page(site: HostedSite, embedded: str | None, frame_path: str, csrf: str, share: str) -> str
 ```
 
 **Purpose**: Builds the HTML for the hosted-site frame. It shows the site name and either a creator-only visibility selector or a read-only visibility badge, then embeds the real site in a sandboxed iframe.
 
-**Data flow**: It receives the hosted-site record, the embedded ingress URL if one exists, the frame path, a CSRF token if the selector should be shown, and a flag for bare homepage rendering. It escapes user-visible values for HTML safety, creates either an iframe or an unconfigured-hosting message, optionally creates the visibility control, and returns a full HTML page string.
+**Data flow**: It receives the hosted-site record, the embedded ingress URL if one exists, the frame path, a CSRF token if the selector should be shown, and the share metadata. It escapes user-visible values for HTML safety, creates either an iframe or an unconfigured-hosting message, creates the visibility control, and returns a full HTML page string.
 
 **Call relations**: `frame` calls this after all access checks pass and after it has minted any needed CSRF token. This function calls `_selector` when the creator should be allowed to change visibility, and `_page` to produce the complete document.
 

@@ -81,14 +81,15 @@ not see, and a deploy hosting no links all answer `none`.
 
 ## Embed
 
-The portal frames the existing sites frame (`/surface/sites/<token>`) in a plain same-origin
-iframe filling the pane. The frame is the app's own trusted page and already does everything —
-session-cookie gate, per-visit visibility check, the creator's visibility selector in its header,
-and the sandboxed cross-origin inner iframe around the model-authored bytes
-(`extensions/sites/ufo_ext_sites/surface.py:239`). The outer iframe takes no `sandbox` attribute:
-sandbox flags inherit, and the inner site is promised scripts. A dead sandbox, an unregistered
-site, and a not-public site render as the frame's own states inside the pane. The portal's CSP
-admits `frame-src 'self'` if it does not already.
+The portal frames a signed portal-embed sites URL (`/surface/sites/<token>`) in one sandboxed iframe
+filling the pane. The surface applies the session-cookie and per-visit agent-visibility gates, then
+redirects that iframe request to a freshly minted cross-origin ingress URL. The signed claim and
+Fetch Metadata keep a top-level visit on the sandboxed sites wrapper; ingress `frame-ancestors`
+admits only the portal and the workspace's app origins around the direct document. When Fetch
+Metadata is absent, the wrapper replaces its own framed document with that ingress URL; a top-level
+visit keeps its sandboxed child. The portal iframe grants scripts, the site's own origin, forms,
+popups, modals, downloads, pointer lock, and fullscreen; it withholds top navigation and sends no
+referrer. A dead sandbox, an unregistered site, and a not-public site render inside the pane.
 
 ## Seeding — and the backfill is the same sweep
 

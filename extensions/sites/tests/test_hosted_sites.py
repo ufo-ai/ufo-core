@@ -70,8 +70,9 @@ from ufo_ext_sites.surface import (
     VISIBILITY_BADGES,
     ShippedAddress,
     SiteHostingUnconfigured,
+    homepage_embed_url,
     shipped_address,
-    shipped_site_url,
+    shipped_homepage_url,
     site_address,
     site_card_url,
     site_token,
@@ -508,6 +509,14 @@ async def _stored(workspace: Workspace) -> tuple[sa.Row, ...]:
 
 def _cookie(token: str) -> dict[str, str]:
     return {"cookie": f"{SESSION_COOKIE}={token}"}
+
+
+def _iframe_cookie(token: str) -> dict[str, str]:
+    return {
+        **_cookie(token),
+        "sec-fetch-dest": "iframe",
+        "sec-fetch-site": "same-origin",
+    }
 
 
 def _embedded(body: str) -> str:
@@ -2763,12 +2772,12 @@ async def test_a_private_site_opens_for_a_workspace_admin(deployment: Deployment
     assert "<select name=visibility>" not in opened.text
 
 
-async def test_a_homepage_frame_follows_the_agent_and_renders_bare(
+async def test_a_homepage_frame_follows_the_agent_and_redirects_the_portal_to_ingress(
     deployment: Deployment,
 ) -> None:
     """A bound site's frame gates on the agent — every member for a workspace agent, owner and
-    admins for a private one, the creator holding no standing of their own — renders without the
-    header, and refuses the visibility post whole."""
+    admins for a private one, the creator holding no standing of their own — redirects the portal's
+    frame to ingress, and refuses the visibility post whole."""
     client, workspace = deployment.client, deployment.workspace
     creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
     _other_id, other_token = await _seed_member(workspace, OTHER_EMAIL)
@@ -2782,12 +2791,23 @@ async def test_a_homepage_frame_follows_the_agent_and_renders_bare(
         await _dispatch(
             tool, _bind(ctx, workspace, conversation_id, creator_id), site=str(hosted["site"])
         )
+    portal_link = homepage_embed_url(link)
 
-    opened = await client.get(link, headers=_cookie(other_token))
-    assert opened.status_code == 200
-    assert "<header>" not in opened.text
-    assert "<select name=visibility>" not in opened.text
-    assert INGRESS_HOST in _embedded(opened.text)
+    standalone = await client.get(portal_link, headers=_cookie(other_token))
+    assert standalone.status_code == 200
+    assert INGRESS_HOST in _embedded(standalone.text)
+    assert "if(self!==top)location.replace" in standalone.text
+    dev_portal = await client.get(
+        portal_link,
+        headers={**_cookie(other_token), "sec-fetch-dest": "iframe", "sec-fetch-site": "same-site"},
+    )
+    assert dev_portal.status_code == 303
+    assert INGRESS_HOST in dev_portal.headers["location"]
+
+    opened = await client.get(portal_link, headers=_iframe_cookie(other_token))
+    assert opened.status_code == 303
+    assert "<iframe" not in opened.text
+    assert INGRESS_HOST in opened.headers["location"]
 
     refused = await client.post(
         f"{link}/visibility",
@@ -2803,9 +2823,14 @@ async def test_a_homepage_frame_follows_the_agent_and_renders_bare(
             .where(tables.agent.c.id == workspace.agent_id)
             .values(visibility="private")
         )
-    assert (await client.get(link, headers=_cookie(other_token))).status_code == 404
-    assert (await client.get(link, headers=_cookie(creator_token))).status_code == 404
-    assert (await client.get(link, headers=_cookie(admin_token))).status_code == 200
+    assert (await client.get(portal_link, headers=_iframe_cookie(other_token))).status_code == 404
+    assert (await client.get(portal_link, headers=_iframe_cookie(creator_token))).status_code == 404
+    assert (await client.get(portal_link, headers=_iframe_cookie(admin_token))).status_code == 303
+
+    unhosted = await deployment.unhosted.get(portal_link, headers=_iframe_cookie(admin_token))
+    assert unhosted.status_code == 200
+    assert "<iframe" not in unhosted.text
+    assert UNCONFIGURED_BODY in unhosted.text
 
 
 SHIPPED_DIGEST = "deadbeefdeadbeef"
@@ -2836,33 +2861,52 @@ async def _seed_app_agent(
     return agent_id
 
 
-def test_a_shipped_url_round_trips_and_never_collides_with_a_site_token() -> None:
+def test_a_homepage_embed_url_preserves_the_site_address_and_marks_the_portal_frame() -> None:
+    ws_id, conversation_id = uuid4(), uuid4()
+    hosted = site_url(PUBLIC_BASE_URL, ws_id, conversation_id, "dash")
+
+    embedded = homepage_embed_url(hosted)
+
+    address = site_address(embedded.rpartition("/")[2])
+    assert address is not None
+    assert (address.workspace_id, address.conversation_id, address.name, address.portal_embed) == (
+        ws_id,
+        conversation_id,
+        "dash",
+        True,
+    )
+    with pytest.raises(ValueError, match="hosted-site URL"):
+        homepage_embed_url("not-a-site")
+
+
+def test_a_shipped_homepage_url_round_trips_and_never_collides_with_a_site_token() -> None:
     """The shipped frame link carries its whole address in the token — workspace, app agent, slug,
     digest — and reads back as exactly that. A shipped token is not a site token and a site token is
     not a shipped one, so the two frame paths never resolve each other's address. No public base,
     no link."""
     ws_id, agent_id = uuid4(), uuid4()
-    url = shipped_site_url(PUBLIC_BASE_URL, ws_id, agent_id, "radar", SHIPPED_DIGEST)
+    url = shipped_homepage_url(PUBLIC_BASE_URL, ws_id, agent_id, "radar", SHIPPED_DIGEST)
     assert url is not None and url.startswith(f"{PUBLIC_BASE_URL}{FRAME_PATH}/")
     token = url.rpartition("/")[2]
     assert shipped_address(token) == ShippedAddress(ws_id, agent_id, "radar", SHIPPED_DIGEST)
     assert site_address(token) is None
     assert shipped_address(site_token(ws_id, uuid4(), "dash")) is None
-    assert shipped_site_url(None, ws_id, agent_id, "radar", SHIPPED_DIGEST) is None
+    assert shipped_homepage_url(None, ws_id, agent_id, "radar", SHIPPED_DIGEST) is None
 
 
-async def test_a_shipped_app_frame_gates_on_the_agent_and_embeds_the_fleet_bundle(
+async def test_a_shipped_app_frame_gates_on_the_agent_and_redirects_to_the_fleet_bundle(
     deployment: Deployment,
 ) -> None:
     """A shipped app page has no hosted_site row: the frame resolves the agent from the token, gates
-    on its visibility exactly as a bound homepage does, renders bare, and embeds the deploy-wide
+    on its visibility exactly as a bound homepage does, and redirects to the deploy-wide
     bundle from the fleet store — the ingress view token it mints carries the shipped claim and the
-    synthetic per-workspace anchor, and an unconfigured ingress embeds nothing rather than crash."""
+    synthetic per-workspace anchor, and an unconfigured ingress renders a refusal rather than
+    redirecting nowhere."""
     client, workspace = deployment.client, deployment.workspace
     _other_id, other_token = await _seed_member(workspace, OTHER_EMAIL)
     _admin_id, admin_token = await _seed_member(workspace, ADMIN_EMAIL, is_admin=True)
     app_agent = await _seed_app_agent(workspace, "radar")
-    url = shipped_site_url(PUBLIC_BASE_URL, workspace.id, app_agent, "radar", SHIPPED_DIGEST)
+    url = shipped_homepage_url(PUBLIC_BASE_URL, workspace.id, app_agent, "radar", SHIPPED_DIGEST)
     assert url is not None
 
     anonymous = await client.get(url)
@@ -2870,10 +2914,14 @@ async def test_a_shipped_app_frame_gates_on_the_agent_and_embeds_the_fleet_bundl
     assert "not signed in to the workspace" in anonymous.text
     assert "<iframe" not in anonymous.text
 
-    opened = await client.get(url, headers=_cookie(other_token))
-    assert opened.status_code == 200
-    assert "<header>" not in opened.text
-    embedded = _embedded(opened.text)
+    standalone = await client.get(url, headers=_cookie(other_token))
+    assert standalone.status_code == 200
+    assert INGRESS_HOST in _embedded(standalone.text)
+
+    opened = await client.get(url, headers=_iframe_cookie(other_token))
+    assert opened.status_code == 303
+    assert "<iframe" not in opened.text
+    embedded = opened.headers["location"]
     assert INGRESS_HOST in embedded
     claims = verify_ingress_token(
         embedded.rpartition(f"{INGRESS_VIEW_PATH}/")[2], datetime.now(UTC), INGRESS_VIEW_KIND
@@ -2888,10 +2936,10 @@ async def test_a_shipped_app_frame_gates_on_the_agent_and_embeds_the_fleet_bundl
             .where(tables.agent.c.id == app_agent)
             .values(visibility="private")
         )
-    assert (await client.get(url, headers=_cookie(other_token))).status_code == 404
-    assert (await client.get(url, headers=_cookie(admin_token))).status_code == 200
+    assert (await client.get(url, headers=_iframe_cookie(other_token))).status_code == 404
+    assert (await client.get(url, headers=_iframe_cookie(admin_token))).status_code == 303
 
-    unhosted = await deployment.unhosted.get(url, headers=_cookie(admin_token))
+    unhosted = await deployment.unhosted.get(url, headers=_iframe_cookie(admin_token))
     assert unhosted.status_code == 200
     assert "<iframe" not in unhosted.text
     assert UNCONFIGURED_BODY in unhosted.text

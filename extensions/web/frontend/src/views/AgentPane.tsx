@@ -33,6 +33,9 @@ const FRESH = "new";
  *  fade is the whole wait — nothing here delays the swap past the paint it exists to smooth. */
 const FRAME_SWAP_MS = 200;
 
+const HOMEPAGE_SANDBOX =
+  "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock";
+
 /** One mounted copy of the homepage frame. A redeploy remounts the page at the same URL, and a
  *  frame torn down the instant its successor mounts leaves the member watching the successor's
  *  blank document paint — so the standing copy holds the screen until the arriving one has
@@ -413,14 +416,12 @@ export function AgentPane({
               <IconMessage aria-hidden />
             </Button>
           </div>
-          {/* The frame is the app's own trusted page and carries the sandbox around the
-              model-authored bytes itself, so these iframes take no sandbox attribute — sandbox
-              flags inherit, and the inner site is promised scripts. Each frame's key carries the
-              deploy generation, so a redeploy at the same URL mounts a fresh copy rather than
-              showing the page the member last loaded — arriving invisible over the standing one
-              and fading in on its own load, so the swap never paints the blank document. The box
-              and the frames wear the pane's own background and the portal's color-scheme, so what
-              shows through an empty frame is the pane rather than a browser's white canvas. */}
+          {/* Each frame's key carries the deploy generation, so a redeploy at the same URL mounts
+              a fresh copy rather than showing the page the member last loaded — arriving invisible
+              over the standing one and fading in on its own load, so the swap never paints the
+              blank document. The box and the frames wear the pane's own background and the portal's
+              color-scheme, so what shows through an empty frame is the pane rather than a browser's
+              white canvas. */}
           <div className="relative min-h-0 flex-1 bg-surface">
             {frames.map((frame, index) => (
               <iframe
@@ -428,6 +429,9 @@ export function AgentPane({
                 ref={index === frames.length - 1 ? frameRef : undefined}
                 src={frame.url}
                 title={agentName(agent.name) + " homepage"}
+                sandbox={HOMEPAGE_SANDBOX}
+                referrerPolicy="no-referrer"
+                allow="fullscreen"
                 onLoad={() => landed(frame.key)}
                 className={cn(
                   "absolute inset-0 size-full border-0 bg-surface",
