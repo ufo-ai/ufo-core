@@ -63,6 +63,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from ufo.access.connectors import GrantUnusable
 from ufo.o11y import warn
 from ufo.sources.connector import Connector, StreamPage, StreamSpec
 from ufo.sources.rest import get_path
@@ -70,6 +71,7 @@ from ufo.sources.sync import (
     Page,
     SourceAuth,
     SourceRowConfig,
+    StreamSkipped,
     SyncResult,
     normalize_page_timestamp,
     validation_fault,
@@ -152,9 +154,14 @@ class ConnectorBackend:
                 f"connector source {self.connector.name!r} needs an auth proxy but none is wired "
                 "(install the provider's broker extension, or set [connectors] auth_backend)"
             )
-        credential = await auth.auth_proxy.credential(
-            auth.workspace_id, self.connector.name, config.account
-        )
+        try:
+            credential = await auth.auth_proxy.credential(
+                auth.workspace_id, self.connector.name, config.account
+            )
+        except GrantUnusable as unusable:
+            raise StreamSkipped(
+                f"{self.connector.name}: {config.stream!r} {unusable}"
+            ) from unusable
         stream = self._stream(config.stream)
         base_url = config.base_url or self.connector.base_url
         if not base_url:

@@ -17,6 +17,8 @@ import ufo_ext_composio.client as composio
 import ufo_ext_composio.proxy as composio_proxy
 from ufo_ext_composio.broker import ComposioBroker
 
+from ufo.sdk.connectors import GrantUnusable
+
 ACCOUNT = "ca_asana_1"
 ASANA_BASE = "https://app.asana.com/api/1.0"
 
@@ -210,5 +212,5 @@ async def test_composio_broker_says_reconnect_for_an_account_it_does_not_hold(
 
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
     monkeypatch.setattr(composio, "composio_client", lambda: client)
-    with pytest.raises(composio.ComposioError, match="reconnect with connect_account"):
+    with pytest.raises(GrantUnusable, match="reconnect with connect_account"):
         await ComposioBroker().credential(uuid4(), "asana", ACCOUNT)

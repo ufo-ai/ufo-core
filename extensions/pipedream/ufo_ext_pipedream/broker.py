@@ -31,6 +31,7 @@ from ufo.sdk.connectors import (
     BrokerFile,
     BrokerSearch,
     BrokerTool,
+    GrantUnusable,
     StagedUpload,
     UnknownBrokerTool,
     stale_grant_guidance,
@@ -152,7 +153,7 @@ class PipedreamBroker:
         except PipedreamError as error:
             if error.status != NOT_FOUND:
                 raise
-            raise _reconnect_error(error, provider) from error
+            raise GrantUnusable(f"{error.body} — {stale_grant_guidance(provider)}") from error
         if connected.app != spec.app:
             raise PipedreamError(
                 409,

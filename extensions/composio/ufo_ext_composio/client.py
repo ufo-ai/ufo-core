@@ -26,6 +26,7 @@ from ufo.sdk.connectors import (
     BrokerTool,
     CatalogEntry,
     CatalogPage,
+    GrantUnusable,
     OAuthAccount,
 )
 from ufo_ext_composio import mcp_session
@@ -206,7 +207,11 @@ class ComposioClient:
             )
         status = str(payload.get("status") or "").upper()
         if status != ACTIVE_STATUS:
-            raise ComposioError(409, f"connected account {account_id!r} is {status or 'unknown'}")
+            raise GrantUnusable(
+                f"composio cannot authenticate connected account {account_id!r}: it is "
+                f"{status or 'unknown'}, not {ACTIVE_STATUS}, so its grant needs the member to "
+                "reconnect the account"
+            )
         toolkit = payload.get("toolkit")
         auth_config = payload.get("auth_config")
         if toolkit is None and isinstance(auth_config, dict):

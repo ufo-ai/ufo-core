@@ -63,6 +63,7 @@ from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.connectors import GrantUnusable
 from ufo.serve import _connect_flow, _connector_registry, _mount_ext_routes
 from ufo.surfaces.cli import callback_router
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
@@ -394,7 +395,7 @@ async def test_composio_client_refuses_an_inactive_account() -> None:
         )
 
     client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler))
-    with pytest.raises(composio.ComposioError, match="INITIATED"):
+    with pytest.raises(GrantUnusable, match="INITIATED"):
         await client.connected_account(COMPOSIO_ACCOUNT, COMPOSIO_USER, "github")
 
 

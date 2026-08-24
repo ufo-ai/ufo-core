@@ -35,6 +35,8 @@ from uuid import UUID
 
 import httpx
 
+from ufo.sdk.connectors import GrantUnusable
+
 PIPEDREAM_API_BASE = "https://api.pipedream.com/v1"
 PIPEDREAM_CLIENT_ID_ENV = "PIPEDREAM_CLIENT_ID"
 PIPEDREAM_CLIENT_SECRET_ENV = "PIPEDREAM_CLIENT_SECRET"
@@ -310,11 +312,21 @@ def _owned_account(
 
 
 def _account(record: dict[str, object], account_id: str) -> ConnectedAccount:
+    """Project a Connect account record, refusing the two states it cannot authenticate under.
+
+    `healthy: false` is Pipedream's own word for a grant whose token it can no longer refresh — a
+    revoked consent, an expired refresh token, a password change. It answers that on every read of
+    the account for as long as the state lasts, and nothing but the member reconnecting changes it,
+    so it raises `GrantUnusable` rather than a broker fault: a caller retrying it every minute
+    would spend a request a minute forever and alert an operator who cannot fix it."""
     owner = record.get("external_id")
     if not isinstance(owner, str) or not owner:
         raise PipedreamError(502, f"connected account {account_id!r} carried no external owner")
     if record.get("healthy") is False:
-        raise PipedreamError(409, f"connected account {account_id!r} is unhealthy")
+        raise GrantUnusable(
+            f"pipedream cannot authenticate connected account {account_id!r}: it is unhealthy, so "
+            "its grant needs the member to reconnect the account"
+        )
     app = _dict(record.get("app"))
     app_slug = app.get("name_slug")
     return ConnectedAccount(

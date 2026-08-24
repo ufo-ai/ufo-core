@@ -19,6 +19,8 @@ import pytest
 import ufo_ext_pipedream.client as pipedream
 from ufo_ext_pipedream.broker import PipedreamBroker
 
+from ufo.sdk.connectors import GrantUnusable
+
 ACCOUNT = "apn_gmail_1"
 GMAIL_BASE = "https://gmail.googleapis.com"
 HISTORY_PATH = "/gmail/v1/users/me/history"
@@ -207,6 +209,48 @@ async def test_pipedream_broker_refuses_a_foreign_account(
         await PipedreamBroker().credential(workspace_id, "gmail", ACCOUNT)
 
 
+async def test_pipedream_broker_refuses_an_unhealthy_account_as_a_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`healthy: false` is what a revoked or expired consent looks like on the account read, and it
+    is the one shape a feed-sync run cannot retry its way out of. It answers `GrantUnusable`, whose
+    message names the reconnect, so the run records a refusal and the feed parks on the long
+    interval — rather than a broker fault, which climbs the error backoff and holds a CRITICAL check
+    that pages an operator hourly for a repair only the member can make."""
+    workspace_id = uuid4()
+    owner = _owner(workspace_id)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/oauth/token":
+            return httpx.Response(200, json={"access_token": "at", "expires_in": 3600})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": ACCOUNT,
+                    "external_id": owner,
+                    "healthy": False,
+                    "dead": False,
+                    "app": {"name_slug": "gmail"},
+                }
+            },
+        )
+
+    client = pipedream.PipedreamClient(
+        client_id=f"cid_{uuid4().hex}",
+        client_secret="s",
+        project_id="proj_test",
+        transport=httpx.MockTransport(handle),
+    )
+    monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
+
+    with pytest.raises(GrantUnusable, match="reconnect the account") as raised:
+        await PipedreamBroker().credential(workspace_id, "gmail", ACCOUNT)
+
+    assert ACCOUNT in str(raised.value)
+    assert not isinstance(raised.value, pipedream.PipedreamError)
+
+
 async def test_pipedream_broker_says_reconnect_for_an_account_it_does_not_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -225,7 +269,7 @@ async def test_pipedream_broker_says_reconnect_for_an_account_it_does_not_hold(
         transport=httpx.MockTransport(handler),
     )
     monkeypatch.setattr(pipedream, "pipedream_client", lambda: client)
-    with pytest.raises(pipedream.PipedreamError, match="reconnect with connect_account"):
+    with pytest.raises(GrantUnusable, match="reconnect with connect_account"):
         await PipedreamBroker().credential(uuid4(), "gmail", "ca_composio_era")
 
 

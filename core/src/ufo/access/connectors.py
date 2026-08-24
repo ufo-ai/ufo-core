@@ -90,6 +90,18 @@ class UnknownBrokerTool(LookupError):
     into its `unresolved` answer instead of failing the call."""
 
 
+class GrantUnusable(RuntimeError):
+    """A broker will not authenticate an account until the member reconnects it: the grant is
+    revoked, expired, unhealthy at the broker, or unknown to it.
+
+    Separate from a broker fault because there is nothing to wait for. A fault may be the provider
+    having a bad minute, so a caller retries it and escalates if it persists; this cannot resolve
+    without the member, so a caller that retried every interval would spend a request per interval
+    and page an operator who can do nothing. The message names the reconnect, because whoever reads
+    it is the one who has to ask for it. `sources.backend` turns it into a `StreamSkipped`, which
+    parks the feed onto the long interval and records it as a warning rather than an alert."""
+
+
 def stale_grant_guidance(provider: str) -> str:
     """The suffix a broker appends when a failure names an account it does not hold — a grant made
     through a previous broker, or a broker key/org rotation. The agent cannot repair that by

@@ -52,6 +52,7 @@ from ufo.loop.engine import MAX_TOOL_RESULT_CHARS
 from ufo.schema import tables
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.connectors import GrantUnusable
 from ufo.serve import _connect_flow, _connector_registry
 from ufo.tools.builtins import ConnectAccountInput, connect_account_handler
 from ufo.tools.context import ToolContext
@@ -273,7 +274,7 @@ async def test_connected_account_refuses_an_unhealthy_account(
         return httpx.Response(200, json={"data": record})
 
     _install_transport(monkeypatch, handler)
-    with pytest.raises(pipedream.PipedreamError, match="unhealthy"):
+    with pytest.raises(GrantUnusable, match="unhealthy"):
         await pipedream.pipedream_client().connected_account(PIPEDREAM_ACCOUNT, "ufo_ws")
 
 

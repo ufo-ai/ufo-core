@@ -24,12 +24,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from ufo.access.connectors import Credential
+from ufo.access.connectors import Credential, GrantUnusable
 from ufo.sources import backend as backend_module
 from ufo.sources.backend import BACKFILL_KEY, ConnectorBackend, ConnectorSourceConfig
 from ufo.sources.connector import Connector, StreamPage, StreamSpec
 from ufo.sources.rest import RestConnector
-from ufo.sources.sync import SourceAuth, SyncResult
+from ufo.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
 Feed = list[list[dict[str, Any]] | StreamPage]
@@ -88,6 +88,41 @@ class _UntitledRecordConnector(_FeedConnector):
 class _NoAuthProxy:
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
         return Credential(bearer="unused")
+
+
+class _UnusableGrantProxy:
+    """The proxy a broker answers with once the provider stopped honouring the grant — a revoked
+    consent, an expired refresh token. Every call answers the same way, which is the point: there is
+    no attempt count that gets past it."""
+
+    reason = (
+        "pipedream cannot authenticate connected account 'apn_1': it is unhealthy, so its grant "
+        "needs the member to reconnect the account"
+    )
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        raise GrantUnusable(self.reason)
+
+
+async def test_an_unusable_grant_skips_the_stream_instead_of_failing_the_run() -> None:
+    """A grant the broker will not authenticate is a refusal, not a fault. Nothing about it changes
+    between two attempts, so failing the run would climb the error backoff and hold a CRITICAL check
+    that pages hourly for a repair only the member can make. As a `StreamSkipped` the driver counts
+    it, parks the row onto the long interval after the threshold, and records it as a warning — and
+    the reason carries the broker's own text, which names the reconnect, plus the stream it stopped.
+
+    Read the whole reason: it is what a member sees on the sources panel and what an operator finds
+    in the park log, and a bare 'refused' there would send them looking for a scope."""
+    stream = StreamSpec(name="tickets", source_object="tickets")
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_UnusableGrantProxy())
+
+    with pytest.raises(StreamSkipped) as raised:
+        await ConnectorBackend(connector=_FeedConnector(stream, [])).fetch(
+            ConnectorSourceConfig(account=ACCOUNT, stream=stream.name), None, auth
+        )
+
+    assert raised.value.reason == f"probe: 'tickets' {_UnusableGrantProxy.reason}"
+    assert "reconnect the account" in raised.value.reason
 
 
 async def _run(

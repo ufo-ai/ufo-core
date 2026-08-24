@@ -29,6 +29,7 @@ from ufo.sdk.connectors import (
     BrokerFile,
     BrokerSearch,
     BrokerTool,
+    GrantUnusable,
     StagedUpload,
     UnknownBrokerTool,
     stale_grant_guidance,
@@ -126,7 +127,7 @@ class ComposioBroker:
         except composio.ComposioError as error:
             if error.status != NOT_FOUND:
                 raise
-            raise _reconnect_error(error, provider) from error
+            raise GrantUnusable(f"{error.body} — {stale_grant_guidance(provider)}") from error
         return Credential(
             transport=ComposioProxyTransport(
                 api_base=composio.COMPOSIO_API_BASE,
