@@ -150,7 +150,7 @@ for (const [where, device] of [
     assert.equal(line.lines, 1);
     assert.equal(line.inWindow, true, `the line runs outside the window at ${where}`);
     assert.equal(line.overflow, 0, `the page scrolls ${line.overflow}px sideways at ${where}`);
-    assert.equal(line.text, "Go further.");
+    assert.equal(line.text, "Build the unknown.");
     await page.close();
   });
 }

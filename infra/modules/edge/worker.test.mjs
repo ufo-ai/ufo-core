@@ -117,8 +117,8 @@ test("the page hands an unfurler a titled card at an absolute https URL", async 
       "og:type": "website",
       "og:site_name": "UFO",
       "og:url": "https://ufo.ai/",
-      "og:title": "UFO — Go further.",
-      "og:description": "UFO. Go further.",
+      "og:title": "UFO — Build the unknown.",
+      "og:description": "UFO. Build the unknown.",
       "og:image": SHARE_CARD,
       "og:image:width": "1200",
       "og:image:height": "630",
@@ -126,8 +126,8 @@ test("the page hands an unfurler a titled card at an absolute https URL", async 
       "og:image:alt":
         "The UFO wordmark in white with three ember dots beside it, centred on a black field.",
       "twitter:card": "summary_large_image",
-      "twitter:title": "UFO — Go further.",
-      "twitter:description": "UFO. Go further.",
+      "twitter:title": "UFO — Build the unknown.",
+      "twitter:description": "UFO. Build the unknown.",
       "twitter:image": SHARE_CARD,
     },
   );
@@ -137,8 +137,8 @@ test("the page hands an unfurler a titled card at an absolute https URL", async 
     assert.equal(kind, name.startsWith("og:") ? "property" : "name", name);
   }
   // The unfurl and the tab must say the same thing, and the page keeps one canonical home.
-  assert.match(LANDING_PAGE, /<title>UFO — Go further\.<\/title>/);
-  assert.match(LANDING_PAGE, /<meta name="description" content="UFO\. Go further\." \/>/);
+  assert.match(LANDING_PAGE, /<title>UFO — Build the unknown\.<\/title>/);
+  assert.match(LANDING_PAGE, /<meta name="description" content="UFO\. Build the unknown\." \/>/);
   assert.match(LANDING_PAGE, /<link rel="canonical" href="https:\/\/ufo\.ai\/" \/>/);
   // Absolute and https, because a crawler resolves it against nothing.
   const card = new URL(tags["og:image"].content);

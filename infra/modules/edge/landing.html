@@ -4,8 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="theme-color" content="#0D1418" />
-<title>UFO — Go further.</title>
-<meta name="description" content="UFO. Go further." />
+<title>UFO — Build the unknown.</title>
+<meta name="description" content="UFO. Build the unknown." />
 <link rel="canonical" href="https://ufo.ai/" />
 
 <!-- What a link unfurler draws. It reads these tags and then comes back for the card itself,
@@ -17,16 +17,16 @@
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="UFO" />
 <meta property="og:url" content="https://ufo.ai/" />
-<meta property="og:title" content="UFO — Go further." />
-<meta property="og:description" content="UFO. Go further." />
+<meta property="og:title" content="UFO — Build the unknown." />
+<meta property="og:description" content="UFO. Build the unknown." />
 <meta property="og:image" content="https://ufo.ai/share/og-home.jpg" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
 <meta property="og:image:type" content="image/jpeg" />
 <meta property="og:image:alt" content="The UFO wordmark in white with three ember dots beside it, centred on a black field." />
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="UFO — Go further." />
-<meta name="twitter:description" content="UFO. Go further." />
+<meta name="twitter:title" content="UFO — Build the unknown." />
+<meta name="twitter:description" content="UFO. Build the unknown." />
 <meta name="twitter:image" content="https://ufo.ai/share/og-home.jpg" />
 
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" media="(prefers-color-scheme: light)" />
@@ -40,7 +40,7 @@
      worker at /favicon.svg, so no copy of it can drift.
 
      One knowing departure from the node: #fafafa -> var(--foreground)
-     (sand-50 #F3ECDE) for "further." and the nav. Marginally warmer than the
+     (sand-50 #F3ECDE) for "the unknown." and the nav. Marginally warmer than the
      node's cool near-white; that is the palette behaving correctly, not a drift.
 
      The node draws the buttons in Inter Medium 14px, which is what they use.
@@ -258,7 +258,7 @@ body {
   color: var(--foreground);
 }
 
-.go { color: var(--signal-500); }
+.build { color: var(--signal-500); }
 
 /* --- narrow -------------------------------------------------------------- */
 
@@ -270,24 +270,21 @@ body {
 }
 
 /* --- phone ---------------------------------------------------------------
-   A phone sits on both clamp floors above — 40px of headline under 88px of
-   padding — which reads small and hangs the line under the bar rather than
-   centring it in the sky. 70px is 1.75x that 40px, and 18vw reaches it at 390
-   and holds it to 480; below 390 the line steps down instead of breaking, to
-   65px at 360 and 58px at 320, inside the gutters at each. The art is square
+   A phone sits on the padding clamp floor above — 88px — while the headline
+   steps from 41px at 320 to 61px at 480. The art is square
    and cover-fit, so the heads land at 0.406 of the viewport height, and
    88px + 8.6vh centres the line above them at 360 and 390. Stops at 480 so
    nothing between 481 and 640 moves.
 
    The designer holds two of these as a standing rule: keep this padding-top,
    and keep the headline on one line, because a second line orphans a word.
-   "Go further." measures 4.21px of width for each 1px of font-size, and the
+   "Build the unknown." measures 6.88px of width for each 1px of font-size, and the
    gutters take 32px of the viewport. So any later edit to the headline copy
    must be re-checked for one-line fit at 320, 360, 390, 430 and 480 against
    that measure before it lands. */
 @media (max-width: 480px) {
   .hero { padding-top: calc(88px + 8.6vh); }
-  .display { font-size: clamp(40px, 18vw, 70px); }
+  .display { font-size: clamp(40px, 12.8vw, 62px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -428,7 +425,7 @@ body {
   </header>
 
   <main class="hero">
-    <h1 class="display"><span class="go">Go</span> <em>further.</em></h1>
+    <h1 class="display"><span class="build">Build</span> <em>the unknown.</em></h1>
   </main>
 
 </div>
