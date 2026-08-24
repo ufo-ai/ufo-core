@@ -49,11 +49,15 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
 from opentelemetry.trace import SpanKind
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
 from ufo.db import workspace_tx
 from ufo.ext.context import AgentArchived
 from ufo.ext.surface import Admitted, conversation_name
+from ufo.hub import Hub, Reply
 from ufo.o11y import current_traceparent, log, span
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -67,6 +71,7 @@ from ufo.schema.records import (
     PARKED,
     SCHEDULED_ADMISSION,
     SUBAGENT_SURFACE,
+    SURFACE_COMMENT_ROUND_INDEX,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
     WRITEBACK_PENDING,
@@ -75,6 +80,7 @@ from ufo.schema.records import (
     ToolIntent,
     TurnContext,
     TurnStatus,
+    mid_turn_reply_id_for,
     turn_id_for,
 )
 from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats, gate_member
@@ -109,6 +115,7 @@ def _refused(
 class Admission:
     dbos: DBOSClient
     durable_surfaces: frozenset[str]
+    hub: Hub | None = None
     key_slot_for: Callable[[str], str | None] | None = None
     billing_url: str | None = None
 
@@ -121,13 +128,16 @@ class Admission:
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
         intent: ToolIntent | None = None,
+        comment: str | None = None,
     ) -> Admitted:
         if intent is not None and speaker_member_id is None:
             raise ValueError("a prepared intent requires a speaking member")
         if intent is not None and body != intent.model_dump_json():
             raise ValueError("body and intent disagree — the envelope is the turn's inbound")
+        if comment == "":
+            raise ValueError("a surface comment cannot be empty")
         with span("admission", kind=SpanKind.SERVER):
-            return await self._admit(
+            admitted = await self._admit(
                 workspace_id,
                 conversation_id,
                 None,
@@ -137,7 +147,19 @@ class Admission:
                 context,
                 member_admission=True,
                 intent=intent,
+                comment=comment,
             )
+        if admitted.comment_id is not None and comment is not None and self.hub is not None:
+            await self.hub.publish(
+                admitted.turn_id,
+                Reply(
+                    id=admitted.comment_id,
+                    message_ref=admitted.arrival_id or admitted.turn_id,
+                    text=comment,
+                    is_comment=True,
+                ),
+            )
+        return admitted
 
     async def redispatch(
         self, workspace_id: UUID, conversation_id: UUID
@@ -283,6 +305,7 @@ class Admission:
         as_scheduled: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        comment: str | None = None,
     ) -> Admitted:
         if (unless_member_since is None) != (unless_member_arrival_since is None):
             raise ValueError("waiting on a member takes both watermarks, turn and arrival")
@@ -378,7 +401,13 @@ class Admission:
                         if queued_message.conversation_id != conversation_id:
                             raise RuntimeError("idempotency key reused for a different turn")
                         if queued_message.consumed_turn_id is not None:
-                            return Admitted(queued_message.consumed_turn_id, opened_run=False)
+                            return await self._record_comment(
+                                connection,
+                                workspace_id,
+                                Admitted(queued_message.consumed_turn_id, opened_run=False),
+                                comment,
+                                queued_message.id,
+                            )
                         target_live = (
                             await connection.execute(
                                 sa.select(tables.turn.c.status.in_(NON_TERMINAL_STATUSES)).where(
@@ -387,10 +416,15 @@ class Admission:
                             )
                         ).scalar_one()
                         if target_live:
-                            return Admitted(
-                                queued_message.admitted_turn_id,
-                                opened_run=False,
-                                arrival_id=queued_message.id,
+                            return await self._record_comment(
+                                connection,
+                                workspace_id,
+                                Admitted(
+                                    queued_message.admitted_turn_id,
+                                    opened_run=False,
+                                    arrival_id=queued_message.id,
+                                ),
+                                comment,
                             )
                         await connection.execute(
                             sa.delete(tables.inbound_message).where(
@@ -551,7 +585,12 @@ class Admission:
                         turn_status=live_turn.status,
                     )
                     if live_turn.status != PARKED:
-                        return Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id)
+                        return await self._record_comment(
+                            connection,
+                            workspace_id,
+                            Admitted(live_turn.id, opened_run=False, arrival_id=arrival_id),
+                            comment,
+                        )
                     await connection.execute(
                         sa.update(tables.turn)
                         .values(
@@ -569,7 +608,12 @@ class Admission:
                 if retry_enqueue and deduped.running_attempt is not None:
                     redispatch_workflow_id = uuid4().hex
                 if not retry_enqueue:
-                    return Admitted(turn_id, opened_run=False)
+                    return await self._record_comment(
+                        connection,
+                        workspace_id,
+                        Admitted(turn_id, opened_run=False),
+                        comment,
+                    )
                 status = QUEUED
             if deduped is None and folded_parked_turn is None:
                 seq = (
@@ -714,18 +758,75 @@ class Admission:
                         .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
                         .where(tables.turn.c.id == turn_id, tables.turn.c.status == QUEUED)
                     )
+            admitted = await self._record_comment(
+                connection,
+                workspace_id,
+                (
+                    Admitted(folded_parked_turn, opened_run=True, arrival_id=arrival_id)
+                    if folded_parked_turn is not None
+                    else Admitted(turn_id, opened_run=False)
+                    if status != QUEUED
+                    else Admitted(turn_id, opened_run=opened_run)
+                ),
+                comment,
+            )
         if folded_parked_turn is not None:
             await self._enqueue(
                 workspace_id, conversation_id, folded_parked_turn, workflow_id=uuid4().hex
             )
-            return Admitted(folded_parked_turn, opened_run=True, arrival_id=arrival_id)
+            return admitted
         if status != QUEUED:
-            return Admitted(turn_id, opened_run=False)
+            return admitted
         if dispatch_now:
             await self._enqueue(
                 workspace_id, conversation_id, turn_id, workflow_id=redispatch_workflow_id
             )
-        return Admitted(turn_id, opened_run=opened_run)
+        return admitted
+
+    async def _record_comment(
+        self,
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        admitted: Admitted,
+        comment: str | None,
+        message_ref: UUID | None = None,
+    ) -> Admitted:
+        if comment is None:
+            return admitted
+        reference = message_ref or admitted.arrival_id or admitted.turn_id
+        comment_id = mid_turn_reply_id_for(
+            admitted.turn_id,
+            SURFACE_COMMENT_ROUND_INDEX,
+            0,
+            f"surface:{reference}",
+        )
+        insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+        written = await connection.execute(
+            insert(tables.mid_turn_reply)
+            .values(
+                id=comment_id,
+                workspace_id=workspace_id,
+                turn_id=admitted.turn_id,
+                round_index=SURFACE_COMMENT_ROUND_INDEX,
+                span_index=0,
+                message_ref=reference,
+                text=comment,
+                status=WRITEBACK_PENDING,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+            .on_conflict_do_nothing(index_elements=[tables.mid_turn_reply.c.id])
+        )
+        return (
+            Admitted(
+                turn_id=admitted.turn_id,
+                opened_run=admitted.opened_run,
+                arrival_id=admitted.arrival_id,
+                comment_id=comment_id,
+            )
+            if written.rowcount == 1
+            else admitted
+        )
 
     async def _enqueue(
         self,
@@ -823,6 +924,7 @@ class MemberAdmission:
         *,
         speaker_member_id: UUID | None,
         intent: ToolIntent | None = None,
+        comment: str | None = None,
     ) -> Admitted:
         return await self.admission.admit_member(
             self.workspace_id,
@@ -832,6 +934,7 @@ class MemberAdmission:
             idempotency_key=idempotency_key,
             context=context,
             intent=intent,
+            comment=comment,
         )
 
 

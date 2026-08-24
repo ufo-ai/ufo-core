@@ -26,6 +26,7 @@ const LINKED: OwnedConversation = {
   last_turn_at: "2026-07-30T11:00:00",
   readable: true,
   disclosable: false,
+  commentable: false,
 };
 
 const titled = (route: Route, linked: Record<string, OwnedConversation> = {}) =>

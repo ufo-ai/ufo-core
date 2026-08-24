@@ -351,6 +351,8 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     });
   });
 
+  source.addEventListener("comment", () => undefined);
+
   /** A drain is a round boundary: the text streamed before it is working prose the member was never
    *  sent — a reply is delivered by its own tag, as the `reply` frame above — so nothing settles
    *  here and the live bubble starts the next round empty. The frame's ids clear the wait each

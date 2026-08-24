@@ -493,12 +493,14 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
   holding the claim is the one narrating and a resumed run gets its narration back: the status Slack
   drops two minutes after its last write is stamped again by the instance that took the turn over.
   Live feedback is never delivery, which stays the poller's: a `speak` post per marked span while
-  the turn runs, then the terminal reply. Every post the surface makes — span, progress, terminal
-  reply, shared file — is a reply to the member message it answers: the thread root a channel's
-  queue key carries, and in a DM the member message the surface recorded at admission, since a DM
-  conversation is the channel and each member message founds a thread of its own. A turn that
-  answers no member message (a scheduled run) has nothing to thread under and posts at the DM top
-  level.
+  the turn runs, then the terminal reply. A comment admitted from the portal writes its `speak`
+  delivery beside the inbound in the same transaction; Slack posts `Name commented: <message>`,
+  with `commented` linking to the portal conversation, before the agent's reply. Every post the
+  surface makes — comment, span, progress, terminal reply, shared file — is a reply to the member
+  message it answers: the thread root a channel's queue key carries, and in a DM the member message
+  the surface recorded at admission. A portal comment has no new Slack message to answer, so it
+  uses the conversation's recorded DM thread anchor. A turn that answers no member message (a
+  scheduled run) has nothing to thread under and posts at the DM top level.
 - **Live** (web; the terminal surface is its directive-stream twin) — the member's connection is held open, so
   admission registers nothing and the surface delivers by `tail`-ing the turn's frames off the hub
   over SSE in its own route. The poller only processes turns that registered a writeback, so it is a
@@ -536,8 +538,12 @@ signed-in member — a row they own joins by ownership alone, the rest by grants
 extension's own store, granted and revoked in chat
 (`grant_web_access`/`revoke_web_access`, admin-only, applying to the conversation's agent). A
 member-private extension conversation is listed as a chat and admits that member's replies, but
-does not grant another conversation or an agent panel. A workspace admin reaches and administers
-every agent. A subagent profile is deploy shape, not an agent — no identity, no audience, no page
+does not grant another conversation or an agent panel. A readable Slack or terminal conversation
+whose audience is the workspace or the signed-in member admits portal comments through the same
+chat transport; an admin disclosure of another member's private conversation never does. The
+admission publishes the linked comment to a live terminal and records it for Slack's durable
+delivery. A workspace admin reaches and administers every agent. A subagent profile is deploy
+shape, not an agent — no identity, no audience, no page
 of its own: a run's work is read inline under the reply that spawned it, and the topology graph
 draws the profile roster as one tile. An out-of-audience agent is not-found on
 every portal route,
@@ -568,8 +574,9 @@ binding names, admitted through the sites surface's per-visit agent-visibility g
 into the portal's sandboxed iframe — headed by the agent's name, the way out to the page, its
 settings, and a chat toggle that opens the conversation beside the page. That conversation column
 opens on the conversation that moved last and carries the composer where the portal founded that
-conversation, a read-only transcript where another surface holds it, and the acknowledgement gate
-where the member has not opened it; every one of the app's conversations stands in an index lane
+conversation or where Slack or terminal holds a commentable one, a read-only transcript for every
+other readable conversation, and the acknowledgement gate where the member has not opened it;
+every one of the app's conversations stands in an index lane
 beside it, and pressing one opens it. The homepage read has three states, so the page a
 member is waiting for is not the page that is not there: `building` while the seed run that builds
 an agent's first homepage is still working, drawn as the shape a page takes; `set` once one is
@@ -627,7 +634,8 @@ or holding a turn they spoke — and, under a bound of its own, the readable one
 and they are not: the rail's projection, each row titled the way the title job named it, flagged
 `mine`, and a colleague's naming who spoke it. A conversation no member spoke in is an extension's
 errand and is in neither. A `#/c/<conversation_id>` permalink opens a web chat normally, opens a
-member-private extension conversation for replies, and opens every other surface's readable
+member-private extension conversation for replies, opens the signed-in member's and workspace's
+Slack and terminal conversations for comments, and opens every other surface's readable
 conversation in that same conversation view read-only — headed the way a chat is, by the agent it
 ran under and the model it ran on, with the surface holding it marked at the far end of that header,
 that mark the way out to it where the surface reported one. A link into the portal from another

@@ -34,6 +34,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Admin } from "@/views/Admin";
 import { Agents, AppsIndex } from "@/views/Agents";
 import { ArchivedAppsProvider } from "@/views/ArchivedApps";
+import { Chat } from "@/views/Chat";
 import { ChatPane, ConversationSlot } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
@@ -965,8 +966,10 @@ function RoutedPane({
             key={linkedConversation.id}
             agent={linkedAgent}
             conversation={linkedConversation}
+            member={member}
             crumb={crumb}
             slot={route.slot}
+            onActivity={railActivity}
             onSelectSlot={(slot) => openSlot(route.conversationId, slot)}
           />
         );
@@ -1049,14 +1052,18 @@ function RoutedPane({
 function LinkedPane({
   agent,
   conversation,
+  member,
   crumb,
   slot,
+  onActivity,
   onSelectSlot,
 }: {
   agent: Agent;
   conversation: OwnedConversation;
+  member: Member;
   crumb?: Crumb;
   slot?: string;
+  onActivity: (conversationId: string) => void;
   onSelectSlot: (slot: string | null) => void;
 }) {
   const [disclosed, setDisclosed] = useState(false);
@@ -1071,9 +1078,17 @@ function LinkedPane({
           acts={<SurfaceMark conversation={conversation} />}
           pinned
         />
-        <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-          {readable ? (
-            <>
+        {readable ? (
+          conversation.commentable ? (
+            <Chat
+              agent={agent}
+              member={member}
+              conversationId={conversation.id}
+              onActivity={onActivity}
+              onOpenArtifacts={() => onSelectSlot("artifacts")}
+            />
+          ) : (
+            <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
               <ConversationDetail
                 agent={agent}
                 conversation={conversation}
@@ -1084,15 +1099,17 @@ function LinkedPane({
                 This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
                 continue it.
               </p>
-            </>
-          ) : (
+            </div>
+          )
+        ) : (
+          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
             <Disclose
               agent={agent}
               conversation={conversation}
               onOpened={() => setDisclosed(true)}
             />
-          )}
-        </div>
+          </div>
+        )}
       </div>
       {readable && slot ? (
         <ConversationSlot

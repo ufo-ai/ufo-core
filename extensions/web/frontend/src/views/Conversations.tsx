@@ -134,7 +134,7 @@ function origin(conversation: Conversation): string {
 /** One conversation names itself the same way on every screen that opens it — where it came from,
  *  then what it is about — and the words naming where it came from are the way back out where one
  *  leads there (`originParts`). */
-function conversationTitle(conversation: Conversation, viewer: string | null): ReactNode {
+export function conversationTitle(conversation: Conversation, viewer: string | null): ReactNode {
   const parts: ReactNode[] = [...originParts(conversation), subject(conversation, viewer)];
   return parts.flatMap((part, index) => (index ? [" · ", part] : part));
 }

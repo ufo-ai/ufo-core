@@ -242,6 +242,7 @@ TURN_WORKFLOW_NAME = "turn"
 DBOS_APP_NAME = "ufo"
 DBOS_APP_VERSION = "ufo"
 DBOS_MAX_EXECUTOR_THREADS = 8192
+SURFACE_COMMENT_ROUND_INDEX = -1
 
 
 def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID:

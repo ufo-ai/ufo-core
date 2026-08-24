@@ -167,9 +167,8 @@ function ChatApp({
     ).then((sought) => {
       if (!live) return;
       const chat = sought.ok ? sought.payload.chats[0] : undefined;
-      // A web chat comes back as a rail row this page can carry on. Another surface — a Slack
-      // thread, a terminal session — comes back as a read-only conversation projection instead,
-      // which the page shows as a transcript with the way back to the surface that holds it.
+      // A web chat comes back as a rail row this page can carry on. Another surface comes back as
+      // its conversation projection, including whether the portal may continue it.
       const reading = sought.ok ? sought.payload.conversation : undefined;
       setShown(
         chat
@@ -321,6 +320,19 @@ function ChatApp({
     const agent =
       agents.find((entry) => entry.id === convo.agent?.id) ??
       ({ id: convo.agent?.id ?? "", name: convo.agent?.name ?? "", model: "" } as Agent);
+    if (convo.commentable) {
+      return (
+        <ChatPane
+          key={convo.id}
+          agent={agent}
+          member={member}
+          conversationId={convo.id}
+          title={convo.description}
+          crumb={crumb}
+          onActivity={() => {}}
+        />
+      );
+    }
     return (
       <Pane>
         <Header pinned heading={1} title={convo.description} />

@@ -56,6 +56,7 @@ export type Conversation = {
   last_turn_at: string | null;
   readable: boolean;
   disclosable: boolean;
+  commentable: boolean;
 };
 
 /** A conversation a read spanning every agent answers with: the row names the agent that ran it,

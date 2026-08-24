@@ -267,6 +267,7 @@ def run() -> None:
     admission = Admission(
         dbos=dbos_client,
         durable_surfaces=durable_surfaces(manifests),
+        hub=hub,
         key_slot_for=registry.key_slot_for,
         billing_url=billing_url,
     )
@@ -1001,6 +1002,7 @@ def _mount_shared_surfaces(
     admission = Admission(
         dbos=dbos_client,
         durable_surfaces=durable_surfaces(manifests),
+        hub=hub,
         key_slot_for=key_slot_for,
         billing_url=billing_url,
     )

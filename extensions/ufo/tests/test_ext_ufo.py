@@ -58,6 +58,7 @@ from ufo.hub import (
     CostTick,
     InProcessHub,
     Parked,
+    Reply,
     Resumed,
     SkillLoad,
     SubagentActivity,
@@ -143,6 +144,14 @@ def test_frame_map_covers_every_live_frame() -> None:
     assert directives_for(run.model_copy(update={"status": "done"}), False) == ()
     assert directives_for(CostTick(cost_micro_usd=55_000, tokens=3000), False) == (
         b"status\t3000 tok - $0.055000\n",
+    )
+    comment = Reply(
+        id=UUID(int=4),
+        text="You [commented](https://ufo.test/surface/web#/c/thread): follow up",
+        is_comment=True,
+    )
+    assert directives_for(comment, False) == (
+        b"say\tYou [commented](https://ufo.test/surface/web#/c/thread): follow up\n",
     )
 
 

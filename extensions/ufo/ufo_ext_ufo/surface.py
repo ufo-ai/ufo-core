@@ -247,10 +247,11 @@ def directives_for(
     names the credential prompts still awaiting values, `files` the ones it shared). A drain names
     the member arrivals it folded (`absorbed`), which is how a client holding a message it sent
     mid-turn learns the agent has taken that message up. A reply the turn delivered mid-flight says
-    itself (`say`): the member has been sent those words, and they never rode the token stream. A
-    turn the fleet resumed after the process running it died narrates that as a `note`, on the
-    frame — a client's notes already carry every other thing the turn is doing, so this one needs no
-    grace to keep it clear of the answer."""
+    itself (`say`): the member has been sent those words, and they never rode the token stream. The
+    same frame carries a linked notice when a member comments from the portal. A turn the fleet
+    resumed after the process running it died narrates that as a `note`, on the frame — a client's
+    notes already carry every other thing the turn is doing, so this one needs no grace to keep it
+    clear of the answer."""
     match frame:
         case TextDelta():
             return (directive("txt", frame.text),) if frame.text else ()

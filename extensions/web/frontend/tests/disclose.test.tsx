@@ -35,6 +35,7 @@ const PRIVATE = {
   last_turn_at: "2026-07-30T11:00:00",
   readable: false,
   disclosable: true,
+  commentable: false,
 };
 
 const WALLED = {

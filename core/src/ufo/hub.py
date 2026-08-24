@@ -91,8 +91,9 @@ class Resumed(BaseModel):
 
 
 class Reply(BaseModel):
-    """One reply a running turn already delivered to a member: the whole text of a span the model
-    marked for delivery, and the `message_ref` it answers when the tag named a readable one.
+    """One reply delivered to a member while a turn runs: the whole text of a span the model marked
+    for delivery, or the source-surface notice for a comment admitted somewhere else, and the
+    `message_ref` it answers when one is known.
     Non-terminal, and distinguished from a TextDelta by carrying text the member has been sent
     rather than a chunk in flight — a span's words never ride the delta stream, so this frame is the
     only place a live surface reads them.
@@ -104,6 +105,7 @@ class Reply(BaseModel):
     id: UUID
     message_ref: UUID | None = None
     text: str = ""
+    is_comment: bool = False
 
 
 class SubagentActivity(BaseModel):

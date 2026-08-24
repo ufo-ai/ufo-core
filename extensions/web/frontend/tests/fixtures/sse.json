@@ -21,7 +21,7 @@
   },
   {
     "event": "reply",
-    "data": "{\"id\":\"66666666-6666-4666-8666-666666666666\",\"message_ref\":\"88888888-8888-4888-8888-888888888888\",\"text\":\"Filed the launch issue as metalcraftai/ufo#1801.\"}"
+    "data": "{\"id\":\"66666666-6666-4666-8666-666666666666\",\"message_ref\":\"88888888-8888-4888-8888-888888888888\",\"text\":\"Filed the launch issue as metalcraftai/ufo#1801.\",\"is_comment\":false}"
   },
   {
     "event": "absorbed",

@@ -31,6 +31,7 @@ const LISTED = {
   last_turn_at: "2026-08-01T09:00:01",
   readable: true,
   disclosable: false,
+  commentable: false,
 };
 
 beforeEach(() => {

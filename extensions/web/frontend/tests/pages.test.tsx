@@ -297,7 +297,7 @@ test("the chat page heads one conversation under the crumb the shell handed it",
   expect(within(path).getByText(CHAT_ROW.title)).toBeTruthy();
 });
 
-test("the chat page opens a Slack or terminal conversation read-only, not as unavailable", async () => {
+test("the chat page opens a Slack or terminal conversation for comments", async () => {
   const SLACK = TURN_ID;
   const slackConversation = {
     id: SLACK,
@@ -314,10 +314,10 @@ test("the chat page opens a Slack or terminal conversation read-only, not as una
     last_turn_at: "2026-08-01T09:00:01",
     readable: true,
     disclosable: false,
+    commentable: true,
   };
   const { calls } = await runPage("chat", {
-    // The listing is portal-filtered, so a Slack conversation is never in it: the page resolves it
-    // by address, and the resolve answers a read-only conversation rather than a repliable chat.
+    // The listing is portal-filtered, so the page resolves the Slack conversation by address.
     "/objects/conversation": () => json({ objects: [], next_cursor: null }),
     "/api/chats": () => json({ chats: [], conversation: slackConversation }),
     "/transcript": () => json({ messages: [], earlier: 0 }),
@@ -326,8 +326,8 @@ test("the chat page opens a Slack or terminal conversation read-only, not as una
   await screen.findByRole("heading", { name: "Chat" });
   window.postMessage({ ufo: "place", place: { opens: [SLACK] } }, "*");
 
-  // The read-only note stands, the miss never does, and the transcript is fetched by its address.
-  expect(await screen.findByText(/Reply in Slack to continue it/)).toBeTruthy();
+  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(screen.queryByText(/read-only here/)).toBeNull();
   expect(screen.queryByText("This conversation is not available here.")).toBeNull();
   expect(calls.some((url) => url.includes("transcript") && url.includes(SLACK))).toBe(true);
 });

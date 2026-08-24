@@ -367,7 +367,7 @@ test("the agent's own section lists what is shared with it and not what is held 
   expect(screen.queryByText("notion")).toBeTruthy();
 });
 
-test("a workspace-shared conversation reads as shared, in its band and in its heading", async () => {
+test("a workspace-shared conversation names its audience and surface in its band", async () => {
   const shared = "5c0be3aa-0000-4000-8000-000000000003";
   wire({
     ["/conversations/" + shared + "/transcript"]: () => json({ messages: [] }),
@@ -387,6 +387,7 @@ test("a workspace-shared conversation reads as shared, in its band and in its he
             last_turn_at: null,
             readable: true,
             disclosable: false,
+            commentable: true,
           },
         ],
       }),
@@ -396,10 +397,8 @@ test("a workspace-shared conversation reads as shared, in its band and in its he
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const band = await heldConversation();
-  expect(band).toBe("Workspace");
-  expect(band).not.toContain("slack");
+  expect(band).toBe("Slack · Workspace");
   expect(band).not.toContain(shared.slice(0, 8));
-  expect(await screen.findByRole("heading", { name: "Slack · Workspace" })).toBeTruthy();
 });
 
 test("a conversation the address names is opened, and named by what it is about", async () => {
@@ -423,6 +422,7 @@ test("a conversation the address names is opened, and named by what it is about"
             last_turn_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
+            commentable: true,
           },
         ],
       }),
@@ -435,9 +435,8 @@ test("a conversation the address names is opened, and named by what it is about"
 
   openConversation(AGENT_ID, opened);
 
-  await waitFor(async () => expect(await heldConversation()).toBe(said));
+  await waitFor(async () => expect(await heldConversation()).toBe("Slack · " + said));
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "Slack · " + said })).toBeTruthy();
 });
 
 test("a Slack conversation names its channel in its heading, and those words are the way out", async () => {
@@ -462,6 +461,7 @@ test("a Slack conversation names its channel in its heading, and those words are
             last_turn_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
+            commentable: true,
           },
         ],
       }),
@@ -485,9 +485,8 @@ test("a Slack conversation names its channel in its heading, and those words are
   expect(drawn).not.toContain("underline");
   expect(drawn).not.toContain("text-link");
   expect(within(out).getByText("↗").className).toContain("text-ink-soft");
-  expect(
-    screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
-  ).toBeTruthy();
+  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
 test("a conversation opened here reads as chat, with the reply's whole activity behind it", async () => {
@@ -529,6 +528,7 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
             created_at: "2026-07-30T10:00:00",
             last_turn_at: "2026-07-30T10:00:01",
             readable: true,
+            commentable: false,
           },
         ],
       }),
@@ -572,6 +572,7 @@ test("a Slack transcript heads itself with its channel, and those words are the 
     last_turn_at: "2026-07-30T10:00:01",
     readable: true,
     disclosable: false,
+    commentable: surface === "slack",
   });
   wire({
     ["/conversations/" + thread + "/transcript"]: () =>
@@ -639,6 +640,7 @@ test("a conversation nobody shared is never named, and the half stands on the co
             created_at: "2026-07-30T10:00:00",
             last_turn_at: null,
             readable: false,
+            commentable: false,
           },
           {
             id: "31bd9f77-0000-4000-8000-000000000002",
@@ -652,6 +654,7 @@ test("a conversation nobody shared is never named, and the half stands on the co
             created_at: "2026-07-30T11:00:00",
             last_turn_at: null,
             readable: false,
+            commentable: false,
           },
         ],
       }),
@@ -826,6 +829,7 @@ test("an app opens on the conversation that moved last, and an address names ano
     last_turn_at: "2026-07-30T10:00:01",
     readable: true,
     disclosable: false,
+    commentable: false,
   });
   location.hash = "#/agents/" + AGENT_ID;
   wire({
@@ -940,6 +944,7 @@ test("New starts a fresh conversation while the address still names one", async 
             last_turn_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
+            commentable: false,
           },
         ],
       }),
@@ -990,6 +995,7 @@ test("a conversation the member may not read says so instead of reporting a stat
             created_at: "2026-07-30T12:00:00",
             last_turn_at: "2026-07-30T12:00:00",
             readable: true,
+            commentable: false,
           },
         ],
       }),

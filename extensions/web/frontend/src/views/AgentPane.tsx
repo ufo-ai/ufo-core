@@ -12,7 +12,12 @@ import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import type { ChatRow } from "@/lib/rail";
 import { Chat } from "@/views/Chat";
-import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
+import {
+  ConversationDetail,
+  Disclose,
+  conversationTitle,
+  subject,
+} from "@/views/Conversations";
 import { mergePlace, serializePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
 import { agentCrumb } from "@/lib/title";
 import type { Agent, Conversation, Homepage, Member } from "@/lib/types";
@@ -108,10 +113,8 @@ export function AgentPane({
   const site = usePanelRead<Homepage>("/agents/" + agent.id + "/homepage", settles);
   const home: Homepage = site.phase === "ready" ? site.payload : boot;
   // Two reads, each authoritative for a different question. The index says which conversations the
-  // app has at all — every surface it has ever spoken on. The rail says which of them the portal
-  // can carry on, because the chat transport answers only for a conversation the web surface
-  // founded. Neither answers the other's question: an index row on Slack has no composer, and a
-  // rail filtered to this app is not the app's history.
+  // app has at all — every surface it has ever spoken on — and which external ones accept comments.
+  // The rail says which portal and extension conversations are the app's directive chats.
   //
   // The index is read only when a conversation is on screen: one the address opens, or — for an
   // agent whose page is not set — the editing conversation the pane stands on by default, since
@@ -179,7 +182,13 @@ export function AgentPane({
   // rather than offering an act that cannot be taken.
   const walled = opened !== null && !opened.readable && !opened.disclosable;
   const gated = opened !== null && !walled && !opened.readable && disclosed !== opened.id;
-  const reading = opened !== null && !walled && !gated && live !== null && !live.has(opened.id);
+  const reading =
+    opened !== null &&
+    !walled &&
+    !gated &&
+    live !== null &&
+    !live.has(opened.id) &&
+    !opened.commentable;
 
   const url = home.state === "set" ? home.url : null;
   const generation = home.state === "set" ? (home.deploy_generation ?? 0) : 0;
@@ -312,7 +321,13 @@ export function AgentPane({
       {beside ? null : (
         <Header
           heading={2}
-          title={opened ? subject(opened, viewer) : NEW_CONVERSATION}
+          title={
+            opened
+              ? opened.commentable
+                ? conversationTitle(opened, viewer)
+                : subject(opened, viewer)
+              : NEW_CONVERSATION
+          }
           acts={
             <>
               <Button variant="send" size="bar" onClick={start}>
@@ -352,10 +367,10 @@ export function AgentPane({
           />
         </div>
       ) : reading ? (
-        // A conversation the portal did not found is read rather than answered: the composer
-        // would post to a route that refuses it. Where another surface holds it, that surface is
-        // the way on and the heading it draws is the way back to it. Where the portal's own
-        // surface holds it — a run on a clock, a turn the workspace seeded — there is nowhere to
+        // A conversation the portal cannot continue is read rather than answered. Where another
+        // surface holds it, that surface is the way on and the heading it draws is the way back to
+        // it. Where the portal's own surface holds it — a run on a clock, a turn the workspace
+        // seeded — there is nowhere to
         // send the member, so the line states the fact and stops: `Reply in Portal` read inside
         // the portal names no act.
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl">

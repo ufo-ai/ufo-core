@@ -100,6 +100,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import (
+    SURFACE_COMMENT_ROUND_INDEX,
     WRITEBACK_PENDING,
     AskQuestion,
     AskUserInput,
@@ -4848,6 +4849,46 @@ async def test_dm_spans_thread_under_the_messages_they_answer(
         ("D5", "300.5", "On yours too."),
         ("D5", "100.5", "And this."),
     ]
+
+
+async def test_a_web_comment_in_a_dm_posts_under_the_mirrored_slack_thread(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, _ = await _seed(member_email=OPERATOR_OWNER_EMAIL)
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "D5", "closing", blob, artifact=False)
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        await slack._mirror_thread(
+            conversation_id,
+            slack.MirroredThread(queue_key="D5", message_ts="100.5"),
+        )
+    notice = (
+        f"You [commented](https://ufo.example.test/surface/web#/c/{conversation_id}): follow up"
+    )
+    await _seed_spoken_reply(
+        workspace_id,
+        turn_id,
+        notice,
+        round_index=SURFACE_COMMENT_ROUND_INDEX,
+    )
+
+    await app.state.mid_turn_reply_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
+    ]
+    assert [(post["channel"], post["thread_ts"], post["text"]) for post in posts] == [
+        ("D5", "100.5", notice)
+    ]
+    assert posts[0]["blocks"] == [{"type": "markdown", "text": notice}]
 
 
 GUEST_TEAM_ID = "T0000009"

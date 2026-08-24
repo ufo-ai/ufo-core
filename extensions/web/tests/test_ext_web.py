@@ -173,6 +173,7 @@ from ufo.schema import tables
 from ufo.schema.records import (
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
+    SURFACE_COMMENT_ROUND_INDEX,
     AskQuestion,
     AskUserInput,
     ConnectRequest,
@@ -355,6 +356,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
             assert b"event:" not in event
         else:
             assert named[kind] in event
+    assert b"event: comment\n" in _sse("8", Reply(id=uuid4(), text="commented", is_comment=True))
 
     class Unmapped(BaseModel):
         pass
@@ -1896,6 +1898,35 @@ async def test_a_stop_naming_another_conversations_turn_is_not_found(
 
     assert refused.status_code == 404
     assert refused.text == "no such turn in this conversation"
+    assert await _turn_status(running) == "running"
+
+
+async def test_a_shared_commenter_cannot_stop_another_members_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    speaker_id, _speaker_token = await _seed_member(workspace_id, "speaker@example.com")
+    _viewer_id, viewer_token = await _seed_member(workspace_id, "viewer@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C1:1.0",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    running = await _seed_running_turn(workspace_id, conversation_id, agent_id, speaker_id, 1)
+
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        headers={
+            "cookie": f"{SESSION_COOKIE}={viewer_token}",
+            "x-ufo-stop-turn": str(running),
+        },
+    )
+
+    assert refused.status_code == 403
+    assert refused.headers[web_surface.REFUSAL_HEADER] == "1"
     assert await _turn_status(running) == "running"
 
 
@@ -5115,6 +5146,21 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
         seq=1,
         inbound="Review pull request 42.",
     )
+    shared_id = await _seed_agent_conversation(
+        workspace_id,
+        review_agent,
+        queue_key="C1:1.0",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        shared_id,
+        review_agent,
+        seq=1,
+        inbound="Shared review room.",
+    )
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     reached = await client.get(
         f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie
@@ -5155,6 +5201,22 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
         headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     assert foreign.status_code == 404
+    shared_transcript = await client.get(
+        f"/surface/web/agents/{review_agent}/transcript?conversation={shared_id}",
+        headers=cookie,
+    )
+    shared_reply = await client.post(
+        f"/surface/web/agents/{review_agent}/chat?conversation={shared_id}",
+        content=b"Cross the private agent boundary.",
+        headers=cookie,
+    )
+    shared_permalink = await client.get(
+        f"/surface/web/api/chats?conversation={shared_id}",
+        headers=cookie,
+    )
+    assert shared_transcript.status_code == 404
+    assert shared_reply.status_code == 404
+    assert shared_permalink.json() == {"chats": []}
 
 
 async def test_the_rail_reads_every_surface_under_its_bound(
@@ -5472,7 +5534,90 @@ async def test_a_readable_slack_conversation_resolves_by_permalink(
         "last_turn_at": target["last_turn_at"],
         "readable": True,
         "disclosable": False,
+        "commentable": True,
     }
+
+
+async def test_web_comments_continue_slack_and_terminal_conversations_and_notify_their_threads(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    slack_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C1:1.0",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    terminal_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="terminal-1",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="ufo",
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        slack_conversation,
+        agent_id,
+        seq=1,
+        inbound="from Slack",
+        speaker_member_id=member_id,
+        context=TurnContext(sender="Robin Vale (owner@example.com)"),
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        terminal_conversation,
+        agent_id,
+        seq=1,
+        inbound="from terminal",
+        speaker_member_id=member_id,
+        context=TurnContext(sender="owner@example.com"),
+    )
+
+    for conversation_id, author in (
+        (slack_conversation, "Robin Vale"),
+        (terminal_conversation, "You"),
+    ):
+        STREAM_GATE.arm()
+        posted = await client.post(
+            f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+            content=b"follow up",
+            headers=cookie,
+        )
+
+        assert posted.status_code == 200
+        turn_id = UUID(posted.json()["turn_id"])
+        async with workspace_tx() as connection:
+            comment = (
+                await connection.execute(
+                    sa.select(
+                        tables.mid_turn_reply.c.round_index,
+                        tables.mid_turn_reply.c.text,
+                    ).where(tables.mid_turn_reply.c.turn_id == turn_id)
+                )
+            ).one()
+            context = (
+                await connection.execute(
+                    sa.select(tables.turn.c.context).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one()
+        url = f"https://web/surface/web#/c/{conversation_id}"
+        assert (comment.round_index, comment.text) == (
+            SURFACE_COMMENT_ROUND_INDEX,
+            f"{author} [commented]({url}): follow up",
+        )
+        assert TurnContext.model_validate(context).source == f"{url} (owner@example.com)"
+        await _consume(client, token, str(turn_id))
+
+    listed = await client.get(f"/surface/web/agents/{agent_id}/conversations", headers=cookie)
+    rows = {row["id"]: row for row in listed.json()["conversations"]}
+    assert rows[str(slack_conversation)]["commentable"] is True
+    assert rows[str(terminal_conversation)]["commentable"] is True
 
 
 async def test_a_permalink_resolves_with_the_viewers_own_admin_flag(
@@ -5520,8 +5665,16 @@ async def test_a_permalink_resolves_with_the_viewers_own_admin_flag(
     assert private.json()["conversation"]["member_email"] == "owner@example.com"
     assert private.json()["conversation"]["readable"] is False
     assert private.json()["conversation"]["disclosable"] is True
+    assert private.json()["conversation"]["commentable"] is False
     assert walled.json()["conversation"]["readable"] is False
     assert walled.json()["conversation"]["disclosable"] is False
+    assert walled.json()["conversation"]["commentable"] is False
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={theirs}",
+        content=b"not mine",
+        headers=admin_cookie,
+    )
+    assert refused.status_code == 404
     for conversation_id in (theirs, room):
         unprivileged = await client.get(
             f"/surface/web/api/chats?conversation={conversation_id}", headers=peer_cookie
@@ -5805,6 +5958,38 @@ async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
         headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
     )
     assert crossed.status_code == 403
+
+
+async def test_a_shared_slack_turn_streams_to_a_member_who_did_not_speak_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    speaker_id, _speaker_token = await _seed_member(workspace_id, "speaker@example.com")
+    _viewer_id, viewer_token = await _seed_member(workspace_id, "viewer@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C1:1.0",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    turn_id = await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=1,
+        inbound="from Slack",
+        speaker_member_id=speaker_id,
+    )
+
+    streamed = await client.get(
+        f"/surface/web/turns/{turn_id}/stream",
+        headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"},
+    )
+
+    assert streamed.status_code == 200
+    assert "event: terminal" in streamed.text
 
 
 async def test_admin_view_reads_the_workspace_shape(

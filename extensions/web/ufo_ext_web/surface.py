@@ -16,10 +16,11 @@ The `ufo_session` cookie carries the signed HMAC member bearer the gateway or `u
 claims (`resolve_workspace`), and the handler re-verifies it for its email — that email is the web
 `surface_identity`, resolved to (or created as) a member the first time they speak, and the axis
 the web audience (`ufo_ext_web.audience`) grants on. Admission is the shared durable queue every
-surface admits onto; each conversation binds permanently to the agent the member selected, web
-admits without writeback and delivers by tailing the hub over SSE in its own stream route, never
-through the writeback poller. Everything web-specific lives here, reaching core only through the
-privileged `SurfaceContext` — the SDK surface a CI gate pins."""
+surface admits onto; each conversation binds permanently to the agent the member selected. A web
+conversation delivers by tailing the hub over SSE; a portal comment in a Slack conversation uses
+that conversation's durable delivery, and one in a terminal conversation reaches its held stream.
+Everything web-specific lives here, reaching core only through the privileged `SurfaceContext` —
+the SDK surface a CI gate pins."""
 
 import asyncio
 import json
@@ -41,7 +42,7 @@ from pydantic import BaseModel, JsonValue, ValidationError
 from ufo_ext_sites.surface import homepage_embed_url, shipped_homepage_url
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
-from ufo.sdk.audience import audience_subjects, conversation_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
 from ufo.sdk.balance import read_headroom
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
@@ -170,6 +171,7 @@ SCHEDULED_TASK_KIND = "scheduled_task"
 SITE_KIND = "site"
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
+COMMENT_SURFACES = frozenset({"slack", "ufo"})
 SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
 CHAT_STORE_PREFIX = "chat/"
@@ -821,7 +823,11 @@ async def _member_chat(
     member_id: UUID,
     email: str,
     conversation_id: UUID,
+    *,
+    agent_visible: bool,
 ) -> ListedConversation | None:
+    """One conversation this member may continue through the portal. A member-private extension
+    grants only itself; Slack and terminal comments require the agent's ordinary web reach."""
     web = await _own_web_chat(store, agent_id, email, conversation_id)
     listed = await ctx.list_agent_conversations(
         agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
@@ -835,7 +841,16 @@ async def _member_chat(
         conversation_audience(member_id)
     ):
         return conversation
+    if agent_visible and _commentable(conversation, member_id):
+        return conversation
     return None
+
+
+def _commentable(conversation: ListedConversation, member_id: UUID) -> bool:
+    return conversation.summary.surface in COMMENT_SURFACES and conversation.audience in {
+        str(SHARED_AUDIENCE),
+        str(conversation_audience(member_id)),
+    }
 
 
 def _turn_context(email: str, request: Request, source: str) -> TurnContext:
@@ -852,15 +867,45 @@ def _turn_context(email: str, request: Request, source: str) -> TurnContext:
         return TurnContext(sender=email, source=source)
 
 
+def _chat_url(public_base_url: str | None, conversation_id: UUID) -> str | None:
+    if not public_base_url:
+        return None
+    return f"{public_base_url.rstrip('/')}{PORTAL_PATH}#/c/{conversation_id}"
+
+
 def _chat_source(public_base_url: str | None, conversation_id: UUID, email: str) -> str:
     """Where a portal message was said, as the agent carries it into anything it creates: the
     portal URL that opens this conversation, plus who asked. The portal routes on the fragment
     (`#/c/<id>`), so the link lands on the conversation rather than the shell. A deploy whose
     public base is unset or empty has no address to give, and names the client and the member
     instead."""
-    if not public_base_url:
+    url = _chat_url(public_base_url, conversation_id)
+    if url is None:
         return f"{SOURCE} ({email})"
-    return f"{public_base_url.rstrip('/')}{PORTAL_PATH}#/c/{conversation_id} ({email})"
+    return f"{url} ({email})"
+
+
+def _comment_notice(
+    public_base_url: str | None,
+    conversation: ListedConversation,
+    member_id: UUID,
+    email: str,
+    text: str,
+    paths: tuple[str, ...],
+) -> str:
+    if conversation.audience == str(conversation_audience(member_id)):
+        author = "You"
+    else:
+        speaker = next((who for who in conversation.speakers if who.email == email), None)
+        sender = None if speaker is None else speaker.sender
+        author = email if sender is None else sender.removesuffix(f" ({email})")
+    url = _chat_url(public_base_url, conversation.summary.id)
+    verb = "commented" if url is None else f"[commented]({url})"
+    message = text.strip()
+    if paths:
+        attached = ", ".join(PurePosixPath(path).name for path in paths)
+        message = f"{message}\n\nAttached: {attached}" if message else f"Attached: {attached}"
+    return f"{author} {verb}: {message}"
 
 
 async def _audience_for(
@@ -1210,9 +1255,10 @@ def _stop_header(request: Request) -> UUID | None | Response:
 
 async def chat(ctx: SurfaceContext, request: Request) -> Response:
     """Admit one member message. The `conversation` query parameter continues that conversation —
-    gated to the member's own chat with this agent — and the `new` sentinel opens a fresh one: the
-    chat POST is the chat transport, so opening a conversation rides the first message rather than
-    a separate mutation, and the response names the conversation it landed in.
+    gated to the member's own portal or private-extension chat, or a Slack/terminal conversation
+    shared with them — and the `new` sentinel opens a fresh one: the chat POST is the chat
+    transport, so opening a conversation rides the first message rather than a separate mutation,
+    and the response names the conversation it landed in.
 
     A message sent while a turn is still running joins that turn instead of founding one, and the
     response says so by naming the `arrival_id` the turn's `absorbed` event will carry — the id the
@@ -1257,6 +1303,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     requested = request.query_params.get("conversation", "").strip()
     if not requested:
         return Response("conversation is required", status_code=400)
+    comment = None
     if requested == NEW_CONVERSATION:
         if not audience.allows(agent_id):
             return Response("no such agent", status_code=404)
@@ -1272,10 +1319,26 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
             conversation_id = UUID(requested)
         except ValueError:
             return Response("no such conversation", status_code=404)
-        if await _member_chat(ctx, store, agent_id, member_id, email, conversation_id) is None:
+        conversation = await _member_chat(
+            ctx,
+            store,
+            agent_id,
+            member_id,
+            email,
+            conversation_id,
+            agent_visible=audience.allows(agent_id),
+        )
+        if conversation is None:
             return Response("no such conversation", status_code=404)
-        title = await _named(ctx, agent_id, member_id, conversation_id)
+        title = conversation.title
+        if _commentable(conversation, member_id):
+            comment = _comment_notice(
+                ctx.public_base_url, conversation, member_id, email, text, paths
+            )
     if stop is not None:
+        authorized = await _member_turn(ctx, request, named_turn=stop)
+        if isinstance(authorized, Response):
+            return authorized
         try:
             stopped = await ctx.stop_turn(conversation_id, stop)
         except ValueError:
@@ -1294,6 +1357,7 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         ),
         idempotency_key=key,
         speaker_member_id=member_id,
+        comment=comment,
     )
     payload: dict[str, str | bool | None] = {
         "turn_id": str(admitted.turn_id),
@@ -2047,7 +2111,15 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     except ValueError:
         return Response("no such conversation", status_code=404)
     if (
-        await _member_chat(ctx, web_extension().store, agent_id, member_id, email, conversation_id)
+        await _member_chat(
+            ctx,
+            web_extension().store,
+            agent_id,
+            member_id,
+            email,
+            conversation_id,
+            agent_visible=audience.allows(agent_id),
+        )
         is None
     ):
         return Response("no such conversation", status_code=404)
@@ -2121,21 +2193,38 @@ async def _resolve_chat(
 ) -> Response:
     """The conversation a `#/c/<id>` permalink names: a web chat returns its rail row; another
     surface returns its conversation projection. A member-private extension conversation is a chat;
-    every other surface is read-only. The same audience gates as their ordinary views answer, down
-    to the viewer's own admin flag — so a row the conversations panel offers an admin to disclose
-    resolves here too, carrying `readable: false` rather than reading as a conversation that does
-    not exist. A malformed or turnless id is absent.
-
-    The row it returns is this member's own chat — `_member_chat` answers nothing else — so it is
-    `mine` and names no speaker."""
+    a readable Slack or terminal conversation in the member's own or workspace audience takes
+    comments, and every other surface is read-only. The same audience gates as their ordinary views
+    answer, down to the viewer's own admin flag — so a row the conversations panel offers an admin
+    to disclose resolves here too, carrying `readable: false` rather than reading as a conversation
+    that does not exist. A malformed or turnless id is absent."""
     try:
         named = UUID(requested)
     except ValueError:
         return JSONResponse({"chats": []})
     for agent in audience.chat_agents:
-        own = await _member_chat(ctx, store, agent.id, member_id, email, named)
+        own = await _member_chat(
+            ctx,
+            store,
+            agent.id,
+            member_id,
+            email,
+            named,
+            agent_visible=audience.allows(agent.id),
+        )
         if own is None:
             continue
+        if _commentable(own, member_id):
+            return JSONResponse(
+                {
+                    "chats": [],
+                    "conversation": _conversation_row(
+                        own,
+                        member_id,
+                        {"id": str(agent.id), "name": agent.name},
+                    ),
+                }
+            )
         latest = await ctx.latest_turn(named)
         if latest is None:
             break
@@ -2177,7 +2266,9 @@ async def _resolve_chat(
         {
             "chats": [],
             "conversation": _conversation_row(
-                listed[0], {"id": str(target_agent.id), "name": target_agent.name}
+                listed[0],
+                member_id,
+                {"id": str(target_agent.id), "name": target_agent.name},
             ),
         }
     )
@@ -2496,7 +2587,9 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
         limit=CONVERSATION_LIST_LIMIT,
         search=_searched(request),
     )
-    return JSONResponse({"conversations": [_conversation_row(entry) for entry in listed]})
+    return JSONResponse(
+        {"conversations": [_conversation_row(entry, member_id) for entry in listed]}
+    )
 
 
 def _searched(request: Request) -> str | None:
@@ -2507,7 +2600,9 @@ def _searched(request: Request) -> str | None:
 
 
 def _conversation_row(
-    entry: ListedConversation, agent: dict[str, str] | None = None
+    entry: ListedConversation,
+    member_id: UUID,
+    agent: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """One conversation as the panel lists it. `description` is what the conversation is called —
     the one string the rail row, this row and the record's own heading all read, so no screen names
@@ -2537,6 +2632,7 @@ def _conversation_row(
         "last_turn_at": _iso(entry.summary.last_turn_at),
         "readable": entry.readable,
         "disclosable": entry.disclosable,
+        "commentable": _commentable(entry, member_id),
     }
 
 
@@ -2599,7 +2695,13 @@ async def _member_chat_page(
     except ValueError:
         return Response("no such conversation", status_code=404)
     chat = await _member_chat(
-        ctx, web_extension().store, agent_id, member_id, email, conversation_id
+        ctx,
+        web_extension().store,
+        agent_id,
+        member_id,
+        email,
+        conversation_id,
+        agent_visible=audience.allows(agent_id),
     )
     if chat is None:
         return Response("no such conversation", status_code=404)
@@ -3461,31 +3563,35 @@ async def connect_handoff(ctx: SurfaceContext, request: Request) -> Response:
     return RedirectResponse(url, status_code=303)
 
 
-async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID, str] | Response:
+async def _member_turn(
+    ctx: SurfaceContext,
+    request: Request,
+    *,
+    named_turn: UUID | None = None,
+    allow_commentable: bool = False,
+) -> tuple[UUID, UUID, str] | Response:
     """One turn this member may reach, as the member, the turn, and the email their audience is
-    resolved from, or the refusal to answer with. The turn must belong to the member AND its agent
-    must still be in their web audience, so a revocation ends tailing and stopping alongside chat
-    and transcript — an out-of-audience agent's turn is not-found."""
+    resolved from, or the refusal to answer with. A mutation requires the member's own turn; a
+    stream may also read a Slack or terminal conversation they may comment in. The agent must still
+    be reachable by their web audience or that conversation."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, email, audience = resolved
     absent = Response("That turn is not available.", status_code=404, headers={REFUSAL_HEADER: "1"})
-    try:
-        turn_id = UUID(request.path_params["turn_id"])
-    except ValueError:
-        return absent
-    owner = await ctx.turn_owner(turn_id)
-    if owner is None:
-        return absent
-    if owner != member_id:
-        return Response(
-            "That turn belongs to another member.", status_code=403, headers={REFUSAL_HEADER: "1"}
-        )
+    if named_turn is None:
+        try:
+            turn_id = UUID(request.path_params["turn_id"])
+        except ValueError:
+            return absent
+    else:
+        turn_id = named_turn
     detail = await ctx.turn_detail(turn_id)
     if detail is None:
         return absent
-    if not audience.allows(detail.turn.agent_id) and (
+    owner = detail.turn.speaker_member_id or await ctx.turn_owner(turn_id)
+    agent_visible = audience.allows(detail.turn.agent_id)
+    conversation = (
         await _member_chat(
             ctx,
             web_extension().store,
@@ -3493,15 +3599,28 @@ async def _member_turn(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUI
             member_id,
             email,
             detail.turn.conversation_id,
+            agent_visible=agent_visible,
         )
-        is None
+        if owner != member_id or not agent_visible
+        else None
+    )
+    if owner != member_id and (
+        not allow_commentable or conversation is None or not _commentable(conversation, member_id)
     ):
+        if owner is None:
+            return absent
+        return Response(
+            "That turn belongs to another member.",
+            status_code=403,
+            headers={REFUSAL_HEADER: "1"},
+        )
+    if not agent_visible and conversation is None:
         return absent
     return member_id, turn_id, email
 
 
 async def stream(ctx: SurfaceContext, request: Request) -> Response:
-    reached = await _member_turn(ctx, request)
+    reached = await _member_turn(ctx, request, allow_commentable=True)
     if isinstance(reached, Response):
         return reached
     member_id, turn_id, email = reached
@@ -3980,6 +4099,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             return head + b"event: absorbed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case Resumed():
             return head + b"event: resumed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        case Reply(is_comment=True):
+            return head + b"event: comment\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case Reply():
             return head + b"event: reply\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case TextDelta():

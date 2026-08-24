@@ -20,7 +20,7 @@ import {
   type ChatRow,
 } from "@/lib/rail";
 
-import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -670,7 +670,7 @@ test("a conversation another member spoke stands at the foot and names them", as
   ).not.toContain("Other members");
 });
 
-test("an origin rail row opens the read-only pane, never the live chat", async () => {
+test("an origin rail row opens a live comment chat", async () => {
   const slack = {
     ...CHAT_ROW,
     surface: "slack",
@@ -690,21 +690,36 @@ test("an origin rail row opens the read-only pane, never the live chat", async (
     last_turn_at: "2026-07-30T11:00:00",
     readable: true,
     disclosable: false,
+    commentable: true,
     agent: { id: AGENT.id, name: AGENT.name },
   };
   holdRailShown(EVERY_SURFACE);
-  wire({
+  const { calls } = wire({
     ...chatsOnWire([slack]),
     "/api/chats": () => json({ chats: [slack], conversation: linked }),
     "/transcript": () => json({ messages: [{ role: "user", text: "slack words" }] }),
+    "/chat": () =>
+      json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Slack question" }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Slack question/ }));
 
   expect(await screen.findByText("slack words")).toBeTruthy();
-  expect(screen.getByText(/read-only here/)).toBeTruthy();
-  expect(screen.queryByLabelText("Message the app")).toBeNull();
+  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.queryByText(/read-only here/)).toBeNull();
+
+  await userEvent.type(screen.getByLabelText("Message the app"), "from the portal");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() =>
+    expect(calls.some((url) => url.includes("/chat?conversation=" + CONVO_ID))).toBe(true),
+  );
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("comment", {
+    id: SECOND_ID,
+    text: "You commented from the portal.",
+  });
+  expect(screen.queryByText("You commented from the portal.")).toBeNull();
 });
 
 test("a private extension conversation opens the live chat", async () => {
@@ -785,18 +800,19 @@ function slackConversation(fields: Record<string, unknown> = {}) {
     last_turn_at: "2026-08-01T08:01:00Z",
     readable: true,
     disclosable: false,
+    commentable: true,
     ...fields,
   };
 }
 
-test("a Slack conversation permalink opens its read-only transcript", async () => {
+test("a Slack conversation permalink opens a live comment chat", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
     "/api/chats": (url) =>
       url.includes("conversation=")
         ? json({ chats: [], conversation: slackConversation() })
         : json({ chats: [] }),
-    ["/conversations/" + CONVO_ID + "/transcript"]: () =>
+    "/transcript": () =>
       json({
         messages: [
           { role: "user", text: "from Slack" },
@@ -808,10 +824,8 @@ test("a Slack conversation permalink opens its read-only transcript", async () =
 
   expect(await screen.findByText("from Slack")).toBeTruthy();
   expect(screen.getByText("reply in Slack")).toBeTruthy();
-  expect(screen.queryByLabelText("Message the app")).toBeNull();
-  expect(
-    screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
-  ).toBeTruthy();
+  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.queryByText(/read-only here/)).toBeNull();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
   expect(
     within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByText(
@@ -830,7 +844,7 @@ test("a Slack conversation is headed like a web thread, marked with its way out 
       url.includes("conversation=")
         ? json({ chats: [], conversation: slackConversation() })
         : json({ chats: [] }),
-    ["/conversations/" + CONVO_ID + "/transcript"]: () =>
+    "/transcript": () =>
       json({ messages: [{ role: "user", text: "from Slack" }] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -870,7 +884,7 @@ test("a terminal conversation is marked with its surface and no way out", async 
       url.includes("conversation=")
         ? json({ chats: [], conversation: terminal })
         : json({ chats: [] }),
-    ["/conversations/" + CONVO_ID + "/transcript"]: () =>
+    "/transcript": () =>
       json({ messages: [{ role: "user", text: "from the CLI" }] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -880,14 +894,12 @@ test("a terminal conversation is marked with its surface and no way out", async 
   expect(header.getByText("Deploy the branch")).toBeTruthy();
   expect(header.getByText("Terminal")).toBeTruthy();
   expect(header.getByText("Terminal").closest("a")).toBeNull();
-  expect(
-    screen.getByText("This conversation is read-only here. Reply in Terminal to continue it."),
-  ).toBeTruthy();
+  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
 /** A conversation another surface holds shares files the same way the chat does, so its markdown
- *  cards open the artifacts sidebar there too — a read-only transcript is not a pane without a
- *  sidebar. */
+ *  cards open the artifacts sidebar there too. */
 test("a markdown file in a Slack conversation opens the artifacts sidebar", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
@@ -907,7 +919,7 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
         ],
         truncated: false,
       }),
-    ["/conversations/" + CONVO_ID + "/transcript"]: () =>
+    "/transcript": () =>
       json({
         messages: [
           { role: "user", text: "from Slack" },
@@ -950,6 +962,7 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
               last_turn_at: "2026-08-01T08:01:00Z",
               readable: true,
               disclosable: false,
+              commentable: true,
             },
           })
         : json({ chats: [] }),

@@ -12,9 +12,10 @@ from ufo import o11y
 from ufo.db import workspace_tx
 from ufo.ext.context import AgentArchived
 from ufo.ext.surface import Admitted, fence_member_message, mint_marker
+from ufo.hub import InProcessHub, Reply
 from ufo.loop.engine import _claim_turn
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, TurnContext
+from ufo.schema.records import SURFACE_COMMENT_ROUND_INDEX, TerminalFrame, TurnContext
 from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
 from ufo.surfaces.admission import ARCHIVED_REFUSAL_MESSAGE, Admission
 
@@ -606,6 +607,61 @@ async def test_seated_speaker_enqueues(db: None) -> None:
     assert dbos.enqueued == [str(turn_id)]
     status, _ = await _turn_row(turn_id)
     assert status == "queued"
+
+
+async def test_a_surface_comment_is_recorded_once_and_published_to_the_live_thread(
+    db: None,
+) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    hub = InProcessHub()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset(), hub=hub)
+    opened = await admission.admit_member(workspace_id, conversation_id, "first", member_id)
+    comment = "You [commented](https://ufo.test/surface/web#/c/thread): follow up"
+
+    admitted = await admission.admit_member(
+        workspace_id,
+        conversation_id,
+        "follow up",
+        member_id,
+        idempotency_key="web-comment-1",
+        comment=comment,
+    )
+    redelivered = await admission.admit_member(
+        workspace_id,
+        conversation_id,
+        "follow up",
+        member_id,
+        idempotency_key="web-comment-1",
+        comment=comment,
+    )
+
+    assert admitted.turn_id == opened.turn_id
+    assert admitted.arrival_id is not None
+    assert admitted.comment_id is not None
+    assert redelivered.comment_id is None
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.mid_turn_reply.c.id,
+                    tables.mid_turn_reply.c.round_index,
+                    tables.mid_turn_reply.c.message_ref,
+                    tables.mid_turn_reply.c.text,
+                ).where(tables.mid_turn_reply.c.turn_id == opened.turn_id)
+            )
+        ).all()
+    assert [(row.id, row.round_index, row.message_ref, row.text) for row in rows] == [
+        (admitted.comment_id, SURFACE_COMMENT_ROUND_INDEX, admitted.arrival_id, comment)
+    ]
+    stream = hub.subscribe(opened.turn_id)
+    _cursor, frame = await anext(stream)
+    await stream.aclose()
+    assert frame == Reply(
+        id=admitted.comment_id,
+        message_ref=admitted.arrival_id,
+        text=comment,
+        is_comment=True,
+    )
 
 
 async def test_internal_invoke_passes_the_seat_gate(db: None) -> None:

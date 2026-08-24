@@ -117,6 +117,7 @@ from ufo.schema.records import (
     SCHEDULED_ADMISSION,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
+    SURFACE_COMMENT_ROUND_INDEX,
     WRITEBACK_CLAIMED,
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
@@ -306,6 +307,7 @@ class Admitted:
     turn_id: UUID
     opened_run: bool
     arrival_id: UUID | None = None
+    comment_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -336,6 +338,7 @@ class MemberAdmitter(Protocol):
         *,
         speaker_member_id: UUID | None,
         intent: ToolIntent | None = None,
+        comment: str | None = None,
     ) -> Admitted: ...
 
 
@@ -657,10 +660,10 @@ class Writeback:
 
 @dataclass(frozen=True)
 class MidTurnReply:
-    """One reply a still-running turn already produced for a member: the words the model marked for
-    delivery and the `message_ref` they answer. `id` is the span's durable identity — derived from
-    the turn, the round, and the position in that round — so a surface that keys its own
-    idempotency record on it posts one span once however often it is handed the row.
+    """One reply delivered while a turn runs: words the model marked for delivery or a notice that a
+    member commented from another surface. `message_ref` names what it answers, and `id` is its
+    durable identity, so a surface that keys its own idempotency record on it posts it once however
+    often it is handed the row.
 
     It carries no terminal frame: a mid-turn reply is not the turn's outcome, so it has no settled
     accounting to footer, no question to attach buttons for, and no shared files. Those ride the
@@ -673,6 +676,7 @@ class MidTurnReply:
     queue_key: str
     message_ref: UUID | None
     text: str
+    is_comment: bool = False
 
 
 AMBIENT_REPLY_TIMEOUT_SECONDS = 5.0
@@ -2283,6 +2287,7 @@ class SurfaceContext:
         *,
         speaker_member_id: UUID | None,
         intent: ToolIntent | None = None,
+        comment: str | None = None,
     ) -> Admitted:
         """Admit an inbound message onto the durable turn queue and return its turn, with whether
         this delivery opened that turn's run. The turn executes as the conversation's bound agent —
@@ -2305,6 +2310,7 @@ class SurfaceContext:
             context=context,
             speaker_member_id=speaker_member_id,
             intent=intent,
+            comment=comment,
         )
 
     async def connect_url(self, turn_id: UUID, member_id: UUID) -> str:
@@ -4599,10 +4605,10 @@ class SurfaceSpec:
     that reply. Recovery repeats `attach`: attachment delivery is at-least-once because a crash
     after upload but before the delivered commit cannot distinguish the completed upload. A
     surface may make individual files best effort so one rejection does not block its siblings.
-    `speak` is the same contract for a reply the turn produced before it ended: one message per
-    marked span, sent while the turn still runs, returning that message's durable reference. A
-    durable surface that declares none delivers at the terminal alone, so its members read a long
-    turn's replies only once it ends.
+    `speak` is the same contract for a reply delivered before the turn ends: one message per marked
+    span, plus a source-surface notice when a member comments from another surface, returning that
+    message's durable reference. A durable surface that declares none delivers at the terminal
+    alone, so its members read a long turn's replies only once it ends.
     The poller drives these for every turn its ingest admitted with writeback. A **live**
     surface omits them (`post=attach=None`): it admits without writeback and delivers by tailing the
     hub in its own route, so the poller never sees its turns. `self_user_id` resolves the surface's
@@ -5137,14 +5143,14 @@ def _mid_turn_reply_due(now: datetime) -> sa.ColumnElement[bool]:
 
 @dataclass(frozen=True)
 class MidTurnReplyPoller:
-    """Exactly-once delivery of the replies a turn speaks before it ends.
+    """Exactly-once delivery of replies and source-surface comment notices before a turn ends.
 
     Three independent guards, because all three failures are real. The engine writes one row per
-    span under the span's own identity, so a workflow replay after a pod roll re-derives that id and
-    inserts nothing. This poller claims a row with its worker id and an expiry and advances it only
-    while it still holds the claim, so a second replica never delivers the row this one has. The
-    surface keys its own delivery record on `reply.id`, which closes the one window where two
-    workers can both call out — a claim that expires while a post is in flight.
+    span under the span's own identity; admission does the same for one portal comment, so a replay
+    or request redelivery inserts nothing. This poller claims a row with its worker id and an expiry
+    and advances it only while it still holds the claim, so a second replica never delivers the row
+    this one has. The surface keys its own delivery record on `reply.id`, which closes the one
+    window where two workers can both call out — a claim that expires while a post is in flight.
 
     Order is the model's: rows are claimed and delivered oldest first and, within one moment, in
     span order — a resumed run counts its rounds from one again, so the round and the span alone
@@ -5286,6 +5292,7 @@ class MidTurnReplyPoller:
                 queue_key=turn.queue_key,
                 message_ref=row.message_ref,
                 text=row.text,
+                is_comment=row.round_index == SURFACE_COMMENT_ROUND_INDEX,
             ),
         )
 

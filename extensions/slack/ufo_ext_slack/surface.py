@@ -4387,10 +4387,12 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
 
 
 async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
-    """Post one reply the turn produced before it ended and return its message ref
+    """Post one reply delivered before the turn ends and return its message ref
     (`channel:ts`) — a plain thread message, split at markdown boundaries when it is long. It
     threads under the message the span answers (`message_ref`), so a turn that speaks to two members
     answers each in their own thread rather than stacking both under whichever message came first.
+    A portal comment in a DM uses the conversation's mirrored thread anchor because no Slack message
+    arrived to anchor it; a channel comment uses the root carried by the queue key.
 
     It carries no footer, no ask or connect buttons and no files: this is not the turn's outcome, so
     it has no settled accounting to state and nothing to attach, and the terminal reply that follows
@@ -4403,10 +4405,18 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
     Every record of a turn's replies is dropped in `attach`, once core has recorded the ref of the
     terminal reply that ends the turn. It does carry mentions: these are the model's own words to
     the member, like the terminal reply's, so a name it writes notifies the same person here."""
-    channel = reply.queue_key.partition(":")[0]
-    thread = await _reply_thread(reply.queue_key, reply.turn_id, reply.message_ref)
+    channel, _, root = reply.queue_key.partition(":")
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     store = ScopedStore(SLACK_EXTENSION)
+    if reply.is_comment and not root:
+        mirrored = await store.get(_thread_mirror_key(reply.conversation_id))
+        if mirrored is None:
+            raise SlackApiError("Slack thread mirror missing")
+        thread = MirroredThread.read(mirrored).anchor()
+        if thread is None:
+            raise SlackApiError("Slack thread anchor missing")
+    else:
+        thread = root or await _reply_thread(reply.queue_key, reply.turn_id, reply.message_ref)
     progress_key = _slack_reply_progress_key(reply.turn_id, reply.id)
     progress, stored = await _slack_reply_progress(store, progress_key)
     if progress.complete:
