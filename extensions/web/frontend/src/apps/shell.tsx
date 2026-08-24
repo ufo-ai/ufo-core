@@ -1,4 +1,12 @@
-import { StrictMode, useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  StrictMode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { createRoot } from "react-dom/client";
 
 import { connect, installShims, navigate, onPlaced, type AppInit } from "@/apps/runtime";
@@ -122,14 +130,17 @@ function Booted({
   init: AppInit;
   render: (init: AppInit, agents: Agent[]) => ReactNode;
 }) {
-  const [agents, setAgents] = useState<Agent[] | null>(null);
+  const [agents, setAgents] = useState<Agent[] | null>(init.agents ?? null);
   const [failed, setFailed] = useState<string | null>(null);
+  const requested = useRef(false);
   useEffect(() => {
+    if (init.agents !== undefined || requested.current) return;
+    requested.current = true;
     getJson<AgentsPayload>("/api/agents").then((answer) => {
       if (answer.ok) setAgents(answer.payload.agents);
       else setFailed(answer.message);
     });
-  }, []);
+  }, [init.agents]);
   if (failed) return <p className="p-4 text-sm">{failed}</p>;
   if (agents === null) return null;
   // The page is the whole viewport, hosted the way the portal's shell hosts a pane: one grid cell

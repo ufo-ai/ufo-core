@@ -1,12 +1,20 @@
 import { afterEach, expect, test, vi } from "vitest";
 
-import { attachBridge, endpointFor, type BridgeHandle } from "@/lib/bridge";
+import {
+  attachBridge as attach,
+  endpointFor,
+  type BridgeConfig,
+  type BridgeHandle,
+} from "@/lib/bridge";
 import { BASE } from "@/lib/api";
 import { framedNavigation } from "@/lib/route";
 import { heldRoute } from "@/lib/router";
 
 const MEMBER = { email: "member@example.com", admin: true };
 const AGENT_ID = "11111111-1111-1111-1111-111111111111";
+const AGENTS: BridgeConfig["agents"] = [
+  { id: AGENT_ID, name: "Radar", model: "openai/gpt-5", main: false, icon: "radar" },
+];
 const CONVERSATION_ID = "22222222-2222-2222-2222-222222222222";
 const PLACE = { q: "tokens", range: "90d", opens: [CONVERSATION_ID] };
 const CRUMB = { label: "Radar", at: "#/agents/" + AGENT_ID };
@@ -32,6 +40,10 @@ function jsonResponse(body: unknown): Response {
 }
 
 let bridge: BridgeHandle | null = null;
+
+function attachBridge(config: Omit<BridgeConfig, "agents">): BridgeHandle {
+  return attach({ ...config, agents: AGENTS });
+}
 
 afterEach(() => {
   bridge?.detach();
@@ -86,6 +98,7 @@ test("ready is answered with the member's own init payload", async () => {
   expect(posted[0]).toEqual({
     ufo: "init",
     member: MEMBER,
+    agents: AGENTS,
     agentId: AGENT_ID,
     place: {},
     portal: location.origin,
@@ -126,9 +139,9 @@ test("a tabled GET is forwarded and its payload returned", async () => {
   vi.stubGlobal("fetch", fetchMock);
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
-  deliver({ ufo: "call", id: "r1", method: "GET", path: "api/agents" }, iframe.contentWindow);
+  deliver({ ufo: "call", id: "r1", method: "GET", path: "api/chats" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(1));
-  expect(fetchMock.mock.calls[0][0]).toBe("/surface/web/api/agents");
+  expect(fetchMock.mock.calls[0][0]).toBe("/surface/web/api/chats");
   expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "GET" });
   expect(posted[0]).toEqual({
     ufo: "data",
@@ -309,7 +322,7 @@ test("a form on a row that takes none is refused without a fetch", async () => {
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
   deliver(
-    { ufo: "call", id: "f2", method: "GET", path: "api/agents", form: [] },
+    { ufo: "call", id: "f2", method: "GET", path: "api/chats", form: [] },
     iframe.contentWindow,
   );
   await vi.waitFor(() => expect(posted).toHaveLength(1));
@@ -331,7 +344,7 @@ test("a body of the wrong shape for its row is refused without a fetch", async (
     iframe.contentWindow,
   );
   deliver(
-    { ufo: "call", id: "b3", method: "GET", path: "api/agents", body: { extra: true } },
+    { ufo: "call", id: "b3", method: "GET", path: "api/chats", body: { extra: true } },
     iframe.contentWindow,
   );
   await vi.waitFor(() => expect(posted).toHaveLength(3));

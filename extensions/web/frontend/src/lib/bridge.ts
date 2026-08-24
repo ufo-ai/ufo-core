@@ -2,7 +2,7 @@ import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 import { framedNavigation, type WorkspacePlace } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import type { Crumb } from "@/lib/title";
-import type { Member } from "@/lib/types";
+import type { Agent, Member } from "@/lib/types";
 
 /** The portal shell's side of the app bridge (RFC 0039, `docs/apps-prototype-contracts.md`
  *  Contract 1). An app's homepage is a page the app's agent built, framed cross-origin from the
@@ -113,6 +113,7 @@ function carriedHeaders(stated: unknown): Record<string, string> {
 export type BridgeConfig = {
   iframe: HTMLIFrameElement;
   member: Member;
+  agents: Agent[];
   agentId: string;
   /** The place the page stands at, handed to it in `init` so a sidebar or search landing opens the
    *  tile it named. It is the whole record the address carries, not one field of it: a page holds a
@@ -208,6 +209,7 @@ function bodyFault(endpoint: Endpoint, body: unknown): string | null {
 export function attachBridge({
   iframe,
   member,
+  agents,
   agentId,
   place,
   crumb,
@@ -274,6 +276,7 @@ export function attachBridge({
         reply({
           ufo: "init",
           member: { email: member.email, admin: member.admin },
+          agents,
           agentId,
           place: standing,
           crumb:

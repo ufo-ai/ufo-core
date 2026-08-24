@@ -15,17 +15,21 @@ type Runtime = typeof import("@/apps/runtime");
 
 const INIT = {
   member: { email: MEMBER.email, admin: true },
+  agents: [AGENT],
   agentId: AGENT.id,
   place: {},
   portal: location.origin,
 };
 
-function shell(onCall: (message: Record<string, unknown>) => void): () => void {
+function shell(
+  onCall: (message: Record<string, unknown>) => void,
+  handshake: AppInit = INIT,
+): () => void {
   const listener = (event: MessageEvent) => {
     const message = event.data as { ufo?: string } | null;
     if (!message || typeof message.ufo !== "string") return;
     if (message.ufo === "ready") {
-      window.postMessage({ ufo: "init", ...INIT }, "*");
+      window.postMessage({ ufo: "init", ...handshake }, "*");
       return;
     }
     if (message.ufo === "call" || message.ufo === "close") {
@@ -239,6 +243,7 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
           tab="tasks"
           init={{
             member: { email: MEMBER.email, admin: true },
+            agents: [AGENT],
             agentId: AGENT.id,
             place: {},
             portal: location.origin,
@@ -266,7 +271,6 @@ test("a page mounted through the kit alone greets the shell, reads over the brid
   vi.resetModules();
   const { getJson, mountApp, useEffect, useState } = await import("@/apps/kit");
   const answers: Record<string, string> = {
-    "/api/agents": JSON.stringify({ agents: [AGENT], member: MEMBER }),
     "/api/chats": JSON.stringify({ chats: [{ title: "Weekly report" }] }),
   };
   cleanups.push(
@@ -319,6 +323,46 @@ test("a page mounted through the kit alone greets the shell, reads over the brid
   expect(await screen.findByText(MEMBER.email)).toBeTruthy();
   expect(await screen.findByText("Weekly report")).toBeTruthy();
   expect(await screen.findByText("the turn spoke")).toBeTruthy();
+});
+
+test("a page remounted across a deploy reads its audience when its standing shell cannot carry it", async () => {
+  vi.resetModules();
+  const { mountApp } = await import("@/apps/kit");
+  const calls: string[] = [];
+  cleanups.push(
+    shell(
+      (message) => {
+        if (message.ufo !== "call") return;
+        calls.push(message.path as string);
+        window.postMessage(
+          {
+            ufo: "data",
+            id: message.id,
+            ok: true,
+            status: 200,
+            body: JSON.stringify({ agents: [AGENT], member: MEMBER }),
+            refusal: null,
+            fault: null,
+          },
+          "*",
+        );
+      },
+      {
+        member: INIT.member,
+        agentId: INIT.agentId,
+        place: INIT.place,
+        portal: INIT.portal,
+      },
+    ),
+  );
+  const root = document.createElement("div");
+  document.body.append(root);
+  cleanups.push(() => root.remove());
+
+  mountApp(root, (_init, agents) => <p>{agents[0].name}</p>);
+
+  expect(await screen.findByText(AGENT.name)).toBeTruthy();
+  expect(calls).toEqual(["/api/agents"]);
 });
 
 /** A page spells no address by hand: every builder the route table declares stands on the kit, so a

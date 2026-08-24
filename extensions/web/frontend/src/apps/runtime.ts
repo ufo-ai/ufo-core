@@ -1,6 +1,7 @@
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 import type { WorkspacePlace } from "@/lib/route";
 import type { Crumb } from "@/lib/title";
+import type { Agent } from "@/lib/types";
 
 /** The app page's side of the bridge (RFC 0039, `docs/apps-prototype-contracts.md` Contract 1) and
  *  the whole of what a page needs from the portal: the page is a built bundle that imports this
@@ -13,6 +14,7 @@ import type { Crumb } from "@/lib/title";
 
 export type AppInit = {
   member: { email: string; admin: boolean };
+  agents?: Agent[];
   agentId: string;
   /** The place the pane opened the page at, whole: the same record a portal tab stands on, so a page
    *  reads its screen off the address the member arrived with rather than off one field of it. */

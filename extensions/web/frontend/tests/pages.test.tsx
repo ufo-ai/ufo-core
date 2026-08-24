@@ -42,6 +42,7 @@ function pagePath(app: string): string {
 
 const INIT: AppInit = {
   member: { email: MEMBER.email, admin: true },
+  agents: [AGENT],
   agentId: AGENT.id,
   place: {},
   portal: location.origin,
@@ -106,7 +107,7 @@ async function runPage(
   init: Partial<AppInit> = {},
 ): Promise<{ calls: string[] }> {
   vi.resetModules();
-  const { calls, handler } = wire({ "/api/agents": () => json({ agents: [AGENT] }), ...routes });
+  const { calls, handler } = wire(routes);
   cleanups.push(shell(handler, init));
   await import(/* @vite-ignore */ pagePath(app));
   return { calls };
@@ -135,12 +136,14 @@ afterEach(async () => {
 });
 
 test("the radar page mounts and draws its empty feed under its own band", async () => {
-  await runPage("radar", {
+  const { calls } = await runPage("radar", {
     "/objects/report": () => json({ objects: [] }),
   });
   expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
   expect(await screen.findByRole("button", { name: "Rebuild entries" })).toBeTruthy();
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
+  expect(calls.some((url) => url.includes("/api/agents"))).toBe(false);
+  expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);
 });
 
 test("the tasks page mounts and draws both of its listings", async () => {

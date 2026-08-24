@@ -262,6 +262,7 @@ export function AgentPane({
     const handle = attachBridge({
       iframe: frame,
       member,
+      agents,
       agentId: agent.id,
       place: framedRef.current,
       crumb: agentCrumb(agent),
@@ -274,7 +275,7 @@ export function AgentPane({
       bridgeRef.current = null;
       handle.detach();
     };
-  }, [member, agent.id, agent.app, url, generation]);
+  }, [member, agents, agent.id, agent.app, url, generation]);
   useEffect(() => {
     bridgeRef.current?.place(framedRef.current);
   }, [framedAt]);
