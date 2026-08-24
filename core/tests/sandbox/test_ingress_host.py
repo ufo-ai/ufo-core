@@ -12,6 +12,9 @@ from ufo.sandbox.ingress_host import (
     SIGNATURE_BYTES,
     SiteLabelError,
     parse_site_label,
+    serve_port,
+    shipped_anchor,
+    shipped_app_slug,
     site_label,
 )
 
@@ -32,6 +35,19 @@ def test_one_conversation_port_is_one_stable_origin(monkeypatch: pytest.MonkeyPa
     assert site_label(conversation_id, 8000) == label
     assert site_label(conversation_id, 3000) != label
     assert site_label(uuid4(), 8000) != label
+
+
+def test_a_shipped_app_has_one_workspace_origin() -> None:
+    """The provision identity supplies the stable slug, and that slug gives each workspace one
+    synthetic conversation and port even though no hosted-site row backs the page."""
+    workspace_id = uuid4()
+    anchor = shipped_anchor(workspace_id, "artifacts")
+    assert shipped_app_slug("app_artifacts") == "artifacts"
+    assert shipped_app_slug("artifacts") is None
+    assert shipped_app_slug(None) is None
+    assert shipped_anchor(workspace_id, "artifacts") == anchor
+    assert shipped_anchor(uuid4(), "artifacts") != anchor
+    assert 20000 <= serve_port(anchor) < 40000
 
 
 def test_a_label_fits_one_dns_label(monkeypatch: pytest.MonkeyPatch) -> None:

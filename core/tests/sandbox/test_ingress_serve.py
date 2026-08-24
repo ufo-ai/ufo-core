@@ -28,7 +28,7 @@ from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import dispose_db, workspace_tx
 from ufo.ext.manifest import CarrierSpec
 from ufo.sandbox import ingress_serve
-from ufo.sandbox.ingress_host import site_label
+from ufo.sandbox.ingress_host import serve_port, shipped_anchor, site_label
 from ufo.sandbox.ingress_serve import (
     CACHE_DIRECTIVE_HEADERS,
     CONTENT_SECURITY_POLICY,
@@ -271,6 +271,24 @@ async def _seed_hosted_site(
                 creator_member_id=uuid4(),
                 generation=uuid4(),
                 source_manifest=source_manifest,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def _seed_shipped_app(workspace_id: UUID, extension: str, name: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                name=name,
+                prompt="p",
+                model="claude-opus-4-8",
+                provisioned_by=extension,
+                provisioned_name=name,
+                provisioned_version="1",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -811,6 +829,24 @@ async def test_framing_names_only_the_workspaces_own_sites(db, ingress) -> None:
     assert got.status_code == 200
     assert _framers(got) == [f"{APP_ORIGIN} {_origin(sibling_conversation_id, 3000)}"]
     assert _origin(foreign_conversation_id, 3000) not in _framers(got)[0]
+
+
+async def test_framing_names_the_workspaces_shipped_app_origin(db, ingress) -> None:
+    """A shipped app has no hosted-site row, but it embeds a site's live view from its synthetic
+    workspace origin. That origin is an ancestor the browser checks, so it is admitted beside the
+    frame page while the same shipped app in another workspace is not."""
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    foreign_workspace_id, _foreign_conversation_id = await _seed_conversation(None)
+    await _seed_shipped_app(workspace_id, "app_artifacts", "artifacts")
+    await _seed_shipped_app(foreign_workspace_id, "app_artifacts", "artifacts")
+    await _open(ingress, workspace_id, conversation_id)
+
+    got = await ingress.get(f"{_origin(conversation_id)}/index.html")
+
+    anchor = shipped_anchor(workspace_id, "artifacts")
+    foreign_anchor = shipped_anchor(foreign_workspace_id, "artifacts")
+    assert _framers(got) == [f"{APP_ORIGIN} {_origin(anchor, serve_port(anchor))}"]
+    assert _origin(foreign_anchor, serve_port(foreign_anchor)) not in _framers(got)[0]
 
 
 async def test_a_deploy_with_no_app_origin_lets_nothing_frame_a_site(

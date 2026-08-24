@@ -70,9 +70,7 @@ from ufo_ext_sites.surface import (
     VISIBILITY_BADGES,
     ShippedAddress,
     SiteHostingUnconfigured,
-    serve_port,
     shipped_address,
-    shipped_anchor,
     shipped_site_url,
     site_address,
     site_card_url,
@@ -126,6 +124,7 @@ from ufo.sdk.audience import (
     foreign_room_audience,
     room_audience,
 )
+from ufo.sdk.sandbox import serve_port, shipped_anchor
 from ufo.serve import RESERVED_HOST_PREFIXES, _mount_shared_surfaces
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef

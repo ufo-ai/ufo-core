@@ -97,6 +97,7 @@ from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import AGENT_KIND, ObjectListQuery, ObjectRef
+from ufo.sdk.sandbox import shipped_app_slug
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
     MEMBER_ADMISSION,
@@ -682,7 +683,7 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
         if agent.archived:
             await ctx.store.put(key, "archived")
             continue
-        if _app_slug(agent.provisioned_by) is not None:
+        if shipped_app_slug(agent.provisioned_by) is not None:
             await ctx.store.put(key, "shipped")
             continue
         if agent.tools is not None and not set(HOMEPAGE_TOOLS) <= set(agent.tools):
@@ -836,22 +837,6 @@ async def _audience_for(
     return member_id, email, await web_audience(ctx, web_extension(), email)
 
 
-APP_PROVISION = re.compile(r"app_(?P<slug>[a-z0-9]+)")
-
-
-def _app_slug(provisioned_by: str | None) -> str | None:
-    """The slug an app extension shipped this agent under — `app_radar` provisions `radar` — or
-    None for every other agent. The slug is the section identity: extension names are unique where
-    the deploy is assembled, where an agent's own name is a member-visible string provisioning
-    suffixes on collision (`radar-app-radar`), so a route bound to the name dies in exactly the
-    workspace that already had one. The `[a-z0-9]+` class is the one `APP_HOME_SKILL` reads a slug
-    with, so the provision name and the home-skill name resolve to the identical slug or to none."""
-    if provisioned_by is None:
-        return None
-    match = APP_PROVISION.fullmatch(provisioned_by)
-    return None if match is None else match["slug"]
-
-
 async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     """The portal's first read: the signed-in member and the agents their web audience holds — every
     agent for a workspace admin, the main agent plus the granted non-main agents for everyone else.
@@ -899,7 +884,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "main": agent.main,
                     "model": agent.model,
                     "icon": agent.icon,
-                    "app": _app_slug(agent.provisioned_by),
+                    "app": shipped_app_slug(agent.provisioned_by),
                     "homepage": homepages[agent.id],
                     **(
                         {"web_audience": list(grants.get(agent.id, ()))}
@@ -4182,7 +4167,7 @@ async def _homepage_state(
             "url": bound.fields["site_url"],
             "deploy_generation": bound.fields.get("deploy_generation", 0),
         }
-    slug = _app_slug(summary.provisioned_by)
+    slug = shipped_app_slug(summary.provisioned_by)
     tree, digest = apps
     if slug is not None and f"{slug}/index.html" in tree:
         url = shipped_site_url(ctx.public_base_url, ctx.workspace_id, summary.id, slug, digest)

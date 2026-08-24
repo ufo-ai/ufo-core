@@ -53,7 +53,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, model_validator
 
 from ufo.sdk.o11y import log
-from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
+from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, serve_port, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.objects import effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page, shot_command
@@ -66,7 +66,7 @@ from ufo_ext_sites.store import (
     Visibility,
     site_name,
 )
-from ufo_ext_sites.surface import serve_port, site_url
+from ufo_ext_sites.surface import site_url
 
 WEBSITE_TOOL = "website"
 START_SERVER_TOOL = "start_server"

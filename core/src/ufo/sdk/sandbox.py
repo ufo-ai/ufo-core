@@ -10,6 +10,9 @@ from ufo.sandbox.containment import contained_file as contained_file
 from ufo.sandbox.containment import contained_leaf as contained_leaf
 from ufo.sandbox.containment import contained_relative as contained_relative
 from ufo.sandbox.containment import contained_root as contained_root
+from ufo.sandbox.ingress_host import serve_port as serve_port
+from ufo.sandbox.ingress_host import shipped_anchor as shipped_anchor
+from ufo.sandbox.ingress_host import shipped_app_slug as shipped_app_slug
 from ufo.sandbox.session import CA_SANDBOX_PATH as CA_SANDBOX_PATH
 from ufo.sandbox.session import CA_STAGING_PATH as CA_STAGING_PATH
 from ufo.sandbox.session import COPY_IN_PROG as COPY_IN_PROG

@@ -24,12 +24,17 @@ therefore re-encodes what it decoded and refuses anything but the one canonical 
 
 import base64
 import hmac
+import re
 from hashlib import sha256
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ufo.sandbox.ingress_token import ingress_secret
 
 SITE_LABEL_KIND = b"sandbox-site"
+APP_PORT_FLOOR = 20000
+APP_PORT_SPAN = 20000
+SHIPPED_ANCHOR_LABEL = "ufo-shipped-app"
+SHIPPED_APP_PROVISION_RE = re.compile(r"app_(?P<slug>[a-z0-9]+)")
 UUID_BYTES = 16
 PORT_BYTES = 2
 ADDRESS_BYTES = UUID_BYTES + PORT_BYTES
@@ -47,6 +52,34 @@ if LABEL_CHARS > DNS_LABEL_MAX_CHARS:
 
 class SiteLabelError(ValueError):
     """A site label is malformed, or this deploy's secret did not sign it."""
+
+
+def serve_port(conversation_id: UUID) -> int:
+    """The stable sandbox port assigned to a conversation's hosted site.
+
+    Per-conversation ports keep host-path sandboxes from displacing one another while container
+    carriers remain indifferent. The port is half of the site's durable origin, so every producer
+    derives it here from the conversation rather than storing a second answer."""
+    return APP_PORT_FLOOR + conversation_id.int % APP_PORT_SPAN
+
+
+def shipped_app_slug(provisioned_by: str | None) -> str | None:
+    """The page slug carried by an app extension's provision name.
+
+    The extension identity is stable where a provisioned agent's member-visible name may be
+    suffixed on collision, so origins and bundle paths derive from it rather than the row name."""
+    if provisioned_by is None:
+        return None
+    match = SHIPPED_APP_PROVISION_RE.fullmatch(provisioned_by)
+    return None if match is None else match["slug"]
+
+
+def shipped_anchor(workspace_id: UUID, slug: str) -> UUID:
+    """The stable per-workspace origin anchor for one shipped app page.
+
+    No conversation row backs a shipped page. This synthetic identity gives each workspace's copy
+    its own cookies and storage and stays the same when that app is forked into a hosted site."""
+    return uuid5(NAMESPACE_URL, f"{SHIPPED_ANCHOR_LABEL}:{workspace_id}:{slug}")
 
 
 def site_label(conversation_id: UUID, port: int) -> str:

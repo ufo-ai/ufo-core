@@ -47,7 +47,7 @@ brand's generic card, naming nothing."""
 import hashlib
 import html
 from dataclasses import dataclass
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from ufo.sdk.bearer import LOGOUT_PATH, verify_token
 from ufo.sdk.http import (
@@ -57,6 +57,7 @@ from ufo.sdk.http import (
     Request,
     Response,
 )
+from ufo.sdk.sandbox import serve_port, shipped_anchor
 from ufo.sdk.seats import Seats
 from ufo.sdk.surface_token import mint_surface_token, verify_surface_token
 from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
@@ -74,9 +75,6 @@ DIGEST_CLAIM = "digest"
 AGENT_CLAIM = "agent"
 CSRF_CLAIM = "csrf"
 
-APP_PORT_FLOOR = 20000
-APP_PORT_SPAN = 20000
-SHIPPED_ANCHOR_LABEL = "ufo-shipped-app"
 TOKEN_PARAM = "site_token"
 PATH_PARAM = "site_path"
 CARD_HASH_PARAM = "card_hash"
@@ -167,27 +165,6 @@ def site_url(
         raise SiteHostingUnconfigured(HOSTING_UNCONFIGURED)
     token = site_token(workspace_id, conversation_id, name)
     return f"{public_base_url.rstrip('/')}{FRAME_PATH}/{token}"
-
-
-def serve_port(conversation_id: UUID) -> int:
-    """The port a conversation's site serves on, derived from the conversation so it is stable
-    across redeploys (the site's origin hangs off `(conversation, port)`). Per-conversation rather
-    than one fixed port because the local carrier's sandboxes share the host's port namespace — on
-    one fixed port every deploy killed the previous conversation's server and every dial reached
-    whoever deployed last. Container carriers are indifferent: any port works inside a namespace.
-
-    It lives here, beside `site_label` and `ingress_url`, because the port is half a site's origin:
-    the deploy tools and the shipped-frame render both derive it, and the origin math has one home
-    rather than a copy in each."""
-    return APP_PORT_FLOOR + conversation_id.int % APP_PORT_SPAN
-
-
-def shipped_anchor(workspace_id: UUID, slug: str) -> UUID:
-    """The synthetic conversation a shipped app page's origin hangs off — computed, never a row, so
-    the page serves without one. One per `(workspace, app)`, so each workspace's shipped page owns
-    its own origin and its cookies and storage stay scoped to it, and a fork reuses the same anchor
-    as its `hosted_site.conversation_id` so the browser origin is identical before and after."""
-    return uuid5(NAMESPACE_URL, f"{SHIPPED_ANCHOR_LABEL}:{workspace_id}:{slug}")
 
 
 @dataclass(frozen=True)

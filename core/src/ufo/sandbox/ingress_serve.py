@@ -41,7 +41,14 @@ from ufo.ext.loader import load_manifests
 from ufo.ext.manifest import CarrierSpec
 from ufo.o11y import init_o11y, log, log_error, warn
 from ufo.proxy_serve import OTLP_ENDPOINT_ENV, owner_dsn
-from ufo.sandbox.ingress_host import SiteLabelError, parse_site_label, site_label
+from ufo.sandbox.ingress_host import (
+    SiteLabelError,
+    parse_site_label,
+    serve_port,
+    shipped_anchor,
+    shipped_app_slug,
+    site_label,
+)
 from ufo.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
@@ -266,12 +273,12 @@ class IngressServe:
     every site label shares one registrable domain — so without this, site A frames site B and the
     viewer's session cookie for B rides along.
 
-    `_frame_ancestors` appends the responding site's sibling origins per response: an app page —
-    itself a hosted site — embeds another site's live view through the app-origin frame page, and
-    a browser checks `frame-ancestors` against every ancestor in that chain, so the outer site's
-    origin must be named alongside the frame page's. Only hosted sites of the responding site's own
-    workspace are named — that is the embed chain, and it keeps a site in another workspace of the
-    same deploy from wrapping this one around the viewer's session.
+    `_frame_ancestors` appends the responding site's sibling origins per response: an app page
+    embeds another site's live view through the app-origin frame page, and a browser checks
+    `frame-ancestors` against every ancestor in that chain, so the outer app's origin must be named
+    alongside the frame page's. Both row-backed sites and row-less shipped apps are named from the
+    responding site's own workspace — that is the embed chain, and it keeps a site in another
+    workspace of the same deploy from wrapping this one around the viewer's session.
 
     Carried as our own header rather than appended to the origin's: a site commonly sends no policy
     at all, which is the case this exists for, and several policies combine restrictively — so one
@@ -646,11 +653,10 @@ class IngressServe:
             yield chunk
 
     async def _frame_ancestors(self, workspace_id: UUID) -> str:
-        """The `frame-ancestors` value for one workspace's responses: the app origin, then one
-        origin per hosted site of that workspace. `'none'` stays alone — with no app base there is
-        no frame page and so no embed chain, and `'none'` beside another source would name it
-        anyway. The rows are the sites extension's `hosted_site`, read by name the way extension
-        tables are read elsewhere in core, filtered to the workspace explicitly because this
+        """The `frame-ancestors` value for one workspace's responses: the app origin, then every
+        row-backed site and active shipped app origin in that workspace. `'none'` stays alone —
+        with no app base there is no frame page and so no embed chain, and `'none'` beside another
+        source would name it anyway. The reads are explicitly workspace-filtered because this
         process runs on the owner DSN."""
         if self.frame_ancestor == NO_FRAME_ANCESTOR:
             return NO_FRAME_ANCESTOR
@@ -659,21 +665,43 @@ class IngressServe:
         if cached is not None and now < cached[0]:
             return cached[1]
         async with workspace_tx() as connection:
-            rows = (
+            sites = (
                 await connection.execute(
                     sa.select(HOSTED_SITE.c.conversation_id, HOSTED_SITE.c.port)
                     .distinct()
                     .where(HOSTED_SITE.c.workspace_id == workspace_id)
                 )
             ).all()
-        ancestors = " ".join(
-            [self.frame_ancestor]
-            + [
-                f"{self.site_scheme}://{site_label(row.conversation_id, row.port)}"
-                f".{self.base_host}{self.site_port_suffix}"
-                for row in rows
-            ]
-        )
+            provisions = (
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.provisioned_by)
+                        .distinct()
+                        .where(
+                            tables.agent.c.workspace_id == workspace_id,
+                            tables.agent.c.archived_at.is_(None),
+                            tables.agent.c.provisioned_by.is_not(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        shipped = [
+            shipped_anchor(workspace_id, slug)
+            for provision in provisions
+            if (slug := shipped_app_slug(provision)) is not None
+        ]
+        origins = {
+            f"{self.site_scheme}://{site_label(row.conversation_id, row.port)}"
+            f".{self.base_host}{self.site_port_suffix}"
+            for row in sites
+        } | {
+            f"{self.site_scheme}://{site_label(anchor, serve_port(anchor))}"
+            f".{self.base_host}{self.site_port_suffix}"
+            for anchor in shipped
+        }
+        ancestors = " ".join([self.frame_ancestor, *sorted(origins)])
         self.frame_ancestors_cache[workspace_id] = (now + FRAME_ANCESTORS_TTL_SECONDS, ancestors)
         return ancestors
 
