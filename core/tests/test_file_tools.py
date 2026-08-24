@@ -93,7 +93,8 @@ REGISTRY = ToolRegistry(BUILTIN_TOOLS)
 CONTAINER_OP_TIMEOUT_S = 180
 
 
-MINIMAL_PDF = b"""%PDF-1.4
+MINIMAL_PDF_STREAM = "BT /F1 24 Tf 40 100 Td (Hello ufo fs PDF) Tj ET"
+MINIMAL_PDF = f"""%PDF-1.4
 1 0 obj
 << /Type /Catalog /Pages 2 0 R >>
 endobj
@@ -101,13 +102,13 @@ endobj
 << /Type /Pages /Kids [3 0 R] /Count 1 >>
 endobj
 3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R \
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] /Contents 4 0 R \
 /Resources << /Font << /F1 5 0 R >> >> >>
 endobj
 4 0 obj
-<< /Length 46 >>
+<< /Length {len(MINIMAL_PDF_STREAM.encode())} >>
 stream
-BT /F1 24 Tf 40 100 Td (Hello ufo fs PDF) Tj ET
+{MINIMAL_PDF_STREAM}
 endstream
 endobj
 5 0 obj
@@ -116,7 +117,7 @@ endobj
 trailer
 << /Root 1 0 R /Size 6 >>
 %%EOF
-"""
+""".encode()
 
 
 def _png_1x1() -> bytes:
