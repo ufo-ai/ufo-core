@@ -5,7 +5,7 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct Limits {
     pub deadline: Duration,
-    pub memory_bytes: u64,
+    pub memory_bytes: Option<u64>,
     pub file_size_bytes: u64,
     pub cpu_secs: u64,
 }
@@ -52,7 +52,9 @@ pub async fn run(
             // binary with EINVAL (the dyld shared-cache reservation exceeds the limit); the
             // deployed container is Linux, where the bound is real and enforced.
             #[cfg(target_os = "linux")]
-            set_rlimit(libc::RLIMIT_AS, memory)?;
+            if let Some(memory) = memory {
+                set_rlimit(libc::RLIMIT_AS, memory)?;
+            }
             #[cfg(not(target_os = "linux"))]
             let _ = memory;
             set_rlimit(libc::RLIMIT_FSIZE, fsize)?;
@@ -96,7 +98,7 @@ mod tests {
     fn limits(deadline_ms: u64) -> Limits {
         Limits {
             deadline: Duration::from_millis(deadline_ms),
-            memory_bytes: 512 * 1024 * 1024,
+            memory_bytes: Some(512 * 1024 * 1024),
             file_size_bytes: 64 * 1024 * 1024,
             cpu_secs: 30,
         }

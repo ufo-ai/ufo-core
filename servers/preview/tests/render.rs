@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -89,6 +90,36 @@ async fn missing_bearer_is_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn site_capture_requires_a_direct_bearer_even_with_a_put_url() {
+    let base = serve_app(config(None)).await;
+    let request = serde_json::json!({
+        "kind": "site",
+        "source_url": "http://127.0.0.1:8000/",
+        "max_width": 1200,
+        "max_height": 900,
+        "sink": {"put_url": "https://sink.example/preview.png"},
+    });
+    let client = reqwest::Client::new();
+    let missing = client
+        .post(format!("{base}/render"))
+        .multipart(multipart(request.clone(), None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 401);
+
+    let forwarded = client
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .header("x-ufo-workspace", "workspace")
+        .multipart(multipart(request, None))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forwarded.status(), 401);
 }
 
 #[tokio::test]
@@ -264,6 +295,64 @@ async fn pdf_inline_round_trip() {
     assert!(w <= 800);
     let body = resp.bytes().await.unwrap();
     assert!(body.starts_with(b"\x89PNG"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn site_inline_round_trip() {
+    let cross_origin_requested = Arc::new(AtomicBool::new(false));
+    let requested = cross_origin_requested.clone();
+    let cross_origin = serve_app_router(axum::Router::new().route(
+        "/pixel.png",
+        axum::routing::get(move || {
+            requested.store(true, Ordering::SeqCst);
+            async { "pixel" }
+        }),
+    ))
+    .await;
+    let page = axum::Router::new().route(
+        "/",
+        axum::routing::get(move || {
+            let cross_origin = cross_origin.clone();
+            async move {
+                axum::response::Html(format!(
+                    "<html><body style='background:#111;color:#fff'><h1>Site preview</h1><img src='{cross_origin}/pixel.png'></body></html>"
+                ))
+            }
+        }),
+    );
+    let source = serve_app_router(page).await;
+    let base = serve_app(config(None)).await;
+    let request = serde_json::json!({
+        "kind": "site",
+        "source_url": format!("{source}/"),
+        "max_width": 1200,
+        "max_height": 900,
+        "sink": {"inline": true},
+    });
+    let response = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(request, None))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(headers["x-preview-width"], "1200");
+    assert_eq!(headers["x-preview-height"], "900");
+    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(!cross_origin_requested.load(Ordering::SeqCst));
+}
+
+async fn serve_app_router(app: axum::Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{address}")
 }
 
 #[tokio::test]

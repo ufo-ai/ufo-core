@@ -32,7 +32,7 @@ import pytest
 import sqlalchemy as sa
 import yaml
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, MockTransport, Request, Response
 from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -114,6 +114,7 @@ from ufo.ext.loader import member_object_registry, turn_tools
 from ufo.hub import InProcessHub
 from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, verify_artifact_url
 from ufo.media.image_previews import ImagePreviewGrant
+from ufo.media.site_previewer import SitePreviewer
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox import containment
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -243,21 +244,21 @@ def _png(color: str) -> bytes:
 
 
 PAGE_PNG = _png("white")
+PREVIEW_SERVICE_PNG = _png("navy")
 CARD_DIGEST = "5f2c" * 16
 REDRAWN_DIGEST = "a91b" * 16
 
 
 @dataclass
 class ShootingSandbox:
-    """Stands in for the member's container on a deploy whose page really is photographed: every
-    command succeeds and answers the shot's byte count, every in-sandbox program answers the digest
-    the card's encode step prints, and reading a shot back hands over one real PNG.
+    """Stands in for the member's container while the preview service photographs its hosted page:
+    every command succeeds and answers the share-card byte count, every in-sandbox program answers
+    the digest the card's encode step prints, and reading the card back hands over one real PNG.
 
     It answers the same thing to every command, so it records and asserts nothing about what the
-    tools said. What the deploy did with the bytes is the contract: the rows it wrote, the picture
-    the store now holds, and the card the frame's head then names. An empty `digest` is a container
-    that
-    photographs the page and composes no card — which is what every site deployed before cards
+    tools said. What the deploy did with the bytes is the contract: the rows it wrote, the preview
+    service's picture the store now holds, and the card the frame's head then names. An empty
+    `digest` is a container that composes no card — which is what every site deployed before cards
     existed has."""
 
     png: bytes = PAGE_PNG
@@ -497,13 +498,35 @@ def _bind(
     runs in the sandbox of the turn that spawned it. `sandbox` is which stand-in answers that
     container's commands: the plain one, or the one that photographs the page. `skills` is the
     deploy's registry the turn resolves app pages through."""
+    selected_sandbox = replace(
+        sandbox or FakeSandbox(),
+        conversation_id=serving_conversation_id or conversation_id,
+    )
+    site_previewer = ctx.site_previewer
+    if isinstance(selected_sandbox, ShootingSandbox):
+
+        def preview_response(request: Request) -> Response:
+            return Response(
+                200,
+                content=PREVIEW_SERVICE_PNG,
+                headers={
+                    "content-type": "image/png",
+                    "x-preview-width": str(PREVIEW_WIDTH),
+                    "x-preview-height": str(PREVIEW_HEIGHT),
+                },
+            )
+
+        site_previewer = SitePreviewer(
+            blob=ctx.blob,
+            service_url="http://preview.svc:8930",
+            token="preview-token",
+            ingress_public_url=INGRESS_BASE_URL,
+            transport=MockTransport(preview_response),
+        )
     return replace(
         ctx,
         skills=skills or ctx.skills,
-        sandbox=replace(
-            sandbox or FakeSandbox(),
-            conversation_id=serving_conversation_id or conversation_id,
-        ),
+        sandbox=selected_sandbox,
         turn=ctx.turn.model_copy(
             update={
                 "workspace_id": workspace.id,
@@ -513,6 +536,7 @@ def _bind(
             }
         ),
         speaker_member_id=speaker_member_id,
+        site_previewer=site_previewer,
     )
 
 
@@ -1565,16 +1589,16 @@ async def test_a_deploy_photographs_the_page_and_the_row_carries_the_picture(
     (row,) = await _stored(workspace)
     assert row.preview_blob_key.startswith(ARTIFACT_KEY_PREFIX)
     assert row.preview_blob_key.endswith(f"/{SITE}.png")
-    assert row.preview_size_bytes == len(PAGE_PNG)
+    assert row.preview_size_bytes == len(PREVIEW_SERVICE_PNG)
     with ws(workspace.id):
-        assert await blob.get(row.preview_blob_key) == PAGE_PNG
+        assert await blob.get(row.preview_blob_key) == PREVIEW_SERVICE_PNG
         listed = await _verb("object_list", workspace, conversation_id, creator_id, kind=SITE_KIND)
 
     (listed_row,) = listed["objects"]
     preview_url = listed_row["preview_url"]
     assert preview_url.startswith(f"{PUBLIC_BASE_URL}/{ARTIFACT_KEY_PREFIX}")
     assert _preview_claims(preview_url, ARTIFACT_SECRET) == ImagePreviewGrant(
-        media_type="image/png", size_bytes=len(PAGE_PNG)
+        media_type="image/png", size_bytes=len(PREVIEW_SERVICE_PNG)
     )
 
 
@@ -1610,7 +1634,45 @@ async def test_a_site_whose_page_never_drew_is_hosted_and_keeps_the_picture_it_h
 
     (row,) = await _stored(workspace)
     assert row.preview_blob_key == photographed.preview_blob_key
-    assert row.preview_size_bytes == len(PAGE_PNG)
+    assert row.preview_size_bytes == len(PREVIEW_SERVICE_PNG)
+
+
+async def test_a_site_without_the_preview_service_still_composes_its_share_card(
+    db: None, tmp_path: Path
+) -> None:
+    workspace = await _seed_workspace()
+    creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    conversation_id = await _seed_conversation(workspace, audience, creator_id)
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blobs"))
+    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience, blob=blob)
+    bound = replace(
+        _bind(
+            ctx,
+            workspace,
+            conversation_id,
+            creator_id,
+            sandbox=ShootingSandbox(),
+        ),
+        site_previewer=None,
+    )
+
+    with ws(workspace.id):
+        await _dispatch(
+            tool,
+            bound,
+            project_path="/workspace/dist",
+            site_name=SITE,
+            entry_point="index.html",
+            visibility="public",
+        )
+
+    (row,) = await _stored(workspace)
+    assert row.preview_blob_key is None
+    assert row.share_card_hash == CARD_DIGEST
+    assert row.share_card_blob_key is not None
+    with ws(workspace.id):
+        assert await blob.get(row.share_card_blob_key) == PAGE_PNG
 
 
 async def test_the_portal_index_carries_the_site_s_picture(
@@ -1634,7 +1696,7 @@ async def test_the_portal_index_carries_the_site_s_picture(
     assert read.status_code == 200
     (row,) = read.json()["objects"]
     assert _preview_claims(row["preview_url"], ARTIFACT_SECRET) == ImagePreviewGrant(
-        media_type="image/png", size_bytes=len(PAGE_PNG)
+        media_type="image/png", size_bytes=len(PREVIEW_SERVICE_PNG)
     )
 
 
@@ -2213,31 +2275,12 @@ async def test_publish_leaves_the_members_site_alone_when_it_cannot_come_up(db: 
 
 
 @dataclass(frozen=True)
-class StoppedShotSandbox:
-    """A sandbox that serves the new bytes and then never comes back from the shot — what a turn
-    ending inside the render looks like from here. Chromium is given `PREVIEW_TIMEOUT_SECONDS`, so
-    the render is the deploy's longest step and the one a turn is likeliest to be cut short in."""
-
-    conversation_id: UUID = field(default_factory=uuid4)
-
-    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
-        if "--remote-debugging-pipe" in command:
-            raise RuntimeError("the turn ended while the page was drawing")
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
-        if program is ENUMERATE_PROG:
-            return _listed_source()
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    def read_file(self, path: str) -> AsyncIterator[bytes]:
-        async def bytes_of() -> AsyncIterator[bytes]:
-            yield SOURCE_BYTES
-
-        return bytes_of()
+class StoppedSitePreviewer:
+    async def render(self, *args: object) -> None:
+        raise RuntimeError("the turn ended while the preview service was drawing")
 
 
-async def test_a_deploy_stopped_inside_the_shot_has_already_moved_the_ports_row(db: None) -> None:
+async def test_a_stopped_preview_has_already_moved_the_ports_row(db: None) -> None:
     """The photograph runs after the registration, not between the serve and it. The serve has
     already killed the member's previous server and put this deploy's bytes on the port, and
     registering is the only thing that retires the site that port belonged to — so a deploy cut
@@ -2251,10 +2294,10 @@ async def test_a_deploy_stopped_inside_the_shot_has_already_moved_the_ports_row(
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
     stopped = replace(
         _bind(ctx, workspace, conversation_id, member_id),
-        sandbox=StoppedShotSandbox(conversation_id=conversation_id),
+        site_previewer=StoppedSitePreviewer(),
     )
 
-    with ws(workspace.id), pytest.raises(RuntimeError, match="while the page was drawing"):
+    with ws(workspace.id), pytest.raises(RuntimeError, match="preview service was drawing"):
         await _dispatch(
             tool,
             stopped,
@@ -2266,60 +2309,6 @@ async def test_a_deploy_stopped_inside_the_shot_has_already_moved_the_ports_row(
     (row,) = await _stored(workspace)
     assert row.name == "pricing"
     assert row.port == serve_port(conversation_id)
-    assert row.preview_blob_key is None
-
-
-@dataclass(frozen=True)
-class RefusedShotSandbox:
-    """A sandbox where the shot's own name cannot be cleared — the containment guard's refusal,
-    which is what a link planted at that path looks like from here. The server log clears normally,
-    so the deploy really reaches the shot."""
-
-    conversation_id: UUID = field(default_factory=uuid4)
-
-    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
-        if program is ENUMERATE_PROG:
-            return _listed_source()
-        if args[0].endswith(".png"):
-            return ExecResult(stdout="", stderr="that path is not contained", exit_code=1)
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    def read_file(self, path: str) -> AsyncIterator[bytes]:
-        async def bytes_of() -> AsyncIterator[bytes]:
-            yield SOURCE_BYTES
-
-        return bytes_of()
-
-
-async def test_a_shot_path_the_guard_refuses_still_hosts_the_site(db: None) -> None:
-    """Clearing the shot's name is the render's own first step and it can be refused, so it answers
-    like every other undrawn shot: logged, no preview, site hosted. The site is already registered
-    by then, so raising here would report a failure for a deploy that really is serving."""
-    workspace = await _seed_workspace()
-    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
-    audience = conversation_audience(member_id)
-    conversation_id = await _seed_conversation(workspace, audience, member_id)
-    tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
-    refused = replace(
-        _bind(ctx, workspace, conversation_id, member_id),
-        sandbox=RefusedShotSandbox(conversation_id=conversation_id),
-    )
-
-    with ws(workspace.id):
-        hosted = await _dispatch(
-            tool,
-            refused,
-            project_path="/workspace/dist",
-            site_name=SITE,
-            entry_point="index.html",
-        )
-
-    assert hosted["site_name"] == SITE
-    (row,) = await _stored(workspace)
-    assert row.name == SITE
     assert row.preview_blob_key is None
 
 

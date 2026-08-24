@@ -228,6 +228,7 @@ data "kubectl_file_documents" "hosted" {
     namespace                        = local.system_namespace
     apex_host                        = module.platform.hostname
     gateway_origin_host              = local.gateway_origin_host
+    site_host                        = module.platform.hostname
     shared_host                      = local.shared_host
     cluster_issuer                   = "letsencrypt"
     ingress_class                    = "nginx"

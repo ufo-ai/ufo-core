@@ -1,9 +1,9 @@
 # ufo-preview
 
-`ufo-preview` is the service that turns a document into a picture. Give it a PDF, a Word, Excel, or
-PowerPoint file, a CSV, a Markdown file, or an SVG and it answers with PNG page images. Give it a
-video (`mp4`, `mov`, `webm`, `mkv`) and it answers with one extracted frame. That is the whole job:
-everything in the product that shows a thumbnail or a page preview of a file gets it from here.
+`ufo-preview` turns a file or hosted site into a picture. Give it a PDF, a Word, Excel, or PowerPoint
+file, a CSV, a Markdown file, or an SVG and it answers with PNG page images. Give it a video (`mp4`,
+`mov`, `webm`, `mkv`) and it answers with one extracted frame. Give it a hosted-site view URL and it
+captures the page through Chromium.
 
 The service is stateless and holds no storage credential. A caller either uploads the file on the
 request or hands over a URL to fetch it from, and asks for the result either in the response body or
@@ -15,10 +15,10 @@ Two binaries are built here. `ufo-preview` is the service. `preview-worker` is t
 the service starts for each rasterization, so a malformed file can crash a bounded process instead of
 the service. A developer runs the service; the worker is started for you.
 
-Byte-returning requests need a bearer token. A `put_url` is its own single-key storage capability
-and needs no bearer. The service refuses anything larger, longer, or with more pages than its limits
-allow. `GET /_health` answers `ok`. Configuration is read once at boot; a missing required value
-exits with status 2.
+Byte-returning requests need a bearer token. A file render's `put_url` is its own single-key storage
+capability and needs no bearer. A site capture always needs the bearer and a configured hosted-site
+domain. The service refuses anything larger, longer, or with more pages than its limits allow.
+`GET /_health` answers `ok`. Configuration is read once at boot; a missing required value exits with status 2.
 
 ## Run it in development
 
@@ -27,6 +27,7 @@ Prerequisites:
 - a stable Rust toolchain;
 - LibreOffice (`soffice`) on `PATH` — every format except PDF is converted through it;
 - `ffmpeg` on `PATH`, for video frames only;
+- Chromium and Python 3, for hosted sites only;
 - the pdfium library, which the fetch script downloads for your platform.
 
 ```bash
@@ -50,7 +51,7 @@ curl -sS -o /tmp/preview.png \
   http://127.0.0.1:8930/render
 ```
 
-`kind` names the format, `max_width` and `max_height` bound the picture, `start_page` (default 1)
+`kind` names the format or `site`, `max_width` and `max_height` bound the picture, `start_page` (default 1)
 selects the first page, and `pages` (default 1, maximum 20) selects the range. `sink` is
 `{"inline":true}` for display bytes, `{"bundle":true}` for the document-read ZIP, or
 `{"put_url":"..."}` to write the preview to that URL. Instead of uploading a file, `source_url`
@@ -71,6 +72,10 @@ never does.
 | `UFO_PREVIEW_PDFIUM_LIB` | Path to the pdfium library used for rasterizing. Required. |
 | `UFO_PREVIEW_SOFFICE_BIN` | LibreOffice command. Defaults to `soffice`. |
 | `UFO_PREVIEW_FFMPEG_BIN` | ffmpeg command. Defaults to `ffmpeg`. |
+| `UFO_PREVIEW_BROWSER_BIN` | Chromium command. Defaults to `/usr/bin/chromium`. |
+| `UFO_PREVIEW_PYTHON_BIN` | Python command for the browser driver. Defaults to `/usr/bin/python3`. |
+| `UFO_PREVIEW_SITE_DRIVER` | Browser-driver path. Defaults to `/usr/local/libexec/ufo-site-preview.py`. |
+| `UFO_PREVIEW_SITE_HOST` | Hosted-site base domain accepted by `kind: site`. Unset disables site capture. |
 | `UFO_PREVIEW_ALLOW_LOCAL` | `1` admits `http://` and private or loopback addresses. Off by default. |
 | `UFO_PREVIEW_CONCURRENCY` | How many renders run at once. Defaults to the core count, at most 4. |
 | `UFO_PREVIEW_MAX_INPUT_MB` | Largest accepted input. Defaults to 100. |
@@ -80,6 +85,7 @@ never does.
 | `UFO_PREVIEW_CONVERT_TIMEOUT_SECS` | Bound on one document conversion. Defaults to 120. |
 | `UFO_PREVIEW_RASTER_TIMEOUT_SECS` | Bound on one rasterization. Defaults to 30. |
 | `UFO_PREVIEW_FETCH_TIMEOUT_SECS` | Bound on fetching a named source. Defaults to 60. |
+| `UFO_PREVIEW_SITE_TIMEOUT_SECS` | Bound on one hosted-site capture. Defaults to 30. |
 | `UFO_PREVIEW_REQUEST_TIMEOUT_SECS` | Bound on a whole request. Defaults to 300. |
 | `UFO_PREVIEW_LOG` | Log filter. Defaults to `info`. Logs are JSON on stdout. |
 

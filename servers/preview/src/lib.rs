@@ -7,6 +7,7 @@ pub mod refusal;
 pub mod render;
 pub mod server;
 pub mod sink;
+pub mod site;
 pub mod worker;
 
 pub use config::Config;

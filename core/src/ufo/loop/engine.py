@@ -76,6 +76,7 @@ from ufo.loop.compaction import (
 from ufo.loop.prompts.render import RenderedPrompt
 from ufo.loop.replies import MarkedReply, ReplyRedaction, marked_replies
 from ufo.loop.transcript import Transcript
+from ufo.media.site_previewer import SitePreviewer
 from ufo.memory import MemorySearch
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
@@ -976,6 +977,7 @@ class TurnEngine:
     audience: Audience
     artifact_token_secret: str
     grants: GrantStore | None
+    site_previewer: SitePreviewer | None = None
     previous_turn_ended_at: datetime | None = None
     lineage: RunLineage | None = None
     sandbox_for: SandboxFor | None = None
@@ -1086,6 +1088,7 @@ class TurnEngine:
             find=rank_find,
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
+            site_previewer=self.site_previewer,
             models=self.models,
             model_specs=self.model_specs,
             auto_model=self.auto_model,
@@ -1265,6 +1268,7 @@ class TurnEngine:
             connectors=self.connectors,
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
+            site_previewer=self.site_previewer,
             models=self.models,
             model_specs=self.model_specs,
             auto_model=self.auto_model,

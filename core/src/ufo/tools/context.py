@@ -24,7 +24,8 @@ write's header, a spawned child's identity — so the effect applies at most onc
 `None`. `meter_images` and `meter_videos` book what a paid image or video generation cost onto this
 turn's ledger: metering is core's, so a provider extension prices its own call and writes it through
 here. `store_preview` takes a picture a tool rendered inside the sandbox into the artifact
-namespace, which core alone names, so the row it illustrates can carry a signed preview link. An
+namespace, which core alone names; `render_site_preview` instead gives the preview service a
+core-minted view of one hosted port and the resulting picture's one-key store capability. An
 extension tool also gets `ext`, its owning extension's workspace-scoped ExtensionContext; a builtin
 tool gets `ext=None`."""
 
@@ -47,6 +48,8 @@ from ufo.browser import CdpProvider, FindCompleter
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, SourceReader
 from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
+from ufo.media.previews import StoredPreview
+from ufo.media.site_previewer import SitePreviewer
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.spec import ModelSpec
 from ufo.o11y import log
@@ -256,15 +259,6 @@ class ConnectorConnection:
 
 
 @dataclass(frozen=True)
-class StoredPreview:
-    """A picture stored beside the row it illustrates: the blob key it landed under and its exact
-    size, the two values a signed preview grant is minted over."""
-
-    blob_key: str
-    size_bytes: int
-
-
-@dataclass(frozen=True)
 class ToolContext:
     sandbox: Sandbox
     blob: WorkspaceBlobStore
@@ -294,6 +288,7 @@ class ToolContext:
     model_specs: Mapping[str, ModelSpec] = field(default_factory=dict)
     auto_model: str = AUTO_MODEL
     public_base_url: str | None = None
+    site_previewer: SitePreviewer | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
 
     @property
@@ -379,6 +374,15 @@ class ToolContext:
             case _:
                 await self.blob.put_stream(key, self.sandbox.read_file(sandbox_path))
         return StoredPreview(blob_key=key, size_bytes=int(measured))
+
+    async def render_site_preview(
+        self, name: str, port: int, width: int, height: int
+    ) -> StoredPreview | None:
+        """Capture this turn's hosted sandbox port through the configured preview service."""
+        if self.site_previewer is None:
+            return None
+        conversation_id = self.turn.sandbox_conversation_id or self.turn.conversation_id
+        return await self.site_previewer.render(conversation_id, port, name, width, height)
 
     def source_reader(self) -> SourceReader:
         """Who is asking for a source's synced pages: this turn's agent, the member speaking right

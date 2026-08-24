@@ -57,6 +57,7 @@ from ufo.loop.subagents import (
     subagent_system_prompt,
 )
 from ufo.loop.transcript import Transcript
+from ufo.media.site_previewer import SitePreviewer
 from ufo.memory import MemorySearch
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.registry import ModelRegistry
@@ -321,6 +322,7 @@ class Runtime:
     index: IndexBackend
     embed: EmbedClient
     artifact_token_secret: str
+    site_previewer: SitePreviewer | None = None
     billing_url: str | None = None
     home_surface: str | None = None
     tailer: TurnTailer | None = None
@@ -723,6 +725,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             subagents_for=subagents_for,
             audience=audience,
             artifact_token_secret=runtime.artifact_token_secret,
+            site_previewer=runtime.site_previewer,
             grants=grants,
             previous_turn_ended_at=previous_turn_ended_at,
             pricing=runtime.registry.pricing,

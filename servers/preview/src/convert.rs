@@ -66,7 +66,7 @@ pub async fn to_pdf(
         .current_dir(workdir);
     let limits = Limits {
         deadline: cfg.convert_timeout,
-        memory_bytes: SOFFICE_MEMORY_BYTES,
+        memory_bytes: Some(SOFFICE_MEMORY_BYTES),
         file_size_bytes: SOFFICE_FILE_SIZE_BYTES,
         cpu_secs: SOFFICE_CPU_SECS,
     };
@@ -198,7 +198,7 @@ pub async fn video_frame(
         .current_dir(workdir);
     let limits = Limits {
         deadline: cfg.convert_timeout,
-        memory_bytes: FFMPEG_MEMORY_BYTES,
+        memory_bytes: Some(FFMPEG_MEMORY_BYTES),
         file_size_bytes: FFMPEG_FILE_SIZE_BYTES,
         cpu_secs: FFMPEG_CPU_SECS,
     };

@@ -121,6 +121,7 @@ from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
 from ufo.media.document_renderer import DocumentRenderer
 from ufo.media.preview_renderer import PREVIEW_SERVICE_URL_ENV, PREVIEW_TOKEN_ENV, PreviewRenderer
+from ufo.media.site_previewer import SitePreviewer
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.interface import AUTO_MODEL
@@ -309,6 +310,16 @@ def run() -> None:
         embed=embed,
         memory=memory,
         artifact_token_secret=artifact_secret,
+        site_previewer=(
+            SitePreviewer(
+                blob=blob,
+                service_url=f"http://{preview[0][0]}:{preview[0][1]}",
+                token=preview[1],
+                ingress_public_url=config.sandbox.ingress_public_url,
+            )
+            if preview is not None and config.sandbox.ingress_public_url is not None
+            else None
+        ),
         billing_url=billing_url,
         home_surface=browser_home,
         tailer=HubTailer(hub=hub, billing_url=billing_url),

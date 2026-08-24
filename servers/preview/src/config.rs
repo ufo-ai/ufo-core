@@ -9,6 +9,7 @@ const DEFAULT_MAX_PAGES: u32 = 20;
 const DEFAULT_CONVERT_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_SITE_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_CONCURRENCY_CEILING: usize = 4;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
 
@@ -21,6 +22,10 @@ pub struct Config {
     pub pdfium_lib: String,
     pub soffice_bin: String,
     pub ffmpeg_bin: String,
+    pub browser_bin: String,
+    pub python_bin: String,
+    pub site_driver: String,
+    pub site_host: Option<String>,
     pub max_input_bytes: u64,
     pub max_output_bytes: u64,
     pub max_box_px: u32,
@@ -28,6 +33,7 @@ pub struct Config {
     pub convert_timeout: Duration,
     pub raster_timeout: Duration,
     pub fetch_timeout: Duration,
+    pub site_timeout: Duration,
     /// The whole `/render` request, permit hold included — bounds a bearer-less `put_url` caller
     /// trickling a body from pinning a permit forever. Must exceed every phase it wraps (fetch +
     /// convert + raster + PUT headroom), so the per-phase timeouts fire first.
@@ -51,6 +57,13 @@ impl Config {
             pdfium_lib: req(m, "UFO_PREVIEW_PDFIUM_LIB")?,
             soffice_bin: opt(m, "UFO_PREVIEW_SOFFICE_BIN").unwrap_or_else(|| "soffice".into()),
             ffmpeg_bin: opt(m, "UFO_PREVIEW_FFMPEG_BIN").unwrap_or_else(|| "ffmpeg".into()),
+            browser_bin: opt(m, "UFO_PREVIEW_BROWSER_BIN")
+                .unwrap_or_else(|| "/usr/bin/chromium".into()),
+            python_bin: opt(m, "UFO_PREVIEW_PYTHON_BIN")
+                .unwrap_or_else(|| "/usr/bin/python3".into()),
+            site_driver: opt(m, "UFO_PREVIEW_SITE_DRIVER")
+                .unwrap_or_else(|| "/usr/local/libexec/ufo-site-preview.py".into()),
+            site_host: opt(m, "UFO_PREVIEW_SITE_HOST"),
             max_input_bytes: parse_or(m, "UFO_PREVIEW_MAX_INPUT_MB", DEFAULT_MAX_INPUT_MB)?
                 .saturating_mul(1024 * 1024),
             max_output_bytes: parse_or(
@@ -74,6 +87,11 @@ impl Config {
                 m,
                 "UFO_PREVIEW_FETCH_TIMEOUT_SECS",
                 DEFAULT_FETCH_TIMEOUT_SECS,
+            )?),
+            site_timeout: Duration::from_secs(parse_or(
+                m,
+                "UFO_PREVIEW_SITE_TIMEOUT_SECS",
+                DEFAULT_SITE_TIMEOUT_SECS,
             )?),
             request_timeout: Duration::from_secs(parse_or(
                 m,
@@ -156,6 +174,10 @@ mod tests {
         assert_eq!(c.max_pages, 20);
         assert_eq!(c.soffice_bin, "soffice");
         assert_eq!(c.ffmpeg_bin, "ffmpeg");
+        assert_eq!(c.browser_bin, "/usr/bin/chromium");
+        assert_eq!(c.python_bin, "/usr/bin/python3");
+        assert_eq!(c.site_driver, "/usr/local/libexec/ufo-site-preview.py");
+        assert_eq!(c.site_host, None);
         assert!(!c.allow_local);
         assert!(
             c.concurrency <= 4,

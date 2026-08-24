@@ -40,7 +40,6 @@ from enum import StrEnum
 from secrets import token_hex
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
-from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -99,15 +98,7 @@ from ufo.sandbox.conversation import (
     ConversationSandbox,
     WorkspaceFile,
 )
-from ufo.sandbox.ingress_host import site_label
-from ufo.sandbox.ingress_token import (
-    INGRESS_VIEW_KIND,
-    INGRESS_VIEW_PATH,
-    INGRESS_VIEW_TTL_SECONDS,
-    IngressClaims,
-    ShippedClaim,
-    mint_ingress_token,
-)
+from ufo.sandbox.ingress_url import mint_ingress_view_url
 from ufo.sandbox.terminal import TerminalOp
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -1953,27 +1944,15 @@ class SurfaceContext:
         session cookie to the workspace — while the shipped claim names the row-less deploy-wide
         bytes: this is the producer half of the ingress's shipped-serving path, whose bytes are
         workspace-independent."""
-        if not self._ingress_public_url:
-            return None
-        base = urlsplit(self._ingress_public_url)
-        shipped = (
-            ShippedClaim(slug=shipped_slug, digest=shipped_digest)
-            if shipped_slug is not None and shipped_digest is not None
-            else None
+        return mint_ingress_view_url(
+            self._ingress_public_url,
+            self.workspace_id,
+            conversation_id,
+            port,
+            entry_path,
+            shipped_slug=shipped_slug,
+            shipped_digest=shipped_digest,
         )
-        token = mint_ingress_token(
-            IngressClaims(
-                workspace_id=self.workspace_id,
-                conversation_id=conversation_id,
-                port=port,
-                expires_at=int(datetime.now(UTC).timestamp()) + INGRESS_VIEW_TTL_SECONDS,
-                shipped=shipped,
-            ),
-            INGRESS_VIEW_KIND,
-        )
-        label = site_label(conversation_id, port)
-        entry = "" if entry_path == "/" else quote(entry_path, safe="/")
-        return f"{base.scheme}://{label}.{base.netloc}{INGRESS_VIEW_PATH}/{token}{entry}"
 
     async def _identity_member(self, surface: str, external_id: str) -> UUID | None:
         """The member a surface's external id is linked to, or None. `linked_member` reads this

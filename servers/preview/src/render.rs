@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::convert;
 use crate::fetch;
 use crate::refusal::Refusal;
+use crate::site;
 
 const WORKER_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 const WORKER_FILE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
@@ -126,6 +127,20 @@ impl Render {
         req: &RenderRequest,
         file: Option<Vec<u8>>,
     ) -> Result<Rendered, Refusal> {
+        if req.kind == "site" {
+            if file.is_some() || matches!(&req.sink, SinkSpec::Bundle { .. }) {
+                return Err(Refusal::UnsupportedType(
+                    "site capture accepts source_url and a picture sink".into(),
+                ));
+            }
+            let source_url = req
+                .source_url
+                .as_deref()
+                .ok_or_else(|| Refusal::UnsupportedType("site source_url is required".into()))?;
+            let max_w = req.max_width.clamp(16, self.cfg.max_box_px);
+            let max_h = req.max_height.clamp(16, self.cfg.max_box_px);
+            return site::capture(source_url, max_w, max_h, &self.cfg).await;
+        }
         let kind = Kind::parse(&req.kind)
             .ok_or_else(|| Refusal::UnsupportedType(format!("kind {}", req.kind)))?;
         if kind.is_video() && matches!(&req.sink, SinkSpec::Bundle { .. }) {
@@ -243,7 +258,7 @@ impl Render {
             .current_dir(request.workdir);
         let limits = Limits {
             deadline: self.cfg.raster_timeout,
-            memory_bytes: WORKER_MEMORY_BYTES,
+            memory_bytes: Some(WORKER_MEMORY_BYTES),
             file_size_bytes: WORKER_FILE_SIZE_BYTES,
             cpu_secs: WORKER_CPU_SECS,
         };
@@ -516,6 +531,15 @@ mod tests {
         req.kind = "mp4".into();
         req.sink = SinkSpec::Bundle { bundle: true };
         let err = render.handle(&req, Some(vec![1])).await.err().unwrap();
+        assert!(matches!(err, Refusal::UnsupportedType(_)));
+    }
+
+    #[tokio::test]
+    async fn site_capture_requires_a_source_url() {
+        let render = Render::new(test_config());
+        let mut req = request(None);
+        req.kind = "site".into();
+        let err = render.handle(&req, None).await.err().unwrap();
         assert!(matches!(err, Refusal::UnsupportedType(_)));
     }
 

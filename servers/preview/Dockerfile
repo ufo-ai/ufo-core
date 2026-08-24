@@ -21,12 +21,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer libreoffice-calc libreoffice-impress \
         fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
-        ffmpeg ca-certificates curl tini \
+        ffmpeg chromium python3 ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
 RUN sh /tmp/fetch-pdfium.sh /usr/local/lib/pdfium && rm /tmp/fetch-pdfium.sh
 ENV UFO_PREVIEW_PDFIUM_LIB=/usr/local/lib/pdfium/libpdfium.so
 COPY --from=build /build/target/release/ufo-preview /usr/local/bin/ufo-preview
 COPY --from=build /build/target/release/preview-worker /usr/local/bin/preview-worker
+COPY scripts/capture-site.py /usr/local/libexec/ufo-site-preview.py
 USER nobody
 ENTRYPOINT ["tini", "--", "ufo-preview"]

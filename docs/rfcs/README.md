@@ -34,7 +34,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0033](0033-spawn.md) | Spawn — one verb over typed targets: profiles and workspace agents | implemented |
 | [0035](0035-egress-proxy-rust.md) | Egress proxy in Rust — a data plane over a core control RPC | proposed |
 | [0036](0036-control-plane-rust.md) | Control plane in Rust — its own ledgers, a core RPC for core's tables | implemented |
-| [0037](0037-preview-service.md) | Preview service — document rasterization out of the sandbox | accepted |
+| [0037](0037-preview-service.md) | Preview service — file and site rasterization | accepted |
 | [0038](0038-invitation-delivery.md) | Invitation delivery — one mail API, our words | accepted |
 | [0038](0038-skill-retrieval.md) | Skill retrieval — routing cards, tiered visibility, and retrieval proven in shadow | implemented |
 | [0039](0039-first-class-apps.md) | First-class apps | proposed |

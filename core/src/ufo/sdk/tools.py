@@ -10,11 +10,11 @@ reported by the same handles under the same names whichever tool asked."""
 from ufo.access.grants import (
     ConnectUnavailable as ConnectUnavailable,
 )
-from ufo.tools.context import (
-    ImageContent as ImageContent,
+from ufo.media.previews import (
+    StoredPreview as StoredPreview,
 )
 from ufo.tools.context import (
-    StoredPreview as StoredPreview,
+    ImageContent as ImageContent,
 )
 from ufo.tools.context import (
     TextContent as TextContent,

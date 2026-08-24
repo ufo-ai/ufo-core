@@ -19,15 +19,14 @@ reachable server rather than a race. The served URL is `http://localhost:<port>`
 which the browser tools and js_repl reach to validate the page.
 
 `deploy_website` and `publish_website` then register that port as a hosted site, returning its
-`site_url` — the frame a member opens, gated on the site's visibility — and photograph the page it
-answers with the sandbox's own headless chromium afterwards, storing the PNG as the site's preview.
-The picture is what the artifacts view draws the site's card with, and it is taken at deploy time
-because the page and a browser are both inside that one container at that one moment; it is taken
-after the registration because registering is what retires the site this deploy displaced from the
-port, and a render is long enough for a turn to end inside. A render that fails leaves the site
-hosted with the picture it already had. Hosting a site is registering the port the readiness probe
-just proved, so nothing moves: a re-deploy of the same name updates the port in place and the link
-never changes. Visibility defaults from the conversation's audience; an explicit argument
+`site_url` — the frame a member opens, gated on the site's visibility — and ask the preview service
+to photograph that address into the artifact store. The picture is what the artifacts view draws
+the site's card with. It is taken after the registration because registering is what retires the
+site this deploy displaced from the port, and a render is long enough for a turn to end inside. A
+render that fails leaves the site hosted with the picture it already had. Hosting a site is
+registering the port the readiness probe just proved, so nothing moves: a re-deploy of the same
+name updates the port in place and the link never changes. Visibility defaults from the
+conversation's audience; an explicit argument
 overrides that default, but only for the site's creator and only on a turn with a live speaker,
 because choosing who can open a site is a disclosure act. `start_server` registers nothing, since a
 scratch server is not a deliverable.
@@ -52,11 +51,10 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
-from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, serve_port, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.objects import effective_visibility, site_object_name
-from ufo_ext_sites.share_card import draw_from_page, shot_command
+from ufo_ext_sites.share_card import draw_from_page
 from ufo_ext_sites.source import (
     PROJECT_CONFIG,
     PROJECT_CONFIG_BYTES,
@@ -95,15 +93,8 @@ LOG_TAIL_TIMEOUT_SECONDS = 15
 SERVER_LOG = f"{TOOL_OUTPUT_DIR}/server-{{port}}.log"
 DEPLOY_LOG = f"{TOOL_OUTPUT_DIR}/deploy-{{port}}.log"
 PUBLISH_LOG = f"{TOOL_OUTPUT_DIR}/publish-{{port}}.log"
-PREVIEW_SHOT = f"{TOOL_OUTPUT_DIR}/preview-{{port}}.png"
 PREVIEW_WIDTH = 1200
 PREVIEW_HEIGHT = 900
-PREVIEW_TIMEOUT_SECONDS = 90
-PREVIEW_DETAIL_CHARS = 500
-PREVIEW_PROFILE_DIR = "/tmp/ufo-site-preview"
-"""Outside the workspace and outside the persistent browser's own profile: a one-shot chromium takes
-the profile lock for its run, and sharing the directory the sandbox's standing DevTools browser
-holds would fail whichever started second."""
 LOG_CLEAR_PROG = """
 import sys
 from containment import ContainmentError, contained_file
@@ -486,54 +477,19 @@ async def _illustrate(ctx: ToolContext, name: str, port: int, conversation_id: U
     redeploy, whose scratch server runs here while the row lives with the conversation that first
     deployed it.
 
-    The renderer and the bytes are both local at this one moment: the site answers on the sandbox's
-    own loopback and the sandbox has Chrome or Chromium, so one headless run draws the page and core
-    takes the PNG from there into the artifact namespace. A picture the member never asked for is
-    not worth a deploy, so a sandbox with no chromium, a page that draws nothing but one flat
-    colour, a shot path that cannot be cleared, and a store that cannot take the bytes each leave
-    the site hosted with the picture it already had and say why in the log. The card answers the
-    same way, and it is drawn after the picture rather than instead of it: the portal's card is the
-    picture and the share card is what a link unfurls as, so a deploy that draws one and not the
-    other moves what it can.
+    Core mints the site's ingress view and the preview blob's one-key write capability, then the
+    preview service visits the first and writes the PNG to the second. The member's sandbox owns no
+    browser work or preview bytes. The card is separate: it is what a link unfurls as, while the
+    portal's card is this picture, so a deploy that draws one and not the other moves what it can.
 
-    This runs after `_host`, not between the serve and it. The shot is a long, failure-capable step
-    — `PREVIEW_TIMEOUT_SECONDS` of chromium — and `register` is the only thing that retires the site
-    this deploy displaced from the port, so a turn that ends inside the render has to find that row
-    already moved. The picture therefore lands in a write of its own, which touches nothing but the
-    preview columns.
-
-    The shot's name is emptied through the containment guard first, exactly as a server log is, and
-    the picture is written back through the guard as well: the name sits in a directory the agent
-    writes."""
+    This runs after `_host`, not between the serve and it. `register` is the only thing that retires
+    the site this deploy displaced from the port, so a turn that ends inside the external render has
+    to find that row already moved. The picture therefore lands in a write of its own, which touches
+    nothing but the preview columns."""
     if ctx.ext is None:
         raise RuntimeError("the website tools dispatched without their ExtensionContext")
-    shot = PREVIEW_SHOT.format(port=port)
-    try:
-        await _free_log(ctx, shot)
-    except RuntimeError as refused:
-        log("site_preview.undrawn", site=name, detail=str(refused)[:PREVIEW_DETAIL_CHARS])
-        return
-    drawn = await ctx.sandbox.bash(
-        shot_command(
-            url=f"http://127.0.0.1:{port}",
-            width=PREVIEW_WIDTH,
-            height=PREVIEW_HEIGHT,
-            scale=1,
-            shot=shot,
-            profile=PREVIEW_PROFILE_DIR,
-            root=WORKSPACE_DIR,
-        ),
-        timeout_s=PREVIEW_TIMEOUT_SECONDS,
-    )
-    if drawn.exit_code != 0:
-        log(
-            "site_preview.undrawn",
-            site=name,
-            detail=(drawn.stderr.strip() or drawn.stdout.strip())[:PREVIEW_DETAIL_CHARS],
-        )
-        return
     sites = HostedSites(ctx.ext.store.workspace_id, ctx.ext.transaction)
-    preview = await ctx.store_preview(shot, name)
+    preview = await ctx.render_site_preview(name, port, PREVIEW_WIDTH, PREVIEW_HEIGHT)
     if preview is not None:
         await sites.set_preview(conversation_id, name, preview)
     await draw_from_page(ctx, sites, conversation_id, name, port)

@@ -80,6 +80,13 @@ fn admits(
     headers: &HeaderMap,
     token: &str,
 ) -> bool {
+    if request.kind == "site" {
+        return !headers.contains_key(FORWARDED_WORKSPACE_HEADER)
+            && file.is_none()
+            && request.source_url.is_some()
+            && !matches!(&request.sink, SinkSpec::Bundle { .. })
+            && authorized(headers, token);
+    }
     if !headers.contains_key(FORWARDED_WORKSPACE_HEADER) {
         return matches!(&request.sink, SinkSpec::PutUrl { .. }) || authorized(headers, token);
     }

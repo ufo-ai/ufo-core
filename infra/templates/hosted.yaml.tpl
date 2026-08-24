@@ -432,7 +432,8 @@ spec:
             - {name: http, containerPort: 8930}
           env:
             - {name: UFO_PREVIEW_LISTEN, value: "0.0.0.0:8930"}
-            # Gates byte-returning sinks; `put_url` carries its own capability.
+            - {name: UFO_PREVIEW_SITE_HOST, value: "${site_host}"}
+            # Gates byte-returning sinks and site capture; file `put_url` carries its own capability.
             - name: UFO_PREVIEW_TOKEN
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: UFO_PREVIEW_TOKEN}
