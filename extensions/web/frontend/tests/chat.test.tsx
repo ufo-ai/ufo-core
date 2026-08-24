@@ -2270,23 +2270,23 @@ test("a streamed chunk never steals focus from where the member put it", async (
   expect(document.activeElement).toBe(elsewhere);
 });
 
-/** The transcript of a compacted conversation is only the tail; `earlier` names the page of
- *  compacted-away messages standing above it, and each page's response names the one above it —
- *  the chain is the server's to state. The row over the oldest loaded message brings the next
- *  page in when it is seen — the test's IntersectionObserver sees everything at once, so the
- *  pages land unprompted — and each reads above the tail in order, the loading row gone and no
- *  further page asked for once a response names none. */
+/** The transcript of a compacted conversation is only the tail; its cursor names the bounded page
+ *  standing above it, and each page's response names the one above it — the chain is the server's
+ *  to state. The row over the oldest loaded message brings the next page in when it is seen — the
+ *  test's IntersectionObserver sees everything at once, so the pages land unprompted — and each
+ *  reads above the tail in order, the loading row gone and no further page asked for once a
+ *  response names none. */
 test("a compacted conversation pages its earlier messages in above the tail", async () => {
   const { calls } = wire({
-    "/transcript/2": () =>
+    "/transcript?cursor=page-2": () =>
       json({
         messages: [
           { role: "user", text: "second ask" },
           { role: "assistant", text: "second reply" },
         ],
-        earlier: 1,
+        earlier_cursor: "page-1",
       }),
-    "/transcript/1": () =>
+    "/transcript?cursor=page-1": () =>
       json({
         messages: [
           { role: "user", text: "first ask" },
@@ -2298,7 +2298,7 @@ test("a compacted conversation pages its earlier messages in above the tail", as
         { role: "user", text: "third ask" },
         { role: "assistant", text: "third reply" },
       ],
-      earlier: 2,
+      earlier_cursor: "page-2",
     }),
   });
   open();
@@ -2309,9 +2309,17 @@ test("a compacted conversation pages its earlier messages in above the tail", as
   expect(log.indexOf("first ask")).toBeLessThan(log.indexOf("second ask"));
   expect(log.indexOf("second ask")).toBeLessThan(log.indexOf("third ask"));
   expect(screen.queryByText("Loading earlier messages…")).toBeNull();
-  expect(calls.filter((url) => url.includes("/transcript/"))).toEqual([
-    "/surface/web/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/transcript/2",
-    "/surface/web/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/transcript/1",
+  expect(calls.filter((url) => url.includes("/transcript?cursor="))).toEqual([
+    "/surface/web/agents/" +
+      AGENT.id +
+      "/conversations/" +
+      CONVO_ID +
+      "/transcript?cursor=page-2",
+    "/surface/web/agents/" +
+      AGENT.id +
+      "/conversations/" +
+      CONVO_ID +
+      "/transcript?cursor=page-1",
   ]);
 });
 
@@ -2344,7 +2352,7 @@ test("a conversation that never compacted asks for no pages", async () => {
   const { calls } = wire(transcript({ messages: [{ role: "assistant", text: "Done." }] }));
   open();
   await screen.findByText("Done.");
-  expect(calls.filter((url) => url.includes("/transcript/"))).toEqual([]);
+  expect(calls.filter((url) => url.includes("/transcript?cursor="))).toEqual([]);
 });
 
 /** jsdom lays nothing out, so the geometry of a page landing is stated by hand: a pane showing
@@ -2391,7 +2399,7 @@ test("loading a page above holds the line being read where it was", async () => 
     log({
       pages: [
         {
-          index: 1,
+          cursor: "page-1",
           messages: [
             { role: "user", text: "first ask" },
             { role: "assistant", text: "first reply" },
@@ -2417,7 +2425,7 @@ test("a transcript read back retries a failed page only when pressed", async () 
       title="Review PR 1268"
       messages={[{ role: "assistant", text: "tail reply" }]}
       earlier={{
-        pages: [{ index: 1, messages: [{ role: "user", text: "first ask" }] }],
+        pages: [{ cursor: "page-1", messages: [{ role: "user", text: "first ask" }] }],
         more: true,
         loading: false,
         failed: true,

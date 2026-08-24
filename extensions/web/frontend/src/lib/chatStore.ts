@@ -63,8 +63,8 @@ export type Founding = { conversationId: string; title: string };
 
 export type ChatState = {
   messages: Bubble[] | null;
-  /** How many compacted-away pages stand above `messages`, as the transcript read stated it. */
-  earlier: number;
+  /** The compacted-away page above `messages`, as the transcript read stated it. */
+  earlierCursor: string | null;
   busy: boolean;
   live: LiveTurn | null;
   turn: StreamingTurn | null;
@@ -86,7 +86,7 @@ export type ChatState = {
 
 const EMPTY: ChatState = {
   messages: null,
-  earlier: 0,
+  earlierCursor: null,
   busy: false,
   live: null,
   turn: null,

@@ -148,7 +148,7 @@ export function Chat({
     conversationId === null
       ? null
       : "/agents/" + agent.id + "/conversations/" + conversationId + "/transcript",
-    state.earlier,
+    state.earlierCursor,
   );
   const messages = state.messages;
   const settled = !state.busy && !state.live;
@@ -901,4 +901,3 @@ function Starters({ agentId }: { agentId: string }) {
     </div>
   );
 }
-

@@ -57,6 +57,16 @@ test("the endpoint table admits its rows and their fills, and nothing else", () 
   expect(endpointFor("GET", "objects/scheduled_task")).toBeTruthy();
   expect(endpointFor("GET", "objects/scheduled_task?paused=false")).toBeTruthy();
   expect(endpointFor("GET", "/agents/" + AGENT_ID + "/transcript")).toBeTruthy();
+  expect(
+    endpointFor(
+      "GET",
+      "/agents/" +
+        AGENT_ID +
+        "/conversations/" +
+        CONVERSATION_ID +
+        "/transcript?cursor=Mjo",
+    ),
+  ).toBeTruthy();
   expect(endpointFor("POST", "objects/scheduled_task")).toBeTruthy();
   expect(endpointFor("POST", "credentials")).toBeTruthy();
   expect(endpointFor("POST", "agents/" + AGENT_ID + "/chat?conversation=new")).toBeTruthy();

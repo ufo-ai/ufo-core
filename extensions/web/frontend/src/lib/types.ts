@@ -218,10 +218,9 @@ export type ChatConnect = {
 
 export type Transcript = {
   messages: Message[];
-  /** The compacted-away page standing directly above `messages`, read at
-   *  `…/transcript/<earlier>`; each page's response names the one above it in turn. Absent when
-   *  the transcript reflects no compaction. */
-  earlier?: number;
+  /** The compacted-away page standing directly above `messages`; each page's response names the
+   *  bounded page above it in turn. Absent when the transcript reflects no compaction. */
+  earlier_cursor?: string;
   turn?: string;
   credentials?: CredentialRequest | null;
 };

@@ -12058,10 +12058,10 @@ async def test_a_compacted_conversation_pages_its_earlier_messages(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """A compacted transcript states its tail and, in `earlier`, how many pages stand above it.
-    Each page answers the messages its compaction replaced, less the kept tail the next window
-    already shows, so pages and tail concatenate without a repeat or a gap; the summary message a
-    compaction wrote draws no bubble on either read. An index outside the records is not found."""
+    """A compacted transcript states its tail and the cursor directly above it. Each page answers
+    the messages its compaction replaced, less the kept tail the next window already shows, so
+    pages and tail concatenate without a repeat or a gap; the summary message a compaction wrote
+    draws no bubble on either read. A malformed cursor and another route shape are not found."""
     client, workspace_id, agent_id = web
     _config, _hub, blob, _sandboxes = dbos_runtime
     member_id, token = await _seed_member(workspace_id, "m@example.com")
@@ -12108,17 +12108,17 @@ async def test_a_compacted_conversation_pages_its_earlier_messages(
     path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
     read = await client.get(path, headers=headers)
     assert read.status_code == 200
-    assert read.json() == {
-        "messages": [
-            {"role": "user", "text": "second ask"},
-            {"role": "assistant", "text": "second reply"},
-            {"role": "user", "text": "third ask"},
-            {"role": "assistant", "text": "third reply"},
-        ],
-        "earlier": 1,
-    }
+    tail_payload = read.json()
+    assert tail_payload["messages"] == [
+        {"role": "user", "text": "second ask"},
+        {"role": "assistant", "text": "second reply"},
+        {"role": "user", "text": "third ask"},
+        {"role": "assistant", "text": "third reply"},
+    ]
+    cursor = tail_payload["earlier_cursor"]
+    assert isinstance(cursor, str)
 
-    page = await client.get(path + "/1", headers=headers)
+    page = await client.get(path, headers=headers, params={"cursor": cursor})
     assert page.status_code == 200
     assert page.json() == {
         "messages": [
@@ -12132,11 +12132,63 @@ async def test_a_compacted_conversation_pages_its_earlier_messages(
         headers=headers,
     )
     assert own.status_code == 200
-    assert own.json()["earlier"] == 1
+    assert own.json()["earlier_cursor"] == cursor
 
-    for absent in ("0", "2", "one"):
-        missing = await client.get(path + "/" + absent, headers=headers)
-        assert missing.status_code == 404
+    malformed = await client.get(path, headers=headers, params={"cursor": "not-a-cursor"})
+    assert malformed.status_code == 404
+    unshaped = await client.get(path + "/1", headers=headers)
+    assert unshaped.status_code == 404
+
+
+async def test_earlier_messages_are_bounded_and_cursor_complete(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A large compaction window crosses in bounded newest-first pages whose cursors reconstruct
+    the complete history once, whether the message-count or encoded-byte ceiling cuts a page."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation_id, _turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="done"),
+    )
+    texts = [f"short {at}" for at in range(170)] + [f"long {at} " + "x" * 2_000 for at in range(80)]
+    history = tuple(
+        Message(role="user", content=f"<context>\nmessage_ref: bulk-{at}\n</context>\n{text}")
+        for at, text in enumerate(texts)
+    )
+    summary = Message(role="user", content="Compacted context:\nthe bulk history")
+    await _write_compaction(blob, conversation_id, 1, before=history, after=(summary,))
+    await _write_transcript(blob, conversation_id, Conversation(seq=1, messages=(summary,)))
+
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
+    tail = await client.get(path, headers=headers)
+    cursor = tail.json()["earlier_cursor"]
+    pages: list[list[dict[str, object]]] = []
+    page_lengths: list[int] = []
+    seen: set[str] = set()
+    while cursor:
+        assert cursor not in seen
+        seen.add(cursor)
+        page = await client.get(path, headers=headers, params={"cursor": cursor})
+        assert page.status_code == 200
+        payload = page.json()
+        assert len(payload["messages"]) <= web_surface.HISTORY_PAGE_MESSAGE_LIMIT
+        assert len(page.content) <= web_surface.HISTORY_PAGE_BYTE_LIMIT
+        pages.insert(0, payload["messages"])
+        page_lengths.append(len(payload["messages"]))
+        cursor = payload.get("earlier_cursor")
+
+    assert [message for page in pages for message in page] == [
+        {"role": "user", "text": text} for text in texts
+    ]
+    assert web_surface.HISTORY_PAGE_MESSAGE_LIMIT in page_lengths
+    assert any(length < web_surface.HISTORY_PAGE_MESSAGE_LIMIT for length in page_lengths)
 
 
 async def test_earlier_names_only_records_the_transcript_reflects(
@@ -12146,7 +12198,7 @@ async def test_earlier_names_only_records_the_transcript_reflects(
     """A compaction record can exist without ever reaching the transcript: a turn that compacted
     and then ended non-done keeps the pre-compaction transcript, and the next compaction
     summarizes from that fuller window, shadowing the orphaned record. The tail then already
-    holds everything such a record replaced, so `earlier` names only the newest record the
+    holds everything such a record replaced, so the cursor names only the newest record the
     transcript opens with — nothing while the transcript is unreflective, and never a shadowed
     record from the page above it."""
     client, workspace_id, agent_id = web
@@ -12178,7 +12230,7 @@ async def test_earlier_names_only_records_the_transcript_reflects(
     path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
     repaired = await client.get(path, headers=headers)
     assert repaired.status_code == 200
-    assert "earlier" not in repaired.json()
+    assert "earlier_cursor" not in repaired.json()
 
     third = await _seed_listed_turn(
         workspace_id, conversation_id, agent_id, seq=3, inbound="third ask"
@@ -12195,14 +12247,14 @@ async def test_earlier_names_only_records_the_transcript_reflects(
 
     compacted = await client.get(path, headers=headers)
     assert compacted.status_code == 200
-    assert compacted.json() == {
-        "messages": [
-            {"role": "user", "text": "third ask"},
-            {"role": "assistant", "text": "third reply"},
-        ],
-        "earlier": 2,
-    }
-    page = await client.get(path + "/2", headers=headers)
+    compacted_payload = compacted.json()
+    assert compacted_payload["messages"] == [
+        {"role": "user", "text": "third ask"},
+        {"role": "assistant", "text": "third reply"},
+    ]
+    page = await client.get(
+        path, headers=headers, params={"cursor": compacted_payload["earlier_cursor"]}
+    )
     assert page.status_code == 200
     assert page.json() == {
         "messages": [
@@ -12272,25 +12324,25 @@ async def test_pages_chain_upward_through_their_records(
     path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
     read = await client.get(path, headers=headers)
     assert read.status_code == 200
-    assert read.json() == {
-        "messages": [
-            {"role": "user", "text": "ask 3"},
-            {"role": "assistant", "text": "reply 3"},
-            {"role": "user", "text": "ask 4"},
-            {"role": "assistant", "text": "reply 4"},
-        ],
-        "earlier": 2,
-    }
-    upper = await client.get(path + "/2", headers=headers)
+    tail_payload = read.json()
+    assert tail_payload["messages"] == [
+        {"role": "user", "text": "ask 3"},
+        {"role": "assistant", "text": "reply 3"},
+        {"role": "user", "text": "ask 4"},
+        {"role": "assistant", "text": "reply 4"},
+    ]
+    upper = await client.get(
+        path, headers=headers, params={"cursor": tail_payload["earlier_cursor"]}
+    )
     assert upper.status_code == 200
-    assert upper.json() == {
-        "messages": [
-            {"role": "user", "text": "ask 2"},
-            {"role": "assistant", "text": "reply 2"},
-        ],
-        "earlier": 1,
-    }
-    top = await client.get(path + "/1", headers=headers)
+    upper_payload = upper.json()
+    assert upper_payload["messages"] == [
+        {"role": "user", "text": "ask 2"},
+        {"role": "assistant", "text": "reply 2"},
+    ]
+    top = await client.get(
+        path, headers=headers, params={"cursor": upper_payload["earlier_cursor"]}
+    )
     assert top.status_code == 200
     assert top.json() == {
         "messages": [
@@ -12361,14 +12413,18 @@ async def test_history_pages_answer_at_the_chat_reach(
         headers=headers,
     )
     assert own.status_code == 200
-    assert own.json()["earlier"] == 1
+    cursor = own.json()["earlier_cursor"]
 
-    path = f"/surface/web/agents/{review_agent}/conversations/{conversation_id}/transcript/1"
-    page = await client.get(path, headers=headers)
+    path = f"/surface/web/agents/{review_agent}/conversations/{conversation_id}/transcript"
+    page = await client.get(path, headers=headers, params={"cursor": cursor})
     assert page.status_code == 200
     assert page.json() == {"messages": [{"role": "user", "text": "older ask"}]}
 
-    refused = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={other_token}"})
+    refused = await client.get(
+        path,
+        headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
+        params={"cursor": cursor},
+    )
     assert refused.status_code == 404
 
     shared = await _seed_agent_conversation(
@@ -12385,10 +12441,11 @@ async def test_history_pages_answer_at_the_chat_reach(
         before=(Message(role="user", content="shared ask"),),
         after=(Message(role="user", content="Compacted context:\nshared"),),
     )
-    for tail_route in ("/transcript", "/transcript/1"):
+    for params in (None, {"cursor": cursor}):
         parity = await client.get(
-            f"/surface/web/agents/{review_agent}/conversations/{shared}{tail_route}",
+            f"/surface/web/agents/{review_agent}/conversations/{shared}/transcript",
             headers=headers,
+            params=params,
         )
         assert parity.status_code == 404
 

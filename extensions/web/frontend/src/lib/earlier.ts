@@ -3,7 +3,7 @@ import { useRef, useState } from "react";
 import { getJson } from "@/lib/api";
 import type { Message } from "@/lib/types";
 
-export type EarlierPage = { index: number; messages: Message[] };
+export type EarlierPage = { cursor: string; messages: Message[] };
 
 /** Older pages of a compacted conversation, held above the tail the transcript already states.
  *  `pages` is what has landed, oldest first; `more` says another page stands above them; `load`
@@ -17,29 +17,34 @@ export type EarlierMessages = {
   load: () => void;
 };
 
-/** Pages a conversation's compacted-away messages in from `<path>/<index>`, newest page first.
- *  `above` is the transcript's own `earlier` — the page standing over the tail — and each page's
- *  response names the one over it, so the chain is the server's to state and a record the
- *  transcript never reflected is never asked for. A transcript that restates a different `above`
- *  has compacted again since the pages loaded, so they no longer abut the tail and are dropped
- *  rather than drawn around a gap. */
-export function useEarlierMessages(path: string | null, above: number): EarlierMessages {
-  const [held, setHeld] = useState<{ above: number; next: number; pages: EarlierPage[] }>({
-    above,
-    next: above,
+/** Pages a conversation's compacted-away messages in from the transcript's cursor, newest page
+ *  first. Each response names the bounded page over it, so the chain is the server's to state and
+ *  a record the transcript never reflected is never asked for. A transcript that restates a
+ *  different root has compacted again since the pages loaded, so they no longer abut the tail and
+ *  are dropped rather than drawn around a gap. */
+export function useEarlierMessages(path: string | null, root: string | null): EarlierMessages {
+  const [held, setHeld] = useState<{
+    root: string | null;
+    next: string | null;
+    pages: EarlierPage[];
+  }>({
+    root,
+    next: root,
     pages: [],
   });
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const inflight = useRef(false);
-  if (held.above !== above) setHeld({ above, next: above, pages: [] });
+  if (held.root !== root) setHeld({ root, next: root, pages: [] });
   const next = held.next;
   const load = async () => {
-    if (inflight.current || path === null || next < 1) return;
+    if (inflight.current || path === null || next === null) return;
     inflight.current = true;
     setFailed(false);
     setLoading(true);
-    const result = await getJson<{ messages: Message[]; earlier?: number }>(path + "/" + next);
+    const result = await getJson<{ messages: Message[]; earlier_cursor?: string }>(
+      path + "?cursor=" + encodeURIComponent(next),
+    );
     inflight.current = false;
     setLoading(false);
     if (!result.ok) {
@@ -47,18 +52,18 @@ export function useEarlierMessages(path: string | null, above: number): EarlierM
       return;
     }
     setHeld((current) =>
-      current.above === above && current.next === next
+      current.root === root && current.next === next
         ? {
             ...current,
-            next: result.payload.earlier ?? 0,
-            pages: [{ index: next, messages: result.payload.messages }, ...current.pages],
+            next: result.payload.earlier_cursor ?? null,
+            pages: [{ cursor: next, messages: result.payload.messages }, ...current.pages],
           }
         : current,
     );
   };
   return {
     pages: held.pages,
-    more: path !== null && next >= 1,
+    more: path !== null && next !== null,
     loading,
     failed,
     load: () => void load(),

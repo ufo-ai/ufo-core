@@ -333,7 +333,7 @@ export function MessageLog({
         <EarlierRow earlier={earlier} />
       ) : null}
       {earlier?.pages.flatMap((page) =>
-        page.messages.map((said, at) => bubble(said, "h" + page.index + ":" + at)),
+        page.messages.map((said, at) => bubble(said, "h" + page.cursor + ":" + at)),
       )}
       {rows.map((row) =>
         row.live ? (

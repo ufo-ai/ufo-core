@@ -256,7 +256,7 @@ export function ConversationDetail({
   const state = usePanelRead<Transcript>(path + "/transcript");
   const earlier = useEarlierMessages(
     path + "/transcript",
-    state.phase === "ready" ? (state.payload.earlier ?? 0) : 0,
+    state.phase === "ready" ? (state.payload.earlier_cursor ?? null) : null,
   );
   const viewer = useViewer();
 

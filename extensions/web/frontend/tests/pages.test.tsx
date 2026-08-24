@@ -238,7 +238,7 @@ test("the chat page opens a conversation without re-listing, and switching opens
       json({ objects: [conversationRow(A, "Alpha"), conversationRow(B, "Bravo")], next_cursor: null }),
     "/api/chats": (url) =>
       json({ chats: [url.includes(B) ? resolvedChat(B, "Bravo") : resolvedChat(A, "Alpha")] }),
-    "/transcript": () => json({ messages: [], earlier: 0 }),
+    "/transcript": () => json({ messages: [] }),
   });
   const listReads = () => calls.filter((url) => url.includes("/objects/conversation")).length;
 
@@ -320,7 +320,7 @@ test("the chat page opens a Slack or terminal conversation for comments", async 
     // The listing is portal-filtered, so the page resolves the Slack conversation by address.
     "/objects/conversation": () => json({ objects: [], next_cursor: null }),
     "/api/chats": () => json({ chats: [], conversation: slackConversation }),
-    "/transcript": () => json({ messages: [], earlier: 0 }),
+    "/transcript": () => json({ messages: [] }),
   });
 
   await screen.findByRole("heading", { name: "Chat" });

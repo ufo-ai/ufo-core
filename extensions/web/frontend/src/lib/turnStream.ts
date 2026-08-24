@@ -634,7 +634,7 @@ export async function refreshTranscript(
     return {
       ...current,
       messages: payload.messages,
-      earlier: payload.earlier ?? 0,
+      earlierCursor: payload.earlier_cursor ?? null,
       fault: null,
       busy: running ? true : current.busy,
       turn: running ? { id: running, answering: false } : current.turn,

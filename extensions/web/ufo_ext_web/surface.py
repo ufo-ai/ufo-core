@@ -23,9 +23,11 @@ Everything web-specific lives here, reaching core only through the privileged `S
 the SDK surface a CI gate pins."""
 
 import asyncio
+import base64
 import json
 import os
 import re
+from binascii import Error as Base64Error
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -174,6 +176,8 @@ CONVERSATION_LIST_LIMIT = 100
 COMMENT_SURFACES = frozenset({"slack", "ufo"})
 SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
+HISTORY_PAGE_MESSAGE_LIMIT = 100
+HISTORY_PAGE_BYTE_LIMIT = 64 * 1024
 CHAT_STORE_PREFIX = "chat/"
 TITLE_JOB_NAME = "chat_titles"
 TITLE_JOB_SCHEDULE = "*/15 * * * * *"
@@ -1956,8 +1960,8 @@ async def _conversation_messages(
     member no longer has and its card states what they chose and nothing else.
 
     A compacted conversation's live transcript starts at its newest summary, so this projection
-    states the conversation's tail and, in `earlier`, the compaction record standing directly
-    above it — the newest one whose kept window the transcript opens with, served by
+    states the conversation's tail and the cursor standing directly above it — the newest
+    compaction whose kept window the transcript opens with, served by
     `_history_messages` as the reader scrolls up, each page naming the one above it in turn."""
     recorded, agent_origin, spoken, compactions = await asyncio.gather(
         ctx.read_transcript(conversation_id),
@@ -2047,25 +2051,77 @@ async def _verified_earlier(
     return 0
 
 
+def _history_cursor(index: int, end: int | None = None) -> str:
+    position = f"{index}:{'' if end is None else end}".encode()
+    return base64.urlsafe_b64encode(position).decode().rstrip("=")
+
+
+def _history_position(cursor: str) -> tuple[int, int | None]:
+    if len(cursor) > 128:
+        raise ValueError("invalid history cursor")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        position = base64.b64decode(
+            (cursor + padding).encode("ascii"), altchars=b"-_", validate=True
+        ).decode("ascii")
+    except (Base64Error, UnicodeError, ValueError) as error:
+        raise ValueError("invalid history cursor") from error
+    index, separator, end = position.partition(":")
+    if not separator or len(index) > 20 or not index.isdigit() or int(index) < 1:
+        raise ValueError("invalid history cursor")
+    if end and (len(end) > 20 or not end.isdigit() or int(end) < 1):
+        raise ValueError("invalid history cursor")
+    return int(index), int(end) if end else None
+
+
+def _bounded_history_page(
+    messages: list[dict[str, object]], index: int, end: int
+) -> tuple[list[dict[str, object]], int]:
+    floor = max(0, end - HISTORY_PAGE_MESSAGE_LIMIT)
+
+    def fits(start: int) -> bool:
+        payload = {
+            "messages": messages[start:end],
+            "earlier_cursor": _history_cursor(index, start or None),
+        }
+        return len(JSONResponse(payload).body) <= HISTORY_PAGE_BYTE_LIMIT
+
+    if floor == end or fits(floor):
+        return messages[floor:end], floor
+    low = floor
+    high = end - 1
+    while low < high:
+        middle = (low + high) // 2
+        if fits(middle):
+            high = middle
+        else:
+            low = middle + 1
+    return messages[low:end], low
+
+
 async def _history_messages(
     ctx: SurfaceContext,
     agent_id: UUID,
     conversation_id: UUID,
     viewer: UUID,
-    index: int,
+    cursor: str,
     opens: frozenset[UUID],
-) -> tuple[list[dict[str, object]], int] | None:
-    """One earlier page of a compacted conversation and the index of the page above it (0 when
-    none), or None when this index holds no record.
+) -> tuple[list[dict[str, object]], str | None] | None:
+    """One bounded earlier page of a compacted conversation and the cursor above it, or None when
+    the cursor names no position.
 
     A compaction record's `before` is the whole window the compaction replaced, and its `after` is
     the summary plus the tail it kept verbatim — messages the window after it (the next record's
     `before`, or the live transcript) opens with. The page is therefore `before` less that kept
     tail: pages and the live projection concatenate without a message repeating or going missing,
     whichever page the reader has scrolled to. The page above is the newest older record this
-    page's `before` opens with — the same verified chain `earlier` states for the tail — so the
+    page's `before` opens with — the same verified chain the tail's cursor states — so the
     reader is never handed a page the one below already restates. Rendered with the same aids as
     the live window, so a message reads the same on whichever page it stands."""
+    try:
+        index, requested_end = _history_position(cursor)
+    except ValueError:
+        return None
     record = await ctx.read_compaction(conversation_id, index)
     if record is None:
         return None
@@ -2086,8 +2142,15 @@ async def _history_messages(
     aids = await _transcript_aids(
         ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked, opens
     )
+    rendered = aids.render(window)
+    end = len(rendered) if requested_end is None else requested_end
+    if requested_end is not None and (end < 1 or end > len(rendered)):
+        return None
+    page, start = _bounded_history_page(rendered, index, end)
+    if start:
+        return page, _history_cursor(index, start)
     above = await _verified_earlier(ctx, conversation_id, tuple(range(1, index)), record.before)
-    return aids.render(window), above
+    return page, _history_cursor(above) if above else None
 
 
 async def transcript(ctx: SurfaceContext, request: Request) -> Response:
@@ -2128,7 +2191,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     )
     payload: dict[str, object] = {"messages": rendered}
     if earlier:
-        payload["earlier"] = earlier
+        payload["earlier_cursor"] = _history_cursor(earlier)
     if turn is not None:
         if turn.terminal is None:
             payload["turn"] = str(turn.id)
@@ -2664,6 +2727,9 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     another surface holds — as the same messages the chat draws. Each reply names the children it
     spawned, and a child carries this conversation's audience, so the card opens that run through
     this conversation and the one gate here authorizes both."""
+    cursor = request.query_params.get("cursor")
+    if cursor is not None:
+        return await _conversation_history(ctx, request, cursor)
     authorized = await _readable_conversation(ctx, request)
     if isinstance(authorized, Response):
         return authorized
@@ -2673,7 +2739,7 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     )
     payload: dict[str, object] = {"messages": rendered}
     if earlier:
-        payload["earlier"] = earlier
+        payload["earlier_cursor"] = _history_cursor(earlier)
     return JSONResponse(payload)
 
 
@@ -2708,31 +2774,27 @@ async def _member_chat_page(
     return agent_id, conversation_id, SlotViewer(member_id, audience.admin, _opens(audience))
 
 
-async def conversation_history(ctx: SurfaceContext, request: Request) -> Response:
-    """One earlier page of a conversation whose transcript has compacted. `index` names the
-    compaction record, from 1 upward; the transcript's `earlier` names the page above its tail and
-    each page's `earlier` the one above it, so the pane follows the chain upward as the reader
-    scrolls. Gated as exactly the union of the two reads that advertise a page — the conversation
-    content read, or the member's own chat transcript — so a page answers precisely where a
-    transcript that names it answers, and nowhere else."""
+async def _conversation_history(ctx: SurfaceContext, request: Request, cursor: str) -> Response:
+    """One earlier page of a conversation whose transcript has compacted. The transcript's cursor
+    names the bounded page above its tail and each page's cursor the one above it, so the pane
+    follows the chain upward as the reader scrolls. Gated as exactly the union of the two reads
+    that advertise a page — the conversation content read, or the member's own chat transcript —
+    so a page answers precisely where a transcript that names it answers, and nowhere else."""
     authorized = await _readable_conversation(ctx, request)
     if isinstance(authorized, Response):
         authorized = await _member_chat_page(ctx, request)
     if isinstance(authorized, Response):
         return authorized
     agent_id, conversation_id, viewer = authorized
-    index = request.path_params["index"]
-    if not index.isdigit() or int(index) < 1:
-        return Response("no such page", status_code=404)
     page = await _history_messages(
-        ctx, agent_id, conversation_id, viewer.member_id, int(index), viewer.opens
+        ctx, agent_id, conversation_id, viewer.member_id, cursor, viewer.opens
     )
     if page is None:
         return Response("no such page", status_code=404)
     rendered, above = page
     payload: dict[str, object] = {"messages": rendered}
     if above:
-        payload["earlier"] = above
+        payload["earlier_cursor"] = above
     return JSONResponse(payload)
 
 
@@ -4420,11 +4482,6 @@ ROUTES = (
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/transcript",
         handler=conversation_transcript,
-    ),
-    SurfaceRoute(
-        method="GET",
-        path="agents/{agent_id}/conversations/{conversation_id}/transcript/{index}",
-        handler=conversation_history,
     ),
     SurfaceRoute(
         method="GET",
