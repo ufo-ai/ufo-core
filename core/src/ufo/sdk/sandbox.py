@@ -32,6 +32,7 @@ from ufo.sandbox.session import CommandStopping as CommandStopping
 from ufo.sandbox.session import DialTarget as DialTarget
 from ufo.sandbox.session import ExecResult as ExecResult
 from ufo.sandbox.session import ProxyEndpoint as ProxyEndpoint
+from ufo.sandbox.session import Sandbox as Sandbox
 from ufo.sandbox.session import SandboxHandle as SandboxHandle
 from ufo.sandbox.session import SandboxSession as SandboxSession
 from ufo.sandbox.session import SandboxSpec as SandboxSpec

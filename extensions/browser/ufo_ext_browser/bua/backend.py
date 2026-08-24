@@ -34,7 +34,7 @@ from pydantic import JsonValue
 
 from ufo.sdk.browser import CdpLease, CdpProvider, FindCompleter, SessionGone
 from ufo.sdk.context import ScopedStore
-from ufo.sdk.sandbox import SandboxSession, contained_leaf, workspace_path
+from ufo.sdk.sandbox import Sandbox, contained_leaf, workspace_path
 from ufo_ext_browser.bua.session import BrowserSession
 
 CDP_TOKEN_KEY = "cdp-token/{conversation_id}"
@@ -55,7 +55,7 @@ class BuaSurface:
     cdp_provider: CdpProvider
     find_completer: FindCompleter | None
     model: str | None
-    sandbox: SandboxSession | None = None
+    sandbox: Sandbox | None = None
     store: ScopedStore | None = None
     conversation_id: UUID | None = None
     lease: CdpLease | None = None

@@ -555,9 +555,9 @@ async def _refuse_before_serving(
         raise RuntimeError(VISIBILITY_NEEDS_A_SPEAKER)
     workspace_id = ctx.ext.store.workspace_id
     name = site_name(raw_name)
-    site_url(ctx.public_base_url, workspace_id, ctx.sandbox.handle.conversation_id, name)
+    site_url(ctx.public_base_url, workspace_id, ctx.sandbox.conversation_id, name)
     displaced = await HostedSites(workspace_id, ctx.ext.transaction).refuse_or_pass(
-        ctx.sandbox.handle.conversation_id,
+        ctx.sandbox.conversation_id,
         name,
         port,
         creator_member_id,
@@ -594,7 +594,7 @@ async def _host(
         raise RuntimeError(VISIBILITY_NEEDS_A_SPEAKER)
     workspace_id = ctx.ext.store.workspace_id
     name = site_name(raw_name)
-    serving = ctx.sandbox.handle.conversation_id
+    serving = ctx.sandbox.conversation_id
     link = site_url(ctx.public_base_url, workspace_id, serving, name)
     site = await HostedSites(workspace_id, ctx.ext.transaction).register(
         serving,
@@ -636,7 +636,7 @@ async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
 
 
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
-    conversation = ctx.sandbox.handle.conversation_id
+    conversation = ctx.sandbox.conversation_id
     port = serve_port(conversation)
     bound = await _agent_homepage(ctx)
     slug = site_name(args.site_name)
@@ -691,7 +691,7 @@ async def _redeploy_homepage(
         raise RuntimeError("a hosted site needs an owner: no member is acting on this turn")
     sites = _sites_registry(ctx)
     displaced = await sites.refuse_or_pass(
-        ctx.sandbox.handle.conversation_id,
+        ctx.sandbox.conversation_id,
         bound.name,
         scratch_port,
         ctx.acting_member_id,
@@ -728,7 +728,7 @@ async def _redeploy_homepage(
 
 
 async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolResult:
-    conversation = ctx.sandbox.handle.conversation_id
+    conversation = ctx.sandbox.conversation_id
     port = serve_port(conversation)
     name, _displaced = await _refuse_before_serving(ctx, args.app_name, port, args.visibility)
     if args.install_command:
@@ -773,7 +773,7 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
     if ctx.acting_member_id != site.creator_member_id:
         raise ValueError(HOMEPAGE_NEEDS_ITS_CREATOR.format(site=args.site))
     deployed_this_turn = (
-        site.conversation_id == ctx.sandbox.handle.conversation_id
+        site.conversation_id == ctx.sandbox.conversation_id
         and site.created_at >= ctx.turn.created_at
     )
     if ctx.speaker_member_id is None and not deployed_this_turn:

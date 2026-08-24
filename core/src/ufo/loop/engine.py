@@ -112,7 +112,7 @@ from ufo.o11y import (
     turn_profile,
 )
 from ufo.object_name import ObjectRef
-from ufo.sandbox.session import TOOL_OUTPUT_DIR, SandboxSession
+from ufo.sandbox.session import TOOL_OUTPUT_DIR, Sandbox
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
@@ -211,7 +211,7 @@ FINISH_SCHEMA_ERROR = (
     "finish failed the output schema — fix the payload and call it again:\n{error}"
 )
 
-SandboxFor = Callable[[UUID | None], Awaitable[SandboxSession]]
+SandboxFor = Callable[[UUID | None], Awaitable[Sandbox]]
 SubagentsFor = Callable[[UUID | None], tuple[Spawn, SubagentControl | None]]
 SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
 SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
@@ -964,7 +964,7 @@ class TurnEngine:
     transcript: Transcript
     compaction: Compaction
     hub: Hub
-    sandbox: SandboxSession
+    sandbox: Sandbox
     cdp_provider: CdpProvider | None
     search_provider: SearchProvider | None
     connectors: ConnectorRegistry

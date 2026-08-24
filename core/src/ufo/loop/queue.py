@@ -83,7 +83,9 @@ from ufo.sandbox.exec_env import (
 from ufo.sandbox.session import (
     RunToken,
     RunTokenCodec,
+    Sandbox,
     SandboxSession,
+    _LateSandbox,
 )
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -629,8 +631,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         )
         grants = GrantStore() if runtime.credentials is not None else None
         clis = connector_clis(runtime.manifests)
-        with span("sandbox.open"):
-            sandbox = await _open_sandbox(
+        sandbox = _LateSandbox(
+            conversation_id=turn.sandbox_conversation_id or turn.conversation_id,
+            turn_id=turn.id,
+            open=lambda: _open_sandbox(
                 runtime.sandboxes,
                 runtime.run_tokens,
                 turn,
@@ -642,7 +646,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     runtime.config.sandbox.cache_daemon is not None
                     and agent.internet_access_allowed
                 ),
-            )
+            ),
+            existing=lambda: runtime.sandboxes.existing(
+                turn.sandbox_conversation_id or turn.conversation_id
+            ),
+        )
         sandbox_authorizer = SandboxAuthorizer(
             sandbox=sandbox,
             run_tokens=runtime.run_tokens,
@@ -1042,37 +1050,41 @@ async def _open_sandbox(
 
     The turn is stated all the same, and only to the carrier: the container is the conversation's,
     so the commands one turn leaves running in it are told from a sibling turn's by nothing else,
-    and a cancel must stop its own turn's alone."""
+    and a cancel must stop its own turn's alone.
+
+    The credential derivations run here rather than at the turn's start, so a turn that never
+    touches the sandbox reads no credential slot either."""
     run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
     cache_config = cache_git_config() if cache_rewrite else ()
-    return await sandboxes.open(
-        turn.sandbox_conversation_id or turn.conversation_id,
-        turn.id,
-        run_tokens.encode(run),
-        {
-            CONVERSATION_ID_ENV: str(turn.conversation_id),
-            **_git_config_env(
-                (
-                    *GIT_PROXY_AUTH_CONFIG,
-                    *cache_config,
-                    *await _git_credential_config(credentials, slots, turn.workspace_id),
-                )
-            ),
-            **await _grant_cli_env(grants, clis, None, turn.id),
-            **await _keyed_provider_env(credentials, slots, turn.workspace_id),
-        },
-    )
+    with span("sandbox.open"):
+        return await sandboxes.open(
+            turn.sandbox_conversation_id or turn.conversation_id,
+            turn.id,
+            run_tokens.encode(run),
+            {
+                CONVERSATION_ID_ENV: str(turn.conversation_id),
+                **_git_config_env(
+                    (
+                        *GIT_PROXY_AUTH_CONFIG,
+                        *cache_config,
+                        *await _git_credential_config(credentials, slots, turn.workspace_id),
+                    )
+                ),
+                **await _grant_cli_env(grants, clis, None, turn.id),
+                **await _keyed_provider_env(credentials, slots, turn.workspace_id),
+            },
+        )
 
 
 @dataclass(frozen=True)
 class SandboxAuthorizer:
-    sandbox: SandboxSession
+    sandbox: Sandbox
     run_tokens: RunTokenCodec
     grants: GrantStore | None
     clis: Mapping[str, CliCredential]
     turn: Turn
 
-    async def authorize(self, acting_member_id: UUID | None) -> SandboxSession:
+    async def authorize(self, acting_member_id: UUID | None) -> Sandbox:
         run_token = self.run_tokens.encode(
             RunToken(
                 workspace_id=self.turn.workspace_id,

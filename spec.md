@@ -250,6 +250,10 @@ conversation, and a subagent turn executes in the sandbox of the turn that spawn
 filesystem for a whole spawn tree, so a file a child leaves in `/workspace` is the handoff back to
 its parent, and co-residency is the cost: session state at fixed paths, one serving port, one
 `/proc` carrying the run token.
+The sandbox is late-bound: the first operation that needs one creates it — a command, a file op, a
+skill mount, a dial — and the turn's start creates nothing, so a turn that answers out of its
+context, calls a host-side tool, or only spawns a subagent leaves no container and no handle on the
+row. One create serves the whole turn, whichever of its operations races there first.
 An off-cluster carrier reaches the proxy only over TLS; the proxy token is never sent on plaintext
 transport. Each tool command gets a deployment-signed token naming its turn and acting member;
 unbound commands name no member. Descendants retain the launching command's environment while later

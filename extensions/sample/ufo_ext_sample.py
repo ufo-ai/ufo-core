@@ -109,8 +109,8 @@ from ufo.sdk.sandbox import (
     CarrierSpec,
     DialTarget,
     ExecResult,
+    Sandbox,
     SandboxHandle,
-    SandboxSession,
     SandboxSpec,
     sbxfs_file_op,
 )
@@ -981,7 +981,7 @@ class SampleCdpProvider:
     consumed through the protocol, so a test drives it as core selects and leases it; the BUA engine
     keeps its own live-CDP proof."""
 
-    async def lease(self, sandbox: SandboxSession | None = None) -> CdpLease:
+    async def lease(self, sandbox: Sandbox | None = None) -> CdpLease:
         return SampleCdpLease()
 
     async def reattach(self, token: str) -> CdpLease:

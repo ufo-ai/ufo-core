@@ -25,7 +25,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.db import workspace_tx
 from ufo.models.interface import ToolUseBlock
 from ufo.o11y import log
-from ufo.sandbox.session import WORKSPACE_DIR, SandboxSession, workspace_path
+from ufo.sandbox.session import WORKSPACE_DIR, Sandbox, workspace_path
 from ufo.schema import tables
 from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 
@@ -93,12 +93,14 @@ class WorkspaceChangeRecorder:
     fails leaves the last one standing: this is a projection of the workspace, and a stale answer
     to `what changed` beats no answer and beats failing a turn that already ended."""
 
-    sandbox: SandboxSession
+    sandbox: Sandbox
     workspace_id: UUID
     conversation_id: UUID
     targets: tuple[str, ...]
 
     async def record(self) -> None:
+        if not self.sandbox.created and not self.targets:
+            return
         try:
             recorded = await recorded_workspace_changes(self.conversation_id)
             asked = self._directories(recorded)

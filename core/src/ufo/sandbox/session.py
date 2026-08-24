@@ -1,17 +1,21 @@
-"""The sandbox seam: the carrier interface, the per-turn session tools hold, and value objects.
+"""The sandbox seam: the carrier interface, the sandbox a caller holds, and value objects.
 
 Everything downstream (tools, engine) depends only on this module; the Docker carrier and the
 egress proxy implement against it. A deploy swaps the carrier (E2B, remote) without touching a
-tool. The invariant the session exists to hold: a tool reaches only the conversation's
+tool. The invariant the sandbox exists to hold: a tool reaches only the conversation's
 `/workspace`, never the transcript or compaction records, which live in the blob store the sandbox
-holds no credential for."""
+holds no credential for.
 
+A caller holds a sandbox either way round: `SandboxSession` over one that exists, and `LateSandbox`
+over one the first operation creates — the same operations, so no tool knows which it was handed."""
+
+import asyncio
 import base64
 import json
 import os
 import re
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -523,14 +527,172 @@ def _resolve_parts(parts: tuple[str, ...]) -> list[str]:
     return stack
 
 
+class Sandbox:
+    """What a caller reaches a conversation's `/workspace` through: run a command in it, write bytes
+    in, stream bytes out, dial a port something inside it opened.
+
+    Every operation resolves the sandbox it runs against through `_bound`, so the two ways a caller
+    holds one — a session over a sandbox that exists, and a turn's sandbox that is created the first
+    time an operation needs it — answer every operation from this one implementation."""
+
+    @property
+    def conversation_id(self) -> UUID:
+        """The conversation whose workspace this reaches, which a subagent turn inherits from the
+        turn that spawned it. It is known before anything is created, so naming the workspace an
+        operation would land in never creates one."""
+        raise NotImplementedError
+
+    @property
+    def created(self) -> bool:
+        """Whether a sandbox exists to run an operation against."""
+        raise NotImplementedError
+
+    def authorize(
+        self,
+        run_token: str,
+        cleared_env: frozenset[str],
+        env: Mapping[str, str],
+    ) -> "Sandbox":
+        """The same sandbox as one acting member reaches it: their run token on the proxy
+        environment, the connector variables of any other member dropped, and theirs exported."""
+        raise NotImplementedError
+
+    async def _bound(self) -> "SandboxSession":
+        raise NotImplementedError
+
+    async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
+        bound = await self._bound()
+        return await bound.carrier.exec(
+            bound.handle,
+            ("bash", "-lc", command),
+            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        """Run a POSIX script with `args` as its positional parameters — each one its own argv
+        element, so a host-path carrier's `/workspace` rewrite reaches it and no quoting ever
+        interpolates it into the script."""
+        bound = await self._bound()
+        return await bound.carrier.exec(
+            bound.handle,
+            ("sh", "-c", script, "sh", *args),
+            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        """Run an in-sandbox python program with the containment guard importable, so a program that
+        builds a path from an argument runs the checks `sbxfs` runs rather than its own — the one
+        place every such program reaches the guard from.
+
+        The guard is baked beside `sbxfs` rather than installed as a package, so the bootstrap
+        locates the scripts through `sbxfs` itself: which directory holds them differs by carrier.
+        The interpreter runs isolated (`SANDBOX_PYTHON_FLAG`), which is what keeps that bootstrap
+        from resolving against the very workspace it is about to guard. Run as argv, never through a
+        login shell, whose profile resets PATH and drops the local carrier's own bin directory."""
+        bound = await self._bound()
+        return await bound.carrier.exec(
+            bound.handle,
+            ("python3", SANDBOX_PYTHON_FLAG, "-c", f"{SANDBOX_MODULE_BOOTSTRAP}{program}", *args),
+            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+
+    async def stop_commands(self) -> None:
+        """Stop what this turn left running in the container, for a cancel already known to be a
+        member's. A carrier whose commands cannot outlive the `exec` that launched them declares no
+        stop and needs none — there is nothing left for this to reach."""
+        bound = await self._bound()
+        if isinstance(bound.carrier, CommandStopping):
+            await bound.carrier.stop_commands(bound.handle)
+
+    async def write_file(self, path: str, content: bytes) -> None:
+        bound = await self._bound()
+        await bound.carrier.write(bound.handle, workspace_path(path), content)
+
+    async def ensure_tool_output_dir(self) -> bool:
+        """Guarantee the engine's private `.tool-output` offload dir exists, reclaiming a
+        non-directory squatting the name — a bare `mkdir -p` fails `File exists` when a file or
+        broken symlink already occupies it, so a member write to that name would otherwise poison
+        every later offload. The target is fixed to `TOOL_OUTPUT_DIR`, never a caller-supplied path,
+        so this destructive reclaim can only ever touch the engine's own namespace, never member
+        data. Returns whether a squatter was reclaimed."""
+        bound = await self._bound()
+        result = await bound.carrier.exec(
+            bound.handle,
+            (
+                "sh",
+                "-c",
+                'if [ -d "$1" ]; then exit 0; fi; '
+                'if [ -e "$1" ] || [ -L "$1" ]; then rm -f "$1" && printf r; fi; '
+                'mkdir -p "$1"',
+                "sh",
+                TOOL_OUTPUT_DIR,
+            ),
+            timeout_s=30,
+        )
+        if result.exit_code != 0:
+            raise OSError(result.stderr.strip() or f"cannot ensure {TOOL_OUTPUT_DIR}")
+        return result.stdout == "r"
+
+    async def file_exists(self, path: str) -> bool:
+        target = workspace_path(path)
+        bound = await self._bound()
+        result = await bound.carrier.exec(
+            bound.handle, ("sh", "-c", 'test -f "$1"', "sh", target), timeout_s=30
+        )
+        return result.exit_code == 0
+
+    async def run_sbxfs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+        """Run one in-sandbox file op through the carrier and return its parsed JSON. A `path` arg
+        is workspace-scoped here so every op inherits the same subtree guard, and the `workspace`
+        root each op confines itself to is set here rather than passed in: which subtree a file op
+        may touch is not a caller's choice. Everything below that — how the op runs inside the
+        sandbox, and which failure the model may recover from — is `Carrier.file_op`."""
+        params = dict(args)
+        raw_path = params.get("path")
+        if isinstance(raw_path, str):
+            params["path"] = workspace_path(raw_path)
+        params["workspace"] = WORKSPACE_DIR
+        bound = await self._bound()
+        return await bound.carrier.file_op(bound.handle, op, params)
+
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        """The workspace file's bytes in bounded chunks — how a produced file leaves the container
+        without the host process ever holding it whole. The path is scoped before the stream is
+        handed back, so a path that escapes the workspace is refused here rather than at the first
+        chunk."""
+        return self._read_file(workspace_path(path))
+
+    async def _read_file(self, target: str) -> AsyncIterator[bytes]:
+        bound = await self._bound()
+        async for chunk in bound.carrier.read(bound.handle, target):
+            yield chunk
+
+    async def dial(self, port: int) -> DialTarget:
+        """The externally dialable target for an in-sandbox `port`, from the carrier's own
+        reachability map — address, TLS, and any header the wire requires (e2b's traffic token)."""
+        bound = await self._bound()
+        return await bound.carrier.dial(bound.handle, port)
+
+
 @dataclass(frozen=True)
-class SandboxSession:
+class SandboxSession(Sandbox):
     """The per-turn handle a tool holds: bash runs in the container through the carrier; file reads
     and writes go through the carrier too, so the same scoping and proxy rules apply whether a byte
     arrives via a shell command or a file op."""
 
     carrier: Carrier
     handle: SandboxHandle
+
+    @property
+    def conversation_id(self) -> UUID:
+        return self.handle.conversation_id
+
+    @property
+    def created(self) -> bool:
+        return True
+
+    async def _bound(self) -> "SandboxSession":
+        return self
 
     def authorize(
         self,
@@ -560,99 +722,73 @@ class SandboxSession:
             ),
         )
 
-    async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
-        return await self.carrier.exec(
-            self.handle,
-            ("bash", "-lc", command),
-            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
-        )
 
-    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
-        """Run a POSIX script with `args` as its positional parameters — each one its own argv
-        element, so a host-path carrier's `/workspace` rewrite reaches it and no quoting ever
-        interpolates it into the script."""
-        return await self.carrier.exec(
-            self.handle,
-            ("sh", "-c", script, "sh", *args),
-            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
-        )
+class _LateSandbox(Sandbox):
+    def __init__(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+        open: Callable[[], Awaitable[SandboxSession]],
+        existing: Callable[[], Awaitable[SandboxSession | None]],
+    ) -> None:
+        self._conversation_id = conversation_id
+        self._turn_id = turn_id
+        self._open = open
+        self._existing = existing
+        self._lock = asyncio.Lock()
+        self._session: SandboxSession | None = None
 
-    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
-        """Run an in-sandbox python program with the containment guard importable, so a program that
-        builds a path from an argument runs the checks `sbxfs` runs rather than its own — the one
-        place every such program reaches the guard from.
+    @property
+    def conversation_id(self) -> UUID:
+        return self._conversation_id
 
-        The guard is baked beside `sbxfs` rather than installed as a package, so the bootstrap
-        locates the scripts through `sbxfs` itself: which directory holds them differs by carrier.
-        The interpreter runs isolated (`SANDBOX_PYTHON_FLAG`), which is what keeps that bootstrap
-        from resolving against the very workspace it is about to guard. Run as argv, never through a
-        login shell, whose profile resets PATH and drops the local carrier's own bin directory."""
-        return await self.carrier.exec(
-            self.handle,
-            ("python3", SANDBOX_PYTHON_FLAG, "-c", f"{SANDBOX_MODULE_BOOTSTRAP}{program}", *args),
-            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
-        )
+    @property
+    def created(self) -> bool:
+        return self._session is not None
+
+    def authorize(
+        self,
+        run_token: str,
+        cleared_env: frozenset[str],
+        env: Mapping[str, str],
+    ) -> Sandbox:
+        return _AuthorizedSandbox(late=self, run_token=run_token, cleared_env=cleared_env, env=env)
+
+    async def _bound(self) -> SandboxSession:
+        if self._session is None:
+            async with self._lock:
+                if self._session is None:
+                    self._session = await self._open()
+        return self._session
 
     async def stop_commands(self) -> None:
-        """Stop what this turn left running in the container, for a cancel already known to be a
-        member's. A carrier whose commands cannot outlive the `exec` that launched them declares no
-        stop and needs none — there is nothing left for this to reach."""
-        if isinstance(self.carrier, CommandStopping):
-            await self.carrier.stop_commands(self.handle)
+        bound = self._session if self._session is not None else await self._existing()
+        if bound is not None and isinstance(bound.carrier, CommandStopping):
+            await bound.carrier.stop_commands(replace(bound.handle, turn_id=self._turn_id))
 
-    async def write_file(self, path: str, content: bytes) -> None:
-        await self.carrier.write(self.handle, workspace_path(path), content)
 
-    async def ensure_tool_output_dir(self) -> bool:
-        """Guarantee the engine's private `.tool-output` offload dir exists, reclaiming a
-        non-directory squatting the name — a bare `mkdir -p` fails `File exists` when a file or
-        broken symlink already occupies it, so a member write to that name would otherwise poison
-        every later offload. The target is fixed to `TOOL_OUTPUT_DIR`, never a caller-supplied path,
-        so this destructive reclaim can only ever touch the engine's own namespace, never member
-        data. Returns whether a squatter was reclaimed."""
-        result = await self.carrier.exec(
-            self.handle,
-            (
-                "sh",
-                "-c",
-                'if [ -d "$1" ]; then exit 0; fi; '
-                'if [ -e "$1" ] || [ -L "$1" ]; then rm -f "$1" && printf r; fi; '
-                'mkdir -p "$1"',
-                "sh",
-                TOOL_OUTPUT_DIR,
-            ),
-            timeout_s=30,
-        )
-        if result.exit_code != 0:
-            raise OSError(result.stderr.strip() or f"cannot ensure {TOOL_OUTPUT_DIR}")
-        return result.stdout == "r"
+@dataclass(frozen=True)
+class _AuthorizedSandbox(Sandbox):
+    late: _LateSandbox
+    run_token: str
+    cleared_env: frozenset[str]
+    env: Mapping[str, str]
 
-    async def file_exists(self, path: str) -> bool:
-        target = workspace_path(path)
-        result = await self.carrier.exec(
-            self.handle, ("sh", "-c", 'test -f "$1"', "sh", target), timeout_s=30
-        )
-        return result.exit_code == 0
+    @property
+    def conversation_id(self) -> UUID:
+        return self.late.conversation_id
 
-    async def run_sbxfs(self, op: str, args: dict[str, object]) -> dict[str, object]:
-        """Run one in-sandbox file op through the carrier and return its parsed JSON. A `path` arg
-        is workspace-scoped here so every op inherits the same subtree guard, and the `workspace`
-        root each op confines itself to is set here rather than passed in: which subtree a file op
-        may touch is not a caller's choice. Everything below that — how the op runs inside the
-        sandbox, and which failure the model may recover from — is `Carrier.file_op`."""
-        params = dict(args)
-        raw_path = params.get("path")
-        if isinstance(raw_path, str):
-            params["path"] = workspace_path(raw_path)
-        params["workspace"] = WORKSPACE_DIR
-        return await self.carrier.file_op(self.handle, op, params)
+    @property
+    def created(self) -> bool:
+        return self.late.created
 
-    def read_file(self, path: str) -> AsyncIterator[bytes]:
-        """The workspace file's bytes in bounded chunks — how a produced file leaves the container
-        without the host process ever holding it whole."""
-        return self.carrier.read(self.handle, workspace_path(path))
+    def authorize(
+        self,
+        run_token: str,
+        cleared_env: frozenset[str],
+        env: Mapping[str, str],
+    ) -> Sandbox:
+        return self.late.authorize(run_token, cleared_env, env)
 
-    async def dial(self, port: int) -> DialTarget:
-        """The externally dialable target for an in-sandbox `port`, from the carrier's own
-        reachability map — address, TLS, and any header the wire requires (e2b's traffic token)."""
-        return await self.carrier.dial(self.handle, port)
+    async def _bound(self) -> SandboxSession:
+        return (await self.late._bound()).authorize(self.run_token, self.cleared_env, self.env)

@@ -114,7 +114,7 @@ from ufo.sandbox.ingress_token import (
     verify_ingress_token,
 )
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ExecResult, ProxyEndpoint, SandboxHandle
+from ufo.sandbox.session import ExecResult, ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
@@ -161,13 +161,11 @@ class FakeSandbox:
     """Every command succeeds, so the readiness probe passes and registration runs. It records
     nothing: what the tools said to the sandbox is not the contract these tests hold.
 
-    It carries a `handle` because the real session does, and the hosting tools read the conversation
-    off it: a site is registered against whichever conversation's sandbox serves the port, which for
-    a subagent is the one that spawned it rather than its own."""
+    It names a conversation because the real sandbox does, and the hosting tools read it off there:
+    a site is registered against whichever conversation's sandbox serves the port, which for a
+    subagent is the one that spawned it rather than its own."""
 
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
@@ -213,9 +211,7 @@ class ShootingSandbox:
 
     png: bytes = PAGE_PNG
     digest: str = CARD_DIGEST
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout=str(len(self.png)), stderr="", exit_code=0)
@@ -241,9 +237,7 @@ class RefusingSandbox:
     Serving kills whatever holds the port, so a command reaching here at all is the defect — the
     stand-in refuses the act rather than recording it for a test to read back."""
 
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         raise AssertionError(f"a refused deploy ran {command!r} in the member's container")
@@ -451,9 +445,7 @@ def _bind(
         ctx,
         sandbox=replace(
             sandbox or FakeSandbox(),
-            handle=SandboxHandle(
-                conversation_id=serving_conversation_id or conversation_id, container_id="c1"
-            ),
+            conversation_id=serving_conversation_id or conversation_id,
         ),
         turn=ctx.turn.model_copy(
             update={
@@ -838,9 +830,7 @@ async def test_a_subagent_rebuilds_its_site_but_cannot_unhost_another(db: None) 
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
     child = replace(
         _bind(ctx, workspace, conversation_id, None, subagent_profile="website_building"),
-        sandbox=RefusingSandbox(
-            handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
-        ),
+        sandbox=RefusingSandbox(conversation_id=conversation_id),
         on_behalf_of_member_id=creator_id,
     )
     with ws(workspace.id), pytest.raises(UnhostNeedsASpeaker, match="unhost") as refusal:
@@ -2054,9 +2044,7 @@ class FailingSandbox:
     """A sandbox whose serve never comes up — the readiness probe's failure, which is what a broken
     build looks like from here."""
 
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout="", stderr="port never opened", exit_code=1)
@@ -2105,9 +2093,7 @@ class FailingInstallSandbox:
     """A sandbox whose install step fails — `publish_website`'s first mutation, and its earliest
     point of no return once a row has been written."""
 
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         if "npm install" in command:
@@ -2133,15 +2119,11 @@ async def test_publish_leaves_the_members_site_alone_when_it_cannot_come_up(db: 
 
     for sandbox, install_command in (
         (
-            FailingInstallSandbox(
-                handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
-            ),
+            FailingInstallSandbox(conversation_id=conversation_id),
             "npm install",
         ),
         (
-            FailingSandbox(
-                handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
-            ),
+            FailingSandbox(conversation_id=conversation_id),
             None,
         ),
     ):
@@ -2168,9 +2150,7 @@ class StoppedShotSandbox:
     ending inside the render looks like from here. Chromium is given `PREVIEW_TIMEOUT_SECONDS`, so
     the render is the deploy's longest step and the one a turn is likeliest to be cut short in."""
 
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         if "--remote-debugging-pipe" in command:
@@ -2203,9 +2183,7 @@ async def test_a_deploy_stopped_inside_the_shot_has_already_moved_the_ports_row(
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
     stopped = replace(
         _bind(ctx, workspace, conversation_id, member_id),
-        sandbox=StoppedShotSandbox(
-            handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
-        ),
+        sandbox=StoppedShotSandbox(conversation_id=conversation_id),
     )
 
     with ws(workspace.id), pytest.raises(RuntimeError, match="while the page was drawing"):
@@ -2229,9 +2207,7 @@ class RefusedShotSandbox:
     which is what a link planted at that path looks like from here. The server log clears normally,
     so the deploy really reaches the shot."""
 
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
@@ -2261,9 +2237,7 @@ async def test_a_shot_path_the_guard_refuses_still_hosts_the_site(db: None) -> N
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
     refused = replace(
         _bind(ctx, workspace, conversation_id, member_id),
-        sandbox=RefusedShotSandbox(
-            handle=SandboxHandle(conversation_id=conversation_id, container_id="c1")
-        ),
+        sandbox=RefusedShotSandbox(conversation_id=conversation_id),
     )
 
     with ws(workspace.id):
@@ -3228,9 +3202,7 @@ class WorkingSandbox:
     """A sandbox whose written files persist, so the materialization stamp round-trips."""
 
     files: dict[str, bytes] = field(default_factory=dict)
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         if command.startswith("cat "):
@@ -3329,9 +3301,7 @@ async def test_a_homepage_redeploy_unhosts_what_its_scratch_server_displaces(db:
 class OvergrownSandbox:
     """A sandbox whose source tree fails the deploy caps — and whose serve must never run."""
 
-    handle: SandboxHandle = field(
-        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="c1")
-    )
+    conversation_id: UUID = field(default_factory=uuid4)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         raise AssertionError("a refused deploy must never reach the serve")

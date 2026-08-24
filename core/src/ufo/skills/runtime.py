@@ -29,7 +29,7 @@ import yaml
 
 from ufo.o11y import log
 from ufo.sandbox.containment import contained_relative
-from ufo.sandbox.session import WORKSPACE_DIR, SandboxSession
+from ufo.sandbox.session import WORKSPACE_DIR, Sandbox
 
 SKILL_MD = "SKILL.md"
 FRONTMATTER_FENCE = "---\n"
@@ -464,7 +464,7 @@ def loaded_context(
     return SKILL_BLOCK_SEPARATOR.join(blocks) + f"\n\nMounted files:\n{_mounted_tree(loaded)}"
 
 
-async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None:
+async def mount_skill(sandbox: Sandbox, skill: RuntimeSkill) -> None:
     """Write a skill's files under its own mount root. A file key is authored input — a member's
     saved skill carries whatever keys it was applied with — so each is confined at `.skills/<name>/`
     and not merely at the workspace: a key climbing out of the mount is still inside the

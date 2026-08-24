@@ -40,7 +40,7 @@ import httpx
 from ufo.sdk.browser import CdpEndpoint, CdpLease, FileBytes, SessionGone
 from ufo.sdk.context import CredentialAccess, ScopedStore
 from ufo.sdk.manifest import CdpProviderSpec, CredentialSlot, Manifest
-from ufo.sdk.sandbox import SandboxSession
+from ufo.sdk.sandbox import Sandbox
 
 NAME = "browserbase"
 VERSION = "0.1.0"
@@ -277,12 +277,12 @@ class BrowserbaseCdpProvider:
     credentials: CredentialAccess
     transport: httpx.AsyncBaseTransport | None = None
 
-    async def lease(self, sandbox: SandboxSession | None = None) -> CdpLease:
+    async def lease(self, sandbox: Sandbox | None = None) -> CdpLease:
         if sandbox is None:
             raise RuntimeError(
                 "the browserbase cdp provider needs the turn's sandbox to name the browser run"
             )
-        conversation_id = sandbox.handle.conversation_id
+        conversation_id = sandbox.conversation_id
         api = BrowserbaseApi(credentials=self.credentials, transport=self.transport)
         store = ScopedStore(extension=NAME)
         context_id = await self._context(api, store, conversation_id)

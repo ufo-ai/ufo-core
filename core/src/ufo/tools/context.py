@@ -50,7 +50,7 @@ from ufo.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.spec import ModelSpec
 from ufo.o11y import log
-from ufo.sandbox.session import SandboxSession
+from ufo.sandbox.session import Sandbox
 from ufo.schema import tables
 from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
 from ufo.search import SearchProvider
@@ -266,7 +266,7 @@ class StoredPreview:
 
 @dataclass(frozen=True)
 class ToolContext:
-    sandbox: SandboxSession
+    sandbox: Sandbox
     blob: WorkspaceBlobStore
     turn: Turn
     agent: Agent

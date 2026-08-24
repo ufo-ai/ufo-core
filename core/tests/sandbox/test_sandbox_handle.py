@@ -59,6 +59,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSession,
     SandboxSpec,
+    _LateSandbox,
     sbxfs_file_op,
 )
 from ufo.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
@@ -1193,24 +1194,49 @@ class _UniqueIdCarrier:
     convergence, never this stand-in's own behavior."""
 
     created: int = 0
+    held: asyncio.Event | None = None
+    execs: list[tuple[str, str | None]] = field(default_factory=list)
+    stops: list[SandboxHandle] = field(default_factory=list)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        if spec.resume_id is not None:
-            return SandboxHandle(conversation_id=spec.conversation_id, container_id=spec.resume_id)
-        self.created += 1
+        if spec.resume_id is None:
+            self.created += 1
+        if self.held is not None:
+            await self.held.wait()
+        proxy = f"http://{spec.run_token}:@proxy:8080"
         return SandboxHandle(
-            conversation_id=spec.conversation_id, container_id=f"sbx-{self.created}"
+            conversation_id=spec.conversation_id,
+            container_id=spec.resume_id or f"sbx-{self.created}",
+            run_token=spec.run_token,
+            egress_env={
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+                **spec.env,
+            },
+            turn_id=spec.turn_id,
         )
 
     async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
         if spec.resume_id is None:
             return None
-        return SandboxHandle(conversation_id=spec.conversation_id, container_id=spec.resume_id)
+        return SandboxHandle(
+            conversation_id=spec.conversation_id,
+            container_id=spec.resume_id,
+            turn_id=spec.turn_id,
+        )
+
+    async def stop_commands(self, handle: SandboxHandle) -> None:
+        self.stops.append(handle)
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 
-    async def exec(self, *args: object, **kwargs: object) -> object:
-        raise AssertionError("these opens never exec")
+    async def exec(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
+        self.execs.append((handle.container_id, handle.run_token))
+        return ExecResult(stdout="", stderr="", exit_code=0)
 
     def read(self, *args: object, **kwargs: object) -> AsyncIterator[bytes]:
         raise AssertionError("these opens never read")
@@ -1250,6 +1276,105 @@ async def test_concurrent_first_opens_converge_on_one_persisted_sandbox(
 
     assert stored is not None
     assert first.handle.container_id == second.handle.container_id == stored.removeprefix("e2b:")
+
+
+def _late(
+    carrier: _UniqueIdCarrier, turn: Turn, tmp_path: Path, grants: GrantStore | None = None
+) -> _LateSandbox:
+    sandboxes = _sandboxes(cast(Carrier, carrier), "e2b", tmp_path)
+    return _LateSandbox(
+        conversation_id=turn.sandbox_conversation_id or turn.conversation_id,
+        turn_id=turn.id,
+        open=lambda: _open_sandbox(
+            sandboxes,
+            RUN_TOKENS,
+            turn,
+            grants,
+            {},
+            None,
+            (),
+        ),
+        existing=lambda: sandboxes.existing(turn.sandbox_conversation_id or turn.conversation_id),
+    )
+
+
+async def test_racing_first_operations_create_the_shared_sandbox_once(
+    db: None, tmp_path: Path
+) -> None:
+    """A subagent names its parent's workspace without creating it; racing operations then wait on
+    one create and all run in the persisted sandbox."""
+    workspace_id, member_conversation = await _conversation()
+    child = _turn(workspace_id, uuid4()).model_copy(
+        update={"sandbox_conversation_id": member_conversation}
+    )
+    carrier = _UniqueIdCarrier(held=asyncio.Event())
+
+    with ws(workspace_id):
+        sandbox = _late(carrier, child, tmp_path)
+        assert sandbox.conversation_id == member_conversation
+        assert sandbox.created is False
+        assert carrier.created == 0
+        assert await _stored_handle(member_conversation) is None
+        racing = [asyncio.ensure_future(sandbox.bash("true")) for _ in range(3)]
+        await asyncio.sleep(0)
+        assert carrier.held is not None
+        carrier.held.set()
+        await asyncio.gather(*racing)
+
+    assert sandbox.created is True
+    assert carrier.created == 1
+    assert [container_id for container_id, _ in carrier.execs] == ["sbx-1"] * 3
+    assert await _stored_handle(member_conversation) == "e2b:sbx-1"
+
+
+async def test_an_acting_members_view_binds_the_turns_one_create(db: None, tmp_path: Path) -> None:
+    """A message-bound tool call runs under the acting member's own run token, which the authorizer
+    derives before anything is created. The view carries that token onto the turn's single sandbox:
+    the create is the turn's, the token on the command is the member's."""
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    carrier = _UniqueIdCarrier()
+
+    with ws(workspace_id), agent(agent_id):
+        sandbox = _late(carrier, turn, tmp_path, grants=GrantStore())
+        authorizer = SandboxAuthorizer(
+            sandbox=sandbox,
+            run_tokens=RUN_TOKENS,
+            grants=GrantStore(),
+            clis={"hub": HUB_CLI},
+            turn=turn,
+        )
+        authorized = await authorizer.authorize(member_id)
+        assert carrier.created == 0
+        await authorized.bash("true")
+        await sandbox.bash("true")
+
+    assert carrier.created == 1
+    member_token, turn_token = (run_token for _, run_token in carrier.execs)
+    assert member_token is not None and turn_token is not None
+    basic = "Basic " + base64.b64encode(f"{member_token}:".encode()).decode()
+    assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(
+        workspace_id=workspace_id, turn_id=turn.id, acting_member_id=member_id
+    )
+    assert turn_token == RUN_TOKENS.encode(RunToken(workspace_id=workspace_id, turn_id=turn.id))
+
+
+async def test_a_recovered_cancel_stops_commands_without_creating_a_sandbox(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, conversation_id = await _conversation(handle="e2b:sbx-1")
+    carrier = _UniqueIdCarrier()
+    turn = _turn(workspace_id, conversation_id)
+
+    with ws(workspace_id):
+        sandbox = _late(carrier, turn, tmp_path)
+        await sandbox.stop_commands()
+
+    assert sandbox.created is False
+    assert carrier.created == 0
+    assert [handle.turn_id for handle in carrier.stops] == [turn.id]
+    assert await _stored_handle(conversation_id) == "e2b:sbx-1"
 
 
 async def test_a_read_never_creates_and_answers_absent_for_a_gone_sandbox(

@@ -11,7 +11,7 @@ import sqlalchemy as sa
 import ufo.turns.workspace_changes as workspace_changes_module
 from ufo.db import workspace_tx
 from ufo.models.interface import ToolUseBlock
-from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
+from ufo.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec, _LateSandbox
 from ufo.sandbox.terminal import TerminalCarrier, TerminalOp, Terminals
 from ufo.schema import tables
 from ufo.turns.workspace_changes import (
@@ -152,6 +152,53 @@ async def test_record_with_nothing_watched_stores_an_empty_scan(db: None) -> Non
     ).record()
 
     assert terminals.in_flight(conversation_id) is None
+    assert await recorded_workspace_changes(conversation_id) == WorkspaceChanges(
+        changes=(), truncated=False
+    )
+
+
+async def test_replayed_targets_open_for_the_scan_while_a_noop_opens_nothing(db: None) -> None:
+    workspace_id, conversation_id = await _seeded_conversation()
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    terminals.connect(conversation_id, "/p", None)
+    opens = 0
+
+    async def open_sandbox() -> SandboxSession:
+        nonlocal opens
+        opens += 1
+        return SandboxSession(carrier=carrier, handle=await carrier.create(_spec(conversation_id)))
+
+    sandbox = _LateSandbox(
+        conversation_id=conversation_id,
+        turn_id=uuid4(),
+        open=open_sandbox,
+        existing=lambda: asyncio.sleep(0, result=None),
+    )
+    recorder = WorkspaceChangeRecorder(
+        sandbox=sandbox,
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        targets=(),
+    )
+
+    await recorder.record()
+    assert opens == 0
+
+    recording = asyncio.ensure_future(
+        WorkspaceChangeRecorder(
+            sandbox=sandbox,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            targets=("src/a.py",),
+        ).record()
+    )
+    exec_ok = json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode()
+    await _answer(terminals, conversation_id, exec_ok)
+    await _answer(terminals, conversation_id, b'{"changes": [], "truncated": false}')
+    await recording
+
+    assert opens == 1
     assert await recorded_workspace_changes(conversation_id) == WorkspaceChanges(
         changes=(), truncated=False
     )

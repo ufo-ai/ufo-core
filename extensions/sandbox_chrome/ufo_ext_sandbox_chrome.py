@@ -3,8 +3,8 @@
 A hosted deploy runs one headless Chrome per conversation, inside that conversation's sandbox, and
 the serve process reaches its DevTools endpoint over the carrier's public per-port host. Selected by
 `[browser] cdp_provider = "sandbox_chrome"`, this provider's per-turn `lease` receives the turn's
-`SandboxSession` and runs one bring-up command against it: launch Chrome on port 9222 if nothing
-answers there, launch an in-sandbox TCP proxy on 9223 that rewrites each request's `Host:` header to
+`Sandbox` and runs one bring-up command against it: launch Chrome on port 9222 if nothing answers
+there, launch an in-sandbox TCP proxy on 9223 that rewrites each request's `Host:` header to
 `127.0.0.1:9222` (Chrome's DevTools rejects a non-localhost Host, and `--remote-allow-origins=*`
 does not fix that — the proxy is load-bearing: it carries the WebSocket upgrade and frames through),
 and read Chrome's `webSocketDebuggerUrl` back *through* that proxy. A lease therefore returns only
@@ -32,7 +32,7 @@ from dataclasses import dataclass
 
 from ufo.sdk.browser import CdpEndpoint, CdpLease, FileBytes, SessionGone
 from ufo.sdk.manifest import CdpProviderSpec, Manifest
-from ufo.sdk.sandbox import ExecResult, SandboxSession
+from ufo.sdk.sandbox import ExecResult, Sandbox
 
 NAME = "sandbox_chrome"
 VERSION = "0.1.0"
@@ -299,7 +299,7 @@ class SandboxChromeCdpLease:
     sandbox — so the lease holds the sandbox to read those bytes back out of it."""
 
     endpoint_: CdpEndpoint
-    sandbox: SandboxSession
+    sandbox: Sandbox
 
     async def endpoint(self) -> CdpEndpoint:
         return self.endpoint_
@@ -361,7 +361,7 @@ class SandboxChromeCdpProvider:
     gone so a recovered turn re-grounds through a fresh `lease` — the endpoint resolves only from
     the live sandbox, which the caller supplies at lease time, never from the token alone."""
 
-    async def lease(self, sandbox: SandboxSession | None = None) -> CdpLease:
+    async def lease(self, sandbox: Sandbox | None = None) -> CdpLease:
         if sandbox is None:
             raise RuntimeError(
                 "the sandbox_chrome cdp provider needs the turn's sandbox to reach its Chrome"
@@ -384,7 +384,7 @@ class SandboxChromeCdpProvider:
         raise SessionGone(token)
 
 
-async def _bring_up_failure(sandbox: SandboxSession, result: ExecResult) -> str:
+async def _bring_up_failure(sandbox: Sandbox, result: ExecResult) -> str:
     """What the failed bring-up says, read from the logs inside the sandbox when the carrier's
     deadline ended the command: the kill takes the program's own report with it, and what remains is
     a carrier timeout that names nothing about the browser. The logs hold the reason, so they are

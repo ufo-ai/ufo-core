@@ -160,6 +160,10 @@ PINNED_PROFILE = SubagentProfile(
 FORCED_ECHO = -1
 FOLLOWUP_INBOUND = "continue"
 FOLLOWUP_ECHO = 99
+RUN_A_COMMAND = "run a command"
+"""The inbound that makes the stand-in call `bash` before it answers — what a turn that reaches its
+sandbox looks like, since a sandbox is created for the first operation that needs one and a turn
+answering out of its context creates none."""
 WAKE_DEADLINE_SECONDS = 30.0
 WAKE_POLL_SECONDS = 0.05
 
@@ -245,6 +249,13 @@ class StandInModel:
         contents = [m.content for m in request.messages]
         nudged = contents[-1] == EMPTY_RESPONSE_NUDGE
         inbound = contents[-2] if nudged else contents[-1]
+        if isinstance(inbound, str) and RUN_A_COMMAND in inbound:
+            yield ToolCallStart(id="b1", name="bash")
+            yield ToolCallDelta(
+                id="b1", partial_json='{"command": "true", "user_description": "running a check"}'
+            )
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
         if isinstance(inbound, str) and "spawn-subagent" in inbound:
             yield ToolCallStart(id="s1", name="spawn")
             yield ToolCallDelta(
@@ -560,6 +571,17 @@ async def _turn_row(turn_id: str) -> tuple[str, UUID]:
     return row.status, row.conversation_id
 
 
+async def _sandbox_handle(conversation_id: UUID) -> str | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.conversation.c.sandbox_handle).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+
+
 async def test_workspace_host_path_is_absolute_for_a_relative_workspace_root(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -589,8 +611,9 @@ async def test_member_turn_trace_joins_admission_and_names_its_stages(
 ) -> None:
     """One member message yields one trace: the admission SERVER span roots it, the turn span
     parents on the traceparent admission stored — the gap between them is the queue hop — and the
-    stages inside the turn (claim, load, extension load, sandbox open, transcript, model round)
-    are children of the turn span, so one waterfall attributes the turn's wall-clock."""
+    stages inside the turn (claim, load, extension load, transcript, model round) are children of
+    the turn span, so one waterfall attributes the turn's wall-clock. This turn answers out of its
+    context, so no sandbox open is among them: the create waits for an operation that needs one."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
@@ -620,10 +643,11 @@ async def test_member_turn_trace_joins_admission_and_names_its_stages(
         "turn.claim",
         "turn.load",
         "extensions.load",
-        "sandbox.open",
         "transcript.load",
         "model.round",
     } <= stages
+    assert "sandbox.open" not in {finished.name for finished in exporter.get_finished_spans()}
+    assert await _sandbox_handle(seed.conversation_id) is None
     assert [event.name for event in spans["model.round"].events] == ["model.first_visible_event"]
 
 
@@ -662,8 +686,8 @@ async def test_a_committed_turn_records_what_git_reports_in_its_workspace(
     surface: Turns,
 ) -> None:
     """The projection is written by the turn, not by the tool that wrote the file: the checkout is
-    changed by neither, and the scan still lands. A conversation whose workspace holds no checkout
-    records an empty scan rather than nothing, so a member reads `no changes` from a fact."""
+    changed by neither, and the scan still lands. The turn runs a command, which is what creates its
+    sandbox — the scan reads the sandbox the turn already has and creates none of its own."""
     seed = await _bootstrap()
     STREAM_GATE.arm()
     runtime = loop_queue._runtime
@@ -675,9 +699,10 @@ async def test_a_committed_turn_records_what_git_reports_in_its_workspace(
     (checkout / "mod.py").write_text("x = 2\n")
     (workspace / "findings.md").write_text("what I found\n")
 
-    turn_id = await surface.admit(seed, "ping")
+    turn_id = await surface.admit(seed, RUN_A_COMMAND)
     await surface.consume(seed, turn_id)
 
+    assert await _sandbox_handle(seed.conversation_id) is not None
     scan = await _await_scan(seed.conversation_id)
     assert WorkspaceChanges.model_validate(scan) == WorkspaceChanges(
         changes=(
@@ -1218,8 +1243,9 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
     assert overdue.trajectory is not None
     assert overdue.trajectory.turn_id is not None
     assert overdue.trajectory.status == "cancelled"
-    status, _ = await _turn_row(str(overdue.trajectory.turn_id))
+    status, conversation_id = await _turn_row(str(overdue.trajectory.turn_id))
     assert status == "cancelled"
+    assert await _sandbox_handle(conversation_id) is None
     handle = await runtime.dbos.retrieve_workflow_async(str(overdue.trajectory.turn_id))
     assert (await handle.get_status()).status == "CANCELLED"
     assert followup.clean

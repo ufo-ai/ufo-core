@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from ufo.sandbox.session import SandboxSession
+from ufo.sandbox.session import Sandbox
 
 FindCompleter = Callable[[str, str], Awaitable[str]]
 FileBytes = Callable[[], Awaitable[bytes]]
@@ -71,7 +71,7 @@ class CdpLease(Protocol):
 
 class CdpProvider(Protocol):
     """Where a turn's Chrome comes from: `lease` mints one `CdpLease` per turn, optionally given the
-    turn's `SandboxSession` so a per-conversation-sandbox provider resolves its endpoint against the
+    turn's `Sandbox` so a per-conversation-sandbox provider resolves its endpoint against the
     Chrome running inside that sandbox (a static or remote provider ignores it); `reattach`
     reconnects to the session a prior run's `token` names — returning a fresh lease over the live
     session, or raising `SessionGone` when it can no longer resolve so the caller mints instead.
@@ -79,6 +79,6 @@ class CdpProvider(Protocol):
     session each turn (reattachable within its TTL) while a sandbox provider wraps a static
     environment endpoint that outlives every turn."""
 
-    async def lease(self, sandbox: SandboxSession | None = None) -> CdpLease: ...
+    async def lease(self, sandbox: Sandbox | None = None) -> CdpLease: ...
 
     async def reattach(self, token: str) -> CdpLease: ...
