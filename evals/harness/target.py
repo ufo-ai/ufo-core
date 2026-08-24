@@ -267,7 +267,17 @@ class InProcessTarget:
             result.output,
             result.trajectory.messages if result.trajectory is not None else (),
         )
-        result = replace(result, output=replace(result.output, timing=timing))
+        recorded_tokens = sum(turn.tokens for turn in timing.turns)
+        recorded_cost = sum(turn.cost_micro_usd for turn in timing.turns)
+        result = replace(
+            result,
+            output=replace(
+                result.output,
+                timing=timing,
+                tokens=max(result.output.tokens, recorded_tokens),
+                cost_micro_usd=max(result.output.cost_micro_usd, recorded_cost),
+            ),
+        )
         if not result.clean:
             if self.logs is not None:
                 await self.logs.discard(turn_id)
@@ -330,6 +340,12 @@ class InProcessTarget:
         for index, turn_id in enumerate(turn_ids):
             steps = await self.turn_steps.steps(turn_id)
             tokens, cost_micro_usd = await self._turn_resources((turn_id,))
+            step_tokens = tuple(step.tokens for step in steps if step.tokens is not None)
+            step_costs = tuple(
+                step.cost_micro_usd for step in steps if step.cost_micro_usd is not None
+            )
+            tokens = max(tokens, sum(step_tokens))
+            cost_micro_usd = max(cost_micro_usd, sum(step_costs))
             turns.append(
                 turn_timing(
                     turn_id,

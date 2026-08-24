@@ -260,10 +260,10 @@ class WorkspaceDriver:
         """The turn's durable engine steps, in the order the workflow recorded them. A tool call's
         step carries the tool-use id its result was memoized under, which is what names it.
 
-        A round's cost is reported only as far as the record supports it, never inferred and never
-        raised over. A terminal with no model — the frame a cancel writes for a turn the harness
-        stopped waiting on — prices nothing, so those rounds carry their tokens and no cost. The
-        rounds are also only part of what a turn spends: a compaction rides its own step, the
+        A round's cost is reported only as far as the record supports it, never raised over. The
+        driver knows the evaluated agent's model, so a cancel frame that names no model still
+        prices each completed model round from its recorded usage. The rounds are also only part of
+        what a turn spends: a compaction rides its own step, the
         browser `find` ranking meters onto a dispatch, and a resumed attempt bills on top of a step
         log that starts empty, so the terminal's residual cost lands on the last round only when the
         rounds account for every token the terminal counts. A completed model or tool step also
@@ -291,7 +291,8 @@ class WorkspaceDriver:
                         sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn_id)
                     )
                 ).scalar_one()
-            model = terminal.get("model", "") if terminal else ""
+            terminal_model = terminal.get("model", "") if terminal else ""
+            model = terminal_model or self.agent_model
             terminal_tokens = terminal.get("tokens", 0) if terminal else 0
             terminal_cost = terminal.get("cost_micro_usd", 0) if terminal else 0
             costs: dict[int, int] = {}
@@ -309,7 +310,11 @@ class WorkspaceDriver:
                 if model:
                     costs[index] = self.pricing.micro_usd(model, usage) if tokens else 0
                 resources[index] = (tokens, costs.get(index))
-            if costs and sum(tokens for tokens, _cost in resources.values()) == terminal_tokens:
+            if (
+                terminal_model
+                and costs
+                and sum(tokens for tokens, _cost in resources.values()) == terminal_tokens
+            ):
                 last = next(reversed(costs))
                 costs[last] += terminal_cost - sum(costs.values())
                 if costs[last] < 0:

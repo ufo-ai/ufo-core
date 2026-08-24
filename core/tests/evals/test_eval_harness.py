@@ -5486,7 +5486,11 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
                 "function_name": "ufo.loop.engine.Engine._stream_once",
                 "started_at_epoch_ms": 1_000,
                 "completed_at_epoch_ms": 2_000,
-                "output": StreamResult(text="I will inspect it.", tool_calls=(call,)),
+                "output": StreamResult(
+                    text="I will inspect it.",
+                    tool_calls=(call,),
+                    usages=(Usage(input_tokens=200_000, output_tokens=20_000),),
+                ),
             },
             {
                 "function_name": "ufo.loop.engine.Engine._dispatch_step",
@@ -5513,6 +5517,7 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
         blob,
         cast(DBOSClient, dbos),
         tmp_path / "workspaces",
+        agent_model=MODEL,
         poll_interval_seconds=0.001,
         workflow_wait_seconds=0.01,
     )
@@ -5551,6 +5556,8 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
             call_id=call.id,
         ),
     )
+    assert result.output.tokens == 220_000
+    assert result.output.cost_micro_usd == 1_500_000
     assert result.output.timing.slowest[0].name == "bash"
 
 
@@ -5707,6 +5714,7 @@ async def _recorded_steps(
         FilesystemBlobStore(root=tmp_path),
         cast(DBOSClient, RecordedStepsDbos(recorded)),
         tmp_path / "workspaces",
+        agent_model=MODEL,
     )
 
     with ws(workspace_id):
@@ -5768,12 +5776,9 @@ async def test_step_resources_leave_the_residual_alone_when_a_compaction_spent_o
     assert [step.cost_micro_usd for step in steps] == [1_500_000, None, 750_000]
 
 
-async def test_step_resources_report_tokens_without_a_cost_when_the_terminal_records_no_model(
+async def test_step_resources_price_completed_rounds_when_the_cancel_terminal_has_no_model(
     db: None, tmp_path
 ) -> None:
-    """A turn the harness stopped waiting on is cancelled, and the cancel's frame carries no model
-    to price its rounds by. The rounds report the tokens they spent and no cost, so the overdue case
-    stays the handled outcome it was."""
     steps = await _recorded_steps(
         tmp_path,
         {"status": "cancelled", "text": "", "model": "", "tokens": 0, "cost_micro_usd": 0},
@@ -5781,7 +5786,7 @@ async def test_step_resources_report_tokens_without_a_cost_when_the_terminal_rec
     )
 
     assert [step.tokens for step in steps] == [220_000]
-    assert [step.cost_micro_usd for step in steps] == [None]
+    assert [step.cost_micro_usd for step in steps] == [1_500_000]
 
 
 async def test_a_shared_case_leaves_the_conversation_unowned_and_speaks_through_the_turn(
@@ -7017,9 +7022,14 @@ async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, m
     agent_id = uuid4()
     report = EvalReport(name="suite", suite="capability", digest="sha256:abc", cases=())
     installed: list[CredentialRequests | None] = []
+    driver_models: list[str] = []
 
     async def resolve(*_args):
-        return workspace_id, agent_id, "prompt", MODEL, "auto"
+        return workspace_id, agent_id, "prompt", "auto", "auto"
+
+    def workspace_driver(*args, **_kwargs):
+        driver_models.append(args[6])
+        return object()
 
     async def run(target, slots) -> EvalReport:
         assert isinstance(slots, asyncio.Semaphore)
@@ -7041,7 +7051,7 @@ async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, m
     monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
     monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
     monkeypatch.setattr("evals.__main__.replay_safe_client", lambda _url: object())
-    monkeypatch.setattr("evals.__main__.WorkspaceDriver", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("evals.__main__.WorkspaceDriver", workspace_driver)
     monkeypatch.setattr(
         "evals.__main__.load_manifests",
         lambda *_args: (
@@ -7098,6 +7108,7 @@ async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, m
             }
         ),
     )
+    assert driver_models == [MODEL]
 
 
 async def test_run_builds_the_compaction_client_inside_the_workspace_scope(

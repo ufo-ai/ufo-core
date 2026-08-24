@@ -774,6 +774,7 @@ async def _run(
             blob = WorkspaceBlobStore(backend=blob_store_for(config.blob))
             dbos = replay_safe_client(config.database.system_url)
             registry = model_registry(config, manifests)
+            resolved_agent_model = registry.resolve(agent_model)
             driver = WorkspaceDriver(
                 workspace_id,
                 agent_id,
@@ -781,7 +782,7 @@ async def _run(
                 blob,
                 dbos,
                 config.sandbox.workspace_root,
-                agent_model,
+                resolved_agent_model,
                 pricing=registry.pricing,
                 workflow_wait_seconds=workflow_wait_seconds,
             )
@@ -824,13 +825,12 @@ async def _run(
                         loadable_skills |= frozenset((waiting.name,))
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):
-                    resolved_model = registry.resolve(agent_model)
                     compaction = CompactionTarget(
-                        client=await registry.client_for(resolved_model),
-                        model=resolved_model,
+                        client=await registry.client_for(resolved_agent_model),
+                        model=resolved_agent_model,
                         blob=blob,
                         workspace_root=config.sandbox.workspace_root,
-                        context_window=registry.spec(resolved_model).context_window,
+                        context_window=registry.spec(resolved_agent_model).context_window,
                     )
                 target = InProcessTarget(
                     ctx=ctx,
@@ -845,7 +845,7 @@ async def _run(
                         config,
                         tasks,
                         agent_prompt,
-                        agent_model,
+                        resolved_agent_model,
                         agent_reasoning,
                         mcp_atlas_url,
                         mcp_atlas_external_url,
@@ -899,7 +899,7 @@ async def _run(
                                     for manifest in manifests
                                 ],
                                 "agentPromptDigest": prompt_digest(agent_prompt),
-                                "agentModel": agent_model,
+                                "agentModel": resolved_agent_model,
                                 **(
                                     {
                                         "judgeModel": task.judge_model,
@@ -926,7 +926,7 @@ async def _run(
                     completed[index] = report.model_copy(
                         update={
                             "digest": digest,
-                            "target_model": agent_model,
+                            "target_model": resolved_agent_model,
                             "judge_model": task.judge_model,
                             "simulator_model": task.simulator_model,
                             "judge_revision": task.judge_revision,
@@ -990,7 +990,7 @@ async def _mcp_atlas_target(
     config: Config,
     tasks: tuple[EvalTask, ...],
     agent_prompt: str,
-    agent_model: str,
+    resolved_agent_model: str,
     agent_reasoning: ReasoningEffort,
     url: str | None,
     external_url: str | None,
@@ -1001,11 +1001,10 @@ async def _mcp_atlas_target(
         raise RuntimeError(f"mcp_atlas_100 requires --mcp-atlas-url or {MCP_ATLAS_URL_ENV}")
     manifests = load_manifests(config.pack.name)
     registry = model_registry(config, manifests)
-    resolved_model = registry.resolve(agent_model)
     target_context = context_for(
         "evals",
         frozenset(),
-        model_resolver=replace(registry, auto_model=resolved_model),
+        model_resolver=replace(registry, auto_model=resolved_agent_model),
         model_job=MCP_ATLAS_JOB,
     )
     if target_context.model is None:
@@ -1019,7 +1018,7 @@ async def _mcp_atlas_target(
         agent_prompt,
         sections,
         skills=skill_registry(manifests).index(),
-        knowledge_cutoff=registry.spec(resolved_model).knowledge_cutoff,
+        knowledge_cutoff=registry.spec(resolved_agent_model).knowledge_cutoff,
     ).content
     public_client = await stack.enter_async_context(
         AsyncClient(
@@ -1040,7 +1039,7 @@ async def _mcp_atlas_target(
     return McpAtlasTarget(
         public_client,
         target_context.model,
-        resolved_model,
+        resolved_agent_model,
         system,
         agent_reasoning,
         external_client,
