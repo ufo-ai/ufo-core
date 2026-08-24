@@ -41,7 +41,9 @@ from ufo.models.interface import (
     ModelResponseTruncated,
     ModelStreamStart,
     TextDelta,
+    ToolResultBlock,
     ToolSchema,
+    ToolUseBlock,
 )
 from ufo.models.pricing import ModelPrice
 from ufo.models.registry import model_registry
@@ -239,6 +241,117 @@ async def test_model_without_tools_with_reasoning_omits_the_reasoning_budget() -
     assert create.calls[0]["extra_body"] == {}
 
 
+async def test_google_tool_result_with_json_reference_is_text_enveloped() -> None:
+    result = json.dumps(
+        {
+            "$defs": {"Visibility": {"type": "string"}},
+            "properties": {"visibility": {"$ref": "#/$defs/Visibility"}},
+        }
+    )
+    request = REQUEST.model_copy(
+        update={
+            "model": "google/gemini-3.7-flash",
+            "messages": (
+                Message(role="user", content="inspect"),
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id="c1", name="inspect", input={}),),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="c1", content=result),),
+                ),
+            ),
+        }
+    )
+    create = ScriptedCreate(
+        [_chunk(content="done"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
+    )
+    async for _ in _client(create).complete(request):
+        pass
+    messages = create.calls[0]["messages"]
+    assert isinstance(messages, list)
+    assert json.loads(messages[-1]["content"]) == {"text": result}
+
+
+def test_non_google_and_reference_free_tool_results_keep_the_standard_shape() -> None:
+    reference = '{"properties":{"visibility":{"$ref":"#/$defs/Visibility"}}}'
+    reference_messages = (
+        Message(role="user", content="add"),
+        Message(role="assistant", content=(ToolUseBlock(id="c1", name="add", input={}),)),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="c1", content=reference),)),
+    )
+    google = REQUEST.model_copy(
+        update={
+            "model": "google/gemini-3.7-flash",
+            "messages": (
+                Message(role="user", content="add"),
+                Message(role="assistant", content=(ToolUseBlock(id="c1", name="add", input={}),)),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="c1", content='{"answer": 5}'),),
+                ),
+            ),
+        }
+    )
+    anthropic = REQUEST.model_copy(
+        update={"model": "anthropic/claude-fable-5", "messages": reference_messages}
+    )
+    client = _client(ScriptedCreate([]))
+    assert client._create_kwargs(google, frozenset())["messages"][-1]["content"] == '{"answer": 5}'
+    assert client._create_kwargs(anthropic, frozenset())["messages"][-1]["content"] == reference
+
+
+def test_google_tool_results_distinguish_reference_keys_from_text() -> None:
+    reference = '{"\\u0024dynamicRef":"#/x"}'
+    text = '{"unsupported_keyword":"$ref"}'
+    malformed = '{"$ref":"#/x"'
+    large_integer = '{"note":"costs $5","n":' + "9" * 5_000 + "}"
+    messages = (
+        Message(role="user", content="inspect"),
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(id="c1", name="reference", input={}),
+                ToolUseBlock(id="c2", name="text", input={}),
+                ToolUseBlock(id="c3", name="malformed", input={}),
+                ToolUseBlock(id="c4", name="large_integer", input={}),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(tool_use_id="c1", content=reference, is_error=True),
+                ToolResultBlock(tool_use_id="c2", content=text),
+                ToolResultBlock(tool_use_id="c3", content=malformed),
+                ToolResultBlock(tool_use_id="c4", content=large_integer),
+            ),
+        ),
+    )
+    request = REQUEST.model_copy(update={"model": "google/gemini-2.5-pro", "messages": messages})
+
+    rendered = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
+
+    assert json.loads(rendered[-4]["content"]) == {"text": f"[tool error] {reference}"}
+    assert rendered[-3]["content"] == text
+    assert rendered[-2]["content"] == malformed
+    assert rendered[-1]["content"] == large_integer
+
+
+def test_google_tool_result_at_the_size_cap_does_not_exceed_the_parser_depth() -> None:
+    result = "[" * 9_997 + '{"$ref":"#/x"}' + "]" * 9_997
+    messages = (
+        Message(role="user", content="inspect"),
+        Message(role="assistant", content=(ToolUseBlock(id="c1", name="inspect", input={}),)),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="c1", content=result),)),
+    )
+    request = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash", "messages": messages})
+
+    rendered = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
+
+    assert json.loads(rendered[-1]["content"]) == {"text": result}
+
+
 async def test_dead_provider_completion_reroutes_excluding_that_provider() -> None:
     dead = [_chunk(finish="stop", provider="deadco"), _chunk(usage=_usage(1, 0))]
     good = [_chunk(content="recovered"), _chunk(finish="stop"), _chunk(usage=_usage(2, 3))]
@@ -270,6 +383,7 @@ def test_manifest_registers_slug_pinned_specs() -> None:
     manifest = openrouter.manifest()
     by_id = {spec.id: spec for spec in manifest.models}
     assert set(by_id) == {
+        "google/gemini-3.7-flash",
         "google/gemini-2.5-pro",
         "z-ai/glm-5.2",
         "moonshotai/kimi-k3",
@@ -277,6 +391,20 @@ def test_manifest_registers_slug_pinned_specs() -> None:
     }
     assert by_id["z-ai/glm-5.2"].price.output == 3_000_000
     assert by_id["z-ai/glm-5.2"].knowledge_cutoff == "2026-03"
+
+
+def test_gemini_37_flash_spec_carries_its_route_price_window_and_reasoning() -> None:
+    spec = {s.id: s for s in openrouter.manifest().models}["google/gemini-3.7-flash"]
+    assert openrouter.openrouter_slug(spec.id) == "google/gemini-3.7-flash"
+    assert spec.price.input == 375_000
+    assert spec.price.output == 1_875_000
+    assert spec.price.cache_read == 37_500
+    assert spec.context_window == 1_048_576
+    assert spec.knowledge_cutoff == "2026-03"
+    assert spec.reasoning.default_on
+    assert not spec.reasoning.can_disable
+    assert spec.wire_reasoning("off", ()) == "low"
+    assert spec.wire_reasoning("high", ()) == "high"
 
 
 def test_kimi_k3_spec_carries_its_price_cache_rate_and_million_token_window() -> None:

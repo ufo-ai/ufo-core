@@ -78,6 +78,7 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
+OPENAI_TOOL_ERROR_PREFIX = "[tool error] "
 STREAM_TRANSPORT_ERRORS = (
     openai.APITimeoutError,
     httpx.TimeoutException,
@@ -190,7 +191,7 @@ def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str
                         {
                             "role": "tool",
                             "tool_call_id": tool_use_id,
-                            "content": f"[tool error] {text}" if is_error else text,
+                            "content": f"{OPENAI_TOOL_ERROR_PREFIX}{text}" if is_error else text,
                         }
                     )
                     lifted_images.extend(images)
@@ -269,13 +270,17 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
                         content = []
                     if isinstance(result, str):
                         output: str | list[ResponseFunctionCallOutputItemParam] = (
-                            f"[tool error] {result}" if is_error else result
+                            f"{OPENAI_TOOL_ERROR_PREFIX}{result}" if is_error else result
                         )
                     else:
                         output = [
                             ResponseInputTextContentParam(
                                 type="input_text",
-                                text=f"[tool error] {part.text}" if is_error else part.text,
+                                text=(
+                                    f"{OPENAI_TOOL_ERROR_PREFIX}{part.text}"
+                                    if is_error
+                                    else part.text
+                                ),
                             )
                             if isinstance(part, TextBlock)
                             else ResponseInputImageContentParam(

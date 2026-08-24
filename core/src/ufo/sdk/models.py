@@ -66,6 +66,9 @@ from ufo.models.interface import (
     trim_images as trim_images,
 )
 from ufo.models.openai import (
+    OPENAI_TOOL_ERROR_PREFIX as OPENAI_TOOL_ERROR_PREFIX,
+)
+from ufo.models.openai import (
     OpenAIClient as OpenAIClient,
 )
 from ufo.models.openai import (

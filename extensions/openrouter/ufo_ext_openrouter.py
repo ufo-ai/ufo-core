@@ -3,9 +3,9 @@ image and video generation as tools.
 
 Core ships direct Anthropic + OpenAI clients; OpenRouter is a router over many upstreams, so per
 spec it is an extension, never core. It speaks the OpenAI Chat Completions wire against
-`openrouter.ai/api/v1`, so it reuses the SDK's `openai_messages` translation and `openai_sdk_client`
-factory and adds only what is OpenRouter's own: an id->slug projection, a reasoning-effort budget on
-`extra_body`, and a dead-provider re-route that excludes an upstream returning an empty completion.
+`openrouter.ai/api/v1`, so it uses the SDK's message translation and client factory. It owns the
+id-to-slug projection, reasoning budget, dead-provider reroute, and the text envelope for
+schema-reference JSON that OpenRouter rejects in Google tool-result messages.
 The manifest enumerates one complete `ModelSpec` per slug it offers — price, cutoff, context window,
 reasoning — so the registry serves those ids exactly like any other, with no catch-all router.
 
@@ -35,6 +35,8 @@ from ufo.sdk.accounting import MICRO_USD_PER_USD
 from ufo.sdk.context import CredentialAccess
 from ufo.sdk.manifest import CredentialSlot, Manifest
 from ufo.sdk.models import (
+    OPENAI_TOOL_ERROR_PREFIX,
+    Message,
     ModelEvent,
     ModelPrice,
     ModelRequest,
@@ -45,6 +47,7 @@ from ufo.sdk.models import (
     TextDelta,
     ToolCallDelta,
     ToolCallStart,
+    ToolResultBlock,
     Usage,
     openai_messages,
     openai_sdk_client,
@@ -64,6 +67,7 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
+JSON_REFERENCE_KEYS = frozenset({"$ref", "$dynamicRef"})
 
 OPENROUTER_CONTEXT_WINDOW = 200_000
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -295,6 +299,56 @@ def _usage_of(usage: CompletionUsage, cache_write_30m_rate: int) -> Usage:
     )
 
 
+def _contains_json_reference(value: object) -> bool:
+    remaining = [value]
+    while remaining:
+        match remaining.pop():
+            case dict() as node:
+                if JSON_REFERENCE_KEYS & node.keys():
+                    return True
+                remaining.extend(node.values())
+            case list() as node:
+                remaining.extend(node)
+            case _:
+                continue
+    return False
+
+
+def _openrouter_messages(
+    model: str, system: str, messages: tuple[Message, ...]
+) -> list[dict[str, object]]:
+    rendered = openai_messages(system, messages)
+    if not openrouter_slug(model).startswith("google/"):
+        return rendered
+    error_results = {
+        block.tool_use_id
+        for message in messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock) and block.is_error
+    }
+    for message in rendered:
+        match message:
+            case {"role": "tool", "content": str() as content}:
+                if "$" not in content and "\\u" not in content:
+                    continue
+                result_content = content
+                if message.get("tool_call_id") in error_results:
+                    result_content = content.removeprefix(OPENAI_TOOL_ERROR_PREFIX)
+                try:
+                    result = json.loads(result_content)
+                except ValueError:
+                    continue
+                except RecursionError:
+                    message["content"] = json.dumps({"text": content})
+                    continue
+                if _contains_json_reference(result):
+                    message["content"] = json.dumps({"text": content})
+            case _:
+                continue
+    return rendered
+
+
 @dataclass(frozen=True)
 class OpenRouterModelClient:
     """The OpenRouter backend behind the `ModelClient` protocol: it streams ModelEvents from the
@@ -430,7 +484,7 @@ class OpenRouterModelClient:
             extra_body["provider"] = {"ignore": sorted(ignore_providers)}
         kwargs: dict[str, Any] = {
             "model": openrouter_slug(request.model),
-            "messages": openai_messages(request.system, request.messages),
+            "messages": _openrouter_messages(request.model, request.system, request.messages),
             "max_tokens": request.max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -484,6 +538,13 @@ OPENROUTER_MODEL_SPECS = (
         "google/gemini-2.5-pro",
         ModelPrice(1_000_000, 10_000_000, 0, 0, 0),
         "2025-01",
+    ),
+    _openrouter(
+        "google/gemini-3.7-flash",
+        ModelPrice(375_000, 1_875_000, 37_500, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
     ),
     _openrouter(
         "z-ai/glm-5.2",
