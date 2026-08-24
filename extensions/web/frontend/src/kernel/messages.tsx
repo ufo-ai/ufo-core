@@ -417,54 +417,74 @@ const MARKDOWN_MEDIA_TYPE = "text/markdown";
  *  which the name itself does not decide. */
 const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-narrow:items-center";
 
-/** What a reply's turn shared, under the words that shared it. A file that is itself a picture is
- *  drawn as one — part of the answer, and pressing it goes to `onOpen` where the screen has an
- *  artifacts sidebar; every other file is a card on a row that scrolls sideways rather than a
- *  column that pushes the rest of the conversation down the page. A markdown card is a document
- *  the sidebar draws, so on a screen with one it opens there too; everywhere else a card links to
- *  the file itself. */
+/** What a reply's turn shared, under the words that shared it. Images with a preview come first:
+ *  one is drawn as part of the answer, and several stand in share order on one snapping row. Every
+ *  other file follows in a card grid, including documents whose first page has a preview and images
+ *  no preview was rendered for — only a drawable image belongs in the image carousel. Pressing an
+ *  image goes to `onOpen` where the screen has an artifacts sidebar. A markdown card opens there
+ *  too; everywhere else a card links to the file itself. */
 function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
-  const pictures = files.filter((file) => file.preview_url);
-  const cards = files.filter((file) => !file.preview_url);
+  const images = files.filter(
+    (file) => file.media_type.startsWith("image/") && file.preview_url !== null,
+  );
+  const documents = files.filter(
+    (file) => !file.media_type.startsWith("image/") || file.preview_url === null,
+  );
   return (
     <>
-      {pictures.map((file) => (
-        <Picture key={file.filename} file={file} onOpen={onOpen} />
-      ))}
-      {cards.length ? (
-        <AttachmentGroup className="mt-2xs">
-          {cards.map((file) => (
-            <Attachment key={file.filename} size="sm">
-              <AttachmentContent>
-                <AttachmentTitle>
-                  {onOpen && file.media_type === MARKDOWN_MEDIA_TYPE ? (
-                    <button
-                      type="button"
-                      onClick={onOpen}
-                      className={cn(
-                        "cursor-pointer border-0 bg-transparent p-0 text-inherit",
-                        TAP_FLOOR,
-                      )}
-                    >
-                      {file.filename}
-                    </button>
-                  ) : file.url ? (
-                    <a href={file.url} className={TAP_FLOOR}>
-                      {file.filename}
-                    </a>
-                  ) : (
-                    file.filename
-                  )}
-                </AttachmentTitle>
-                {file.size_bytes === undefined ? null : (
-                  <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
-                )}
-              </AttachmentContent>
-            </Attachment>
+      {images.length === 1 ? <Picture file={images[0]} onOpen={onOpen} /> : null}
+      {images.length > 1 ? (
+        <AttachmentGroup className="mt-2xs items-start">
+          {images.map((file, index) => (
+            <Picture
+              key={file.filename + String(index)}
+              file={file}
+              onOpen={onOpen}
+              grouped
+            />
           ))}
         </AttachmentGroup>
       ) : null}
+      {documents.length ? (
+        <div
+          data-slot="attachment-grid"
+          className="mt-2xs grid grid-cols-2 gap-lg max-narrow:grid-cols-1"
+        >
+          {documents.map((file, index) => (
+            <FileCard key={file.filename + String(index)} file={file} onOpen={onOpen} />
+          ))}
+        </div>
+      ) : null}
     </>
+  );
+}
+
+function FileCard({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
+  return (
+    <Attachment size="sm" className="w-full min-w-0">
+      <AttachmentContent>
+        <AttachmentTitle>
+          {onOpen && file.media_type === MARKDOWN_MEDIA_TYPE ? (
+            <button
+              type="button"
+              onClick={onOpen}
+              className={cn("cursor-pointer border-0 bg-transparent p-0 text-inherit", TAP_FLOOR)}
+            >
+              {file.filename}
+            </button>
+          ) : file.url ? (
+            <a href={file.url} className={TAP_FLOOR}>
+              {file.filename}
+            </a>
+          ) : (
+            file.filename
+          )}
+        </AttachmentTitle>
+        {file.size_bytes === undefined ? null : (
+          <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
+        )}
+      </AttachmentContent>
+    </Attachment>
   );
 }
 
@@ -529,8 +549,20 @@ function Attached({ files, picked }: { files: ChatFile[]; picked: File[] }) {
 /** One shared picture, named by its filename — a file that is itself a picture, or the first page a
  *  document was rendered to, which wears a badge naming the kind of document it came from. A pane
  *  with no sidebar to open draws it as a link to the file itself. */
-function Picture({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
+function Picture({
+  file,
+  onOpen,
+  grouped = false,
+}: {
+  file: ChatFile;
+  onOpen?: () => void;
+  grouped?: boolean;
+}) {
   const badge = attachmentBadgeFor(file.filename);
+  const className = cn(
+    "w-fit",
+    grouped ? "max-w-full shrink-0 snap-start" : "mt-2xs",
+  );
   const drawn = (
     <span className="relative block w-fit">
       <img
@@ -549,7 +581,7 @@ function Picture({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
       <button
         type="button"
         onClick={onOpen}
-        className="mt-2xs w-fit cursor-pointer border-0 bg-transparent p-0"
+        className={cn(className, "cursor-pointer border-0 bg-transparent p-0")}
       >
         {drawn}
       </button>
@@ -557,12 +589,12 @@ function Picture({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
   }
   if (file.url) {
     return (
-      <a href={file.url} className="mt-2xs w-fit">
+      <a href={file.url} className={className}>
         {drawn}
       </a>
     );
   }
-  return <div className="mt-2xs w-fit">{drawn}</div>;
+  return <div className={className}>{drawn}</div>;
 }
 
 export function Meta({ children }: { children: ReactNode }) {

@@ -1854,6 +1854,76 @@ test("a settled turn names each shared file once, with its size", async () => {
   expect(screen.getByText("2 kB")).toBeTruthy();
 });
 
+test("a turn puts shared images in one carousel before its document grid", async () => {
+  wire(
+    transcript({
+      messages: [
+        {
+          role: "assistant",
+          text: "Here they are.",
+          files: [
+            {
+              filename: "report.pdf",
+              url: "/dl/report.pdf",
+              size_bytes: 2048,
+              preview_url: "https://web/artifacts/preview/report.pdf?token=signed",
+              media_type: "application/pdf",
+            },
+            {
+              filename: "portrait.jpg",
+              url: "/dl/portrait.jpg",
+              size_bytes: 88_000,
+              preview_url: "https://web/artifacts/preview/portrait.jpg?token=signed",
+              media_type: "image/jpeg",
+            },
+            {
+              filename: "scan.bmp",
+              url: "/dl/scan.bmp",
+              size_bytes: 4096,
+              preview_url: null,
+              media_type: "image/bmp",
+            },
+            {
+              filename: "notes.md",
+              url: "/dl/notes.md",
+              size_bytes: 512,
+              preview_url: null,
+              media_type: "text/markdown",
+            },
+            {
+              filename: "chart.png",
+              url: "/dl/chart.png",
+              size_bytes: 16_000,
+              preview_url: "https://web/artifacts/preview/chart.png?token=signed",
+              media_type: "image/png",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  open();
+
+  const reply = (await screen.findByText(saying("Here they are."))).closest(
+    "[data-slot=message]",
+  ) as HTMLElement;
+  const carousel = reply.querySelector('[data-slot="attachment-group"]') as HTMLElement;
+  const documents = reply.querySelector('[data-slot="attachment-grid"]') as HTMLElement;
+  const portrait = within(carousel).getByRole("img", { name: "portrait.jpg" });
+  const chart = within(carousel).getByRole("img", { name: "chart.png" });
+  const report = within(documents).getByRole("link", { name: "report.pdf" });
+  const scan = within(documents).getByRole("link", { name: "scan.bmp" });
+  const notes = within(documents).getByRole("button", { name: "notes.md" });
+  expect(carousel.children).toHaveLength(2);
+  expect(carousel.children[0].contains(portrait)).toBe(true);
+  expect(carousel.children[1].contains(chart)).toBe(true);
+  expect(documents.children).toHaveLength(3);
+  expect(documents.children[0].contains(report)).toBe(true);
+  expect(documents.children[1].contains(scan)).toBe(true);
+  expect(documents.children[2].contains(notes)).toBe(true);
+  expect(carousel.nextElementSibling).toBe(documents);
+});
+
 /** A file is shared by the turn that is running, not by the turn after it: the frame naming one
  *  arrives while the reply is still being written, and the row goes up then. What keeps it off the
  *  next turn is the store dropping the list at the send, which the test below pins. */
