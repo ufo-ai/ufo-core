@@ -135,8 +135,17 @@ async def test_the_catalog_gives_a_member_their_own_agents_and_an_admin_all(db: 
                     "created_at": datetime(2026, 7, 9, tzinfo=UTC),
                     "updated_at": datetime(2026, 7, 9, tzinfo=UTC),
                 }
-                for name, owner in (("mine", mine), ("theirs", uuid4()))
+                for name, owner in (("mine", mine), ("theirs", uuid4()), ("retired", mine))
             ],
+        )
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name="~archived-retired",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.name == "retired")
         )
     registry = SubagentRegistry(CORE_SUBAGENT_PROFILES)
     with ws(workspace_id):
@@ -145,9 +154,11 @@ async def test_the_catalog_gives_a_member_their_own_agents_and_an_admin_all(db: 
 
     assert "`mine`" in member_view.instructions
     assert "theirs" not in member_view.instructions
+    assert "retired" not in member_view.instructions
     assert "shared" not in member_view.instructions
     for name in ("mine", "theirs", "shared"):
         assert f"`{name}`" in admin_view.instructions
+    assert "retired" not in admin_view.instructions
 
 
 async def test_the_catalog_stands_on_its_own_in_the_index(db: None) -> None:

@@ -460,6 +460,35 @@ class ChangedPage:
     digest: str
 
 
+def _readers_remain() -> sa.ColumnElement[bool]:
+    """A correlated predicate on `source`: the archive has not taken every agent that reads it.
+    A source whose grantees are all archived costs a fetch, a page write and the model tokens its
+    facts are extracted with, for a feed no turn can reach — so it waits for a restore. A source
+    nobody was granted is a different row with a different history, and syncs as it always did."""
+    granted = sa.select(sa.literal(1)).where(
+        tables.source_grant.c.workspace_id == tables.source.c.workspace_id,
+        tables.source_grant.c.source_id == tables.source.c.id,
+    )
+    granted_to_a_live_agent = (
+        sa.select(sa.literal(1))
+        .select_from(
+            tables.source_grant.join(
+                tables.agent,
+                sa.and_(
+                    tables.agent.c.workspace_id == tables.source_grant.c.workspace_id,
+                    tables.agent.c.id == tables.source_grant.c.agent_id,
+                ),
+            )
+        )
+        .where(
+            tables.source_grant.c.workspace_id == tables.source.c.workspace_id,
+            tables.source_grant.c.source_id == tables.source.c.id,
+            tables.agent.c.archived_at.is_(None),
+        )
+    )
+    return sa.or_(~sa.exists(granted), sa.exists(granted_to_a_live_agent))
+
+
 @dataclass(frozen=True)
 class SyncDriver:
     """The core sync job: for the workspace the dispatcher bound, claim its due sources, fetch each
@@ -467,7 +496,9 @@ class SyncDriver:
     downward — claim, fetch, commit — one source at a time, so a slow backend never blocks the run.
     `candidate_workspaces` names the workspaces holding a due source through one `owner_tx` read, so
     the dispatcher binds only those and a workspace with nothing due is never opened. On a
-    per-tenant deploy `owner_tx` resolves to the single workspace, unchanged."""
+    per-tenant deploy `owner_tx` resolves to the single workspace, unchanged. Due means readable
+    too: a source the archive took every reader from is nobody's feed, so it is neither a candidate
+    nor claimed until a restore gives it one back."""
 
     backends: Mapping[str, SourceBackend]
     blob: WorkspaceBlobStore
@@ -491,6 +522,7 @@ class SyncDriver:
                             tables.source.c.claimed_by.is_(None),
                             tables.source.c.claim_expires_at < now,
                         ),
+                        _readers_remain(),
                     )
                     .distinct()
                 )
@@ -539,6 +571,7 @@ class SyncDriver:
                     tables.source.c.claimed_by.is_(None),
                     tables.source.c.claim_expires_at < now,
                 ),
+                _readers_remain(),
             )
             .limit(DUE_BATCH_MAX_SOURCES)
         )

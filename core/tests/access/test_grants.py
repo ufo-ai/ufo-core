@@ -2236,3 +2236,41 @@ async def test_connecting_for_an_unknown_agent_is_refused(db: None) -> None:
                 provider="stub", agent="absent", user_description="connecting their account"
             ),
         )
+
+
+async def test_a_grant_refuses_an_archived_app_name(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, main_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).values(is_main=True).where(tables.agent.c.id == main_id)
+        )
+    retired = await _agent(workspace_id, "notes")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{retired}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == retired)
+        )
+    install_connect_flow(
+        ConnectFlow(
+            providers={"stub": StubProvider()},
+            fernet=Fernet(Fernet.generate_key()),
+            store=GrantStore(),
+            redirect_uri=REDIRECT_URI,
+        )
+    )
+    ctx = _turn_context(workspace_id, main_id, conversation_id, member_id)
+
+    with pytest.raises(ValueError, match="no agent named"):
+        await connect_account_handler(
+            ctx,
+            ConnectAccountInput(
+                provider="stub", agent="notes", user_description="connecting their account"
+            ),
+        )

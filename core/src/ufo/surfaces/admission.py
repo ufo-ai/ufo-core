@@ -52,6 +52,7 @@ from opentelemetry.trace import SpanKind
 
 from ufo.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
 from ufo.db import workspace_tx
+from ufo.ext.context import AgentArchived
 from ufo.ext.surface import Admitted, conversation_name
 from ufo.o11y import current_traceparent, log, span
 from ufo.schema import tables
@@ -85,6 +86,9 @@ CANCELLED: TerminalStatus = "cancelled"
 
 class _SupersededByMember(Exception):
     pass
+
+
+ARCHIVED_REFUSAL_MESSAGE = "This app is archived. Restore it from Applications to use it again."
 
 
 def _refused(
@@ -237,9 +241,13 @@ class Admission:
         nothing will answer it, so an unseated member or a breached cap cannot end someone else's
         wait by arriving beside it. A message a hook denied at drain time does still count, because
         the wait ends where the message is admitted and this gate runs before any hook can see it.
-        Nothing is written on the refusal. Only a caller passing these can be answered None, and a
-        redelivery under an idempotency key that already admitted keeps answering its turn rather
-        than flipping to the refusal."""
+        Nothing is written on the refusal, and a redelivery under an idempotency key that already
+        admitted keeps answering its turn rather than flipping to the refusal.
+
+        None means one thing: a member spoke past a watermark the caller passed, so the wait this
+        invocation served is over and the caller's row is done. An archived agent raises
+        `AgentArchived` instead, because its work is owed rather than over — the caller leaves its
+        row alone and a restore runs it."""
         try:
             admitted = await self._admit(
                 workspace_id,
@@ -291,6 +299,13 @@ class Admission:
                         tables.conversation.c.member_id,
                         tables.conversation.c.surface,
                         tables.conversation.c.agent_id,
+                        sa.select(tables.agent.c.archived_at)
+                        .where(
+                            tables.agent.c.workspace_id == workspace_id,
+                            tables.agent.c.id == tables.conversation.c.agent_id,
+                        )
+                        .scalar_subquery()
+                        .label("archived_at"),
                     )
                     .where(tables.conversation.c.id == conversation_id)
                     .with_for_update()
@@ -299,6 +314,9 @@ class Admission:
             if asserted_agent_id is not None and asserted_agent_id != conversation.agent_id:
                 raise ValueError("conversation is bound to another agent")
             agent_id = conversation.agent_id
+            archived = conversation.archived_at is not None
+            if archived and not member_admission:
+                raise AgentArchived(ARCHIVED_REFUSAL_MESSAGE)
             if speaker_member_id is not None:
                 speaker = (
                     await connection.execute(
@@ -473,6 +491,7 @@ class Admission:
                 )
                 fold_admitted = (
                     live_turn is not None
+                    and not archived
                     and (
                         await seats.admits(connection, speaker_member_id)
                         if speaker_member_id is not None
@@ -589,7 +608,9 @@ class Admission:
                 )
                 gate = gate_member(speaker_member_id, on_behalf_of_member_id)
                 terminal: TerminalFrame | None
-                if gate is None and member_admission:
+                if archived:
+                    status, terminal = _refused(holds_work_already_done, ARCHIVED_REFUSAL_MESSAGE)
+                elif gate is None and member_admission:
                     status, terminal = (
                         CANCELLED,
                         TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE),

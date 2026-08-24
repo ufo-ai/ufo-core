@@ -315,7 +315,7 @@ class OnboardControl:
                         updated_at=sa.func.now(),
                     )
                     .on_conflict_do_nothing(
-                        index_elements=[tables.agent.c.workspace_id, tables.agent.c.name]
+                        index_elements=[tables.agent.c.workspace_id, tables.agent.c.name],
                     )
                 )
                 if founded and await credit(

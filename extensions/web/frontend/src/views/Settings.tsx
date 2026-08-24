@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts, Group } from "@/components/ui/facts";
 import { Field, Hint, Textarea } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
@@ -36,6 +36,7 @@ type SettingsPayload = {
     name: string;
     main: boolean;
     surfaces: string[];
+    archivable: boolean;
     updated_at: string;
     prompt: string;
     prompt_digest: string;
@@ -48,7 +49,7 @@ type SettingsPayload = {
   audience?: string[] | null;
 };
 
-export function Settings({ agent }: { agent: Agent }) {
+export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () => void }) {
   const [reloads, setReloads] = useState(0);
   const state = usePanelRead<SettingsPayload>("/agents/" + agent.id + "/settings", reloads);
   const [values, setValues] = useState<Record<string, SpecValue>>({});
@@ -146,6 +147,22 @@ export function Settings({ agent }: { agent: Agent }) {
             promptSaved.current = prompt;
             setReloads((count) => count + 1);
           }
+        }
+
+        async function archive() {
+          if (busy) return;
+          setBusy(true);
+          const outcome = await postIntent(agent.id, {
+            verb: "delete",
+            kind: "agent",
+            name: ready.agent.name,
+          });
+          setBusy(false);
+          if (outcome.applied) {
+            onArchived();
+            return;
+          }
+          setNotice(outcomeNotice(outcome));
         }
 
         async function saveIcon(event: FormEvent) {
@@ -357,6 +374,17 @@ export function Settings({ agent }: { agent: Agent }) {
                 </Reveal>
               )}
             </Group>
+            {ready.agent.archivable ? (
+              <Group title="Archive">
+                <Hint className="m-0">
+                  The app stops and releases its name. Its conversations, tasks, and connected
+                  accounts stay.
+                </Hint>
+                <div className="mt-lg flex justify-end">
+                  <ConfirmButton verb="Archive" variant="row" busy={busy} onClick={archive} />
+                </div>
+              </Group>
+            ) : null}
           </>
         );
       }}

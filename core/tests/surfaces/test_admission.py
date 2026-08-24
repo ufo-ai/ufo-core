@@ -10,12 +10,13 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from ufo import o11y
 from ufo.db import workspace_tx
+from ufo.ext.context import AgentArchived
 from ufo.ext.surface import Admitted, fence_member_message, mint_marker
 from ufo.loop.engine import _claim_turn
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame, TurnContext
 from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
-from ufo.surfaces.admission import Admission
+from ufo.surfaces.admission import ARCHIVED_REFUSAL_MESSAGE, Admission
 
 
 @dataclass
@@ -1416,3 +1417,103 @@ async def test_member_admission_stores_its_trace_for_the_turn_span(db: None, mon
         ).scalar_one()
     admission = next(s for s in exporter.get_finished_spans() if s.name == "admission")
     assert stored.split("-")[1] == format(admission.context.trace_id, "032x")
+
+
+async def test_an_archived_app_refuses_a_member_and_raises_for_work_fired_by_a_clock(
+    db: None,
+) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{agent_id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == agent_id)
+        )
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset({"cli"}))
+
+    admitted = await admission.admit_member(workspace_id, conversation_id, "hi", member_id)
+
+    status, text = await _turn_row(admitted.turn_id)
+    assert (status, text) == ("cancelled", ARCHIVED_REFUSAL_MESSAGE)
+    assert dbos.enqueued == []
+    async with workspace_tx() as connection:
+        writebacks = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.writeback)
+                .where(tables.writeback.c.turn_id == admitted.turn_id)
+            )
+        ).scalar_one()
+    assert writebacks == 1
+
+    with pytest.raises(AgentArchived):
+        await admission.invoke(workspace_id, conversation_id, agent_id, "scheduled fire")
+    assert dbos.enqueued == []
+    assert await _turn_count(conversation_id) == 1
+
+
+async def test_a_message_left_by_a_stop_is_refused_by_an_app_archived_under_it(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    running = await admission.admit_member(workspace_id, conversation_id, "do the thing", member_id)
+    await admission.admit_member(
+        workspace_id, conversation_id, "and this too", member_id, idempotency_key="send-1"
+    )
+    await _cancel_turn_row(running.turn_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{agent_id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == agent_id)
+        )
+
+    founded = await admission.redispatch(workspace_id, conversation_id)
+
+    assert founded is None
+    async with workspace_tx() as connection:
+        newest = (
+            await connection.execute(
+                sa.select(tables.turn.c.id)
+                .where(tables.turn.c.conversation_id == conversation_id)
+                .order_by(tables.turn.c.seq.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+    assert await _turn_row(newest) == ("cancelled", ARCHIVED_REFUSAL_MESSAGE)
+
+
+async def test_a_message_to_an_archived_app_is_refused_beside_a_live_turn_rather_than_folded(
+    db: None,
+) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    live = await admission.admit_member(workspace_id, conversation_id, "do the thing", member_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{agent_id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == agent_id)
+        )
+
+    second = await admission.admit_member(workspace_id, conversation_id, "and this too", member_id)
+
+    assert second.turn_id != live.turn_id
+    assert second.arrival_id is None
+    assert await _turn_row(second.turn_id) == ("cancelled", ARCHIVED_REFUSAL_MESSAGE)
+    assert await _turn_row(live.turn_id) == ("queued", None)
+    assert dbos.enqueued == [str(live.turn_id)]

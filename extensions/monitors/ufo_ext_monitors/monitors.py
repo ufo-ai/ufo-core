@@ -19,7 +19,7 @@ import sqlalchemy as sa
 from pydantic import JsonValue
 
 from ufo.sdk.context import ExtensionContext
-from ufo.sdk.jobs import WorkspaceCandidates, owner_candidates
+from ufo.sdk.jobs import WorkspaceCandidates, agent_is_live, owner_candidates
 
 MONITOR_KIND = "monitor"
 ARMED_MAX = 5
@@ -185,7 +185,15 @@ def due_monitor_workspaces() -> WorkspaceCandidates:
 
     def due() -> sa.Select[tuple[UUID]]:
         now = datetime.now(UTC)
-        return sa.select(monitor.c.workspace_id).where(_claim_available(now), _due(now)).distinct()
+        return (
+            sa.select(monitor.c.workspace_id)
+            .where(
+                _claim_available(now),
+                _due(now),
+                agent_is_live(monitor.c.workspace_id, monitor.c.agent_id),
+            )
+            .distinct()
+        )
 
     return owner_candidates(due)
 
@@ -272,7 +280,12 @@ class MonitorStore:
         due = _due(now)
         selected = (
             sa.select(monitor.c.id)
-            .where(monitor.c.workspace_id == self.ctx.workspace_id, due, claim_available)
+            .where(
+                monitor.c.workspace_id == self.ctx.workspace_id,
+                due,
+                claim_available,
+                agent_is_live(monitor.c.workspace_id, monitor.c.agent_id),
+            )
             .order_by(monitor.c.next_probe_at, monitor.c.id)
             .limit(limit)
             .with_for_update(skip_locked=True)

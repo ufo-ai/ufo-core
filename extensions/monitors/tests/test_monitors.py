@@ -35,6 +35,7 @@ from ufo_ext_monitors.monitors import (
     Monitor,
     MonitorStore,
     capped,
+    due_monitor_workspaces,
     qualified_name,
     stderr_tail,
 )
@@ -946,3 +947,54 @@ async def test_a_revoked_seat_stops_the_watch_acting_as_that_member(
     assert (row["probes_run"], row["skipped"], row["quiet_streak"]) == (0, 1, 0)
     assert row["claimed_by"] is None
     assert turns == []
+
+
+async def test_a_watch_on_an_archived_app_sleeps_on_its_row_instead_of_retiring(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, agent_id, conversation_id, member_id = await _seed()
+    ctx = await _tool_ctx(
+        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
+    )
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    runner_ctx = _runner_ctx(invoker, tmp_path)
+    with ws(workspace_id), agent(agent_id):
+        await monitor(ctx, _input("ci-run", ALPHA))
+        [row] = await _rows(workspace_id)
+        await _overdue(row["id"])
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(
+                    name=f"~archived-{agent_id}",
+                    archived_name=tables.agent.c.name,
+                    archived_at=sa.func.now(),
+                )
+                .where(tables.agent.c.id == agent_id)
+            )
+        assert workspace_id not in await due_monitor_workspaces()()
+        assert await MonitorStore(runner_ctx).claim_due(datetime.now(UTC), 300) == ()
+        await MonitorRunner(ctx=runner_ctx).run()
+        remaining = await _rows(workspace_id)
+        turns = await _turns(conversation_id)
+        assert dbos.enqueued == []
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(name=tables.agent.c.archived_name, archived_name=None, archived_at=None)
+                .where(tables.agent.c.id == agent_id)
+            )
+        assert workspace_id in await due_monitor_workspaces()()
+        await MonitorRunner(ctx=runner_ctx).run()
+        restored = await _rows(workspace_id)
+        restored_turns = await _turns(conversation_id)
+
+    assert [held["name"] for held in remaining] == [qualified_name(conversation_id, "ci-run")]
+    assert turns == []
+    assert restored == []
+    assert len(restored_turns) == 1
+    assert len(dbos.enqueued) == 1

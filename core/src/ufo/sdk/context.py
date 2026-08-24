@@ -7,6 +7,9 @@ from ufo.agent_scope import (
     agent_current as agent_current,
 )
 from ufo.ext.context import (
+    AgentArchived as AgentArchived,
+)
+from ufo.ext.context import (
     ConversationFacts as ConversationFacts,
 )
 from ufo.ext.context import (

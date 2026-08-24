@@ -1158,12 +1158,13 @@ class ObjectVerbs:
             raise ValueError(
                 f"object kind {bound.kind.name!r} rejects an agent target for this verb"
             )
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         async with workspace_tx() as connection:
             current = (
                 await connection.execute(
                     sa.select(
                         tables.agent.c.id,
-                        tables.agent.c.name,
+                        member_name.label("name"),
                         tables.agent.c.is_main,
                     ).where(
                         tables.agent.c.workspace_id == ctx.turn.workspace_id,
@@ -1186,6 +1187,7 @@ class ObjectVerbs:
                     sa.select(tables.agent.c.id, tables.agent.c.name).where(
                         tables.agent.c.workspace_id == ctx.turn.workspace_id,
                         tables.agent.c.name == name,
+                        tables.agent.c.archived_at.is_(None),
                     )
                 )
             ).one_or_none()

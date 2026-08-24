@@ -51,7 +51,7 @@ Tables (all keyed by `workspace_id`, `created_at`, `updated_at`):
 | `workspace` | The team unit: name, config digest. Members are unlimited — one flat fee per workspace, nothing bounded or counted here. |
 | `member` | A human. `is_admin` grants workspace management to any number of members; onboarding makes the first member an admin, the last admin cannot be removed, and at least one seated admin remains able to act in chat. `seated_at` marks a member the agent answers: set by the row that creates them (the column's own default, so no creation path can mint a member the agent silently refuses), cleared only by an admin's revoke in chat, gated at admission and per round. `timezone` is the latest valid IANA zone received from chat metadata; UTC is the default for member-local jobs. Clearing the seat is the one way to remove a person's access, since the row is an identity and a memory subject that outlives it and the `member` kind refuses delete. Surface identities link here (Slack user id, CLI token, web session) — one human, many surfaces, one memory subject. |
 | `surface_installation` | A chat installation's unique external identity → workspace binding, bound to one agent — the agent every conversation the surface creates lands on (a new binding lands on the workspace's explicit main agent). Shared ingress uses it only to select a candidate credential, authenticates the original request bytes, then binds that workspace. |
-| `agent` | A configured agent: name, icon (one of the portal's own element marks, stamped at creation and re-picked by a member from the ordered set the picker offers whole; any other name still validates and still draws wherever a tabler outline mark answers it, so a row written before the pack keeps its mark), prompt, model policy, reasoning effort, sandbox size, granted tool set, skill packs, `use_workspace_skills` (whether its turns load the workspace's member-authored skill set), memory scope, and an optional raw-JSON-Schema I/O contract a spawn of it validates against (reference- and pattern-free — $ref and regular expressions are refused at the write — and unset means task in, result out). Any speaking member creates one and owns what they created; the owner or a workspace admin edits it, and an ownerless row — the main agent, a provisioned agent — answers to admins alone. Exactly one per workspace is `is_main`: onboarding creates it and unbound surfaces route to it. A row an extension shipped (`agents`, below) additionally records that extension, the name it declared, and the version that created the row. |
+| `agent` | A configured agent: name, icon (one of the portal's own element marks, stamped at creation and re-picked by a member from the ordered set the picker offers whole; any other name still validates and still draws wherever a tabler outline mark answers it, so a row written before the pack keeps its mark), prompt, model policy, reasoning effort, sandbox size, granted tool set, skill packs, `use_workspace_skills` (whether its turns load the workspace's member-authored skill set), memory scope, and an optional raw-JSON-Schema I/O contract a spawn of it validates against (reference- and pattern-free — $ref and regular expressions are refused at the write — and unset means task in, result out). Any speaking member creates one and owns what they created; the owner or a workspace admin edits it, and an ownerless row — the main agent, a provisioned agent — answers to admins alone. Exactly one per workspace is `is_main`: onboarding creates it and unbound surfaces route to it. `archived_at` retires an app: the row admits no turn, leaves every surface, and releases its workspace name. `archived_name` keeps the name a member saw while `name` moves the retired row outside the object-name grammar, so the full unique constraint stays valid. The main agent is held live by CHECK. A row an extension shipped (`agents`, below) additionally records that extension, the name it declared, and the version that created the row. |
 | `connection` | One member-owned broker account identity per `(workspace, provider, account)`. It holds no secret. `shared` controls disclosure and `account_label` names the account. `connect_account` creates or reuses it and refuses to reassign another member's account. Deleting it atomically stops its sources, tombstones their pages, and removes every connector grant. |
 | `connector_grant` | One connection → agent attachment. It records the granting conversation; sharing lives on the connection. `connect_account` creates the intended edge; applying the `connector_grant` object attaches a connection the workspace already holds — cross-agent from the main agent on a live member-requested call, so a held account reaches a new agent without another OAuth round trip — flips the connection's sharing flag, or revokes only the current agent's edge. Account resolution admits the exact acting member's private attachments plus shared connections, preferring private; egress remains agent-scoped. |
 | `source` | One member-owned, agent-neutral synced dataset. `shared` widens its member audience; it never grants an agent access. Sync uses the owner's connection independently of agent grants and stores one physical copy. |
@@ -737,11 +737,27 @@ agent kind writes the complete row directly, and the turn is the audit record. T
 administration view mutates through the lane as well: member role and seat changes through the
 member kind's guards, and web-audience grants riding the target agent's own lane to the same store
 the chat verbs write.
-Agent delete stays refused — the cascade over an agent's conversations, memory, and resources is
-unbuilt. A workspace-scoped view has no agent of its own, so its intents ride the main agent's
-lane — the agent every surface already routes an unbound member to: a source's resync, share, and
-remove; a memory correction; the radar's and the wiki's rebuilds; and a credential slot's set,
-replace, and clear. Setting a slot's
+Agent delete archives: the app stops, its record stays, and its name is available. Nothing is
+dropped — the conversations, spend, scheduled work, grants and connected accounts stay on the row,
+which is why the act is reversible and why no cascade over them is owed. A member's message founds
+a turn carrying the refusal, exactly as a cleared seat does, so they read it on whatever surface
+they said it on — the fold is closed too, so a message beside a live turn is refused rather than
+joining it. Work fired by a clock has nobody to tell and a row of its own to settle, so it raises
+`AgentArchived` instead: None already means a member ended the wait, which is what every runner
+retires its row on, and an archived app ends nothing. Each runner catches it and leaves its row
+where it is — a task keeps its occurrence, a pause and a watch stay armed, a spawned result stays
+pending — so a restore runs what was owed. A source is the one clock-fired cost with no turn to
+refuse: it belongs to the workspace and is reached through grants, so the sweep gates on its
+readers — a source the archive took every one of them from waits for a restore, its pages and
+their extracted facts being tokens spent on a feed nothing can read. The freed name is what takes the app out of the object
+namespace, so `restore_application` addresses the stable row by id — read from
+`object_list agent` under the `archived` filter — and names the app as it returns, since another
+app may hold the name it had.
+
+A workspace-scoped view has no agent of its own, so its intents ride the main agent's lane — the
+agent every surface already routes an unbound member to: a source's resync, share, and remove; a
+memory correction; the radar's and the wiki's rebuilds; and a credential slot's set, replace, and
+clear. Setting a slot's
 value is the one mutation whose payload never enters an intent: the intent asks for the same
 sealed `request_credentials` prompt a chat turn produces, and the value crosses only in that
 prompt's private fulfillment, so a secret reaches no turn, transcript, or intent response.

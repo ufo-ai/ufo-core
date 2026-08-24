@@ -194,6 +194,7 @@ def test_registry_schemas_cover_every_tool() -> None:
     schemas = REGISTRY.schemas()
     assert {schema.name for schema in schemas} == {
         "add_member",
+        "restore_application",
         "bash",
         "read",
         "write",

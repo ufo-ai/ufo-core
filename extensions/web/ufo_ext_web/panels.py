@@ -624,6 +624,12 @@ class AddMemberIntent(BaseModel):
     admin: bool = False
 
 
+class RestoreApplicationIntent(BaseModel):
+    verb: Literal["restore_application"]
+    app_id: UUID
+    name: str
+
+
 class PanelIntent(BaseModel):
     """What a panel form submits: the closed set of mutations a panel produces today."""
 
@@ -639,6 +645,7 @@ class PanelIntent(BaseModel):
         | PageFactRebuildIntent
         | PaymentMethodIntent
         | RefillIntent
+        | RestoreApplicationIntent
         | ToolingIntent
         | TranscriptIntent
     ) = Field(discriminator="verb")
@@ -657,6 +664,7 @@ def _tool_intent(
         | PageFactRebuildIntent
         | PaymentMethodIntent
         | RefillIntent
+        | RestoreApplicationIntent
         | ToolingIntent
         | TranscriptIntent
     ),
@@ -680,6 +688,15 @@ def _tool_intent(
                 input={
                     "action": "portal",
                     "user_description": "Open the billing portal from the billing screen.",
+                },
+            )
+        case RestoreApplicationIntent():
+            return ToolIntent(
+                tool="restore_application",
+                input={
+                    "app_id": str(submitted.app_id),
+                    "name": submitted.name,
+                    "user_description": f"Restore the app {submitted.name} from the portal.",
                 },
             )
         case TranscriptIntent():
@@ -1022,7 +1039,9 @@ def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
     return schema
 
 
-async def agent_settings(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) -> Response:
+async def agent_settings(
+    ctx: SurfaceContext, agent_id: UUID, *, admin: bool, archivable: bool
+) -> Response:
     """The settings projection: the agent's configuration and prompt digest, the deploy's public
     internet capability as the ceiling the agent setting narrows, the deploy's model ids for the
     model choice, the writable spec's own schema (the form renders its fields from it, never a
@@ -1043,6 +1062,7 @@ async def agent_settings(ctx: SurfaceContext, agent_id: UUID, *, admin: bool) ->
                 "prompt": detail.prompt,
                 "prompt_digest": detail.prompt_digest,
                 "surfaces": list(detail.surfaces),
+                "archivable": archivable,
                 "updated_at": detail.updated_at.isoformat(),
                 "setup": None if detail.setup is None else detail.setup.model_dump(mode="json"),
             },

@@ -615,6 +615,22 @@ def connection_workspaces() -> WorkspaceCandidates:
     return owner_candidates(with_a_main_agent_connection)
 
 
+def agent_is_live(
+    workspace_id: sa.ColumnElement[UUID], agent_id: sa.ColumnElement[UUID]
+) -> sa.ColumnElement[bool]:
+    """A correlated SQL predicate admitting only a live agent of its workspace, for a sweep that
+    does real work before it reaches the invoke seam. A sweep whose only act is the invoke needs
+    no such filter — the seam refuses it and the runner keeps its row — so this is for the ones
+    that would spend first and be refused after."""
+    return sa.exists(
+        sa.select(tables.agent.c.id).where(
+            tables.agent.c.workspace_id == workspace_id,
+            tables.agent.c.id == agent_id,
+            tables.agent.c.archived_at.is_(None),
+        )
+    )
+
+
 ANSWERED: TurnStatus = "done"
 
 
@@ -651,11 +667,15 @@ def untitled_conversation_workspaces() -> WorkspaceCandidates:
 
 def unseeded_agent_workspaces(extension: str, prefix: str) -> WorkspaceCandidates:
     """The candidate seam a once-per-agent sweep declares: the workspaces whose agents outnumber
-    the extension's `prefix` keys. The sweep writes one key per agent it settles and agent delete
-    is refused, so a workspace leaves this set exactly when every agent is settled — counted
-    rather than joined, because the key spells the agent id in Python's dashed form while the
-    column's SQL text differs by dialect. Core owns `agent` and `ext_store`, so it owns this
-    query — a workspace with nothing left to settle never fires the handler."""
+    the extension's `prefix` keys. The sweep writes one key per agent it settles, so a workspace
+    leaves this set exactly when every agent is settled — counted rather than joined, because the
+    key spells the agent id in Python's dashed form while the column's SQL text differs by dialect.
+    Both sides therefore count every agent the workspace holds, archived rows included: a key
+    already written for a row that was later archived would otherwise outnumber the live agents and
+    take the workspace out of this set for good, so the next app it creates would never be swept.
+    An archived agent is settled by the sweep like any other — marked rather than handed work.
+    Core owns `agent` and `ext_store`, so it owns this query — a workspace with nothing left to
+    settle never fires the handler."""
 
     def with_an_unsettled_agent() -> sa.Select[tuple[UUID]]:
         agents = (
@@ -675,6 +695,16 @@ def unseeded_agent_workspaces(extension: str, prefix: str) -> WorkspaceCandidate
         return sa.select(tables.workspace.c.id).where(agents > settled)
 
     return owner_candidates(with_an_unsettled_agent)
+
+
+class AgentArchived(ValueError):
+    """The turn's agent is archived, raised for work no member is waiting on. It is raised rather
+    than answered with None because None already means a member spoke first — a wait that ended,
+    which is why every clock-fired caller retires its row on it. An archived app ends no wait: its
+    row has work still owed, so the caller catches this and leaves the row where it is, and a
+    restore runs it. A member's own message never reaches here: it founds a turn carrying
+    `ARCHIVED_REFUSAL_MESSAGE`, the way a seat refusal does, so they read it wherever they said
+    it."""
 
 
 class TurnInvoker(Protocol):
@@ -975,6 +1005,7 @@ class WorkspaceAgent(BaseModel):
     owner_member_id: UUID | None = None
     tools: tuple[str, ...] | None = None
     provisioned_by: str | None = None
+    archived: bool = False
 
 
 class MemberContextRecord(BaseModel):
@@ -1115,18 +1146,22 @@ class ExtensionContext:
         return f"{base}/surface/{self.home_surface}{fragment}"
 
     async def workspace_agents(self) -> tuple[WorkspaceAgent, ...]:
-        """Every agent of the workspace with its owner, oldest first, for a first-party job."""
+        """Every agent of the workspace with its owner, oldest first, for a first-party sweep job.
+        Archived rows are here and carry `archived`, because a once-per-agent sweep settles every
+        row it counts — leaving one out would hold its workspace in the candidate set forever."""
         if not self.member_context_read_allowed:
             raise PermissionError("this extension cannot read the agent roster")
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(
                         tables.agent.c.id,
-                        tables.agent.c.name,
+                        member_name.label("name"),
                         tables.agent.c.owner_member_id,
                         tables.agent.c.tools,
                         tables.agent.c.provisioned_by,
+                        tables.agent.c.archived_at,
                     )
                     .where(tables.agent.c.workspace_id == self.workspace_id)
                     .order_by(tables.agent.c.created_at, tables.agent.c.id)
@@ -1139,6 +1174,7 @@ class ExtensionContext:
                 owner_member_id=row.owner_member_id,
                 tools=None if row.tools is None else tuple(row.tools),
                 provisioned_by=row.provisioned_by,
+                archived=row.archived_at is not None,
             )
             for row in rows
         )
@@ -1710,8 +1746,9 @@ class ExtensionContext:
         `unless_member_since` and `unless_member_arrival_since` — a pair, refused half-set —
         refuse the admission with None when a member turn past the turn watermark exists or a
         member arrival past the arrival watermark does (each watermark compares only its own
-        counter space) — None is reachable only for a caller that passed them. Fails loud when
-        no invoker is wired rather than silently dropping the invocation."""
+        counter space). An archived agent raises `AgentArchived` rather than answering None, which
+        means a member ended the wait: the caller catches it and leaves its row for a restore to
+        run. Fails loud when no invoker is wired rather than silently dropping the invocation."""
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(
@@ -1932,10 +1969,11 @@ class ExtensionContext:
         agent-scoped kind can link to the agent it belongs to. Reads the agent the caller bound,
         which is the turn's agent inside a turn and the agent a portal read names outside one."""
         scope = agent_current()
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         async with workspace_tx() as connection:
             return (
                 await connection.execute(
-                    sa.select(tables.agent.c.name).where(
+                    sa.select(member_name).where(
                         tables.agent.c.id == scope.agent_id,
                         tables.agent.c.workspace_id == scope.workspace_id,
                     )

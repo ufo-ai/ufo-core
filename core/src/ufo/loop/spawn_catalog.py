@@ -66,6 +66,7 @@ async def spawn_catalog_skill(registry: SubagentRegistry, member_id: UUID | None
                 sa.select(tables.agent.c.name, tables.agent.c.input_schema)
                 .where(
                     tables.agent.c.workspace_id == ws_current().workspace_id,
+                    tables.agent.c.archived_at.is_(None),
                     *(() if admin else (tables.agent.c.owner_member_id == member_id,)),
                 )
                 .order_by(tables.agent.c.name)

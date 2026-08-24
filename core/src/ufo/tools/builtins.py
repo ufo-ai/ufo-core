@@ -50,6 +50,7 @@ from pydantic import AfterValidator, BaseModel, Field
 from ufo.access.grants import installed_connect_flow
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.db import workspace_tx
+from ufo.kinds.agents import RESTORE_APPLICATION_TOOL_DEF
 from ufo.kinds.artifacts import artifact_object_names
 from ufo.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.media.artifact_url import (
@@ -1037,7 +1038,8 @@ async def _grantee_agent_id(ctx: ToolContext, name: str) -> UUID | None:
             row.name: row
             for row in await connection.execute(
                 sa.select(tables.agent.c.id, tables.agent.c.name, tables.agent.c.is_main).where(
-                    tables.agent.c.workspace_id == ctx.turn.workspace_id
+                    tables.agent.c.workspace_id == ctx.turn.workspace_id,
+                    tables.agent.c.archived_at.is_(None),
                 )
             )
         }
@@ -1138,6 +1140,7 @@ async def message_spawn_handler(ctx: ToolContext, args: MessageSpawnInput) -> To
 
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ADD_MEMBER_TOOL_DEF,
+    RESTORE_APPLICATION_TOOL_DEF,
     ToolDef(
         name="bash",
         description=(

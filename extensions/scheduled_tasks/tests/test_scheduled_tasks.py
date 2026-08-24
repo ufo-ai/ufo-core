@@ -3309,3 +3309,63 @@ async def test_a_conversation_holding_a_task_cannot_be_deleted(db: None) -> None
                     .values(conversation_id=uuid4())
                 )
         assert len(await store.list_reported()) == 1
+
+
+async def test_a_task_on_an_archived_app_keeps_its_occurrence_and_fails_no_tick(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    store = _store()
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    dbos = StubDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    runner_ctx = _runner_ctx(invoker)
+    with ws(workspace_id), agent(agent_id):
+        await store.create(
+            conversation_id,
+            "scheduled-daily",
+            DAILY_9AM,
+            "check inbox",
+            "check inbox",
+            due_at,
+            created_by_member_id=creator,
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(
+                    name=f"~archived-{agent_id}",
+                    archived_name=tables.agent.c.name,
+                    archived_at=sa.func.now(),
+                )
+                .where(tables.agent.c.id == agent_id)
+            )
+
+        await ScheduledTaskRunner(ctx=runner_ctx).run()
+
+        assert await _turns(conversation_id) == []
+        assert dbos.enqueued == []
+        [held] = await store.list()
+        assert held.last_run_at is None
+        assert held.next_run_at == due_at
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(name=tables.agent.c.archived_name, archived_name=None, archived_at=None)
+                .where(tables.agent.c.id == agent_id)
+            )
+            # The refused fire left the claim it took, which the lease clears in its own time.
+            await connection.execute(
+                sa.update(schedule_table).values(claimed_by=None, claim_expires_at=None)
+            )
+        assert workspace_id in await due_task_workspaces()()
+        await ScheduledTaskRunner(ctx=runner_ctx).run()
+        [restored] = await store.list()
+        restored_turns = await _turns(conversation_id)
+
+    assert len(restored_turns) == 1
+    assert restored.last_run_at is not None
+    assert restored.last_run_at > due_at
+    assert restored.next_run_at > restored.last_run_at

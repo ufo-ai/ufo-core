@@ -4,11 +4,15 @@ The spec holds the prompt, model, reasoning effort, sandbox size, public-interne
 workspace-skill use, portal visibility, icon, and the optional I/O contract a spawn of the agent
 validates against.
 `object_apply` is their one member write path. Any speaking member creates agents and owns the
-ones they created; an owner or a workspace admin edits, and an ownerless row — the main agent, a
+ones they created; an owner or a workspace admin edits, and an ownerless row — the main agent or a
 provisioned agent — answers to admins alone. Create never copies grants, credentials, sources, or
-derived data. Delete raises; a mutation by anyone else raises `AdminRequired`."""
+derived data. A mutation by anyone else raises `AdminRequired`.
 
-from dataclasses import dataclass
+Delete archives: the row leaves the live namespace and releases the name it held, keeping the
+app's conversations, spend and grants as the record of what it did. `restore_application` brings
+the same row back by id. The main agent answers every member, so it is not archivable."""
+
+from dataclasses import dataclass, replace
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -19,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from ufo.db import workspace_tx
 from ufo.ext.context import JsonValue
 from ufo.models.interface import AUTO_MODEL
-from ufo.object_name import ObjectRef
+from ufo.object_name import ObjectRef, validate_object_name
 from ufo.objects import (
     AdminRequired,
     ObjectDetail,
@@ -43,16 +47,21 @@ from ufo.schema.records import (
     TablerIcon,
     auto_agent_icon,
 )
-from ufo.tools.context import ToolContext
+from ufo.tools.context import TextContent, ToolContext, ToolResult
+from ufo.tools.registry import ToolDef
 from ufo.turns.contracts import check_declared_schema
 from ufo.workspace import ws_current
 
 AGENT_KIND = "agent"
-AGENT_UNDELETABLE = "agents cannot be deleted through objects"
+RESTORE_APPLICATION_TOOL = "restore_application"
+MAIN_AGENT_UNARCHIVABLE = "the main agent answers every member; it cannot be archived"
+AGENT_ARCHIVE_GATE = "archiving an agent requires its owner or a workspace admin"
+AGENT_RESTORE_GATE = "restoring an agent requires its owner or a workspace admin"
 AGENT_EDIT_GATE = "editing an agent requires its owner or a workspace admin"
 AGENT_CREATE_GATE = "creating an agent requires a speaking member"
 AGENT_PROMPT_REQUIRED = "creating an agent requires a prompt"
 MAIN_AGENT_STAYS_WORKSPACE = "the main agent answers every member; its visibility cannot change"
+ARCHIVED_AGENT_NAME_PREFIX = "~archived-"
 
 
 def _effective_model(ctx: ToolContext, stored: str) -> str:
@@ -171,34 +180,52 @@ def _known_model(ctx: ToolContext, model: str, reasoning: ReasoningEffort) -> No
         raise ValueError(f"model {resolved!r} requires reasoning when reasoning is 'off'")
 
 
+def _agent_summary(ctx: ToolContext, row: sa.Row) -> str:
+    model = _effective_model(ctx, row.model)
+    if row.archived_at is not None:
+        return f"archived {row.archived_at:%d %b %Y}, was on {model}"
+    internet = "allowed" if row.internet_access_allowed else "blocked"
+    return f"{'main agent' if row.is_main else 'agent'}, on {model}, public internet {internet}"
+
+
 @dataclass(frozen=True)
 class AgentObjects:
     """Owner-gated handlers over the complete `agent` row: the owner or an admin writes, and an
     ownerless row (main, provisioned) answers to admins alone."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
+        """The workspace's live agents, and its archived ones for a caller that asks for them by
+        filter. Archived rows carry the stable `id` a restore addresses."""
+        if "archived" not in query.filters:
+            query = replace(query, filters={**query.filters, "archived": False})
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(
-                        tables.agent.c.name,
+                        tables.agent.c.id,
+                        member_name.label("name"),
                         tables.agent.c.model,
                         tables.agent.c.is_main,
                         tables.agent.c.internet_access_allowed,
+                        tables.agent.c.archived_at,
                     )
                     .where(tables.agent.c.workspace_id == ws_current().workspace_id)
-                    .order_by(tables.agent.c.name)
+                    .order_by(member_name)
                 )
             ).all()
         return object_page(
             rows=tuple(
                 ObjectRow(
                     name=row.name,
-                    summary=(
-                        f"{'main agent' if row.is_main else 'agent'}, "
-                        f"on {_effective_model(ctx, row.model)}, public "
-                        f"internet {'allowed' if row.internet_access_allowed else 'blocked'}"
-                    ),
+                    summary=_agent_summary(ctx, row),
+                    fields={
+                        "id": str(row.id),
+                        "archived": row.archived_at is not None,
+                        "archived_at": (
+                            None if row.archived_at is None else row.archived_at.isoformat()
+                        ),
+                    },
                 )
                 for row in rows
             ),
@@ -400,7 +427,32 @@ class AgentObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
-        raise VerbNotSupported(AGENT_UNDELETABLE)
+        """Archive the app: it admits no further turn, leaves the portal, and releases its name.
+        What it did stays — its conversations, spend and grants are the record, and a restore
+        reaches all of it. A turn already running finishes; nothing new founds one."""
+        row = await self._row(name)
+        if row is None:
+            raise UnknownObject(f"no agent object named {name!r}")
+        if row.is_main:
+            raise VerbNotSupported(MAIN_AGENT_UNARCHIVABLE)
+        owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
+        if not owned and not await ctx.speaker_is_admin():
+            raise AdminRequired(AGENT_ARCHIVE_GATE)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(
+                    name=f"{ARCHIVED_AGENT_NAME_PREFIX}{row.id}",
+                    archived_name=row.name,
+                    archived_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.agent.c.workspace_id == ws_current().workspace_id,
+                    tables.agent.c.id == row.id,
+                    tables.agent.c.archived_at.is_(None),
+                )
+            )
 
     async def _row(self, name: str) -> sa.Row | None:
         main = tables.agent.alias("main_agent")
@@ -410,6 +462,7 @@ class AgentObjects:
                     sa.select(
                         tables.agent.c.prompt,
                         tables.agent.c.id,
+                        tables.agent.c.name,
                         tables.agent.c.model,
                         tables.agent.c.is_main,
                         tables.agent.c.internet_access_allowed,
@@ -437,9 +490,97 @@ class AgentObjects:
                     ).where(
                         tables.agent.c.workspace_id == ws_current().workspace_id,
                         tables.agent.c.name == name,
+                        tables.agent.c.archived_at.is_(None),
                     )
                 )
             ).one_or_none()
+
+
+class RestoreApplicationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    app_id: str = Field(
+        description=(
+            "The archived app's id, read from object_list on the agent kind with the filter "
+            '{"archived": true}. The id remains stable when the app is restored.'
+        )
+    )
+    name: str = Field(
+        description=(
+            "The name the app takes as it comes back. Pass the name it held, or another name "
+            "when a live app holds that one."
+        )
+    )
+    user_description: str = Field(
+        description="Which app you are restoring, in plain language for the activity timeline."
+    )
+
+
+@dataclass(frozen=True)
+class RestoreApplication:
+    async def restore(self, ctx: ToolContext, args: RestoreApplicationInput) -> ToolResult:
+        if ctx.speaker_member_id is None:
+            raise AdminRequired(AGENT_RESTORE_GATE)
+        try:
+            app_id = UUID(args.app_id)
+        except ValueError as error:
+            raise ValueError(f"{args.app_id!r} is not an app id") from error
+        validate_object_name(args.name)
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.agent.c.owner_member_id).where(
+                        tables.agent.c.workspace_id == ws_current().workspace_id,
+                        tables.agent.c.id == app_id,
+                        tables.agent.c.archived_at.is_not(None),
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            raise UnknownObject(f"no archived app with id {args.app_id!r}")
+        owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
+        if not owned and not await ctx.speaker_is_admin():
+            raise AdminRequired(AGENT_RESTORE_GATE)
+        async with workspace_tx() as connection:
+            try:
+                restored = (
+                    await connection.execute(
+                        sa.update(tables.agent)
+                        .values(
+                            name=args.name,
+                            archived_name=None,
+                            archived_at=None,
+                            updated_at=sa.func.now(),
+                        )
+                        .where(
+                            tables.agent.c.workspace_id == ws_current().workspace_id,
+                            tables.agent.c.id == app_id,
+                            tables.agent.c.archived_at.is_not(None),
+                        )
+                        .returning(tables.agent.c.id)
+                    )
+                ).scalar_one_or_none()
+            except IntegrityError as error:
+                raise ValueError(f"an agent named {args.name!r} already exists") from error
+        if restored is None:
+            raise UnknownObject(f"no archived app with id {args.app_id!r}")
+        return ToolResult(
+            content=(TextContent(text=f"{args.name} is live again. Its next turn runs it."),)
+        )
+
+
+RESTORE_APPLICATION_TOOL_DEF = ToolDef(
+    name=RESTORE_APPLICATION_TOOL,
+    description=(
+        "Bring an archived app back, under the name it held or another one. Its conversations, "
+        "scheduled tasks, connected accounts and grants come back with it. Only the app's owner "
+        "or a workspace admin may restore it. Read the archived apps, and the id this takes, from "
+        'object_list on the agent kind with the filter {"archived": true}.'
+    ),
+    input_model=RestoreApplicationInput,
+    handler=RestoreApplication().restore,
+    side_effecting=True,
+    parallel_safe=True,
+)
 
 
 AGENT_OBJECT = ObjectKind(
@@ -448,7 +589,8 @@ AGENT_OBJECT = ObjectKind(
         "A workspace agent: its prompt, model, reasoning effort, public-internet policy, "
         "workspace-skill use, portal visibility, icon, and the I/O contract a spawn of it "
         "validates against — readable by all members, creatable by any member, updatable by "
-        "its owner or a workspace admin. It cannot be deleted through objects."
+        "its owner or a workspace admin. Delete archives it: the app stops, its record stays, "
+        "and its name becomes available."
     ),
     guidance=(
         "A workspace agent as an object. Any member may create one and owns what they created; "
@@ -472,9 +614,16 @@ AGENT_OBJECT = ObjectKind(
         "out. Applying a name no agent holds "
         "creates one — the spec then requires `prompt`; a new "
         "agent starts empty, inheriting no grants, credentials, sources, or memory. A child's "
-        "`scoped_to` link names the main agent it runs under. Delete is refused. Confirm before "
-        "changing settings."
+        "`scoped_to` link names the main agent it runs under. Delete archives the app: it admits "
+        "no further turn, leaves the member portal, and releases its name, while "
+        "its "
+        "conversations, scheduled tasks, connected accounts and grants stay on the row. A turn "
+        "already running finishes. The main agent is not archivable. List the archived apps with "
+        'the filter {"archived": true}, which carries '
+        f"each one's id, and {RESTORE_APPLICATION_TOOL} brings one back under an available name. "
+        "Confirm before changing settings, and before archiving."
     ),
     spec_model=AgentSpec,
     store=AgentObjects(),
+    list_fields=frozenset({"id", "archived", "archived_at"}),
 )

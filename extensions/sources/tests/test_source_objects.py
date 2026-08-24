@@ -2917,3 +2917,28 @@ async def test_alert_skipped_when_only_member_private_changes(db: None) -> None:
         private = _change(source_id, "# secret", subject=member_subject(state.member_id))
         await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=(private,))))
         assert await _turns(state.conversation_id) == []
+
+
+async def test_a_trigger_on_an_archived_app_alerts_nothing_and_stops_no_batch(db: None) -> None:
+    state = await _workspace()
+    name, source_id = await _register(state, subject=SHARED_SUBJECT, owner=state.owner_id)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state, None), _trigger_manifest(name, state.conversation_id))
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(
+                    name=f"~archived-{state.agent_id}",
+                    archived_name=tables.agent.c.name,
+                    is_main=False,
+                    archived_at=sa.func.now(),
+                )
+                .where(tables.agent.c.id == state.agent_id)
+            )
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        batch = PageChangeBatch(changes=(_change(source_id, "# asana tasks: Ship it"),))
+
+        await on_page_change(HookContext(ext=ext, payload=batch))
+
+        assert await _turns(state.conversation_id) == []
+        assert [trigger.id for trigger in await SourceTriggerStore(ext).waking(name)]

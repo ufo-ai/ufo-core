@@ -840,6 +840,36 @@ async def test_connection_pool_visibility_and_agent_names(db: None, tmp_path) ->
     assert admin_view[0].agents[0].name == "assistant"
 
 
+async def test_an_archived_holder_leaves_the_connection_pool_but_the_connection_stays(
+    db: None, tmp_path
+) -> None:
+    """The panel's Revoke posts a detach on every holder this read names, and an archived app
+    refuses the turn that would carry it, which stops the sweep before the live holders behind it.
+    The connection itself still lists, held by nobody until a restore."""
+    workspace_id, _main_id, owner = await _seed(member_email="owner@example.com")
+    holder_id = await _seed_agent(workspace_id, "ops")
+    await _seed_connection(workspace_id, holder_id, owner, "asana", shared=True)
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert [
+        holder.name for holder in (await context.list_connections(owner, admin=True))[0].agents
+    ] == ["ops"]
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{holder_id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == holder_id)
+        )
+    held = await context.list_connections(owner, admin=True)
+
+    assert [row.provider for row in held] == ["asana"]
+    assert held[0].agents == ()
+
+
 async def test_github_coverage_projects_each_credential_leg(db: None, tmp_path) -> None:
     workspace_id, agent_id, owner = await _seed(member_email="owner@example.com")
     context = replace(

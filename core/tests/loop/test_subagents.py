@@ -2129,6 +2129,27 @@ async def test_spawn_agent_target_runs_as_that_agent_in_its_own_sandbox(
     assert conversation.sandbox_conversation_id is None
 
 
+async def test_spawn_refuses_an_archived_agent_target(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    specialist_id = await _specialist(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{specialist_id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == specialist_id)
+        )
+    spawner = _spawner(workspace_id, await _parent(workspace_id, agent_id), "research")
+
+    with pytest.raises(UnknownSpawnTarget) as caught:
+        await spawner.spawn("support", {"task": "triage the outage"}, background=True)
+
+    assert "support" in str(caught.value)
+
+
 async def test_profile_spawn_stays_in_the_spawning_turns_sandbox(
     db: None, dbos_launched: Config
 ) -> None:

@@ -2,6 +2,7 @@ import { holdableTrack, unholdable } from "@/lib/tracks";
 
 export const WORKSPACE_TABS = [
   "team",
+  "apps",
   "skills",
   "memory",
   "sources",

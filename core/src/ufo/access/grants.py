@@ -1042,12 +1042,13 @@ async def workspace_grant_summaries(workspace_id: UUID) -> tuple[GrantSummary, .
 
 
 async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary, ...]:
+    member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
                 sa.select(
                     tables.connector_grant.c.id.label("grant_id"),
-                    tables.agent.c.name,
+                    member_name.label("name"),
                     tables.connection.c.provider,
                     tables.connection.c.account_id,
                     tables.connection.c.host,
@@ -1073,7 +1074,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
                     )
                 )
                 .where(scope)
-                .order_by(tables.connection.c.provider, tables.agent.c.name)
+                .order_by(tables.connection.c.provider, member_name)
             )
         ).all()
     return tuple(
@@ -1096,6 +1097,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
 
 async def connection_summaries() -> tuple[ConnectionSummary, ...]:
     """This workspace's member-owned connections, independent of the bound agent."""
+    member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -1110,7 +1112,7 @@ async def connection_summaries() -> tuple[ConnectionSummary, ...]:
                     tables.connection.c.conversation_id,
                     tables.connection.c.created_at,
                     tables.connection.c.updated_at,
-                    tables.agent.c.name,
+                    member_name.label("name"),
                 )
                 .select_from(
                     tables.connection.join(

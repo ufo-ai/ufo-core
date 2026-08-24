@@ -579,7 +579,10 @@ class Subagents:
             rows = (
                 await connection.execute(
                     sa.select(tables.agent.c.name)
-                    .where(tables.agent.c.workspace_id == self.parent.workspace_id)
+                    .where(
+                        tables.agent.c.workspace_id == self.parent.workspace_id,
+                        tables.agent.c.archived_at.is_(None),
+                    )
                     .order_by(tables.agent.c.name)
                 )
             ).all()
@@ -598,6 +601,7 @@ class Subagents:
                     ).where(
                         tables.agent.c.workspace_id == self.parent.workspace_id,
                         tables.agent.c.name == name,
+                        tables.agent.c.archived_at.is_(None),
                     )
                 )
             ).one_or_none()

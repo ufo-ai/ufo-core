@@ -62,8 +62,16 @@ export type Conversation = {
  *  since the pane it lands in names none. */
 export type OwnedConversation = Conversation & { agent: ConversationAgent };
 
+export type ArchivedApp = {
+  id: string;
+  name: string;
+  icon: string;
+  archived_at: string;
+};
+
 export type AgentsPayload = {
   agents: Agent[];
+  archived: ArchivedApp[];
   member: Member;
 };
 

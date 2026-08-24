@@ -133,10 +133,18 @@ agent = sa.Table(
     sa.Column("provisioned_name", sa.Text, nullable=True),
     sa.Column("provisioned_version", sa.Text, nullable=True),
     sa.Column("setup", sa.JSON, nullable=True),
+    sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("archived_name", sa.Text, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(
         "reasoning in ('auto', 'off', 'low', 'medium', 'high')", name="agent_reasoning"
+    ),
+    sa.CheckConstraint("archived_at is null or not is_main", name="agent_archive_scope"),
+    sa.CheckConstraint(
+        "(archived_at is null and archived_name is null) "
+        "or (archived_at is not null and archived_name is not null)",
+        name="agent_archived_name_state",
     ),
     sa.CheckConstraint("sandbox_size in ('small', 'medium', 'large')", name="agent_sandbox_size"),
     sa.CheckConstraint("visibility in ('private', 'workspace')", name="agent_visibility"),

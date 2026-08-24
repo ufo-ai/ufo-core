@@ -151,6 +151,40 @@ async def test_a_second_application_creates_nothing_and_edits_nothing(
     assert (unchanged.id, unchanged.updated_at) == (created.id, created.updated_at)
 
 
+async def test_an_archived_shipped_app_stays_archived_when_provisioning_runs_again(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert created is not None
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(
+                    name=f"~archived-{created.id}",
+                    archived_name=tables.agent.c.name,
+                    archived_at=sa.func.now(),
+                )
+                .where(tables.agent.c.id == created.id)
+            )
+
+    outcomes = await AgentProvisioning((sample.manifest(),)).apply(workspace_id)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            kept = (
+                await connection.execute(
+                    sa.select(tables.agent).where(tables.agent.c.id == created.id)
+                )
+            ).one()
+
+    assert [outcome.result for outcome in outcomes] == [PRESENT]
+    assert [outcome.name for outcome in outcomes] == [PROVISIONED_AGENT_NAME]
+    assert kept.id == created.id
+    assert kept.archived_at is not None
+
+
 async def test_two_executions_that_both_reach_the_insert_create_one_agent(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -558,6 +592,35 @@ async def test_the_shipped_agent_records_every_grant_it_still_needs(
     assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) == AgentSetup(
         connectors=(sample.CONNECTOR_PROVIDER,), instructions=sample.PROVISIONED_AGENT_SETUP
     )
+
+
+async def test_an_archived_app_drops_off_the_setup_roster(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An archived app admits no turn, so it can neither be asked for the grant it wants nor use
+    one. Left on the roster it would name the internal archive token, and the act it asks for —
+    `connect_account` against a live app — raises on a name no live app answers to, so the line
+    would stand for as long as the row is archived."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert created is not None
+    assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) is not None
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{created.id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == created.id)
+        )
+    with ws(workspace_id):
+        roster = await pending_setup()
+
+    assert roster == ()
 
 
 async def test_the_grant_a_member_makes_settles_its_need(

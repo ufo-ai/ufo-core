@@ -1123,6 +1123,7 @@ class SpendRollup:
         window = tables.ledger.c.workspace_id == self.workspace_id
         if cutoff is not None:
             window &= tables.ledger.c.created_at >= cutoff
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         total = int(
             (
                 await connection.execute(
@@ -1177,7 +1178,7 @@ class SpendRollup:
             for row in await connection.execute(
                 sa.select(
                     tables.turn.c.agent_id,
-                    tables.agent.c.name,
+                    member_name.label("name"),
                     _token_sum().label("tokens"),
                     _token_cost_sum().label("priced"),
                 )
@@ -1187,8 +1188,8 @@ class SpendRollup:
                     )
                 )
                 .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
-                .group_by(tables.turn.c.agent_id, tables.agent.c.name)
-                .order_by(tables.agent.c.name.nulls_last())
+                .group_by(tables.turn.c.agent_id, member_name)
+                .order_by(member_name.nulls_last())
             )
         )
         by_price_digest = tuple(

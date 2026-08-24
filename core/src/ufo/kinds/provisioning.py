@@ -59,10 +59,11 @@ class AgentProvisioning:
         self, workspace_id: UUID, manifest: Manifest, provision: AgentProvision
     ) -> ProvisionOutcome:
         extension = manifest.name
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         async with workspace_tx() as connection:
             shipped = (
                 await connection.execute(
-                    sa.select(tables.agent.c.name).where(
+                    sa.select(member_name.label("name")).where(
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.provisioned_by == extension,
                         tables.agent.c.provisioned_name == provision.name,
@@ -87,6 +88,7 @@ class AgentProvisioning:
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.name == provision.name,
                         tables.agent.c.provisioned_by.is_(None),
+                        tables.agent.c.archived_at.is_(None),
                     )
                 )
             ).one_or_none()
@@ -119,7 +121,10 @@ class AgentProvisioning:
         taken = {
             row.name
             for row in await connection.execute(
-                sa.select(tables.agent.c.name).where(tables.agent.c.workspace_id == workspace_id)
+                sa.select(tables.agent.c.name).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.archived_at.is_(None),
+                )
             )
         }
         suffix = extension.replace("_", "-")

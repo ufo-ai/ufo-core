@@ -206,6 +206,7 @@ class ToolIntent(BaseModel):
 
     tool: Literal[
         "add_member",
+        "restore_application",
         "object_apply",
         "object_delete",
         "connect_account",

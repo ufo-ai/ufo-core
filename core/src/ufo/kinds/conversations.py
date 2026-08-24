@@ -230,6 +230,7 @@ class ConversationObjects:
 
 
 def _visible(subjects: frozenset[str]) -> sa.Select:
+    member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
     return (
         sa.select(
             tables.conversation.c.id,
@@ -238,7 +239,7 @@ def _visible(subjects: frozenset[str]) -> sa.Select:
             tables.conversation.c.audience,
             tables.conversation.c.created_at,
             tables.conversation.c.updated_at,
-            tables.agent.c.name.label("agent_name"),
+            member_name.label("agent_name"),
         )
         .select_from(
             tables.conversation.join(

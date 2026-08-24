@@ -33,6 +33,7 @@ import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
 import { Agents, AppsIndex } from "@/views/Agents";
+import { ArchivedAppsProvider } from "@/views/ArchivedApps";
 import { ChatPane, ConversationSlot } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
@@ -117,15 +118,16 @@ import {
   type Section,
   type WorkspacePlace,
 } from "@/lib/route";
-import type { Agent, Member, OwnedConversation } from "@/lib/types";
+import type { Agent, ArchivedApp, Member, OwnedConversation } from "@/lib/types";
 
 export type AppProps = {
   agents: Agent[];
+  archived?: ArchivedApp[];
   member: Member;
   onAgents: () => void;
 };
 
-export function App({ agents, member, onAgents }: AppProps) {
+export function App({ agents, archived = [], member, onAgents }: AppProps) {
   const route = useRoute();
   const rail = useRail();
   const [menu, setMenu] = useState(false);
@@ -228,16 +230,18 @@ export function App({ agents, member, onAgents }: AppProps) {
                 narrow={narrow}
                 onBuild={startBuild}
               />
-              <RoutedPane
-                route={route}
-                agents={agents}
-                member={member}
-                mainAgent={mainAgent}
-                onAgents={onAgents}
-                onExitBuilder={exitBuild}
-                onForwardAgents={forwardBuild}
-                buildWanted={wantedBuild}
-              />
+              <ArchivedAppsProvider apps={archived} onRestored={onAgents}>
+                <RoutedPane
+                  route={route}
+                  agents={agents}
+                  member={member}
+                  mainAgent={mainAgent}
+                  onAgents={onAgents}
+                  onExitBuilder={exitBuild}
+                  onForwardAgents={forwardBuild}
+                  buildWanted={wantedBuild}
+                />
+              </ArchivedAppsProvider>
               <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
             </div>
           </DrawerHost>

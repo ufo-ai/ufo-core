@@ -7,7 +7,8 @@ retires any whose expiry passes before invocation, revalidates the claim, invoke
 version back into its conversation, and advances the row to its next cron occurrence once that one
 is accepted by the turn outbox. Every schedule is a cron schedule, so every accepted fire has a
 following one to advance to. A failed fire keeps its leased occurrence for retry. A tick with
-failures raises their names.
+failures raises their names. An archived app is neither a fire nor a failure: it admits no turn, so
+its tasks keep the occurrence they hold and run again when it is restored.
 
 The fire body is composed here. It is a scheduled turn — `as_scheduled=True` gives it the meaning
 core keys every scheduled behaviour on (its own turn, never folded, seat-gated on the creator) —
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import AgentArchived, ExtensionContext
 from ufo.sdk.scheduled_fire import scheduled_fire_key
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore
@@ -104,6 +105,8 @@ class ScheduledTaskRunner:
                 on_behalf_of_member_id=task.created_by_member_id,
                 as_scheduled=True,
             )
+        except AgentArchived:
+            return None
         except Exception as raised:
             failure = f"{task.name} ({type(raised).__name__})"
         else:

@@ -15,6 +15,7 @@ import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { friendlyMoment } from "@/lib/moments";
+import { openAgents } from "@/lib/router";
 import { AgentPane } from "@/views/AgentPane";
 import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
@@ -332,58 +333,60 @@ export function AppsIndex({
   const runTitle = held.founded?.title ?? null;
   return (
     <nav aria-label="Apps" className="flex min-h-0 flex-1 flex-col gap-sm">
-      <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-px overflow-y-auto px-sm py-0">
-        {/* The run in flight, named the way the wizard's own pane is until the conversation has
-            a title of its own. While the pane shows it states where the member already is;
-            while an app holds the pane instead, the row is the way back to the run. It is not
-            an app: nothing here opens one, and the app's real row arrives from the apps read
-            when it lands. */}
-        {building || running ? (
-          <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
-            {building ? (
-              <div
-                aria-current
-                className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
-              >
-                <span className="min-w-0 truncate text-label">
-                  {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
-                </span>
-                <span className="w-full truncate font-mono text-small text-ink-soft">
-                  Building
-                </span>
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={onBuild}
-                className={cn(
-                  "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
-                  "rounded-row text-left text-inherit hover:bg-fill",
-                )}
-              >
-                <span className="min-w-0 max-w-full truncate text-label">
-                  {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
-                </span>
-                <span className="w-full truncate font-mono text-small text-ink-soft">
-                  Building
-                </span>
-              </button>
-            )}
-          </li>
-        ) : null}
-        {ordered.map((agent) => (
-          <AgentRow
-            key={agent.id}
-            agent={agent}
-            status={statuses[agent.id]}
-            open={!building && agent.id === openId}
-            pinned={pinned.includes(agent.id)}
-            onPin={() => onPin(agent.id)}
-            onOpen={() => onOpen(agent.id)}
-          />
-        ))}
-        {children}
-      </ul>
+      <div className="flex min-h-0 flex-1 flex-col gap-lg overflow-y-auto">
+        <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
+          {/* The run in flight, named the way the wizard's own pane is until the conversation has
+              a title of its own. While the pane shows it states where the member already is;
+              while an app holds the pane instead, the row is the way back to the run. It is not
+              an app: nothing here opens one, and the app's real row arrives from the apps read
+              when it lands. */}
+          {building || running ? (
+            <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
+              {building ? (
+                <div
+                  aria-current
+                  className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
+                >
+                  <span className="min-w-0 truncate text-label">
+                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                  </span>
+                  <span className="w-full truncate font-mono text-small text-ink-soft">
+                    Building
+                  </span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onBuild}
+                  className={cn(
+                    "flex min-w-0 flex-1 flex-col gap-2xs border-0 bg-transparent px-sm py-xs",
+                    "rounded-row text-left text-inherit hover:bg-fill",
+                  )}
+                >
+                  <span className="min-w-0 max-w-full truncate text-label">
+                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                  </span>
+                  <span className="w-full truncate font-mono text-small text-ink-soft">
+                    Building
+                  </span>
+                </button>
+              )}
+            </li>
+          ) : null}
+          {ordered.map((agent) => (
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              status={statuses[agent.id]}
+              open={!building && agent.id === openId}
+              pinned={pinned.includes(agent.id)}
+              onPin={() => onPin(agent.id)}
+              onOpen={() => onOpen(agent.id)}
+            />
+          ))}
+          {children}
+        </ul>
+      </div>
       {/* Every member is offered the act: the `agent` kind admits a create from any speaking
           member and stamps them the owner, and the wizard rides the main agent's own chat. */}
       {mainAgent ? (
@@ -489,7 +492,17 @@ export function Agents({
                 />
               </DialogHeader>
               <TabPanel group="agent-settings" current={settingsTab} className={BANDS}>
-                {settingsTab === "settings" ? <Settings key={shown.id} agent={shown} /> : null}
+                {settingsTab === "settings" ? (
+                  <Settings
+                    key={shown.id}
+                    agent={shown}
+                    onArchived={() => {
+                      setSettling(false);
+                      openAgents();
+                      onAgents();
+                    }}
+                  />
+                ) : null}
                 {settingsTab === "connectors" ? <AgentConnectors agent={shown} /> : null}
                 {settingsTab === "scheduled" ? (
                   <ObjectPane

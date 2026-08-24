@@ -813,6 +813,7 @@ async def turn_workflow(workspace_id: str, turn_id: str) -> str:
 
 async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
     """Load a turn and derive its exact audience from the bound conversation."""
+    member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -846,7 +847,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.agent.c.output_schema,
                     tables.agent.c.internet_access_allowed,
                     tables.agent.c.use_workspace_skills,
-                    tables.agent.c.name,
+                    member_name.label("name"),
                     tables.conversation.c.audience,
                 )
                 .select_from(
@@ -920,9 +921,10 @@ async def _run_lineage(turn: Turn) -> RunLineage | None:
             root = parent
         profile = turn.subagent_profile
         if profile is None:
+            member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
             agent_name = (
                 await connection.execute(
-                    sa.select(tables.agent.c.name).where(tables.agent.c.id == turn.agent_id)
+                    sa.select(member_name).where(tables.agent.c.id == turn.agent_id)
                 )
             ).scalar_one()
             profile = f"agent:{agent_name}"

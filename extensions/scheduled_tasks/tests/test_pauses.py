@@ -965,3 +965,49 @@ async def test_re_arming_moves_both_watermarks_forward(db: None) -> None:
     assert "second wait" in second["prompt"]
     assert len(turns) == 2
     assert turns[1]["admission_source"] == "scheduled"
+
+
+async def test_a_pause_on_an_archived_app_keeps_its_row_for_the_restore(db: None) -> None:
+    workspace_id, agent_id, conversation_id, member_id = await _seed()
+    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=member_id)
+    dbos = StubDbos()
+    runner_ctx = _runner_ctx(_invoker(workspace_id, dbos))
+    with ws(workspace_id), agent(agent_id):
+        await pause_and_wait(ctx, _wait())
+        [row] = await _rows(workspace_id)
+        await _due_now(row["id"])
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(
+                    name=f"~archived-{agent_id}",
+                    archived_name=tables.agent.c.name,
+                    archived_at=sa.func.now(),
+                )
+                .where(tables.agent.c.id == agent_id)
+            )
+        await PauseRunner(ctx=runner_ctx).run()
+        turns = await _turns(conversation_id)
+        remaining = await _rows(workspace_id)
+        assert dbos.enqueued == []
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(name=tables.agent.c.archived_name, archived_name=None, archived_at=None)
+                .where(tables.agent.c.id == agent_id)
+            )
+            # The refused fire left the claim it took, which the lease clears in its own time.
+            await connection.execute(
+                sa.update(pause_table).values(claimed_by=None, claim_expires_at=None)
+            )
+        assert workspace_id in await due_pause_workspaces()()
+        await PauseRunner(ctx=runner_ctx).run()
+        restored = await _rows(workspace_id)
+        restored_turns = await _turns(conversation_id)
+
+    assert [held["id"] for held in remaining] == [row["id"]]
+    assert turns == []
+    assert restored == []
+    assert len(restored_turns) == 1
+    assert len(dbos.enqueued) == 1

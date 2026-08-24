@@ -1044,6 +1044,129 @@ async def test_changed_doc_resync_marks_due_and_reindexes(
     assert "monday" in found
 
 
+async def _set_archived(agent_id: UUID, archived: bool) -> None:
+    """Archive and restore the way the verb does: the row takes an internal name and keeps the
+    member-facing one beside it, which the table's CHECK holds to."""
+    values = (
+        {
+            "name": f"~archived-{agent_id}",
+            "archived_name": tables.agent.c.name,
+            "archived_at": sa.func.now(),
+        }
+        if archived
+        else {
+            "name": tables.agent.c.archived_name,
+            "archived_name": None,
+            "archived_at": None,
+        }
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(**values, updated_at=sa.func.now())
+            .where(tables.agent.c.id == agent_id)
+        )
+
+
+async def test_a_source_no_live_agent_can_read_stops_syncing(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A source is a feed for the agents granted it. Archive every one of them and each pass still
+    costs a fetch, a page write, and the model tokens the page's facts are extracted with — for a
+    feed no turn can reach. So the sweep leaves it alone, and takes it up again on the pass after a
+    restore returns it a reader."""
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "first.md").write_text("the first note")
+    driver, _index, _service = _wire(database_url, vec((21, 1.0)), tmp_path / "blobs", workspace_id)
+    research_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=research_id,
+                workspace_id=workspace_id,
+                name="research",
+                prompt="p",
+                model="m",
+                is_main=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    with ws(workspace_id):
+        source_id = await context_for("probe", frozenset()).register_source(
+            FOLDER_BACKEND,
+            SourceConfig(root=str(root)),
+            subject=SHARED_SUBJECT,
+            owner_member_id=None,
+            agent_id=research_id,
+        )
+    await _sync(driver)
+    assert len(await _pages()) == 1
+
+    await _set_archived(research_id, True)
+    (root / "second.md").write_text("the second note")
+    await _make_due()
+    assert await driver.candidate_workspaces() == ()
+    with ws(workspace_id):
+        assert await _claims(driver) == ()
+    await _sync(driver)
+    assert len(await _pages()) == 1
+
+    await _set_archived(research_id, False)
+    await _make_due()
+    assert await driver.candidate_workspaces() == (workspace_id,)
+    await _sync(driver)
+    assert {page["title"] for page in await _pages()} == {"first.md", "second.md"}
+    assert source_id is not None
+
+
+async def test_a_source_a_second_live_agent_reads_keeps_syncing(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """One source serves every agent granted it, so archiving one grantee settles nothing about the
+    feed. While any live agent still reads it, the sweep treats it exactly as before."""
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "first.md").write_text("the first note")
+    driver, _index, _service = _wire(database_url, vec((22, 1.0)), tmp_path / "blobs", workspace_id)
+    research_id, sales_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        for agent_id, name in ((research_id, "research"), (sales_id, "sales")):
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=agent_id,
+                    workspace_id=workspace_id,
+                    name=name,
+                    prompt="p",
+                    model="m",
+                    is_main=False,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    ctx = context_for("probe", frozenset())
+    with ws(workspace_id):
+        for agent_id in (research_id, sales_id):
+            await ctx.register_source(
+                FOLDER_BACKEND,
+                SourceConfig(root=str(root)),
+                subject=SHARED_SUBJECT,
+                owner_member_id=None,
+                agent_id=agent_id,
+            )
+    await _sync(driver)
+
+    await _set_archived(research_id, True)
+    (root / "second.md").write_text("the second note")
+    await _make_due()
+    assert await driver.candidate_workspaces() == (workspace_id,)
+    await _sync(driver)
+    assert {page["title"] for page in await _pages()} == {"first.md", "second.md"}
+
+
 async def test_edited_page_leaves_no_stale_chunk_in_search_sources(
     db: None, database_url: str, tmp_path: Path
 ) -> None:

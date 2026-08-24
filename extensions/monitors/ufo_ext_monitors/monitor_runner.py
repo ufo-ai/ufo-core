@@ -22,7 +22,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import AgentArchived, ExtensionContext
 from ufo.sdk.seats import Seats
 from ufo.sdk.terminal import TerminalGone
 from ufo.sdk.untrusted import wall
@@ -137,14 +137,17 @@ class MonitorRunner:
         if not await store.claim_holds(row):
             return
         acts_for = row.created_by_member_id if await self._acts_for_a_seated_member(row) else None
-        await self.ctx.invoke(
-            row.conversation_id,
-            row.agent_id,
-            await self._body(row, cause, payload, spill, probes_run),
-            f"{FIRE_KEY_PREFIX}{row.id}",
-            on_behalf_of_member_id=acts_for,
-            holds_work_already_done=True,
-        )
+        try:
+            await self.ctx.invoke(
+                row.conversation_id,
+                row.agent_id,
+                await self._body(row, cause, payload, spill, probes_run),
+                f"{FIRE_KEY_PREFIX}{row.id}",
+                on_behalf_of_member_id=acts_for,
+                holds_work_already_done=True,
+            )
+        except AgentArchived:
+            return
         await store.retire(row)
 
     async def _body(

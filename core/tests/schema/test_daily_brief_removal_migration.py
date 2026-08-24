@@ -155,11 +155,12 @@ def test_both_tables_and_their_rows_outlive_the_merge(tmp_path: Path) -> None:
 
 
 def test_the_later_revision_drops_both_tables(tmp_path: Path) -> None:
-    """Once no running image reads them, the rows answer to no code."""
+    """Once no running image reads them, the rows answer to no code. Upgraded to the drop itself
+    rather than to `heads`, so the next revision to land does not read as this one failing."""
     path = tmp_path / "drop.sqlite"
     config, _ids = _seed(path)
 
-    command.upgrade(config, "heads")
+    command.upgrade(config, DROP)
 
     assert _heads(path) == {DROP}
     assert not {"sweep_edition", "sweep_application"} & _tables(path)

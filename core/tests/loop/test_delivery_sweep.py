@@ -7,7 +7,11 @@ from pydantic import BaseModel
 
 from ufo.db import workspace_tx
 from ufo.ext.manifest import SubagentProfile
-from ufo.loop.delivery import RESULT_DELIVERY_COOLDOWN_SECONDS, DeliverySweep
+from ufo.loop.delivery import (
+    RESULT_DELIVERY_BATCH_CHILDREN,
+    RESULT_DELIVERY_COOLDOWN_SECONDS,
+    DeliverySweep,
+)
 from ufo.loop.queue import _load_turn
 from ufo.loop.subagents import SubagentRegistry, SubagentResult
 from ufo.schema import tables
@@ -377,3 +381,68 @@ async def test_a_workspace_holding_an_outstanding_child_is_the_sweeps_candidate(
         await _sweep(workspace_id).run()
     assert await _delivery_state(child_id) == "delivered"
     assert await _sweep(workspace_id).candidate_workspaces() == ()
+
+
+async def test_a_child_of_an_archived_parent_stays_pending_and_the_pass_goes_on(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    archived_parent, archived_conversation = await _parent(workspace_id, agent_id)
+    orphans = [
+        await _child(
+            workspace_id,
+            agent_id,
+            archived_parent,
+            TerminalFrame(status="done", text='{"finding": "on the retired app"}'),
+        )
+        for _ in range(RESULT_DELIVERY_BATCH_CHILDREN)
+    ]
+    live_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=live_agent,
+                workspace_id=workspace_id,
+                name="still-here",
+                prompt="be brief",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{agent_id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == agent_id)
+        )
+    live_parent, live_conversation = await _parent(workspace_id, live_agent)
+    delivered = await _child(
+        workspace_id,
+        live_agent,
+        live_parent,
+        TerminalFrame(status="done", text='{"finding": "on the live app"}'),
+    )
+
+    with ws(workspace_id):
+        await _sweep(workspace_id).run()
+
+    assert {await _delivery_state(orphan) for orphan in orphans} == {"pending"}
+    assert [seq for seq, _ in await _conversation_turns(archived_conversation)] == [1]
+    assert await _delivery_state(delivered) == "delivered"
+    assert [seq for seq, _ in await _conversation_turns(live_conversation)] == [1, 2]
+    assert await _sweep(workspace_id).candidate_workspaces() == ()
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(name=tables.agent.c.archived_name, archived_name=None, archived_at=None)
+            .where(tables.agent.c.id == agent_id)
+        )
+    assert await _sweep(workspace_id).candidate_workspaces() == (workspace_id,)
+    with ws(workspace_id):
+        await _sweep(workspace_id).run()
+
+    assert {await _delivery_state(orphan) for orphan in orphans} == {"delivered"}
+    assert [seq for seq, _ in await _conversation_turns(archived_conversation)] == [1, 2]

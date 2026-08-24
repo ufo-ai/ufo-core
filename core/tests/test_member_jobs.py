@@ -114,13 +114,19 @@ async def test_member_blob_read_closes_a_bounded_stream(
     assert closed
 
 
-async def test_workspace_agents_carry_the_roster_with_owners(db: None) -> None:
+async def test_workspace_agents_carry_the_roster_with_owners_and_archive_state(db: None) -> None:
     workspace_id, member_id, _other_member_id, brief_id = await _seed()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.agent)
             .where(tables.agent.c.id == brief_id)
-            .values(owner_member_id=member_id, tools=["load_skill", "rebuild_report_digest"])
+            .values(
+                name=f"~archived-{brief_id}",
+                archived_name=tables.agent.c.name,
+                owner_member_id=member_id,
+                tools=["load_skill", "rebuild_report_digest"],
+                archived_at=sa.func.now(),
+            )
         )
     with ws(workspace_id):
         context = context_for("report_digest", frozenset(), member_context_read=True)
@@ -132,6 +138,9 @@ async def test_workspace_agents_carry_the_roster_with_owners(db: None) -> None:
     allowlists = {a.id: a.tools for a in agents}
     assert allowlists[brief_id] == ("load_skill", "rebuild_report_digest")
     assert [tools for agent_id, tools in allowlists.items() if agent_id != brief_id] == [None, None]
+    archived = {a.id: a.archived for a in agents}
+    assert archived[brief_id] is True
+    assert [held for agent_id, held in archived.items() if agent_id != brief_id] == [False, False]
 
 
 async def test_agent_visibilities_answer_by_id_without_member_context(db: None) -> None:

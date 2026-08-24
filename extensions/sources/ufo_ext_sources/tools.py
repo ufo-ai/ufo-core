@@ -33,6 +33,7 @@ includes only shared pages that the agent may read."""
 import json
 import re
 from collections import Counter, defaultdict
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, ClassVar, Literal
@@ -43,7 +44,12 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ufo.sdk.authproxy import DIRECT_ACCOUNT
 from ufo.sdk.connectors import ConnectorRegistry
-from ufo.sdk.context import CredentialSlotUnset, ExtensionContext, SourceReader
+from ufo.sdk.context import (
+    AgentArchived,
+    CredentialSlotUnset,
+    ExtensionContext,
+    SourceReader,
+)
 from ufo.sdk.credentials import credential_object_name
 from ufo.sdk.grants import account_object_name
 from ufo.sdk.manifest import HookContext, HookOutcome, PageChangeBatch
@@ -72,7 +78,12 @@ from ufo.sdk.subjects import SHARED_SUBJECT, member_subject, subject_shared
 from ufo.sdk.tools import ConnectUnavailable, ToolContext
 from ufo_ext_sources.pages import PAGE_KIND
 from ufo_ext_sources.registry import CONNECTORS, SOURCE_KIND
-from ufo_ext_sources.triggers import ListedTrigger, SourceTriggerDelivery, SourceTriggerStore
+from ufo_ext_sources.triggers import (
+    ListedTrigger,
+    SourceTrigger,
+    SourceTriggerDelivery,
+    SourceTriggerStore,
+)
 
 CONNECTION_OBJECT_KIND = "connection"
 SOURCE_TRIGGER_KIND = "source_trigger"
@@ -995,48 +1006,47 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
             authorized = [change for change in shared if change.source_id in readable]
             if not authorized:
                 continue
-            match trigger.delivery:
-                case "current":
-                    latest = max(change.changed_at for change in authorized).isoformat()
-                    path = await _write_change_log(
-                        ctx.ext,
-                        trigger.conversation_id,
-                        binding,
-                        latest,
-                        authorized,
-                    )
-                    await ctx.ext.invoke(
-                        trigger.conversation_id,
-                        trigger.agent_id,
-                        _alert_message(binding, authorized, path),
-                        idempotency_key=(
-                            f"source-trigger:{binding.name}:{trigger.conversation_id.hex}:{latest}"
-                        ),
-                    )
-                case "per_page":
-                    for change in authorized:
-                        conversation_id = await ctx.ext.open_conversation(
-                            trigger.agent_id,
-                            f"source-trigger:{trigger.id.hex}:page:{change.page_id.hex}",
-                        )
-                        revision = f"{change.changed_at.isoformat()}-{change.revision}"
-                        path = await _write_change_log(
-                            ctx.ext,
-                            conversation_id,
-                            binding,
-                            revision,
-                            [change],
-                        )
-                        await ctx.ext.invoke(
-                            conversation_id,
-                            trigger.agent_id,
-                            _alert_message(binding, [change], path),
-                            idempotency_key=(
-                                f"source-trigger:{trigger.id.hex}:{change.page_id.hex}:"
-                                f"{change.revision}"
-                            ),
-                        )
+            with suppress(AgentArchived):
+                await _fire_trigger(ctx.ext, binding, trigger, authorized)
     return None
+
+
+async def _fire_trigger(
+    ext: ExtensionContext, binding: _Binding, trigger: SourceTrigger, authorized: list[PageChange]
+) -> None:
+    """Deliver one trigger's changes. An archived app raises `AgentArchived` out of the first
+    invoke, which drops the rest of this trigger's changes with it — none of them can be answered
+    until the app is restored."""
+    match trigger.delivery:
+        case "current":
+            latest = max(change.changed_at for change in authorized).isoformat()
+            path = await _write_change_log(
+                ext, trigger.conversation_id, binding, latest, authorized
+            )
+            await ext.invoke(
+                trigger.conversation_id,
+                trigger.agent_id,
+                _alert_message(binding, authorized, path),
+                idempotency_key=(
+                    f"source-trigger:{binding.name}:{trigger.conversation_id.hex}:{latest}"
+                ),
+            )
+        case "per_page":
+            for change in authorized:
+                conversation_id = await ext.open_conversation(
+                    trigger.agent_id,
+                    f"source-trigger:{trigger.id.hex}:page:{change.page_id.hex}",
+                )
+                revision = f"{change.changed_at.isoformat()}-{change.revision}"
+                path = await _write_change_log(ext, conversation_id, binding, revision, [change])
+                await ext.invoke(
+                    conversation_id,
+                    trigger.agent_id,
+                    _alert_message(binding, [change], path),
+                    idempotency_key=(
+                        f"source-trigger:{trigger.id.hex}:{change.page_id.hex}:{change.revision}"
+                    ),
+                )
 
 
 async def _write_change_log(

@@ -691,6 +691,94 @@ test("a slot the settings dialog raises stands inside it, beside what raised it"
   expect(cover?.contains(within(dialog).getByRole("tabpanel"))).toBe(false);
 });
 
+test("the selected app archives from its Settings screen", async () => {
+  const posted: unknown[] = [];
+  const onAgents = vi.fn();
+  wire({
+    "/settings": () =>
+      json({
+        ...SETTINGS,
+        agent: { ...SETTINGS.agent, name: RESEARCH.name, main: false, archivable: true },
+      }),
+    "/connections": () => json({ connections: [] }),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + SECOND_ID;
+  render(<App agents={[AGENT, RESEARCH]} member={ADMIN} onAgents={onAgents} />);
+  const dialog = await openAgentSettings("Research");
+
+  await userEvent.click(within(dialog).getByRole("button", { name: "Archive" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "Confirm archive" }));
+
+  await waitFor(() => expect(onAgents).toHaveBeenCalledOnce());
+  expect(posted).toEqual([{ verb: "delete", kind: "agent", name: "research" }]);
+  expect(location.hash).toBe("#/agents");
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("the main app has no Archive action in Settings", async () => {
+  wire({
+    "/settings": () =>
+      json({ ...SETTINGS, agent: { ...SETTINGS.agent, archivable: false } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+  const dialog = await openAgentSettings();
+
+  expect(within(dialog).queryByRole("button", { name: "Archive" })).toBeNull();
+});
+
+test("the workspace Apps tab restores an archived app hidden from the Applications flyout", async () => {
+  const posted: unknown[] = [];
+  const onAgents = vi.fn();
+  wire({
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/workspace/apps";
+  render(
+    <App
+      agents={[AGENT]}
+      archived={[
+        {
+          id: SECOND_ID,
+          name: "invoice-intake",
+          icon: "aten",
+          archived_at: "2026-08-20T12:00:00Z",
+        },
+      ]}
+      member={ADMIN}
+      onAgents={onAgents}
+    />,
+  );
+  const index = within(await raisedIndex());
+  expect(index.queryByText("Invoice Intake")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Applications" }));
+  expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+  const dialog = await screen.findByRole("dialog");
+  const name = within(dialog).getByRole("textbox", { name: "Name" });
+  await userEvent.clear(name);
+  await userEvent.type(name, "invoice-intake-2");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Restore" }));
+
+  await waitFor(() => expect(onAgents).toHaveBeenCalledOnce());
+  expect(posted).toEqual([
+    { verb: "restore_application", app_id: SECOND_ID, name: "invoice-intake-2" },
+  ]);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
 /** The dialog holds no address, so it holds the one track its Scheduled tab walks. The index there
  *  is the root like any other: a second row takes the first record's place, and the dialog reopens
  *  on the first tab with nothing standing. */

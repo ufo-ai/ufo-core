@@ -757,6 +757,16 @@ class AgentSummary(BaseModel):
     provisioned_by: str | None = None
 
 
+class ArchivedAgent(BaseModel):
+    """One archived app as a surface lists it for restore."""
+
+    id: UUID
+    name: str
+    icon: TablerIcon
+    archived_at: datetime
+    owner_member_id: UUID | None = None
+
+
 class InstallationSummary(BaseModel):
     """One surface installation of the workspace — which surface is bound and the agent its
     conversations land on. The workspace-administration read behind the portal's agents view;
@@ -2591,7 +2601,10 @@ class SurfaceContext:
                         tables.agent.c.owner_member_id,
                         tables.agent.c.provisioned_by,
                     )
-                    .where(tables.agent.c.workspace_id == self.workspace_id)
+                    .where(
+                        tables.agent.c.workspace_id == self.workspace_id,
+                        tables.agent.c.archived_at.is_(None),
+                    )
                     .order_by(tables.agent.c.is_main.desc(), tables.agent.c.name)
                 )
             ).all()
@@ -2606,6 +2619,37 @@ class SurfaceContext:
                 icon=row.icon,
                 owner_member_id=row.owner_member_id,
                 provisioned_by=row.provisioned_by,
+            )
+            for row in rows
+        )
+
+    async def list_archived_agents(self) -> tuple[ArchivedAgent, ...]:
+        """The archived apps of this workspace, most recently archived first."""
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.agent.c.id,
+                        member_name.label("name"),
+                        tables.agent.c.icon,
+                        tables.agent.c.archived_at,
+                        tables.agent.c.owner_member_id,
+                    )
+                    .where(
+                        tables.agent.c.workspace_id == self.workspace_id,
+                        tables.agent.c.archived_at.is_not(None),
+                    )
+                    .order_by(tables.agent.c.archived_at.desc(), member_name)
+                )
+            ).all()
+        return tuple(
+            ArchivedAgent(
+                id=row.id,
+                name=row.name,
+                icon=row.icon,
+                archived_at=row.archived_at,
+                owner_member_id=row.owner_member_id,
             )
             for row in rows
         )
@@ -2871,6 +2915,12 @@ class SurfaceContext:
     async def list_connections(
         self, member_id: UUID, *, admin: bool
     ) -> tuple[ConnectionPoolView, ...]:
+        """This workspace's connections with the live apps each is attached to. An archived holder
+        is not one: the panel's Revoke posts a detach on every holder it lists, and an archived app
+        refuses the turn that would carry it, which stops the revoke before the live holders after
+        it. The filter rides the join, so a connection whose only holder is archived still lists —
+        held by nobody until a restore."""
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         query = (
             sa.select(
                 tables.connection.c.provider,
@@ -2881,7 +2931,7 @@ class SurfaceContext:
                 tables.connection.c.shared,
                 tables.connection.c.created_at,
                 tables.agent.c.id.label("agent_id"),
-                tables.agent.c.name.label("agent_name"),
+                member_name.label("agent_name"),
             )
             .select_from(
                 tables.connection.join(
@@ -2891,13 +2941,19 @@ class SurfaceContext:
                     tables.connector_grant,
                     tables.connector_grant.c.connection_id == tables.connection.c.id,
                 )
-                .outerjoin(tables.agent, tables.connector_grant.c.agent_id == tables.agent.c.id)
+                .outerjoin(
+                    tables.agent,
+                    sa.and_(
+                        tables.connector_grant.c.agent_id == tables.agent.c.id,
+                        tables.agent.c.archived_at.is_(None),
+                    ),
+                )
             )
             .where(tables.connection.c.workspace_id == self.workspace_id)
             .order_by(
                 tables.connection.c.provider,
                 tables.connection.c.account_id,
-                tables.agent.c.name,
+                member_name,
             )
         )
         if not admin:
@@ -3403,6 +3459,7 @@ class SurfaceContext:
         """Every spend cap of this workspace with its subject named for the reader — the
         workspace-administration read behind the portal's billing view. Caps are set by the
         deploy's operators today; no object kind owns them, so this stays a read."""
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -3412,7 +3469,7 @@ class SurfaceContext:
                         tables.spend_cap.c.window_seconds,
                         tables.spend_cap.c.limit_micro_usd,
                         tables.spend_cap.c.on_breach,
-                        tables.agent.c.name.label("agent_name"),
+                        member_name.label("agent_name"),
                         tables.member.c.email.label("member_email"),
                     )
                     .select_from(

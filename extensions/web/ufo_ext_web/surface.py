@@ -661,7 +661,8 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     would keep the workspace due forever.
     An agent whose allowlist withholds the site tools is marked
     settled rather than handed a turn it cannot finish — chat is its recovery if the allowlist
-    grows — and an ownerless agent in a workspace with no seated admin waits, unmarked, for one.
+    grows — an archived app is marked for the same reason, since it admits no turn at all, and an
+    ownerless agent in a workspace with no seated admin waits, unmarked, for one.
     The candidates gate on due work: a workspace whose agents are all marked never fires this
     handler, so the settled fleet costs nothing. `bucket` is the day the idempotency key names — a
     refused admission is a durable turn its key would answer forever, so a refusal costs at most
@@ -677,6 +678,9 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
     for agent in agents:
         key = f"{HOMEPAGE_SEED_PREFIX}{agent.id}"
         if key in marked:
+            continue
+        if agent.archived:
+            await ctx.store.put(key, "archived")
             continue
         if _app_slug(agent.provisioned_by) is not None:
             await ctx.store.put(key, "shipped")
@@ -854,7 +858,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     `agents` is the set a member may open and message. The create act draws nothing from this read:
     it is a conversation the `create-application` skill runs, and the screen offers it to every
     signed-in member, because the `agent` kind admits a create from any speaking member and stamps
-    them the owner."""
+    them the owner. `archived` contains the apps this member may restore."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -871,9 +875,23 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
         agent.id: await _homepage_state(ctx, agent, member_id, audience.admin, apps)
         for agent in audience.agents
     }
+    archived = [
+        app
+        for app in await ctx.list_archived_agents()
+        if audience.admin or app.owner_member_id == member_id
+    ]
     return JSONResponse(
         {
             "member": {"email": email, "admin": audience.admin},
+            "archived": [
+                {
+                    "id": str(app.id),
+                    "name": app.name,
+                    "icon": app.icon,
+                    "archived_at": app.archived_at.isoformat(),
+                }
+                for app in archived
+            ],
             "agents": [
                 {
                     "id": str(agent.id),
@@ -4098,8 +4116,10 @@ async def settings(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    _member_id, _email, audience, agent_id = gated
-    return await agent_settings(ctx, agent_id, admin=audience.admin)
+    member_id, _email, audience, agent_id = gated
+    summary = next(agent for agent in audience.agents if agent.id == agent_id)
+    archivable = not summary.main and (audience.admin or summary.owner_member_id == member_id)
+    return await agent_settings(ctx, agent_id, admin=audience.admin, archivable=archivable)
 
 
 async def homepage(ctx: SurfaceContext, request: Request) -> Response:

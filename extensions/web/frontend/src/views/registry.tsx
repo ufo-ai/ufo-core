@@ -4,6 +4,7 @@ import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
 import { WorkspaceConnectors } from "@/views/Connectors";
+import { ArchivedApps } from "@/views/ArchivedApps";
 import { Memory } from "@/views/Memory";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
@@ -47,6 +48,11 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     search: "Search members",
     render: (place, onPlace) => <Team place={place} onPlace={onPlace} />,
   },
+  apps: {
+    label: "Apps",
+    remountOnPlace: false,
+    render: () => <ArchivedApps />,
+  },
   skills: {
     label: "Skills",
     remountOnPlace: false,
@@ -85,4 +91,3 @@ export const CONNECTORS: PaneView = {
 export const SECTION_VIEWS: Partial<Record<Section, PaneView>> = {
   connectors: CONNECTORS,
 };
-

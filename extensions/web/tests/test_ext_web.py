@@ -2217,6 +2217,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     assert index.status_code == 200
     assert index.json() == {
         "member": {"email": "outsider@example.com", "admin": False},
+        "archived": [],
         "agents": [
             {
                 "id": str(agent_id),
@@ -10784,6 +10785,7 @@ async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
     dbos_client.destroy()
     assert settings.status_code == 200
     data = settings.json()
+    assert data["agent"]["archivable"] is False
     assert data["spec"]["sandbox_size"] == "small"
     assert data["spec_schema"]["properties"]["sandbox_size"]["enum"] == [
         "small",
@@ -13615,3 +13617,160 @@ async def test_the_settings_read_offers_the_setup_a_shipped_agent_still_needs(
         )
     settled = await client.get(f"/surface/web/agents/{shipped}/settings", headers=cookie)
     assert settled.json()["agent"]["setup"] is None
+
+
+async def test_the_apps_screen_reads_the_archived_apps_its_reader_may_restore(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    client, workspace_id, agent_id = web
+    owner_id, owner_token = await _seed_member(workspace_id, "owner@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    archived_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=archived_id,
+                workspace_id=workspace_id,
+                name=f"~archived-{archived_id}",
+                archived_name="invoice-intake",
+                prompt="read the invoices",
+                model="claude-opus-4-8",
+                reasoning="high",
+                icon="aten",
+                visibility="workspace",
+                owner_member_id=owner_id,
+                archived_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    for token, names in (
+        (owner_token, ["invoice-intake"]),
+        (admin_token, ["invoice-intake"]),
+        (other_token, []),
+    ):
+        index = await client.get(
+            "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+        )
+        assert index.status_code == 200
+        payload = index.json()
+        assert [app["name"] for app in payload["archived"]] == names
+        assert [agent["id"] for agent in payload["agents"]] == [str(agent_id)]
+    owner_read = await client.get(
+        "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={owner_token}"}
+    )
+    assert owner_read.json()["archived"][0]["id"] == str(archived_id)
+    assert owner_read.json()["archived"][0]["icon"] == "aten"
+
+
+async def test_an_admin_archives_a_shipped_app_from_settings_and_restores_it(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    app_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=app_id,
+                workspace_id=workspace_id,
+                name="invoice-intake",
+                prompt="read the invoices",
+                model="claude-opus-4-8",
+                reasoning="high",
+                icon="aten",
+                visibility="workspace",
+                provisioned_by="app_invoice",
+                provisioned_name="invoice-intake",
+                provisioned_version="1",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    settings = await client.get(f"/surface/web/agents/{app_id}/settings", headers=cookie)
+    assert settings.status_code == 200
+    assert settings.json()["agent"]["archivable"] is True
+    archived = await client.post(
+        f"/surface/web/agents/{app_id}/intents",
+        json={"verb": "delete", "kind": "agent", "name": "invoice-intake"},
+        headers=cookie,
+    )
+    assert archived.status_code == 200
+    assert archived.json()["applied"] is True, archived.json()["message"]
+    index = await client.get("/surface/web/api/agents", headers=cookie)
+    assert [app["name"] for app in index.json()["archived"]] == ["invoice-intake"]
+    assert [agent["id"] for agent in index.json()["agents"]] == [str(agent_id)]
+
+    restored = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "restore_application", "app_id": str(app_id), "name": "invoice-intake-2"},
+        headers=cookie,
+    )
+    assert restored.status_code == 200
+    assert restored.json()["applied"] is True, restored.json()["message"]
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.agent.c.name, tables.agent.c.archived_at).where(
+                    tables.agent.c.id == app_id
+                )
+            )
+        ).one()
+    assert (row.name, row.archived_at) == ("invoice-intake-2", None)
+    back = await client.get("/surface/web/api/agents", headers=cookie)
+    assert back.json()["archived"] == []
+    assert sorted(agent["name"] for agent in back.json()["agents"]) == [
+        "assistant",
+        "invoice-intake-2",
+    ]
+
+
+async def test_the_homepage_sweep_settles_an_archived_app_without_a_turn(db: None) -> None:
+    workspace_id, main_agent = await _seed_workspace()
+    await _seed_member(workspace_id, "seed-admin@example.com", admin=True)
+    archived_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=archived_agent,
+                workspace_id=workspace_id,
+                name=f"~archived-{archived_agent}",
+                archived_name="invoice-intake",
+                prompt="read the invoices",
+                model="claude-opus-4-8",
+                archived_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    dbos = _SeedDbos()
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
+    )
+    with ws(workspace_id):
+        ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
+        await web_surface.seed_homepages(ctx)
+        markers = dict(await ctx.store.list(web_surface.HOMEPAGE_SEED_PREFIX))
+    assert sorted(markers) == sorted(
+        f"{web_surface.HOMEPAGE_SEED_PREFIX}{agent_id}" for agent_id in (main_agent, archived_agent)
+    )
+    assert markers[f"{web_surface.HOMEPAGE_SEED_PREFIX}{archived_agent}"] == "archived"
+    async with workspace_tx() as connection:
+        seeded = (
+            (
+                await connection.execute(
+                    sa.select(tables.conversation.c.agent_id).where(
+                        tables.conversation.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert seeded == [main_agent]

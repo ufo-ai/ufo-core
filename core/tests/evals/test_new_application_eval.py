@@ -122,7 +122,7 @@ async def test_the_fixture_seed_reclaims_the_application_a_homepage_turn_talked_
 ) -> None:
     """The homepage sweep opens a conversation on every new application within five minutes, and a
     talked-to application is the one shape the spare-clear spares, so the seed reclaims its fixture
-    name by name — an insert would collide on `agent_workspace_id_name_key` and the raise would
+    name by name — an insert would collide on the workspace name constraint and the raise would
     escape the case, discarding every suite's results in the run."""
     workspace_id, agent_id, member_id = await _workspace()
     stale_id = await _application(workspace_id, new_application.EXISTING_APPLICATION, member_id)

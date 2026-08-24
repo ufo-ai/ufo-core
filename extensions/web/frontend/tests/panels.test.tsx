@@ -800,10 +800,9 @@ test("a member with no rollup sees only their own figure and no workspace sectio
 
   expect(await screen.findByText("All-time tokens")).toBeTruthy();
   expect(screen.getByText("Sandbox requests")).toBeTruthy();
-  expect(screen.queryByText("Apps")).toBeNull();
-  expect(screen.queryByText("Members")).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Apps" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Members" })).toBeNull();
 });
-
 
 test("a member who is not an admin is offered no administration control", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });

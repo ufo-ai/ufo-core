@@ -43,12 +43,15 @@ from ufo.ext.context import ExtensionContext, JsonValue, context_for
 from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
 from ufo.ext.manifest import Manifest
 from ufo.kinds.agents import (
+    AGENT_ARCHIVE_GATE,
     AGENT_CREATE_GATE,
     AGENT_EDIT_GATE,
     AGENT_KIND,
     AGENT_OBJECT,
     AGENT_PROMPT_REQUIRED,
-    AGENT_UNDELETABLE,
+    AGENT_RESTORE_GATE,
+    MAIN_AGENT_UNARCHIVABLE,
+    RESTORE_APPLICATION_TOOL_DEF,
     AgentObjects,
     AgentSpec,
 )
@@ -1473,7 +1476,7 @@ async def test_agent_kind_creates_owned_by_any_speaking_member_and_refuses_delet
                     {"user_description": OBJECT_NARRATION, "kind": AGENT_KIND, "name": "assistant"}
                 ),
             )
-        assert str(delete_refusal.value) == AGENT_UNDELETABLE
+        assert str(delete_refusal.value) == MAIN_AGENT_UNARCHIVABLE
 
 
 async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: None) -> None:
@@ -3823,3 +3826,219 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
     assert bob_rows[str(shared_id)].fields["mine"] is True
     assert bob_rows[str(shared_id)].fields["speaker"] is None
     assert [row.name for row in portal_only.rows] == [str(mine_id)]
+
+
+async def test_delete_archives_an_app_frees_its_name_and_restore_returns_the_same_row(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, JOINER_CREATED_AT)
+        await _agent_row(workspace_id, name="ufo", is_main=True)
+        archived_id = await _agent_row(workspace_id, name="invoice-intake")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(owner_member_id=owner)
+                .where(tables.agent.c.id == archived_id)
+            )
+        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+
+        deleted = json.loads(
+            await _text(tools, "object_delete", ctx, kind=AGENT_KIND, name="invoice-intake")
+        )
+        assert deleted["deleted"] is True
+        assert deleted["spec"]["prompt"] == "be brief"
+
+        with pytest.raises(UnknownObject):
+            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="invoice-intake")
+        live = json.loads(await _text(tools, "object_list", ctx, kind=AGENT_KIND))
+        assert [row["name"] for row in live["objects"]] == ["ufo"]
+        listed = json.loads(
+            await _text(tools, "object_list", ctx, kind=AGENT_KIND, filters={"archived": True})
+        )
+        assert [row["name"] for row in listed["objects"]] == ["invoice-intake"]
+        assert listed["objects"][0]["id"] == str(archived_id)
+        assert listed["objects"][0]["archived_at"] is not None
+        async with workspace_tx() as connection:
+            archived = (
+                await connection.execute(
+                    sa.select(tables.agent.c.name, tables.agent.c.archived_name).where(
+                        tables.agent.c.id == archived_id
+                    )
+                )
+            ).one()
+        assert archived.name == f"~archived-{archived_id}"
+        assert archived.archived_name == "invoice-intake"
+
+        remade = json.loads(
+            await _text(
+                tools,
+                "object_apply",
+                ctx,
+                manifest=yaml.safe_dump(
+                    {
+                        "kind": AGENT_KIND,
+                        "name": "invoice-intake",
+                        "spec": {
+                            "model": "claude-opus-4-8",
+                            "internet_access_allowed": True,
+                            "reasoning": "high",
+                            "prompt": "read the invoices again",
+                        },
+                    }
+                ),
+                create_only=True,
+            )
+        )
+        assert remade["result"] == "created"
+
+        restore = RESTORE_APPLICATION_TOOL_DEF
+        answer = await restore.handler(
+            ctx,
+            restore.input_model.model_validate(
+                {
+                    "app_id": str(archived_id),
+                    "name": "invoice-intake-first",
+                    "user_description": OBJECT_NARRATION,
+                }
+            ),
+        )
+        assert isinstance(answer.content[0], TextContent)
+        assert "invoice-intake-first is live again." in answer.content[0].text
+        back = yaml.safe_load(
+            await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="invoice-intake-first")
+        )
+        assert back["spec"]["prompt"] == "be brief"
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.agent.c.id,
+                        tables.agent.c.archived_at,
+                        tables.agent.c.archived_name,
+                    ).where(
+                        tables.agent.c.workspace_id == workspace_id,
+                        tables.agent.c.name == "invoice-intake-first",
+                    )
+                )
+            ).one()
+        assert row.id == archived_id
+        assert row.archived_at is None
+        assert row.archived_name is None
+
+
+async def test_a_restore_is_refused_a_name_a_live_app_answers_to(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, JOINER_CREATED_AT)
+        await _agent_row(workspace_id, name="ufo", is_main=True)
+        archived_id = await _agent_row(workspace_id, name="invoice-intake")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(owner_member_id=owner)
+                .where(tables.agent.c.id == archived_id)
+            )
+        ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        await _text(tools, "object_delete", ctx, kind=AGENT_KIND, name="invoice-intake")
+        await _text(
+            tools,
+            "object_apply",
+            ctx,
+            manifest=yaml.safe_dump(
+                {
+                    "kind": AGENT_KIND,
+                    "name": "invoice-intake",
+                    "spec": {
+                        "model": "claude-opus-4-8",
+                        "internet_access_allowed": True,
+                        "reasoning": "high",
+                        "prompt": "read the invoices again",
+                    },
+                }
+            ),
+            create_only=True,
+        )
+        restore = RESTORE_APPLICATION_TOOL_DEF
+        with pytest.raises(ValueError) as refusal:
+            await restore.handler(
+                ctx,
+                restore.input_model.model_validate(
+                    {
+                        "app_id": str(archived_id),
+                        "name": "invoice-intake",
+                        "user_description": OBJECT_NARRATION,
+                    }
+                ),
+            )
+        assert "already exists" in str(refusal.value)
+
+
+async def test_archive_keeps_the_main_app_and_other_members_apps_out_of_reach(db: None) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        owner = await _member(workspace_id, JOINER_CREATED_AT)
+        stranger = await _member(workspace_id, datetime(2026, 7, 3, tzinfo=UTC))
+        admin = await _member(workspace_id, ADMIN_CREATED_AT)
+        await _agent_row(workspace_id, name="ufo", is_main=True)
+        shipped = await _agent_row(workspace_id, name="briefer")
+        owned = await _agent_row(workspace_id, name="invoice-intake")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(
+                    provisioned_by="brief_pipeline",
+                    provisioned_name="briefer",
+                    provisioned_version="1",
+                )
+                .where(tables.agent.c.id == shipped)
+            )
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(owner_member_id=owner)
+                .where(tables.agent.c.id == owned)
+            )
+        owner_ctx = _tool_context(workspace_id, speaker_member_id=owner)
+        stranger_ctx = _tool_context(workspace_id, speaker_member_id=stranger)
+        admin_ctx = _tool_context(workspace_id, speaker_member_id=admin)
+
+        with pytest.raises(VerbNotSupported) as main_refusal:
+            await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="ufo")
+        assert str(main_refusal.value) == MAIN_AGENT_UNARCHIVABLE
+        with pytest.raises(AdminRequired) as shipped_refusal:
+            await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="briefer")
+        assert str(shipped_refusal.value) == AGENT_ARCHIVE_GATE
+        await _text(tools, "object_delete", admin_ctx, kind=AGENT_KIND, name="briefer")
+        await RESTORE_APPLICATION_TOOL_DEF.handler(
+            admin_ctx,
+            RESTORE_APPLICATION_TOOL_DEF.input_model.model_validate(
+                {
+                    "app_id": str(shipped),
+                    "name": "briefer",
+                    "user_description": OBJECT_NARRATION,
+                }
+            ),
+        )
+        with pytest.raises(AdminRequired) as stranger_refusal:
+            await _text(
+                tools, "object_delete", stranger_ctx, kind=AGENT_KIND, name="invoice-intake"
+            )
+        assert str(stranger_refusal.value) == AGENT_ARCHIVE_GATE
+
+        await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="invoice-intake")
+        with pytest.raises(AdminRequired) as restore_refusal:
+            await RESTORE_APPLICATION_TOOL_DEF.handler(
+                stranger_ctx,
+                RESTORE_APPLICATION_TOOL_DEF.input_model.model_validate(
+                    {
+                        "app_id": str(owned),
+                        "name": "invoice-intake",
+                        "user_description": OBJECT_NARRATION,
+                    }
+                ),
+            )
+        assert str(restore_refusal.value) == AGENT_RESTORE_GATE

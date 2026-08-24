@@ -110,7 +110,10 @@ def due_pause_workspaces() -> WorkspaceCandidates:
         now = datetime.now(UTC)
         return (
             sa.select(pause.c.workspace_id)
-            .where(_claim_available(now), pause.c.resume_at <= now)
+            .where(
+                _claim_available(now),
+                pause.c.resume_at <= now,
+            )
             .distinct()
         )
 

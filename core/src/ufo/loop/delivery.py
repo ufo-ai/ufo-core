@@ -28,7 +28,7 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from ufo.db import owner_tx, workspace_tx
-from ufo.ext.context import TurnInvoker
+from ufo.ext.context import AgentArchived, TurnInvoker
 from ufo.loop.subagents import SubagentRegistry, SubagentResult
 from ufo.schema import tables
 from ufo.schema.records import DELIVERY_DELIVERED, DELIVERY_PENDING, Turn
@@ -42,7 +42,11 @@ RESULT_DELIVERY_BATCH_CHILDREN = 100
 class DeliverySweep:
     """The `result_delivery` job's body: find the delegated children whose result never reached the
     conversation that spawned them, and deliver them one parent conversation at a time. The jobs
-    role names and schedules it through a Protocol rather than importing the loop."""
+    role names and schedules it through a Protocol rather than importing the loop.
+
+    A parent whose app was archived takes nothing: its child stays pending and the pass moves on,
+    so one retired app cannot hold up the results every other conversation is waiting for, and a
+    restore delivers what was owed."""
 
     invoker_for: Callable[[UUID], TurnInvoker]
     registry: SubagentRegistry
@@ -62,16 +66,26 @@ class DeliverySweep:
             if conversation_id in woken:
                 continue
             for child in children:
-                await result.deliver(child)
+                try:
+                    await result.deliver(child)
+                except AgentArchived:
+                    continue
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
+        parent = tables.turn.alias("candidate_parent_turn")
         async with owner_tx() as connection:
             rows = (
                 await connection.execute(
                     sa.select(tables.turn.c.workspace_id)
+                    .select_from(
+                        tables.turn.join(parent, parent.c.id == tables.turn.c.parent_turn_id).join(
+                            tables.agent, tables.agent.c.id == parent.c.agent_id
+                        )
+                    )
                     .where(
                         tables.turn.c.result_delivery == DELIVERY_PENDING,
                         tables.turn.c.terminal.is_not(None),
+                        tables.agent.c.archived_at.is_(None),
                     )
                     .distinct()
                 )
@@ -93,11 +107,14 @@ class DeliverySweep:
                             parent.c.conversation_id.label("parent_conversation_id"),
                         )
                         .select_from(
-                            tables.turn.join(parent, parent.c.id == tables.turn.c.parent_turn_id)
+                            tables.turn.join(
+                                parent, parent.c.id == tables.turn.c.parent_turn_id
+                            ).join(tables.agent, tables.agent.c.id == parent.c.agent_id)
                         )
                         .where(
                             tables.turn.c.result_delivery == DELIVERY_PENDING,
                             tables.turn.c.terminal.is_not(None),
+                            tables.agent.c.archived_at.is_(None),
                         )
                         .order_by(parent.c.conversation_id, tables.turn.c.updated_at)
                         .limit(RESULT_DELIVERY_BATCH_CHILDREN)

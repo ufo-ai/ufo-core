@@ -42,6 +42,9 @@ async def pending_setup() -> tuple[tuple[UUID, str, AgentSetup], ...]:
     binds to the agent whose conversation it is made in, so this is read to tell that agent what is
     outstanding.
 
+    An archived app is absent: it admits no turn, so it can neither be asked for a grant nor use
+    one, and the line would stand unmet for as long as the row is archived.
+
     A connector is met by a grant to any connection of that provider — `connect_account` in the
     agent's own conversation writes one, and `GrantStore.attach` binds a connection that already
     exists, so every declared need has a member-reachable way to settle. An agent no extension
@@ -52,6 +55,7 @@ async def pending_setup() -> tuple[tuple[UUID, str, AgentSetup], ...]:
                 sa.select(tables.agent.c.id, tables.agent.c.name, tables.agent.c.setup).where(
                     tables.agent.c.workspace_id == ws_current().workspace_id,
                     tables.agent.c.setup.is_not(None),
+                    tables.agent.c.archived_at.is_(None),
                 )
             )
         ).all()
