@@ -1427,11 +1427,14 @@ class TurnEngine:
         any surface. A closing round's own spans are delivered by the answer rather than by a reply
         of their own, so the words the redaction held out of the live stream go back onto it
         (`_stream_closing_spans`) and a surface that prints that stream still prints the answer.
-        Also returns the
-        structured question, credential request, or connect request left pending when its tool was
-        the turn's final act — each round overwrites all three, so a turn that asked and then
-        worked on carries none. `created` instead accumulates: an object a round created stays
-        created however many rounds follow it, so the terminal names every one of them.
+        Also returns the acts the turn leaves open. The structured question is the one the model
+        asked as its final act: a later round of work replaces it, and a member's mid-turn arrival
+        clears it, because the arrival is words in the same channel the ask would be answered in.
+        A credential or connect request stands until the turn ends, whichever round made it. Only
+        the member discharges those, in a private handoff no message in this conversation performs,
+        so neither the agent's own later work nor a member speaking while it runs makes one stale.
+        `created` instead accumulates: an object a round created stays created however many rounds
+        follow it, so the terminal names every one of them.
 
         A round whose stream dies at the max_tokens budget is dropped from the window — its
         partial tool calls cannot be replayed as a valid assistant message — but its already-paid
@@ -1456,7 +1459,7 @@ class TurnEngine:
         for round_index in range(self.max_rounds):
             absorbed = await self._absorb_arrivals(messages, arrival_log, absorbed_ids, requesters)
             if len(absorbed) > len(messages):
-                question = credential_request = connect_request = None
+                question = None
             messages = absorbed
             await self._enforce_spend(usage_events, requesters)
             self._reseed_loaded_skills(messages)

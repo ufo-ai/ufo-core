@@ -5886,11 +5886,6 @@ async def test_invalid_blocks_reposts_once(
                 )
             assert held is not None
             assert (held["channel"], held["ts"]) == ("C5", "999.200")
-            assert any(
-                element.get("action_id") == slack.CONNECT_ACTION_ID
-                for block in held["blocks"]
-                for element in (block.get("elements") or [])
-            )
         else:
             assert second["blocks"][1]["text"]["text"] == "*Need a decision*"
             assert second["blocks"][2]["block_id"] == "ask:0"
@@ -9554,16 +9549,19 @@ class _ConnectProvider:
         return OAuthAccount(account_id="calendar-account")
 
 
-async def test_a_question_carrying_a_connect_request_holds_no_button_to_settle(
+async def test_a_question_carrying_a_connect_request_posts_both_and_settles_the_button(
     db: None, tmp_path, monkeypatch
 ) -> None:
-    """Slack takes one actions row, so a turn that both asked a question and requested a connection
-    posts the question's controls and no button. Nothing is held for a button that was never posted:
-    a landing connection that rewrote that message would state an account under the question."""
+    """A turn that both asked a question and requested a connection owes the member both acts: the
+    question is answered in the thread and the connection on the provider's pages, so one message
+    carries the question's controls and the button. The landing connection settles the button it was
+    asked from and leaves the question standing."""
     workspace_id, member_id = await _seed(member_email="bee@example.com")
     assert member_id is not None
     recorder: list[httpx.Request] = []
-    app, _client, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    app, _client, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _thread_transport(recorder)
+    )
     async with workspace_tx() as connection:
         agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
     await _seed_done_turn(
@@ -9578,11 +9576,12 @@ async def test_a_question_carrying_a_connect_request_holds_no_button_to_settle(
     )
     await app.state.writeback_poller.drain()
     posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
-    assert not any(
-        element.get("action_id") == slack.CONNECT_ACTION_ID
+    assert [
+        element["action_id"]
         for block in posted["blocks"]
         for element in (block.get("elements") or [])
-    )
+        if "action_id" in element
+    ] == [slack.ASK_SUBMIT_ACTION_ID, slack.CONNECT_ACTION_ID]
 
     hook = HookContext(
         ext=context_for(slack.SLACK_EXTENSION, frozenset({slack.SLACK_BOT_TOKEN_SLOT})),
@@ -9597,7 +9596,158 @@ async def test_a_question_carrying_a_connect_request_holds_no_button_to_settle(
     with ws(workspace_id):
         await settle_connect_button(hook)
 
-    assert _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL) == []
+    rewritten = json.loads(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)[0].content)
+    assert not any(
+        element.get("action_id") == slack.CONNECT_ACTION_ID
+        for block in rewritten["blocks"]
+        for element in (block.get("elements") or [])
+    )
+    assert rewritten["blocks"][-1]["elements"][0]["text"] == (
+        "Connected google_calendar: calendar-account."
+    )
+    assert [block["block_id"] for block in rewritten["blocks"] if "block_id" in block] == ["ask:0"]
+    assert [
+        element["action_id"]
+        for block in rewritten["blocks"]
+        for element in (block.get("elements") or [])
+        if "action_id" in element
+    ] == [slack.ASK_SUBMIT_ACTION_ID]
+
+
+def _thread_transport(recorder: list[httpx.Request]) -> httpx.MockTransport:
+    """A Slack thread that remembers what is in it: a post lands a message, an update replaces one,
+    and a replies read answers with what stands there now. The settle path reads the thread back, so
+    a transport that always answered with what was first posted would prove nothing about it."""
+    inner = _mock_transport([], {})
+    thread: dict[str, dict[str, object]] = {
+        "200.0": {"ts": "200.0", "thread_ts": None, "text": "take it over", "blocks": []}
+    }
+    counter = itertools.count(1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CHAT_POST_MESSAGE_URL:
+            body = json.loads(request.content)
+            ts = f"999.{next(counter)}00"
+            thread[ts] = {
+                "ts": ts,
+                "thread_ts": body.get("thread_ts"),
+                "text": body.get("text", ""),
+                "blocks": body.get("blocks", []),
+            }
+            return httpx.Response(200, json={"ok": True, "channel": body["channel"], "ts": ts})
+        if url == slack.SLACK_CHAT_UPDATE_URL:
+            body = json.loads(request.content)
+            thread[body["ts"]] |= {"text": body["text"], "blocks": body["blocks"]}
+            return httpx.Response(200, json={"ok": True, "ts": body["ts"]})
+        if url in (slack.SLACK_CONVERSATIONS_REPLIES_URL, slack.SLACK_CONVERSATIONS_HISTORY_URL):
+            params = request.url.params
+            oldest = float(params.get("oldest") or 0)
+            latest = float(params.get("latest") or "1e12")
+            page = sorted(
+                (
+                    message
+                    for message in thread.values()
+                    if oldest <= float(message["ts"]) <= latest
+                ),
+                key=lambda message: float(message["ts"]),
+            )
+            return httpx.Response(
+                200, json={"ok": True, "messages": page[: int(params.get("limit") or len(page))]}
+            )
+        return inner.handler(request)
+
+    return httpx.MockTransport(handler)
+
+
+SUBMIT_ROW_BLOCK_ID = "submit_row"
+
+
+async def test_a_landed_connection_keeps_the_answers_a_member_already_sent(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """The reply carried a question and a connect button, and the member answered before they
+    connected. Settling the button reads the thread back, so it takes the button off the message the
+    answers left behind rather than restoring the controls those answers replaced."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    app, _client, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _thread_transport(recorder)
+    )
+    async with workspace_tx() as connection:
+        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+    await _seed_done_turn(
+        workspace_id,
+        "C5:200.0",
+        "Which one?",
+        blob,
+        artifact=False,
+        question=ASK_QUESTION,
+        connect_request=ConnectRequest(provider="google_calendar", requester_member_id=member_id),
+        speaker_member_id=member_id,
+    )
+    await app.state.writeback_poller.drain()
+    posted = json.loads(_requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)[0].content)
+    blocks_as_slack_echoes_them = [
+        (
+            {**block, "block_id": SUBMIT_ROW_BLOCK_ID}
+            if any(
+                element.get("action_id") == slack.ASK_SUBMIT_ACTION_ID
+                for element in (block.get("elements") or [])
+            )
+            else block
+        )
+        for block in posted["blocks"]
+    ]
+
+    submit = slack._to_interaction(
+        _click_body(
+            slack.ASK_SUBMIT_ACTION_ID,
+            blocks=blocks_as_slack_echoes_them,
+            block_id=SUBMIT_ROW_BLOCK_ID,
+            state={
+                "values": {
+                    "ask:0": {
+                        "ask:0": {
+                            "type": "radio_buttons",
+                            "selected_option": {"value": "Ship"},
+                        }
+                    }
+                }
+            },
+        ),
+        slack.SlackIdentity(bot_token_fingerprint="f", team_id=TEAM_ID, bot_user_id=BOT_USER_ID),
+    )
+    assert isinstance(submit, slack.AnswerSubmit)
+    await slack._replace_controls_with_answers(BOT_TOKEN, submit)
+
+    hook = HookContext(
+        ext=context_for(slack.SLACK_EXTENSION, frozenset({slack.SLACK_BOT_TOKEN_SLOT})),
+        payload=ConnectionRecorded(
+            connection_id=uuid4(),
+            provider="google_calendar",
+            account_id="calendar-account",
+            account_label="Work calendar",
+            owner_member_id=member_id,
+            agent_id=agent_id,
+        ),
+    )
+    with ws(workspace_id):
+        await settle_connect_button(hook)
+
+    settled = json.loads(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)[-1].content)
+    lines = [
+        element["text"]
+        for block in settled["blocks"]
+        for element in (block.get("elements") or [])
+        if element.get("type") == "mrkdwn"
+    ]
+    assert "✅ *Ship it?* — Ship" in lines
+    assert "Connected google_calendar: Work calendar." in lines
+    assert not any(block["type"] == "input" for block in settled["blocks"])
+    assert not any(block["type"] == "actions" for block in settled["blocks"])
 
 
 async def test_a_landed_connection_settles_the_slack_button_it_was_asked_from(
@@ -9611,7 +9761,9 @@ async def test_a_landed_connection_settles_the_slack_button_it_was_asked_from(
     workspace_id, member_id = await _seed(member_email="bee@example.com")
     assert member_id is not None
     recorder: list[httpx.Request] = []
-    app, _client, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    app, _client, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, _thread_transport(recorder)
+    )
     async with workspace_tx() as connection:
         agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
     await _seed_done_turn(

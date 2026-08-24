@@ -4434,6 +4434,78 @@ async def test_a_connect_request_survives_a_later_round_of_the_agents_own_work(
     assert frame.connect_request.provider == "stub"
 
 
+@dataclass(frozen=True)
+class ConnectThenHearFromAMemberModel:
+    """Leaves the connection control, then a member speaks while the turn is still running and the
+    model answers them. The arrival is words in the thread; the control is pressed elsewhere."""
+
+    turn: Turn
+    arrival: str
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        rounds = sum(
+            1
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+        )
+        if rounds == 0:
+            yield ToolCallStart(id="k1", name="connect_account")
+            yield ToolCallDelta(
+                id="k1",
+                partial_json=json.dumps(
+                    {
+                        "provider": "stub",
+                        "user_description": "connecting their account",
+                        "requested_by": str(self.turn.id),
+                    }
+                ),
+            )
+            await _queue_arrival(self.turn, self.arrival)
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
+        yield TextDelta(text="The control is in this reply.")
+        yield Usage(input_tokens=1, output_tokens=1)
+
+
+async def test_a_connect_request_survives_a_member_speaking_mid_turn(
+    db: None, tmp_path: Path
+) -> None:
+    """A member who speaks while the turn runs has pressed nothing. Their words reach the window and
+    the connection is still owed, so the reply that ends the turn is the one that carries it."""
+    turn = await _seed_turn("queued", None)
+    owner = await _seeded_member(turn.workspace_id)
+    flow = ConnectFlow(
+        providers={"stub": ConnectStubProvider()},
+        fernet=Fernet(Fernet.generate_key()),
+        store=GrantStore(),
+        redirect_uri="http://surface/v1/connect/callback",
+    )
+    install_connect_flow(flow)
+    try:
+        engine = _engine(
+            turn.model_copy(
+                update={"admission_source": "member", "speaker_member_id": owner},
+            ),
+            ConnectThenHearFromAMemberModel(turn, "no connection control"),
+            tmp_path,
+            member_id=owner,
+        )
+        frame = await engine.run()
+    finally:
+        install_connect_flow(None)
+
+    assert frame.status == "done"
+    assert frame.connect_request is not None
+    assert frame.connect_request.provider == "stub"
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert any(
+        isinstance(message.content, str) and "no connection control" in message.content
+        for message in stored.messages
+    )
+
+
 async def test_a_credential_request_survives_the_round_budget(db: None, tmp_path: Path) -> None:
     """A turn that runs out of rounds still owes what it asked for. The forced close returned no
     acts at all, so a member whose turn ran long enough to exhaust its budget lost the prompt."""

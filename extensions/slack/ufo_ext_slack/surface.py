@@ -1205,7 +1205,7 @@ def slack_reply_body(
     sections: bool = False,
 ) -> bytes:
     """The chat.postMessage body for one bounded reply part: a Block Kit `markdown` block, the
-    rendered ask or connect handoff when present, and an optional final accounting context block.
+    rendered ask and connect handoff when present, and an optional final accounting context block.
     `sections=True` uses conservative section blocks after Slack rejects markdown blocks as
     `invalid_blocks`. `text` carries the whole part as the notification fallback.
 
@@ -1397,7 +1397,12 @@ def _ask_prose(ask: AskQuestion) -> dict[str, object]:
 def slack_connect_blocks(
     request: ConnectRequest | None, turn_id: UUID
 ) -> list[dict[str, object]] | None:
-    """The requester-checked private OAuth handoff for a terminal connect request."""
+    """The requester-checked private OAuth handoff for a turn's connect request.
+
+    It rides the reply beside the question's controls when the turn left both. The two are separate
+    acts — one is answered in the thread, the other on the provider's pages — so a turn that asked
+    and requested a connection owes the member both, and a message carrying only the ask would tell
+    them to press a control that is not there."""
     if request is None:
         return None
     return [
@@ -3718,15 +3723,19 @@ CONNECT_SETTLED_LINE = "Connected {provider}: {account}."
 
 
 class ConnectMessage(BaseModel):
-    """Where a reply's connect button stands: the message that carries it, and the blocks it was
-    posted with. Held because the button outlives the press — a member authorizes on the provider's
-    pages, and the connection lands on a hook with nothing in hand but the account it made — so this
-    is what says which message to rewrite."""
+    """Where a reply's connect button stands: the channel, the message, and the thread holding it.
+    Held because the button outlives the press — a member authorizes on the provider's pages, and
+    the connection lands on a hook with nothing in hand but the account it made — so this is what
+    says which message to rewrite.
+
+    What that message says is not held with it. This surface is not its only writer: a reply that
+    ended on a question carries the question's controls in the same message, and a member who
+    answers rewrites it into the answers they sent. The words are read back when the connection
+    lands, so the account line joins what the thread holds then rather than what was posted."""
 
     channel: str
     ts: str
-    text: str
-    blocks: tuple[dict[str, object], ...] = ()
+    thread_ts: str | None = None
 
 
 def connect_message_key(member_id: UUID, provider: str) -> str:
@@ -3742,28 +3751,28 @@ async def _hold_connect_message(
     channel: str,
     ts: str | None,
 ) -> None:
-    """Remember the message this reply's connect button was posted in.
+    """Remember where this reply's connect button stands.
 
-    The button itself is what is remembered, not the request: a turn that asked a question and
-    requested a connection posts the question's controls — one actions row is Slack's lot — so the
-    reply the member reads carries no button, and a message rewritten as though it did would state a
-    landed account under a question. Every post that does carry one is held, whichever body Slack
-    accepted."""
+    The button itself is what is remembered, not the request: a body Slack will not take at its
+    block bound posts as plain text, so the reply the member reads carries no button, and a message
+    rewritten as though it did would state a landed account under prose that never offered one.
+    Every post that does carry one is held, whichever body Slack accepted."""
     if request is None or ts is None:
         return
     raw = posted.get("blocks")
-    blocks = tuple(
-        block for block in (raw if isinstance(raw, list) else ()) if isinstance(block, dict)
-    )
-    if not any(_is_connect_action(block) for block in blocks):
+    if not any(
+        _is_connect_action(block)
+        for block in (raw if isinstance(raw, list) else ())
+        if isinstance(block, dict)
+    ):
         return
+    thread_ts = posted.get("thread_ts")
     await store.put(
         connect_message_key(request.requester_member_id, request.provider),
         ConnectMessage(
             channel=channel,
             ts=ts,
-            text=str(posted.get("text", "")),
-            blocks=blocks,
+            thread_ts=thread_ts if isinstance(thread_ts, str) else None,
         ).model_dump(mode="json"),
     )
 
@@ -3798,18 +3807,72 @@ async def _rewrite_slack_message(
         )
 
 
+async def _held_connect_message(
+    bot_token: str, held: ConnectMessage
+) -> Mapping[str, object] | None:
+    """The message the button stands in, as the thread holds it now, or None when the read misses
+    it.
+
+    `oldest` and `latest` both name the one message, the bounding `_declared_files` reads a single
+    threaded message with. Both ends matter: a page of this endpoint fills with the earliest
+    messages in its range, so bounding only the top answers with the thread's opening. The parent
+    rides along in every page, so the page is searched rather than read off the front."""
+    params = {
+        "channel": held.channel,
+        "oldest": held.ts,
+        "latest": held.ts,
+        "inclusive": "true",
+    }
+    if held.thread_ts is not None:
+        params["ts"] = held.thread_ts
+    async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
+        payload = await _slack_ok(
+            client.get(
+                SLACK_CONVERSATIONS_REPLIES_URL
+                if held.thread_ts is not None
+                else SLACK_CONVERSATIONS_HISTORY_URL,
+                params=params,
+                headers={"Authorization": f"Bearer {bot_token}"},
+            )
+        )
+    messages = payload.get("messages")
+    return next(
+        (
+            message
+            for message in (messages if isinstance(messages, list) else ())
+            if isinstance(message, dict) and message.get("ts") == held.ts
+        ),
+        None,
+    )
+
+
 async def settle_connect_message(
     bot_token: str, held: ConnectMessage, provider: str, account: str
 ) -> None:
     """Rewrite a landed connect's button into the account it made, with `chat.update`: the thread
-    reads what the member did rather than a button that would ask for it again, and the reply prose
-    above it is echoed back exactly as Slack accepted it. Every block but the button's own is the
-    message's own, so nothing else in the thread moves."""
+    reads what the member did rather than a button that would ask for it again, and every other
+    block is echoed back exactly as the thread holds it.
+
+    What the account line joins is read back rather than remembered. A reply that ended on a
+    question carries its controls in this same message, and a member who answered has already
+    rewritten it into the answers they sent; settling from the blocks that were posted would put
+    the controls back and erase those answers. A message the read cannot find, or one whose button
+    is already gone, is left alone — the grant stands either way, and a stale button costs the
+    member far less than an answer overwritten by the one it replaced."""
+    message = await _held_connect_message(bot_token, held)
+    if message is None:
+        return
+    raw = message.get("blocks")
+    live = [block for block in (raw if isinstance(raw, list) else ()) if isinstance(block, dict)]
+    if not any(_is_connect_action(block) for block in live):
+        return
     blocks: list[dict[str, object]] = [
-        dict(block) for block in held.blocks if not _is_connect_action(block)
+        dict(block) for block in live if not _is_connect_action(block)
     ]
     blocks.append(_context_line(CONNECT_SETTLED_LINE.format(provider=provider, account=account)))
-    await _rewrite_slack_message(bot_token, held.channel, held.ts, held.text, blocks)
+    await _rewrite_slack_message(
+        bot_token, held.channel, held.ts, str(message.get("text") or ""), blocks
+    )
 
 
 def _context_line(text: str) -> dict[str, object]:
@@ -4179,9 +4242,10 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str:
         progress,
         stored,
     )
-    actions = slack_ask_blocks(writeback.terminal.question) or slack_connect_blocks(
-        writeback.terminal.connect_request, writeback.turn_id
-    )
+    actions = [
+        *(slack_ask_blocks(writeback.terminal.question) or ()),
+        *(slack_connect_blocks(writeback.terminal.connect_request, writeback.turn_id) or ()),
+    ] or None
     model = writeback.terminal.model or "no-model"
     params = (
         f"-[{writeback.terminal.reasoning}]" if writeback.terminal.reasoning is not None else ""
