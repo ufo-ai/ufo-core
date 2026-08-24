@@ -41,6 +41,7 @@ from ufo.sandbox.ingress_serve import (
     NO_SITE_HERE,
     NOT_FOUND,
     SESSION_ENDED,
+    SHIPPED_ASSET_CACHE,
     SITE_GONE,
     SITE_HAS_NO_SOCKET,
     SITE_NOT_ANSWERING,
@@ -2047,12 +2048,12 @@ JAVASCRIPT_MEDIA_TYPES = frozenset({"text/javascript", "application/javascript"}
 SHIPPED_SLUG = "radar"
 SHIPPED_DIGEST = "9f3a1c2b4d5e6f70"
 SHIPPED_ETAG = f'"{SHIPPED_DIGEST}"'
-SHIPPED_INDEX = b'<!doctype html><script type="module" src="app.7c2b.js"></script>'
+SHIPPED_INDEX = b'<!doctype html><script type="module" src="/assets/app.7c2b.js"></script>'
 SHIPPED_APP = b"mountApp()"
 SHIPPED_KIT = b"export function mountApp() {}"
 SHIPPED_FILES = {
     f"{SHIPPED_SLUG}/index.html": (SHIPPED_INDEX, "text/html"),
-    f"{SHIPPED_SLUG}/app.7c2b.js": (SHIPPED_APP, "text/javascript"),
+    "assets/app.7c2b.js": (SHIPPED_APP, "text/javascript"),
     "assets/kit.4a9e.js": (SHIPPED_KIT, "text/javascript"),
 }
 
@@ -2099,9 +2100,10 @@ async def test_a_shipped_bundle_serves_row_less_from_the_fleet_store(db, stored_
     raises on any dial, and the bytes come from the deploy-wide fleet prefix — yet the page answers,
     with the digest as its etag and the frame-ancestors CSP a workspace site carries. The synthetic
     anchor scopes the origin; the shipped claim names the deploy-wide bytes. The slug's own index
-    answers `/`, its app bundle answers `/app.<h>.js`, and a tree file outside the slug subdir —
-    `assets/kit.<h>.js` — answers at its own path, proving a sibling resolves without the slug
-    prefix."""
+    answers `/`, and the entry and shared kit under `assets/` answer at their root paths, proving
+    files outside the slug prefix resolve unchanged.
+    The document revalidates because its root URL is stable across deploys, while every
+    Vite-hashed asset is immutable in the viewer's private cache."""
     client, blobs = stored_ingress
     workspace_id = uuid4()
     anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
@@ -2118,13 +2120,15 @@ async def test_a_shipped_bundle_serves_row_less_from_the_fleet_store(db, stored_
     assert index.headers["x-content-type-options"] == "nosniff"
     assert index.headers[CONTENT_SECURITY_POLICY].startswith(FRAME_ANCESTORS_DIRECTIVE)
 
-    app = await client.get(f"{_origin(anchor)}/app.7c2b.js")
+    app = await client.get(f"{_origin(anchor)}/assets/app.7c2b.js")
     assert (app.status_code, app.content) == (200, SHIPPED_APP)
     assert app.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
+    assert app.headers["cache-control"] == SHIPPED_ASSET_CACHE
 
     kit = await client.get(f"{_origin(anchor)}/assets/kit.4a9e.js")
     assert (kit.status_code, kit.content) == (200, SHIPPED_KIT)
     assert kit.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
+    assert kit.headers["cache-control"] == SHIPPED_ASSET_CACHE
 
 
 async def test_a_shipped_bundle_unknown_path_is_404(db, stored_ingress) -> None:
@@ -2146,6 +2150,20 @@ async def test_a_shipped_bundle_revalidates_by_digest(db, stored_ingress) -> Non
     fresh = await client.get(f"{_origin(anchor)}/", headers={"if-none-match": SHIPPED_ETAG})
     assert fresh.status_code == 304
     assert fresh.content == b""
+
+
+async def test_a_shipped_bundle_manifest_is_fixed_by_its_digest(db, stored_ingress) -> None:
+    client, blobs = stored_ingress
+    workspace_id = uuid4()
+    anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
+    await _seed_shipped_bundle(blobs, SHIPPED_DIGEST, SHIPPED_FILES)
+    await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
+    assert (await client.get(f"{_origin(anchor)}/")).status_code == 200
+
+    late = b"not part of the content-addressed tree"
+    await blobs.put(f"apps/{SHIPPED_DIGEST}/assets/late.1234.js", late)
+    got = await client.get(f"{_origin(anchor)}/assets/late.1234.js")
+    assert (got.status_code, got.text) == (404, NOT_FOUND)
 
 
 async def test_a_shipped_bundle_whose_digest_is_gone_is_404(db, stored_ingress) -> None:

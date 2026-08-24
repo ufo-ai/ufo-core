@@ -144,6 +144,10 @@ have what a dialed site's never do: a digest. The viewer's own browser may hold 
 revalidate on every use, the `etag` answer runs the same session gate as a full response — so a
 held copy never outlives its authorization — and the digest moves on every redeploy, so the same
 URL never serves retired bytes."""
+SHIPPED_ASSET_CACHE = "private, max-age=31536000, immutable"
+"""What a shipped app's Vite-hashed assets carry. The bytes are deploy-wide code rather than
+workspace data, and a changed byte gets a changed `/assets/` name, so the viewer's browser can use
+the copy it already authorized and fetched without asking ingress again."""
 STORED_SITE_METHODS = ("GET", "HEAD")
 STORED_SITE_INDEX = "index.html"
 WEBSOCKET_HANDSHAKE_HEADERS = frozenset(
@@ -289,6 +293,7 @@ class IngressServe:
     """The scheme and rendered `:port` (or empty) of `[sandbox] ingress_public_url` — with
     `base_host`, what `_frame_ancestors` renders a sibling site's origin from."""
     frame_ancestors_cache: dict[UUID, tuple[float, str]] = field(default_factory=dict)
+    shipped_manifests: dict[ShippedClaim, dict[str, StoredFile]] = field(default_factory=dict)
     resume_carriers: Mapping[str, tuple[Carrier, CarrierSpec]] = field(default_factory=dict)
     """Backends kept live only for the stored handles bearing their scheme (`[sandbox]
     resume_backends`): a site whose conversation still runs on a prior provider dials through that
@@ -471,12 +476,15 @@ class IngressServe:
         Enumerated by one bounded `list`, not a published manifest — the digest supplies the etag a
         bare listing could not, and the sizes and media types are all the listing and the filenames
         already carry. The keys stay fleet keys, read in `_serve_stored` from the fleet store."""
+        held = self.shipped_manifests.get(shipped)
+        if held is not None:
+            return held
         prefix = f"apps/{shipped.digest}/"
         entries = await FleetBlobStore(backend=self.blob).list(prefix)
         if not entries:
             return None
         slug_prefix = f"{shipped.slug}/"
-        return {
+        manifest = {
             entry.key.removeprefix(prefix).removeprefix(slug_prefix): StoredFile(
                 key=entry.key,
                 size_bytes=entry.size_bytes,
@@ -485,6 +493,8 @@ class IngressServe:
             )
             for entry in entries
         }
+        self.shipped_manifests[shipped] = manifest
+        return manifest
 
     async def _dial_site(self, claims: IngressClaims) -> DialTarget | SiteRefusal:
         """The live target the addressed port is reachable at, for a site whose bytes are served
@@ -608,13 +618,18 @@ class IngressServe:
         candidates = (
             (STORED_SITE_INDEX,) if not trimmed else (trimmed, f"{trimmed}/{STORED_SITE_INDEX}")
         )
-        stored = next((files[name] for name in candidates if name in files), None)
-        if stored is None:
+        located = next(((name, files[name]) for name in candidates if name in files), None)
+        if located is None:
             return Response(NOT_FOUND, status_code=404, media_type="text/plain")
+        name, stored = located
         ancestors = await self._frame_ancestors(claims.workspace_id)
         etag = f'"{stored.sha256}"'
         headers = {
-            "cache-control": STORED_SITE_CACHE,
+            "cache-control": (
+                SHIPPED_ASSET_CACHE
+                if claims.shipped is not None and name.startswith("assets/")
+                else STORED_SITE_CACHE
+            ),
             "etag": etag,
             "x-content-type-options": "nosniff",
             CONTENT_SECURITY_POLICY: f"{FRAME_ANCESTORS_DIRECTIVE} {ancestors}",
