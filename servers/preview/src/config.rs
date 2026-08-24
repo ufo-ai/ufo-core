@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const DEFAULT_MAX_INPUT_MB: u64 = 100;
@@ -21,6 +22,7 @@ pub struct Config {
     pub token: String,
     pub pdfium_lib: String,
     pub soffice_bin: String,
+    pub soffice_profile: PathBuf,
     pub ffmpeg_bin: String,
     pub browser_bin: String,
     pub python_bin: String,
@@ -49,13 +51,14 @@ impl Config {
     }
 
     pub fn from_map(m: &HashMap<String, String>) -> Result<Self, String> {
-        Ok(Self {
+        let config = Self {
             listen: req(m, "UFO_PREVIEW_LISTEN")?
                 .parse()
                 .map_err(|e| format!("UFO_PREVIEW_LISTEN: {e}"))?,
             token: req(m, "UFO_PREVIEW_TOKEN")?,
             pdfium_lib: req(m, "UFO_PREVIEW_PDFIUM_LIB")?,
             soffice_bin: opt(m, "UFO_PREVIEW_SOFFICE_BIN").unwrap_or_else(|| "soffice".into()),
+            soffice_profile: req(m, "UFO_PREVIEW_SOFFICE_PROFILE")?.into(),
             ffmpeg_bin: opt(m, "UFO_PREVIEW_FFMPEG_BIN").unwrap_or_else(|| "ffmpeg".into()),
             browser_bin: opt(m, "UFO_PREVIEW_BROWSER_BIN")
                 .unwrap_or_else(|| "/usr/bin/chromium".into()),
@@ -107,8 +110,32 @@ impl Config {
                     .unwrap_or(2),
             },
             allow_local: opt(m, "UFO_PREVIEW_ALLOW_LOCAL").as_deref() == Some("1"),
-        })
+        };
+        validate_soffice_profile(&config.soffice_profile, &config.soffice_bin)?;
+        Ok(config)
     }
+}
+
+fn validate_soffice_profile(profile: &Path, soffice_bin: &str) -> Result<(), String> {
+    let buildid = std::fs::read_to_string(profile.join("user/extensions/buildid"))
+        .map_err(|e| format!("UFO_PREVIEW_SOFFICE_PROFILE buildid: {e}"))?;
+    let registry = std::fs::read_to_string(profile.join("user/registrymodifications.xcu"))
+        .map_err(|e| format!("UFO_PREVIEW_SOFFICE_PROFILE registry: {e}"))?;
+    if buildid.trim().is_empty() || !registry.contains("oor:name=\"ooSetupLastVersion\"") {
+        return Err("UFO_PREVIEW_SOFFICE_PROFILE is not initialized".into());
+    }
+    let seeded_version = std::fs::read_to_string(profile.join(".ufo-preview-version"))
+        .map_err(|e| format!("UFO_PREVIEW_SOFFICE_PROFILE version: {e}"))?;
+    let output = std::process::Command::new(soffice_bin)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("UFO_PREVIEW_SOFFICE_BIN: {e}"))?;
+    if !output.status.success()
+        || String::from_utf8_lossy(&output.stdout).trim() != seeded_version.trim()
+    {
+        return Err("UFO_PREVIEW_SOFFICE_PROFILE does not match UFO_PREVIEW_SOFFICE_BIN".into());
+    }
+    Ok(())
 }
 
 fn req(m: &HashMap<String, String>, key: &str) -> Result<String, String> {
@@ -155,6 +182,7 @@ mod tests {
             "UFO_PREVIEW_PDFIUM_LIB".into(),
             "/usr/lib/libpdfium.so".into(),
         );
+        m.insert("UFO_PREVIEW_SOFFICE_PROFILE".into(), "/profile".into());
         let err = Config::from_map(&m).unwrap_err();
         assert!(err.contains("UFO_PREVIEW_TOKEN"));
     }
@@ -168,10 +196,22 @@ mod tests {
             "UFO_PREVIEW_PDFIUM_LIB".into(),
             "/usr/lib/libpdfium.so".into(),
         );
+        m.insert(
+            "UFO_PREVIEW_SOFFICE_PROFILE".into(),
+            "tests/fixtures/config-profile".into(),
+        );
+        m.insert(
+            "UFO_PREVIEW_SOFFICE_BIN".into(),
+            "tests/fixtures/soffice-version".into(),
+        );
         let c = Config::from_map(&m).unwrap();
         assert_eq!(c.max_output_bytes, 20 * 1024 * 1024);
         assert_eq!(c.max_pages, 20);
-        assert_eq!(c.soffice_bin, "soffice");
+        assert_eq!(c.soffice_bin, "tests/fixtures/soffice-version");
+        assert_eq!(
+            c.soffice_profile,
+            PathBuf::from("tests/fixtures/config-profile")
+        );
         assert_eq!(c.ffmpeg_bin, "ffmpeg");
         assert_eq!(c.browser_bin, "/usr/bin/chromium");
         assert_eq!(c.python_bin, "/usr/bin/python3");
@@ -184,5 +224,12 @@ mod tests {
             c.concurrency
         );
         assert_eq!(c.request_timeout, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn soffice_profile_must_match_the_binary() {
+        let error = validate_soffice_profile(Path::new("tests/fixtures/config-profile"), "rustc")
+            .unwrap_err();
+        assert!(error.contains("does not match"));
     }
 }

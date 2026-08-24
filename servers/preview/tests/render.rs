@@ -13,10 +13,22 @@ fn base_map() -> HashMap<String, String> {
         "UFO_PREVIEW_PDFIUM_LIB".into(),
         std::env::var("UFO_PREVIEW_PDFIUM_LIB").unwrap_or_else(|_| "/nonexistent".into()),
     );
-    m.insert("UFO_PREVIEW_ALLOW_LOCAL".into(), "1".into());
+    let soffice_profile = std::env::var("UFO_PREVIEW_SOFFICE_PROFILE").ok();
+    m.insert(
+        "UFO_PREVIEW_SOFFICE_PROFILE".into(),
+        soffice_profile
+            .clone()
+            .unwrap_or_else(|| "tests/fixtures/config-profile".into()),
+    );
     if let Ok(bin) = std::env::var("UFO_PREVIEW_SOFFICE_BIN") {
         m.insert("UFO_PREVIEW_SOFFICE_BIN".into(), bin);
+    } else if soffice_profile.is_none() {
+        m.insert(
+            "UFO_PREVIEW_SOFFICE_BIN".into(),
+            "tests/fixtures/soffice-version".into(),
+        );
     }
+    m.insert("UFO_PREVIEW_ALLOW_LOCAL".into(), "1".into());
     m
 }
 

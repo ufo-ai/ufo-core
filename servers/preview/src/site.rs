@@ -155,6 +155,14 @@ mod tests {
             ("UFO_PREVIEW_LISTEN".into(), "127.0.0.1:0".into()),
             ("UFO_PREVIEW_TOKEN".into(), "token".into()),
             ("UFO_PREVIEW_PDFIUM_LIB".into(), "/missing".into()),
+            (
+                "UFO_PREVIEW_SOFFICE_PROFILE".into(),
+                "tests/fixtures/config-profile".into(),
+            ),
+            (
+                "UFO_PREVIEW_SOFFICE_BIN".into(),
+                "tests/fixtures/soffice-version".into(),
+            ),
             ("UFO_PREVIEW_SITE_HOST".into(), "testing.ufo.ai".into()),
         ]);
         if allow_local {

@@ -51,6 +51,7 @@ pub async fn to_pdf(
         .to_str()
         .ok_or_else(|| Refusal::UnsupportedType("workdir is not valid utf-8".into()))?;
     let profile = workdir.join("profile");
+    copy_profile(&cfg.soffice_profile, &profile).await?;
     let mut cmd = tokio::process::Command::new(&cfg.soffice_bin);
     cmd.arg("--headless")
         .arg("--norestore")
@@ -100,6 +101,41 @@ pub async fn to_pdf(
         return Err(Refusal::UnsupportedType("soffice produced no pdf".into()));
     }
     Ok(pdf)
+}
+
+async fn copy_profile(source: &Path, profile: &Path) -> Result<(), Refusal> {
+    let mut directories = vec![(source.to_path_buf(), profile.to_path_buf())];
+    while let Some((source_dir, profile_dir)) = directories.pop() {
+        tokio::fs::create_dir(&profile_dir)
+            .await
+            .map_err(|e| Refusal::RenderTimeout(format!("soffice profile mkdir: {e}")))?;
+        let mut entries = tokio::fs::read_dir(&source_dir)
+            .await
+            .map_err(|e| Refusal::RenderTimeout(format!("soffice profile read: {e}")))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| Refusal::RenderTimeout(format!("soffice profile entry: {e}")))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|e| Refusal::RenderTimeout(format!("soffice profile type: {e}")))?;
+            let target = profile_dir.join(entry.file_name());
+            if file_type.is_dir() {
+                directories.push((entry.path(), target));
+            } else if file_type.is_file() {
+                tokio::fs::copy(entry.path(), target)
+                    .await
+                    .map_err(|e| Refusal::RenderTimeout(format!("soffice profile copy: {e}")))?;
+            } else {
+                return Err(Refusal::RenderTimeout(
+                    "soffice profile contains a non-file entry".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Renders markdown into a standalone HTML document soffice can load as its conversion source.
@@ -235,6 +271,37 @@ pub async fn video_frame(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn initialized_profile_tree_is_copied() {
+        let source = tempfile::tempdir().unwrap();
+        let buildid = source.path().join("user/extensions/buildid");
+        tokio::fs::create_dir_all(buildid.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&buildid, b"build-id").await.unwrap();
+        tokio::fs::write(
+            source.path().join("user/registrymodifications.xcu"),
+            b"<prop oor:name=\"ooSetupLastVersion\"/>",
+        )
+        .await
+        .unwrap();
+        let profile_root = tempfile::tempdir().unwrap();
+        let profile = profile_root.path().join("profile");
+        super::copy_profile(source.path(), &profile).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(profile.join("user/extensions/buildid"))
+                .await
+                .unwrap(),
+            b"build-id"
+        );
+        assert!(
+            tokio::fs::read_to_string(profile.join("user/registrymodifications.xcu"))
+                .await
+                .unwrap()
+                .contains("ooSetupLastVersion")
+        );
+    }
+
     #[test]
     fn markdown_becomes_html_document() {
         let html = super::markdown_to_html("# Title\n\nbody **bold**\n");

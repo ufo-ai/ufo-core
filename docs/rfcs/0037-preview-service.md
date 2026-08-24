@@ -104,7 +104,7 @@ and the render is answered 502 inside the tunnel. Turn liveness is checked at CO
 | Kind | To PDF | Then |
 |---|---|---|
 | `pdf` | — | `preview-worker` |
-| `docx xlsx pptx svg` | `soffice --headless --convert-to pdf`, per-request `-env:UserInstallation` profile — the recipe `builtins.py:112` proves | `preview-worker` |
+| `docx xlsx pptx svg` | `soffice --headless --convert-to pdf`, with a per-request writable profile copied from the image-initialized seed | `preview-worker` |
 | `md csv` | rendered to an HTML document in-process (pure Rust on untrusted text — `pulldown-cmark` for markdown, a `csv`-crate parse into a bordered `<table>` for CSV) → `soffice` | `preview-worker` |
 | `mp4 mov webm mkv` | — | `ffmpeg` extracts one frame to PNG directly |
 | `site` | — | Chromium visits the core-minted ingress view, settles the page, and captures the requested viewport |
@@ -121,11 +121,12 @@ writes PNGs, exits. A video skips it —
 
 ### Isolation and caps
 
-- Children run one-per-request in a fresh tmpdir: `setsid` + process-group kill on deadline,
-  CPU, file-size and fd-count rlimits, cleared environment. Document and video children also carry
-  an address-space rlimit. Chromium reserves more virtual address space than it uses, so its actual
-  memory is bounded by the pod's 2 GiB cgroup; one renderer process and a 128 MiB JavaScript heap
-  further bound each capture.
+- Children run one-per-request in a fresh tmpdir. Each LibreOffice child gets an isolated writable
+  copy of the profile initialized by its exact image version. Children use `setsid` + process-group
+  kill on deadline, CPU, file-size and fd-count rlimits, cleared environment. Document and video
+  children also carry an address-space rlimit. Chromium reserves more virtual address space than it
+  uses, so its actual memory is bounded by the pod's 2 GiB cgroup; one renderer process and a 128 MiB
+  JavaScript heap further bound each capture.
 - Caps enforced by the service before and after every child: input bytes before any spawn, output
   pixels and bytes (parity with core's `IMAGE_PREVIEW_MAX_BYTES`), page count, per-phase deadlines,
   bounded render concurrency with excess requests waiting for the next permit. A whole-request

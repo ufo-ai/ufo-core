@@ -3,7 +3,14 @@ use std::sync::Arc;
 use ufo_preview::admit::Kind;
 use ufo_preview::convert::to_pdf;
 
+#[cfg(target_os = "linux")]
+const SOFFICE_DIRECT_BIN: &str = "/usr/lib/libreoffice/program/soffice.bin";
+
 fn test_config() -> Arc<ufo_preview::Config> {
+    test_config_with_bin(None)
+}
+
+fn test_config_with_bin(soffice_bin: Option<&str>) -> Arc<ufo_preview::Config> {
     let mut m = std::collections::HashMap::new();
     m.insert("UFO_PREVIEW_LISTEN".into(), "127.0.0.1:0".into());
     m.insert("UFO_PREVIEW_TOKEN".into(), "test-token".into());
@@ -12,8 +19,15 @@ fn test_config() -> Arc<ufo_preview::Config> {
         std::env::var("UFO_PREVIEW_PDFIUM_LIB")
             .expect("set UFO_PREVIEW_PDFIUM_LIB — run servers/preview/scripts/fetch-pdfium.sh"),
     );
+    m.insert(
+        "UFO_PREVIEW_SOFFICE_PROFILE".into(),
+        std::env::var("UFO_PREVIEW_SOFFICE_PROFILE")
+            .expect("set UFO_PREVIEW_SOFFICE_PROFILE — run scripts/seed-soffice-profile.sh"),
+    );
     m.insert("UFO_PREVIEW_ALLOW_LOCAL".into(), "1".into());
-    if let Ok(bin) = std::env::var("UFO_PREVIEW_SOFFICE_BIN") {
+    if let Some(bin) = soffice_bin {
+        m.insert("UFO_PREVIEW_SOFFICE_BIN".into(), bin.into());
+    } else if let Ok(bin) = std::env::var("UFO_PREVIEW_SOFFICE_BIN") {
         m.insert("UFO_PREVIEW_SOFFICE_BIN".into(), bin);
     }
     Arc::new(ufo_preview::Config::from_map(&m).unwrap())
@@ -35,6 +49,18 @@ async fn docx_converts() {
     converts(Kind::Docx, "fixture.docx").await
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore]
+async fn initialized_profile_avoids_launcher_restart() {
+    let cfg = test_config_with_bin(Some(SOFFICE_DIRECT_BIN));
+    let work = tempfile::tempdir().unwrap();
+    let input = work.path().join("input.docx");
+    std::fs::copy("tests/fixtures/fixture.docx", &input).unwrap();
+    let pdf = to_pdf(Kind::Docx, &input, work.path(), &cfg).await.unwrap();
+    assert!(std::fs::read(pdf).unwrap().starts_with(b"%PDF-"));
+}
+
 #[tokio::test]
 #[ignore]
 async fn xlsx_converts() {
@@ -47,15 +73,19 @@ async fn pptx_converts() {
     converts(Kind::Pptx, "fixture.pptx").await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn parallel_office_requests_complete() {
-    tokio::join!(
-        converts(Kind::Docx, "fixture.docx"),
-        converts(Kind::Xlsx, "fixture.xlsx"),
-        converts(Kind::Pptx, "fixture.pptx"),
-        converts(Kind::Csv, "fixture.csv"),
-    );
+    let tasks = [
+        (Kind::Docx, "fixture.docx"),
+        (Kind::Xlsx, "fixture.xlsx"),
+        (Kind::Pptx, "fixture.pptx"),
+        (Kind::Csv, "fixture.csv"),
+    ]
+    .map(|(kind, fixture)| tokio::spawn(converts(kind, fixture)));
+    for task in tasks {
+        task.await.unwrap();
+    }
 }
 
 #[tokio::test]

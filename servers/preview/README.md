@@ -28,14 +28,17 @@ Prerequisites:
 - LibreOffice (`soffice`) on `PATH` — every format except PDF is converted through it;
 - `ffmpeg` on `PATH`, for video frames only;
 - Chromium and Python 3, for hosted sites only;
-- the pdfium library, which the fetch script downloads for your platform.
+- the pdfium library, which the fetch script downloads for your platform;
+- a LibreOffice profile initialized by the seed script.
 
 ```bash
 cd preview
 sh scripts/fetch-pdfium.sh
+sh scripts/seed-soffice-profile.sh .soffice-profile
 export UFO_PREVIEW_LISTEN=127.0.0.1:8930
 export UFO_PREVIEW_TOKEN=dev-token
 export UFO_PREVIEW_PDFIUM_LIB="$PWD/.pdfium/libpdfium.so"
+export UFO_PREVIEW_SOFFICE_PROFILE="$PWD/.soffice-profile"
 cargo run --bin ufo-preview
 ```
 
@@ -70,7 +73,8 @@ never does.
 | `UFO_PREVIEW_LISTEN` | Address the service listens on. Required. The container image serves 8930. |
 | `UFO_PREVIEW_TOKEN` | Bearer token byte-returning requests must present. Required. |
 | `UFO_PREVIEW_PDFIUM_LIB` | Path to the pdfium library used for rasterizing. Required. |
-| `UFO_PREVIEW_SOFFICE_BIN` | LibreOffice command. Defaults to `soffice`. |
+| `UFO_PREVIEW_SOFFICE_PROFILE` | Path to the profile initialized by `UFO_PREVIEW_SOFFICE_BIN` and copied into each request. Required. |
+| `UFO_PREVIEW_SOFFICE_BIN` | LibreOffice command. Defaults to `soffice`. Its build must match the profile. |
 | `UFO_PREVIEW_FFMPEG_BIN` | ffmpeg command. Defaults to `ffmpeg`. |
 | `UFO_PREVIEW_BROWSER_BIN` | Chromium command. Defaults to `/usr/bin/chromium`. |
 | `UFO_PREVIEW_PYTHON_BIN` | Python command for the browser driver. Defaults to `/usr/bin/python3`. |
@@ -110,7 +114,9 @@ It requires the pdfium fetch above to have run, plus LibreOffice and `ffmpeg`, a
 library path through for you. The equivalent by hand:
 
 ```bash
-UFO_PREVIEW_PDFIUM_LIB="$PWD/.pdfium/libpdfium.so" cargo test -- --include-ignored --test-threads=4
+UFO_PREVIEW_PDFIUM_LIB="$PWD/.pdfium/libpdfium.so" \
+UFO_PREVIEW_SOFFICE_PROFILE="$PWD/.soffice-profile" \
+cargo test -- --include-ignored --test-threads=4
 ```
 
 CI runs that full pass inside a container image built from `testbed.Dockerfile`, which carries

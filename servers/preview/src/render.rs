@@ -490,6 +490,14 @@ mod tests {
         m.insert("UFO_PREVIEW_LISTEN".into(), "127.0.0.1:0".into());
         m.insert("UFO_PREVIEW_TOKEN".into(), "t".into());
         m.insert("UFO_PREVIEW_PDFIUM_LIB".into(), "/nonexistent".into());
+        m.insert(
+            "UFO_PREVIEW_SOFFICE_PROFILE".into(),
+            "tests/fixtures/config-profile".into(),
+        );
+        m.insert(
+            "UFO_PREVIEW_SOFFICE_BIN".into(),
+            "tests/fixtures/soffice-version".into(),
+        );
         Arc::new(Config::from_map(&m).unwrap())
     }
 

@@ -139,10 +139,18 @@ test-control: ## Run the control (gateway) suite — needs `make control-pg`
 check-control: ## Run the control crate's static gates — fmt and clippy
 	cd servers/control && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
-test-preview: ## Run the preview renderer suite — needs soffice and scripts/fetch-pdfium.sh
+test-preview: ## Run the preview renderer suite — needs soffice and preview setup scripts
 	@lib=$$(ls servers/preview/.pdfium/libpdfium.* 2>/dev/null | head -n1); \
 	test -n "$$lib" || { echo "missing servers/preview/.pdfium — run servers/preview/scripts/fetch-pdfium.sh first" >&2; exit 1; }; \
-	UFO_PREVIEW_PDFIUM_LIB="$$PWD/$$lib" sh -c 'cd servers/preview && cargo test -- --include-ignored --test-threads=4'
+	profile=servers/preview/.soffice-profile; \
+	if ! test -s "$$profile/.ufo-preview-version" \
+		|| ! test -s "$$profile/user/extensions/buildid" \
+		|| ! grep -q 'ooSetupLastVersion' "$$profile/user/registrymodifications.xcu"; then \
+		echo "missing $$profile — run servers/preview/scripts/seed-soffice-profile.sh $$profile first" >&2; \
+		exit 1; \
+	fi; \
+	UFO_PREVIEW_PDFIUM_LIB="$$PWD/$$lib" UFO_PREVIEW_SOFFICE_PROFILE="$$PWD/$$profile" \
+	sh -c 'cd servers/preview && cargo test -- --include-ignored --test-threads=4'
 
 check-preview: ## Run the preview crate's static gates — fmt and clippy
 	cd servers/preview && cargo fmt --check && cargo clippy --all-targets -- -D warnings

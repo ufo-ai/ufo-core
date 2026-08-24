@@ -26,6 +26,10 @@ RUN apt-get update \
 COPY scripts/fetch-pdfium.sh /tmp/fetch-pdfium.sh
 RUN sh /tmp/fetch-pdfium.sh /usr/local/lib/pdfium && rm /tmp/fetch-pdfium.sh
 ENV UFO_PREVIEW_PDFIUM_LIB=/usr/local/lib/pdfium/libpdfium.so
+COPY scripts/seed-soffice-profile.sh /tmp/seed-soffice-profile.sh
+RUN sh /tmp/seed-soffice-profile.sh /usr/local/share/ufo-preview/soffice-profile \
+    && rm /tmp/seed-soffice-profile.sh
+ENV UFO_PREVIEW_SOFFICE_PROFILE=/usr/local/share/ufo-preview/soffice-profile
 COPY --from=build /build/target/release/ufo-preview /usr/local/bin/ufo-preview
 COPY --from=build /build/target/release/preview-worker /usr/local/bin/preview-worker
 COPY scripts/capture-site.py /usr/local/libexec/ufo-site-preview.py
