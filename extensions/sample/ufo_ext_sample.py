@@ -112,7 +112,7 @@ from ufo.sdk.sandbox import (
     Sandbox,
     SandboxHandle,
     SandboxSpec,
-    sbxfs_file_op,
+    ufo_fs_file_op,
 )
 from ufo.sdk.search import (
     FetchedPage,
@@ -1128,7 +1128,7 @@ class SampleCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        return await sbxfs_file_op(self, handle, op, params)
+        return await ufo_fs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         return DialTarget(host=f"{CARRIER_CONTAINER}:{port}", tls=False)

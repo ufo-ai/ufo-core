@@ -11,7 +11,7 @@ import conftest
 import pytest
 import yaml
 
-from sandbox.build_template import DOCKER_BASE_IMAGE, pod_dockerfile
+from sandbox.build_template import CLIENT_STAGE_PATH, DOCKER_BASE_IMAGE, pod_dockerfile
 
 ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -29,7 +29,8 @@ WALLED_CALLS = 3
 KEY_INPUTS = frozenset(
     {
         "sandbox/build_template.py",
-        "core/src/ufo/sandbox/image/**",
+        "client/**",
+        "core/src/ufo/sandbox/client_binary.py",
         "core/src/ufo/sandbox/containment.py",
         "extensions/e2b/ufo_ext_e2b.py",
         "uv.lock",
@@ -57,7 +58,11 @@ HANG = """_hang() {
 UV_STUB = f"""#!/bin/sh
 {HANG}_hang "${{UV_SLEEP:-0}}"
 [ "${{UV_EXIT:-0}}" = 0 ] || exit "$UV_EXIT"
-cat "$RENDERED_DOCKERFILE"
+printf '%s\n' "$*" >>"$UV_CALLS"
+case "$*" in
+  *stage_client_binary*) mkdir -p "$(dirname "$STAGED_CLIENT")"; : >"$STAGED_CLIENT" ;;
+  *) cat "$RENDERED_DOCKERFILE" ;;
+esac
 """
 
 DOCKER_STUB = f"""#!/bin/sh
@@ -68,7 +73,7 @@ case "$*" in
   "pull"*) _hang "${{PULL_SLEEP:-0}}"; exit "${{PULL_EXIT:-0}}" ;;
   "manifest inspect"*) exit "${{MANIFEST_EXIT:-1}}" ;;
   "image inspect"*) sleep "${{INSPECT_SLEEP:-0}}"; exit "${{INSPECT_EXIT:-0}}" ;;
-  "build"*) cat >/dev/null ;;
+  "build"*) [ -f "$STAGED_CLIENT" ] || exit 91; cat >/dev/null ;;
 esac
 """
 
@@ -90,6 +95,8 @@ def _env(root: Path, **overrides: str) -> dict[str, str]:
         "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
         "RENDERED_DOCKERFILE": str(root / "rendered"),
         "DOCKER_CALLS": str(root / "docker-calls"),
+        "UV_CALLS": str(root / "uv-calls"),
+        "STAGED_CLIENT": str(root / "sandbox" / "artifacts" / "ufo"),
         "BASE_DIGEST": BASE_DIGEST,
         **overrides,
     }
@@ -98,6 +105,10 @@ def _env(root: Path, **overrides: str) -> dict[str, str]:
 def _export(
     monkeypatch: pytest.MonkeyPatch, root: Path, prebuilt: str | None = None, **overrides: str
 ) -> None:
+    """The fixture's environment, with the client staging stubbed: what the image bakes comes from a
+    compiled crate, and where that binary comes from is proven where it lives — here the question is
+    which image the fixture runs."""
+    monkeypatch.setattr(conftest, "stage_client_binary", lambda: CLIENT_STAGE_PATH)
     for name, value in _env(root, **overrides).items():
         monkeypatch.setenv(name, value)
     if prebuilt is None:
@@ -108,6 +119,11 @@ def _export(
 
 def _calls(root: Path) -> list[str]:
     recorded = root / "docker-calls"
+    return recorded.read_text().splitlines() if recorded.exists() else []
+
+
+def _uv_calls(root: Path) -> list[str]:
+    recorded = root / "uv-calls"
     return recorded.read_text().splitlines() if recorded.exists() else []
 
 
@@ -274,6 +290,7 @@ def test_the_consumer_names_the_image_the_publisher_pushed(tmp_path: Path) -> No
         f"{conftest.PREBUILT_IMAGE_ENV}={pushed[0]}"
     ]
     assert f"pull -q {pushed[0]}" in _calls(consumer)
+    assert sum("stage_client_binary" in call for call in _uv_calls(publisher)) == 1
 
 
 @pytest.mark.parametrize("miss", [{"UV_EXIT": "3"}, {"PULL_EXIT": "1"}])
@@ -336,20 +353,39 @@ def test_the_publisher_skips_a_key_it_already_published(tmp_path: Path) -> None:
     assert published.returncode == 0, published.stderr
     assert "already published" in published.stdout
     assert not [call for call in _calls(root) if call.startswith(("build ", "push "))]
+    assert not any("stage_client_binary" in call for call in _uv_calls(root))
+
+
+def test_integration_names_the_musl_client_it_builds() -> None:
+    job = _workflow("integration.yaml")["jobs"]["integration"]
+    named = "client/target/x86_64-unknown-linux-musl/release/ufo"
+    assert job["env"]["UFO_CLIENT_BINARY"] == named
+    builds = [
+        step
+        for step in job["steps"]
+        if step.get("working-directory") == "client" and "cargo build" in step.get("run", "")
+    ]
+    assert len(builds) == 1
+    assert "--target x86_64-unknown-linux-musl" in builds[0]["run"]
 
 
 def test_every_input_that_moves_the_key_triggers_the_publisher() -> None:
-    """The paths list stays pinned exactly, and each file a layer COPYs has to be a named key
-    input — a key that moves with no publish behind it makes every PR rebuild the image, and a
-    sandbox running an image older than the guard baked into it cannot run a file op at all."""
+    """The paths list stays pinned exactly, and every file a layer COPYs has to be covered by a
+    named key input — a key that moves with no publish behind it makes every PR rebuild the image,
+    and a sandbox running an image older than the guard baked into it cannot run a file op at all.
+
+    The staged `ufo` binary is the one COPY source no trigger can name: it is a build product, not a
+    tracked file. `client/**` is its trigger, which is also what the definition digest hashes."""
     triggers = _workflow("sandbox-image.yml")["on"]["push"]["paths"]
 
     assert set(triggers) == KEY_INPUTS
+    staged = str(CLIENT_STAGE_PATH.relative_to(conftest.ROOT))
     prefixes = tuple(entry.removesuffix("/**") for entry in KEY_INPUTS)
     copied = [line.split()[1] for line in pod_dockerfile().splitlines() if line.startswith("COPY ")]
     assert copied
+    assert staged in copied and "client/**" in KEY_INPUTS
     for source in copied:
-        assert source.startswith(prefixes), source
+        assert source == staged or source.startswith(prefixes), source
 
 
 def test_a_named_prebuilt_image_replaces_the_build(

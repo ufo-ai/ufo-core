@@ -33,9 +33,9 @@ rather than each writing their own `".." in parts`, and the write they hand off 
 2 to 4 where the filesystem actually is.
 
 This module lives two lives from one file: the serve process imports it as
-`ufo.sandbox.containment`, and the sandbox image bakes it beside the `sbxfs` CLI, which imports it
-as a sibling module from its own directory. So it stays standard-library only and imports nothing
-from `ufo` — a dependency here would have to be installed inside every sandbox.
+`ufo.sandbox.containment`, and an in-sandbox program imports it as the sibling module `containment`,
+whose source `SANDBOX_MODULE_BOOTSTRAP` carries into the program. So it stays standard-library only
+and imports nothing from `ufo` — a dependency here would have to be installed inside every sandbox.
 """
 
 from __future__ import annotations

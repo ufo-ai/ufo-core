@@ -129,11 +129,11 @@ class WorkspaceChangeRecorder:
         return directories
 
     async def _scan(self, directories: list[str]) -> WorkspaceChanges:
-        result = await self.sandbox.run_sbxfs("changes", {"paths": directories})
+        result = await self.sandbox.run_ufo_fs("changes", {"paths": directories})
         try:
             return WorkspaceChanges.model_validate(result)
         except ValidationError as error:
-            raise RuntimeError("sbxfs changes returned a malformed scan") from error
+            raise RuntimeError("ufo fs changes returned a malformed scan") from error
 
     async def _store(self, scanned: WorkspaceChanges, asked: frozenset[str]) -> None:
         async with workspace_tx() as connection:

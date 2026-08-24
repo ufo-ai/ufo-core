@@ -4,11 +4,11 @@ cancel_spawn, message_spawn.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
-`write` run the in-sandbox `sbxfs` CLI, so windowing, ripgrep, and PDF/image render happen in the
+`write` run the in-sandbox `ufo fs` CLI, so windowing, ripgrep, and PDF/image render happen in the
 container and only a bounded JSON result crosses back — the host never pulls a whole file over to
 loop on it. `read` records every path it returns so `edit`/`write` can refuse to touch a file the
 turn has not read — the guard that keeps a blind string-replace from clobbering content the model
-never saw. `glob` and `grep` run the in-sandbox `sbxfs` matcher and ripgrep, so file discovery and
+never saw. `glob` and `grep` run the in-sandbox `ufo fs` matcher and ripgrep, so file discovery and
 content search happen in the container and a bounded result crosses back. `share_file` lands
 produced workspace files in the blob store under `artifacts/<uuid>/` — a directory as a `.tar.gz`
 of itself, and on S3 the sandbox uploads each itself to a presigned PUT bound to the size and
@@ -125,7 +125,7 @@ SHARE_PREFLIGHT_CMD = (
 )
 """Measure a produced file's size, sha256 and text-ness with tools every carrier has — `wc`,
 `openssl`, `head`, `tr` — so the same one command runs in the container and on a member's own
-machine, where no baked `sbxfs` or usable `python3` exists. The size and digest bind the S3
+machine, where no baked `ufo` client or usable `python3` exists. The size and digest bind the S3
 presigned PUT (§`_store_artifact`), so a file changing between the measure and the upload fails at
 S3 rather than landing as a self-consistent lie. A symlink at the target is refused, the one
 containment the share path needs: the bytes it copies out must be the file the agent named, not a
@@ -438,7 +438,7 @@ async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
 
 def _require_str(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
-        raise RuntimeError(f"sbxfs read returned no {field}")
+        raise RuntimeError(f"ufo fs read returned no {field}")
     return value
 
 
@@ -478,7 +478,7 @@ def _pdf_result(result: dict[str, object]) -> ToolResult:
     if isinstance(pages, list):
         for page in pages:
             if not isinstance(page, dict):
-                raise RuntimeError("sbxfs read returned a malformed pdf page")
+                raise RuntimeError("ufo fs read returned a malformed pdf page")
             blocks.append(
                 ImageContent(
                     media_type=_require_str(page.get("media_type"), "media_type"),
@@ -486,7 +486,7 @@ def _pdf_result(result: dict[str, object]) -> ToolResult:
                 )
             )
     if not blocks:
-        raise RuntimeError("sbxfs read returned an empty pdf result")
+        raise RuntimeError("ufo fs read returned an empty pdf result")
     return ToolResult(content=tuple(blocks))
 
 
@@ -496,7 +496,7 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
         params["offset"] = args.offset
     if args.limit is not None:
         params["limit"] = args.limit
-    result = await ctx.sandbox.run_sbxfs("read", params)
+    result = await ctx.sandbox.run_ufo_fs("read", params)
     ctx.read_paths.add(args.file_path)
     if result.get("type") == "image":
         return ToolResult(
@@ -515,14 +515,14 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
     total = result.get("total_lines")
     returned = result.get("lines_returned")
     if not (isinstance(start, int) and isinstance(total, int) and isinstance(returned, int)):
-        raise RuntimeError("sbxfs read returned a malformed text result")
+        raise RuntimeError("ufo fs read returned a malformed text result")
     if returned == 0:
         return ToolResult(
             content=(TextContent(text=f"(no lines at offset {start}; file has {total} lines)"),)
         )
     content = result.get("content")
     if not isinstance(content, str):
-        raise RuntimeError("sbxfs read returned no content")
+        raise RuntimeError("ufo fs read returned no content")
     footer = f"\n\n[lines {start}-{start + returned - 1} of {total}]"
     remaining = result.get("remaining_lines")
     if isinstance(remaining, int) and not isinstance(remaining, bool) and remaining > 0:
@@ -535,7 +535,7 @@ async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
     await ctx.sandbox.ensure_tool_output_dir()
     staged = f"{TOOL_OUTPUT_DIR}/{uuid4().hex}.stage"
     await ctx.sandbox.write_file(staged, data)
-    result = await ctx.sandbox.run_sbxfs(
+    result = await ctx.sandbox.run_ufo_fs(
         "write",
         {
             "path": args.file_path,
@@ -567,7 +567,7 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult:
         }
         for e in args.edits
     ]
-    result = await ctx.sandbox.run_sbxfs("edit", {"path": args.file_path, "edits": edits})
+    result = await ctx.sandbox.run_ufo_fs("edit", {"path": args.file_path, "edits": edits})
     result["path"] = args.file_path
     return _file_tool_result(result)
 
@@ -590,18 +590,18 @@ def _file_tool_result(result: dict[str, object]) -> ToolResult:
 
 
 async def glob_handler(ctx: ToolContext, args: GlobInput) -> ToolResult:
-    """Match files by glob pattern inside the container through the `sbxfs` CLI, so the traversal
+    """Match files by glob pattern inside the container through the `ufo fs` CLI, so the traversal
     runs in the sandbox and only the matching paths cross back. Defaults to the workspace root."""
-    result = await ctx.sandbox.run_sbxfs(
+    result = await ctx.sandbox.run_ufo_fs(
         "glob", {"pattern": args.pattern, "path": args.path or WORKSPACE_DIR}
     )
     return ToolResult(content=(TextContent(text=json.dumps(result)),))
 
 
 async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult:
-    """Search file contents for a regex across the workspace through the in-sandbox `sbxfs` ripgrep,
-    so the scan runs in the container and a bounded result crosses back. `head_limit` caps the
-    matches returned."""
+    """Search file contents for a regex across the workspace through the in-sandbox `ufo fs`
+    ripgrep, so the scan runs in the container and a bounded result crosses back. `head_limit` caps
+    the matches returned."""
     params: dict[str, object] = {
         "pattern": args.pattern,
         "path": WORKSPACE_DIR,
@@ -615,7 +615,7 @@ async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult:
         params["output_mode"] = args.output_mode
     if args.ignore_case:
         params["ignore_case"] = True
-    result = await ctx.sandbox.run_sbxfs("grep", params)
+    result = await ctx.sandbox.run_ufo_fs("grep", params)
     return ToolResult(content=(TextContent(text=json.dumps(result)),))
 
 

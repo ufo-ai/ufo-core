@@ -556,7 +556,7 @@ async def test_read_restarts_a_stopped_box_before_believing_a_404() -> None:
     assert box.starts == 1
 
 
-async def test_file_op_runs_sbxfs_through_exec_and_parses_the_json() -> None:
+async def test_file_op_runs_ufo_fs_through_exec_and_parses_the_json() -> None:
     sdk = _Sdk()
     box = sdk.holds("s1")
     box.scripts.append(_ExecScript(exit_code=0, result='{"files": []}'))
@@ -564,7 +564,9 @@ async def test_file_op_runs_sbxfs_through_exec_and_parses_the_json() -> None:
     parsed = await carrier.file_op(_handle(uuid4(), "s1"), "glob", {"pattern": "*"})
     assert parsed == {"files": []}
     (call,) = box.execs
-    assert "exec sbxfs glob" in call.command
+    assert "command -v ufo" in call.command
+    assert "exec sbxfs" in call.command
+    assert " sh glob " in call.command
 
 
 async def test_dial_answers_the_preview_host_token_and_tls() -> None:

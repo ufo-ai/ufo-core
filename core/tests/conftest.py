@@ -12,8 +12,9 @@ from aiobotocore.session import get_session
 from botocore.exceptions import BotoCoreError, ClientError
 from ufo_testsupport.plugin import integration_dependency_available
 
-from sandbox.build_template import ROOT, pod_dockerfile
+from sandbox.build_template import ROOT, pod_dockerfile, stage_client_binary
 from ufo.blob import S3BlobStore
+from ufo.sandbox.client_binary import client_binary
 from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
 
 MINIO_IMAGE = "minio/minio"
@@ -60,13 +61,30 @@ def docker_or_fail(argv: list[str], *, timeout: int) -> subprocess.CompletedProc
 
 
 @pytest.fixture(scope="session")
+def sandbox_client() -> Path:
+    """A compiled `ufo` client for this host, for a test that runs a real file op or the walk parity
+    check. The ops are verbs on that binary now, so such a test needs a build of the crate: the
+    integration pass builds one and fails loud without it, and a checkout that has none skips."""
+    try:
+        return client_binary()
+    except RuntimeError as error:
+        integration_dependency_available(False, str(error))
+        pytest.skip(str(error))
+
+
+@pytest.fixture(scope="session")
 def sandbox_image() -> str:
     """The real sandbox image every docker-gated test runs against, built once per session. Session
     scope is what the build actually is — one tag in one daemon, global to the run. A narrower scope
     rebuilds it each time the `db` param reorders tests across the owning module's boundary.
 
     `UFO_SANDBOX_TEST_IMAGE` names an image the caller already loaded, which the fixture runs
-    instead of building; unset — every local run — it builds."""
+    instead of building; unset — every local run — it builds.
+
+    The image bakes the compiled `ufo` client, so a build needs one staged into the context.
+    Building the crate is not this fixture's job: CI builds it for the sandbox target before pytest
+    starts, and a checkout with no build yet reports the cargo command it is missing — loudly in CI,
+    as a skip locally."""
     if not integration_dependency_available(
         shutil.which("docker") is not None, "Docker executable is not available"
     ):
@@ -75,6 +93,11 @@ def sandbox_image() -> str:
     if prebuilt:
         docker_or_fail(["docker", "image", "inspect", prebuilt], timeout=CONTAINER_OP_TIMEOUT_S)
         return prebuilt
+    try:
+        stage_client_binary()
+    except RuntimeError as error:
+        integration_dependency_available(False, str(error))
+        pytest.skip(str(error))
     built = run_docker_build(
         ["docker", "build", "-t", SANDBOX_TEST_IMAGE, "-f", "-", str(ROOT)],
         timeout=IMAGE_BUILD_TIMEOUT_S,

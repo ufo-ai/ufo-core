@@ -19,8 +19,8 @@ date: 2026-08-12
 | Fact | Where |
 |---|---|
 | The carrier seam: create/attach/exec/write/read/dial | `core/src/ufo/sandbox/session.py:206` |
-| Every file tool goes through one in-sandbox CLI | `core/src/ufo/sandbox/session.py:382` (`run_sbxfs`) |
-| That CLI is 1190 lines of Python — pdf/pptx/image reads, multi-edit, `changes` over git | `core/src/ufo/sandbox/image/sbxfs` |
+| Every file tool goes through one in-sandbox CLI | `core/src/ufo/sandbox/session.py:382` (`run_ufo_fs`) |
+| That CLI was 1190 lines of Python — pdf/pptx/image reads, multi-edit, `changes` over git. It is now the `ufo fs` verb on the compiled client | `client/src/fscli.rs` |
 | One carrier per process, chosen by `[sandbox] backend` | `core/src/ufo/sandbox/select.py:13` |
 | The turn builds its session off that one carrier | `core/src/ufo/loop/queue.py:367` |
 | A conversation's workspace is `workspace_root/<conversation-id>` | `core/src/ufo/sandbox/conversation.py:121` |
@@ -34,8 +34,8 @@ that is not the deploy's own storage.
 
 **The constraint that shapes everything below:** the client must run on a stock macOS desktop.
 `/usr/bin/python3` and `/usr/bin/git` there are Command Line Tools shims (measured: both link
-`libxcselect`; running one can raise the developer-tools installer), so `sbxfs` cannot ship to the
-member as Python. What a stock Mac does have is JavaScriptCore, reachable two ways, both measured
+`libxcselect`; running one can raise the developer-tools installer), so the file CLI cannot ship to
+the member as Python. What a stock Mac does have is JavaScriptCore, reachable two ways, both measured
 byte-exact on NUL and missing-trailing-newline fixtures: the framework's own `jsc` shell
 (undocumented path that has moved between releases; no rename, stat, readdir, or subprocess; 6 MB
 read+write in an 8 ms process) and `osascript -l JavaScript` (`/usr/bin/osascript`, documented and
@@ -67,12 +67,12 @@ hand-written client update.
 | `dial(port)` | — | `SandboxUnreachable`, as the local carrier already answers |
 
 `Carrier` grows one method, `file_op(handle, op, params) -> dict`. Docker, e2b and local delegate to
-a shared `sbxfs_file_op(...)` holding today's `("sbxfs", op, json)` exec; `SandboxSession.run_sbxfs`
+a shared `ufo_fs_file_op(...)` holding the `("ufo", "fs", op, json)` exec; `SandboxSession.run_ufo_fs`
 calls the carrier instead of composing that argv itself. The client carrier answers per op:
 
 - **read, edit, write, grep, glob** — a JS program per op in `core/src/ufo/sandbox/client/`, the
-  same result shapes and caps `sbxfs` returns, held to them by a differential test against the real
-  `sbxfs` over one fixture tree. Nothing crosses but the op's own result: a `read` sends back only
+  same result shapes and caps the in-sandbox file CLI returns, held to them by a differential test
+  against that real CLI over one fixture tree. Nothing crosses but the op's own result: a `read` sends back only
   its window, an `edit` runs whole on the member's machine — byte-exact on `Uint8Array`, staged
   temp and `mv`, mode preserved — and JS `RegExp` takes the `\d`/`\w`/`\s` and lookarounds the
   models write, which BSD `grep -E` never would. The runner has no subprocess, so enumeration
@@ -80,8 +80,8 @@ calls the carrier instead of composing that argv itself. The client carrier answ
   primitive and hands its output to the JS. `changes` composes from `git` the same way, and reports
   nothing when git is absent (it is CLT-gated) rather than failing the turn.
 - **pdf, pptx and image reads** — the one pull: poppler and libreoffice live on the server, so the
-  file's bytes cross once (capped at 10 MB, refused in `sbxfs`'s own message shape) and the real
-  `sbxfs` renders against a scratch directory.
+  file's bytes cross once (capped at 10 MB, refused in the file CLI's own message shape) and the
+  deploy renders against a scratch directory.
 
 ### Why the op logic is JavaScript
 
@@ -91,7 +91,7 @@ The evidence chain, all measured on this stock-tool set:
    newlines by specification, awk re-emits `ORS`: three of four hostile fixtures corrupt, on
    write-back, after the model was told the edit applied.
 2. **Hex-encoding through `xxd` (base OS, verified not a shim) fixes correctness but not cost.** A
-   30-line `sh`+awk edit agreed with `sbxfs` byte-for-byte on 10/10 fixtures — and took 1.3 s on a
+   30-line `sh`+awk edit agreed with the Python file CLI byte-for-byte on 10/10 fixtures — and took 1.3 s on a
    6 MB file, O(n²) worst case, with the occurrence count, multi-edit sequence and snippet still
    unbuilt.
 3. **JavaScriptCore fixes both.** Byte-exact binary I/O measured on both of its stock faces,
@@ -100,15 +100,17 @@ The evidence chain, all measured on this stock-tool set:
    contract's one home stays server-side and the client's copy is byte-identical, covered by the
    script's own version hash.
 
-The one divergence a byte-exact edit keeps: `sbxfs` edits text decoded `errors="replace"`, so on
-invalid UTF-8 it aliases every bad byte to U+FFFD and can count matches byte-exactness refuses.
-The differential test pins the divergence as intended rather than hiding it.
+The one divergence a byte-exact edit keeps: the Python file CLI edited text decoded
+`errors="replace"`, so on invalid UTF-8 it aliased every bad byte to U+FFFD and could count matches
+byte-exactness refuses. The differential test pins the divergence as intended rather than hiding it.
+The JS runner never shipped: the client implements the ops natively, and `ufo fs` decodes with
+`from_utf8_lossy` as the Python CLI decoded, so the two edit paths that remain agree here.
 
 `osascript` sits at a documented path, so the relay's probe is one `command -v`; a machine
 without it binds no terminal, the conversation falls to the deploy's carrier, and the member is
-told. A Linux client, when one matters, is the same probe finding `python3` and running `sbxfs`
-itself — verbatim, the file the image already bakes — which is why the op seam is a server-authored
-program the client merely runs, not a contract the client implements.
+told. A Linux client, when one matters, is the same probe finding the `ufo` binary and running
+`ufo fs` itself — the very binary the image bakes — which is why the op seam is one program the
+client runs, not a contract each client implements.
 
 ### Selection
 
@@ -228,7 +230,7 @@ edit its outcome, never the file. A skill mount is one write per file. Measure b
 
 | Option | Why not |
 |---|---|
-| Ship `sbxfs` to the member as Python | `python3` is a CLT shim on a stock Mac (measured); it stays the Linux answer, where `python3` is real |
+| Ship the file CLI to the member as Python | `python3` is a CLT shim on a stock Mac (measured); it stayed the Linux answer, where `python3` is real, until the ops moved into the client binary |
 | Rewrite the op contract in `sh` + `awk` over `xxd` hex | Built and measured: byte-exact but 1.3 s at 6 MB, O(n²) worst case, and a client-resident second implementation that can drift; JavaScriptCore is two orders faster and the program stays server-side |
 | Compose walks from BSD `grep`/`find`/`stat` | POSIX ERE drops the `\d`/`\w`/`\s` models write — a translation layer per dialect, per OS; JS `RegExp` takes them natively |
 | A local `ufoctl serve` on the member's machine | A different product — their own database, their own workspace, no shared brain |
@@ -248,7 +250,7 @@ None. Confinement (none), session model (fresh per launch, `--resume`), absent-t
 |---|---|---|
 | 1 | `ConversationSandbox` answers a `SandboxSession`; one carrier owner | 1h |
 | 2 | `Terminals`, the client carrier's three primitives, the surface wire, the relay — proven end to end through the shipped script | 1d |
-| 3 | `file_op` seam; the per-op JS programs under the runner — held against the real `sbxfs` by a differential test | 1–1.5d |
+| 3 | `file_op` seam; the per-op JS programs under the runner — held against the real in-sandbox file CLI by a differential test | 1–1.5d |
 | 4 | A launch is a conversation: `--resume`, the printed id | 2h |
 | 5 | `spec.md`, `README.md`, copy | 1h |
 

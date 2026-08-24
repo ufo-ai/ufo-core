@@ -432,7 +432,7 @@ class Carrier(Protocol):
         tools are built on — against the sandbox's workspace, and answer its parsed JSON object.
         The work runs inside the sandbox and comes back bounded, so the host never pulls a whole
         file across the boundary to loop over it. How the op reaches the files is the carrier's:
-        one whose sandbox bakes the `sbxfs` CLI answers with `sbxfs_file_op`. A handled failure
+        one whose sandbox bakes the `ufo` client answers with `ufo_fs_file_op`. A handled failure
         raises `ValueError` — a recoverable tool error to the model — and anything else raises
         `RuntimeError`."""
         ...
@@ -458,26 +458,33 @@ class CommandStopping(Protocol):
     async def stop_commands(self, handle: SandboxHandle) -> None: ...
 
 
-async def sbxfs_file_op(
+async def ufo_fs_file_op(
     carrier: Carrier, handle: SandboxHandle, op: str, params: dict[str, object]
 ) -> dict[str, object]:
-    """`Carrier.file_op` for a sandbox that bakes the `sbxfs` CLI: run the op as one command and
-    read its single JSON object off stdout. Shared by every such carrier, so none of them restates
-    the argv, the parse, or which failures the model may recover from."""
+    """`Carrier.file_op` for a sandbox image: run `ufo fs`, or `sbxfs` when that is the image's
+    file command, and read its single JSON object off stdout. Shared by every such carrier, so none
+    of them restates the argv, the parse, or which failures the model may recover from."""
     result = await carrier.exec(
         handle,
-        ("sbxfs", op, json.dumps(params, separators=(",", ":"))),
+        (
+            "sh",
+            "-c",
+            'if command -v ufo >/dev/null 2>&1; then exec ufo fs "$@"; fi; exec sbxfs "$@"',
+            "sh",
+            op,
+            json.dumps(params, separators=(",", ":")),
+        ),
         timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
     )
     stdout = result.stdout.strip()
     if not stdout:
-        raise RuntimeError(result.stderr.strip() or f"sbxfs {op} produced no output")
+        raise RuntimeError(result.stderr.strip() or f"ufo fs {op} produced no output")
     try:
         parsed = json.loads(stdout)
     except json.JSONDecodeError as error:
         raise RuntimeError(result.stderr.strip() or stdout) from error
     if not isinstance(parsed, dict):
-        raise RuntimeError(f"sbxfs {op} did not return a JSON object")
+        raise RuntimeError(f"ufo fs {op} did not return a JSON object")
     failure = parsed.get("error")
     if isinstance(failure, str):
         raise ValueError(failure)
@@ -581,14 +588,14 @@ class Sandbox:
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         """Run an in-sandbox python program with the containment guard importable, so a program that
-        builds a path from an argument runs the checks `sbxfs` runs rather than its own — the one
-        place every such program reaches the guard from.
+        builds a path from an argument runs the same checks the file ops run rather than its own —
+        the one place every such program reaches the guard from.
 
-        The guard is baked beside `sbxfs` rather than installed as a package, so the bootstrap
-        locates the scripts through `sbxfs` itself: which directory holds them differs by carrier.
-        The interpreter runs isolated (`SANDBOX_PYTHON_FLAG`), which is what keeps that bootstrap
-        from resolving against the very workspace it is about to guard. Run as argv, never through a
-        login shell, whose profile resets PATH and drops the local carrier's own bin directory."""
+        The guard is carried into the program by `SANDBOX_MODULE_BOOTSTRAP` rather than imported
+        from the sandbox, so it is the copy this process ships under every carrier. The interpreter
+        runs isolated (`SANDBOX_PYTHON_FLAG`), which is what keeps that bootstrap from resolving
+        against the very workspace it is about to guard. Run as argv, never through a login shell,
+        whose profile resets PATH and drops the local carrier's own bin directory."""
         bound = await self._bound()
         return await bound.carrier.exec(
             bound.handle,
@@ -641,7 +648,7 @@ class Sandbox:
         )
         return result.exit_code == 0
 
-    async def run_sbxfs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+    async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
         """Run one in-sandbox file op through the carrier and return its parsed JSON. A `path` arg
         is workspace-scoped here so every op inherits the same subtree guard, and the `workspace`
         root each op confines itself to is set here rather than passed in: which subtree a file op

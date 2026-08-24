@@ -81,7 +81,7 @@ from ufo.sdk.sandbox import (
     SandboxSpec,
     SandboxUnreachable,
     egress_proxy_env,
-    sbxfs_file_op,
+    ufo_fs_file_op,
 )
 
 CARRIER_NAME = "daytona"
@@ -273,7 +273,7 @@ class DaytonaCarrier:
         or None when there is no id or the provider no longer has it. Always the provider's own
         answer, never the cache's, and never a fresh sandbox: a read of a conversation whose
         sandbox is gone answers absent rather than opening an empty one. No egress env — a read
-        runs `sbxfs` and streams files, nothing that leaves the box."""
+        runs `ufo fs` and streams files, nothing that leaves the box."""
         if spec.resume_id is None:
             return None
         try:
@@ -493,9 +493,9 @@ class DaytonaCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        """The snapshot bakes `sbxfs`, so a file op is that CLI run through `exec` — under the
-        same quoting and timeout mapping every other command gets."""
-        return await sbxfs_file_op(self, handle, op, params)
+        """The snapshot bakes the `ufo` client, so a file op is `ufo fs` run through `exec` — under
+        the same quoting and timeout mapping every other command gets."""
+        return await ufo_fs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The sandbox's public per-port host: Daytona routes an in-sandbox port over a per-port

@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "ufo"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "base64",
  "crossterm",
@@ -1255,7 +1255,10 @@ dependencies = [
  "libc",
  "pulldown-cmark",
  "ratatui",
+ "ring",
+ "rustls",
  "rustls-native-certs",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "similar",

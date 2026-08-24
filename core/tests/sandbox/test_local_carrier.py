@@ -4,8 +4,8 @@ The local carrier has no fake to stand in for — it runs the host's own shell, 
 end to end: create the workspace, exec a command that writes into it, rewrite the logical
 `/workspace` path, carry the egress environment, reach a service on the sandbox's own loopback,
 stream a file out in bounded chunks, and confine that read to the workspace. The last test proves
-the payoff — the sbxfs-backed file tools run through the default carrier with only a Python
-interpreter present, no container."""
+the payoff — the file tools run through the default carrier against the `ufo` client on its command
+PATH, no container."""
 
 import asyncio
 import json
@@ -38,6 +38,7 @@ from ufo.sandbox.session import (
     SandboxSpec,
 )
 
+ROOT = Path(__file__).parents[3]
 RUN_TOKEN = "run-token-abc"
 PROXY_PORT = 9999
 PROBE_SYSTEM_HELPER = "probe-system-helper-that-never-runs"
@@ -65,6 +66,15 @@ EXEC_TIMEOUT_SECONDS = 1
 EXEC_RETURN_BUDGET_SECONDS = 15
 DESCENDANT_POLL_SECONDS = 0.05
 DESCENDANT_POLL_ATTEMPTS = 100
+
+
+def test_supported_local_builds_produce_the_client() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    dockerfile = (ROOT / "dev" / "Dockerfile").read_text()
+
+    assert "cargo build --manifest-path client/Cargo.toml --locked" in makefile
+    assert "COPY --from=client /usr/local/bin/ufo /usr/local/bin/ufo" in dockerfile
+    assert "cargo build --release --locked --bin ufo" in dockerfile
 
 
 async def _descendant_pid(workspace: Path) -> int:
@@ -500,9 +510,10 @@ async def test_read_through_a_symlinked_directory_out_of_the_workspace_is_refuse
         [chunk async for chunk in carrier.read(handle, "/workspace/dir/secret.txt")]
 
 
-async def test_file_tools_run_through_sbxfs_locally(tmp_path: Path) -> None:
-    """The default carrier ships sbxfs on the command PATH, so the file tools work with only a
-    Python interpreter present: a write lands in the workspace and the sbxfs read reflects it."""
+@pytest.mark.integration
+async def test_file_tools_run_through_ufo_fs_locally(tmp_path: Path, sandbox_client: Path) -> None:
+    """The default carrier installs the `ufo` client on the command PATH, so the file tools work
+    with no container: a write lands in the workspace and the `ufo fs` read reflects it."""
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(tmp_path / "workspace"))
     session = SandboxSession(carrier=carrier, handle=handle)
@@ -510,13 +521,31 @@ async def test_file_tools_run_through_sbxfs_locally(tmp_path: Path) -> None:
     await session.write_file("notes.txt", b"alpha\nbeta\n")
     assert await session.file_exists("notes.txt")
 
-    read = await session.run_sbxfs("read", {"path": "notes.txt"})
+    read = await session.run_ufo_fs("read", {"path": "notes.txt"})
     assert "alpha" in json.dumps(read)
 
 
-async def test_file_op_is_the_carrier_seam_a_session_runs_a_file_op_through(tmp_path: Path) -> None:
+async def test_file_op_runs_in_a_resumed_sandbox(tmp_path: Path) -> None:
+    scratch = tmp_path / "scratch"
+    (scratch / "home").mkdir(parents=True)
+    bin_dir = scratch / "bin"
+    bin_dir.mkdir()
+    command = bin_dir / "sbxfs"
+    command.write_text('#!/bin/sh\nprintf \'{"op":"%s"}\' "$1"\n')
+    command.chmod(0o755)
+    carrier = LocalCarrier(_scratch=scratch)
+    spec = replace(_spec(tmp_path / "workspace"), env={"PATH": f"{bin_dir}:/usr/bin:/bin"})
+    handle = await carrier.create(spec)
+
+    assert await carrier.file_op(handle, "glob", {"pattern": "*"}) == {"op": "glob"}
+
+
+@pytest.mark.integration
+async def test_file_op_is_the_carrier_seam_a_session_runs_a_file_op_through(
+    tmp_path: Path, sandbox_client: Path
+) -> None:
     """The op the session hands down reaches the files through the carrier alone: the local one
-    answers it with the sbxfs on its command PATH, returning the parsed object, and a handled
+    answers it with the `ufo fs` on its command PATH, returning the parsed object, and a handled
     refusal — a path holding no file — arrives as the ValueError a tool reports to the model."""
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
@@ -550,7 +579,7 @@ print("accepted")
 def _plant_fake_guard(workspace: Path) -> None:
     """What the agent can do with its own `write` tool: leave modules named after the ones the
     bootstrap imports in the directory the carrier runs commands in."""
-    (workspace / "shutil.py").write_text("def which(name):\n    return '/nonexistent/sbxfs'\n")
+    (workspace / "shutil.py").write_text("def which(name):\n    return '/nonexistent/ufo'\n")
     (workspace / "containment.py").write_text(
         "class ContainmentError(Exception):\n    pass\n"
         "from contextlib import contextmanager\n"
@@ -592,11 +621,11 @@ async def test_an_in_sandbox_program_cannot_be_pointed_at_a_planted_guard(tmp_pa
 
 async def test_an_in_sandbox_program_carries_the_guard_it_runs(tmp_path: Path) -> None:
     """A carrier whose sandbox is the member's own machine provisions nothing onto its PATH — the
-    terminal carrier ships no `sbxfs` there, since the file ops that would need it are the client's
-    own natively. The guard travels inside the program instead, so a program decides its verdict
-    with the module this process ships wherever it runs, and a sandbox holding no helper at all
-    still guards the paths it is handed. The system interpreter is the one a member's machine
-    answers `python3` with, which is what the program has to run under."""
+    terminal carrier installs no client there, since the file ops that would need one are the
+    member's own client's already. The guard travels inside the program instead, so a program
+    decides its verdict with the module this process ships wherever it runs, and a sandbox holding
+    no helper at all still guards the paths it is handed. The system interpreter is the one a
+    member's machine answers `python3` with, which is what the program has to run under."""
     workspace = tmp_path / "workspace"
     outside = tmp_path / "host-secret.txt"
     outside.write_bytes(b"host secret")
@@ -608,7 +637,7 @@ async def test_an_in_sandbox_program_carries_the_guard_it_runs(tmp_path: Path) -
     (workspace / "real.txt").write_bytes(b"the workspace's own file")
     _plant_fake_guard(workspace)
 
-    assert shutil.which("sbxfs", path=BARE_PATH) is None
+    assert shutil.which("ufo", path=BARE_PATH) is None
 
     refused = await session.python(GUARD_PROBE_PROG, "/workspace/link.txt", "/workspace")
     reachable = await session.python(GUARD_PROBE_PROG, "/workspace/real.txt", "/workspace")

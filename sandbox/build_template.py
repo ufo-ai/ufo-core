@@ -2,7 +2,7 @@
 """Build the ufo sandbox image — one definition, two targets that stay in sync.
 
 The E2B sandbox template and the Docker carrier's container image share the same layers
-(``apply_layers``: apt packages, the pip/npm toolchain, the sandbox scripts, the start
+(``apply_layers``: apt packages, the pip/npm toolchain, the ``ufo`` client, the start
 command, the baked env). Only the base differs:
 
 - E2B builds from the ``code-interpreter-v1`` template, which carries E2B's own provisioning layers,
@@ -20,6 +20,10 @@ publishing silently. ``--check`` does the inverse and never publishes. ``--docke
 Docker image's Dockerfile to stdout (build it with the repository root as the context).
 ``--build-docker`` renders that Dockerfile and runs ``docker build`` locally, tagging the image the
 Docker carrier runs.
+
+Every mode that actually builds stages the compiled ``ufo`` client into the build context first
+(``stage_client_binary``); rendering the Dockerfile alone never needs the binary, so the CI job that
+only wants the image's cache key derives it without a Rust toolchain.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import argparse
 import hashlib
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -45,18 +50,34 @@ from daytona_api_client import SnapshotState
 from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
 
+from ufo.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
 from ufo.sdk.sandbox import PLAYWRIGHT_BROWSERS_DIR, SANDBOX_ENV, SANDBOX_SIZES, WORKSPACE_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
 E2B_TEMPLATE_NAME = "ufo-sbx"
 SBX_BIN_DIR = "/usr/local/bin"
 UFO_DIR = "/etc/ufo"
-# The in-sandbox binaries live in core beside the local carrier, which installs them onto its
-# command PATH; the image bakes the same files, so a script behaves identically under every carrier.
-IMAGE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "sandbox" / "image"
-# The path-containment guard the serve process imports as `ufo.sandbox.containment`, baked beside
-# the scripts so the in-sandbox file ops confine paths with the same module, not a second copy.
+# The path-containment guard the serve process imports as `ufo.sandbox.containment`, baked so an
+# in-sandbox program confines paths with the same module the host runs, not a second copy.
 MODULE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "sandbox"
+# The in-sandbox CLI is the compiled client — `ufo fs` for the file ops, `ufo llm` for egress — so
+# the image bakes one binary where it used to bake two Python scripts. The client crate is built by
+# its own pipeline, never inside this image: a Rust toolchain layer would add minutes and gigabytes
+# to every sandbox for a binary the release build already produces for this target.
+CLIENT_SOURCE_DIR = ROOT / "client"
+SANDBOX_CLIENT_TARGET = "x86_64-unknown-linux-musl"
+# Fixed, not read off this machine: the base image is amd64, and a target derived from the builder's
+# own architecture would make the definition digest — and so every published template name — differ
+# between two runners building the same commit. musl links statically, so the binary needs nothing
+# from the base's libc.
+CLIENT_STAGE_DIR = ROOT / "sandbox" / "artifacts"
+CLIENT_STAGE_PATH = CLIENT_STAGE_DIR / CLIENT_BINARY_NAME
+# Inside the repository because the build context is the repository root and `.dockerignore`
+# excludes `**/target`, so the crate's own output directory cannot be COPY'd from.
+# What the binary is built from, and so what the image's digest moves with: the crate manifests and
+# `src/`. `target/` is this machine's build state and `tests/` never reaches the binary.
+CLIENT_MANIFESTS = ("Cargo.toml", "Cargo.lock")
+CLIENT_CODE_DIR = "src"
 
 E2B_BASE_TEMPLATE = "code-interpreter-v1"
 
@@ -191,17 +212,15 @@ NPM_PACKAGES = (
 # cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked at build time. The Docker
 # carrier inherits it from the image ENV (docker exec keeps it); the E2B carrier merges it into
 # every exec's envs, since e2b commands do not inherit the template ENV.
-# The scripts baked into the image, with a version bumped on any content change so the digest moves.
-SANDBOX_SCRIPTS: tuple[tuple[str, int], ...] = (("sbx", 2), ("sbxfs", 5))
-# Importable modules baked beside them: a script's own directory is `sys.path[0]`, so a sibling here
-# is what `sbxfs` imports, under every carrier, with no installed package inside the sandbox.
+# Importable modules baked into the sandbox bin dir, each with a version bumped on any content
+# change so the digest moves: a program's own directory is `sys.path[0]`, so a sibling here is what
+# an in-sandbox script imports with no installed package inside the sandbox.
 SANDBOX_MODULES: tuple[tuple[str, int], ...] = (("containment.py", 4),)
 SANDBOX_TEMPLATE_READY_COMMAND = """
 set -ex
 command -v python3 >/dev/null
 command -v node >/dev/null
-command -v sbx >/dev/null
-command -v sbxfs >/dev/null
+command -v ufo >/dev/null
 command -v rg >/dev/null
 command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
@@ -244,10 +263,50 @@ def daytona_refs() -> str:
     return ",".join(f"{size}={daytona_snapshot_name(size)}" for size in DAYTONA_TIERS)
 
 
+def client_definition() -> dict[str, str]:
+    """What the baked `ufo` client is, for the definition digest: its target and a digest of the
+    crate sources it is built from.
+
+    The binary's own bytes are deliberately not hashed. A release build is not reproducible byte for
+    byte, so two machines building one commit would name two images and every `--check` would read
+    as drift. Hashing the source instead keeps the promise the digest is for — the image moves when
+    what goes into it moves — and `client/Cargo.lock` is in the set, so a dependency bump moves it
+    too."""
+    digest = hashlib.sha256()
+    code = (CLIENT_SOURCE_DIR / CLIENT_CODE_DIR).rglob("*")
+    sources = sorted(
+        [CLIENT_SOURCE_DIR / name for name in CLIENT_MANIFESTS]
+        + [path for path in code if path.is_file()]
+    )
+    for path in sources:
+        digest.update(str(path.relative_to(CLIENT_SOURCE_DIR)).encode())
+        digest.update(path.read_bytes())
+    return {
+        "name": CLIENT_BINARY_NAME,
+        "target": SANDBOX_CLIENT_TARGET,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def stage_client_binary() -> Path:
+    """Put the compiled `ufo` client where the build context can COPY it, and answer that path.
+
+    Every render names this one path, so a build that forgets to stage fails on a missing COPY
+    source rather than baking a stale binary. Which build produced it is `client_binary`'s question:
+    a CI job hands over the artifact its client pipeline already built, and a developer's checkout
+    uses its own `cargo build`."""
+    source = client_binary(target=SANDBOX_CLIENT_TARGET)
+    CLIENT_STAGE_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, CLIENT_STAGE_PATH)
+    CLIENT_STAGE_PATH.chmod(0o755)
+    return CLIENT_STAGE_PATH
+
+
 def build_definition_digest(sizing: Sizing | None) -> str:
     """Content digest of everything apply_layers bakes — base, users, the start/ready commands, the
-    apt/pip/npm package sets, the env, and each script (version + content hash) — plus the cpu and
-    memory the build allocates, which no layer carries but which only a republish can change. The
+    apt/pip/npm package sets, the env, the baked client and each module (version + content hash) —
+    plus the cpu and memory the build allocates, which no layer carries but which only a republish
+    can change. The
     Docker image carries no sizing (the daemon imposes none), so its digest takes None. Baked into
     the image at BUILD_DIGEST_PATH and re-derived by --check, so any change to a tier's build
     definition is detectable as drift from that tier's live template."""
@@ -265,14 +324,7 @@ def build_definition_digest(sizing: Sizing | None) -> str:
         "pip": list(PIP_PACKAGES),
         "npm": list(NPM_PACKAGES),
         "env": SANDBOX_ENV,
-        "scripts": [
-            {
-                "name": name,
-                "version": version,
-                "sha256": hashlib.sha256((IMAGE_SOURCE_DIR / name).read_bytes()).hexdigest(),
-            }
-            for name, version in SANDBOX_SCRIPTS
-        ],
+        "client": client_definition(),
         "modules": [
             {
                 "name": name,
@@ -308,12 +360,9 @@ def apply_layers(builder: object, digest: str) -> object:
     )
     builder.run_cmd(f"printf '%s' '{digest}' > {BUILD_DIGEST_PATH}")
     builder.set_envs(SANDBOX_ENV)
-    targets = []
-    for name, _ in SANDBOX_SCRIPTS:
-        target = f"{SBX_BIN_DIR}/{name}"
-        builder.copy((IMAGE_SOURCE_DIR / name).relative_to(ROOT), target, mode=0o755)
-        targets.append(target)
-    builder.run_cmd(f"chmod 0755 {' '.join(targets)}")
+    client = f"{SBX_BIN_DIR}/{CLIENT_BINARY_NAME}"
+    builder.copy(CLIENT_STAGE_PATH.relative_to(ROOT), client, mode=0o755)
+    builder.run_cmd(f"chmod 0755 {client}")
     modules = []
     for name, _ in SANDBOX_MODULES:
         target = f"{SBX_BIN_DIR}/{name}"
@@ -364,6 +413,7 @@ def build_daytona_snapshots() -> None:
     construction, so a republish with nothing changed creates nothing and boots nothing — the
     verify sandbox draws from the organization's one memory budget, which the live fleet is
     spending, so a boot happens only where there is something new to prove."""
+    stage_client_binary()
     daytona = Daytona()
     references = []
     for size, sizing in DAYTONA_TIERS.items():
@@ -447,6 +497,7 @@ def build_docker_image() -> None:
     """Render the Dockerfile from the single definition and build the image the Docker carrier runs.
     Offline — no E2B account, only the local Docker daemon — so a Docker-only deploy builds with no
     E2B key. The context is the repository root, matching the COPY paths apply_layers emits."""
+    stage_client_binary()
     process = subprocess.run(
         ["docker", "build", "-t", DOCKER_IMAGE_TAG, "-f", "-", str(ROOT)],
         input=pod_dockerfile().encode(),
@@ -552,6 +603,7 @@ def main() -> None:
     if args.check_daytona:
         check_daytona_snapshots()
         return
+    stage_client_binary()
     references = []
     for size, sizing in SANDBOX_TIERS.items():
         info = Template.build(

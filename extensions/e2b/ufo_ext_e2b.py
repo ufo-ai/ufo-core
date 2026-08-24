@@ -70,7 +70,7 @@ from ufo.sdk.sandbox import (
     SandboxSpec,
     SandboxUnreachable,
     egress_proxy_env,
-    sbxfs_file_op,
+    ufo_fs_file_op,
 )
 
 CARRIER_NAME = "e2b"
@@ -378,7 +378,7 @@ class E2BCarrier:
         in-process cache's: a cached lease can outlive its sandbox, and a read that answered present
         off it would raise where absence was promised. Never a fresh sandbox either — a read of a
         conversation whose sandbox is gone answers absent rather than opening an empty one and
-        persisting its id over the stored handle. No egress env — a read runs `sbxfs` and `cat`,
+        persisting its id over the stored handle. No egress env — a read runs `ufo fs` and `cat`,
         nothing that leaves the box."""
         if spec.resume_id is None:
             return None
@@ -809,9 +809,9 @@ class E2BCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        """The template bakes `sbxfs`, so a file op is that CLI run through `exec` — under the same
-        lease, quoting and timeout mapping every other command gets."""
-        return await sbxfs_file_op(self, handle, op, params)
+        """The template bakes the `ufo` client, so a file op is `ufo fs` run through `exec` — under
+        the same lease, quoting and timeout mapping every other command gets."""
+        return await ufo_fs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The sandbox's public per-port host: e2b routes an in-sandbox port over a per-port

@@ -1,9 +1,6 @@
-import asyncio
-import fcntl
 import hashlib
 import json
 import shlex
-import tempfile
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -70,8 +67,8 @@ class FakeSandbox:
     async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         return self.bash_result
 
-    async def run_sbxfs(self, op: str, args: dict[str, object]) -> dict[str, object]:
-        raise AssertionError(f"run_sbxfs({op}) must not run once a guard has rejected the call")
+    async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
+        raise AssertionError(f"run_ufo_fs({op}) must not run once a guard has rejected the call")
 
     async def write_file(self, path: str, content: bytes) -> None:
         self.files[path] = content
@@ -289,7 +286,11 @@ async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
         )
 
 
-async def test_write_and_edit_land_bounded_results_through_the_guard(tmp_path: Path) -> None:
+@pytest.mark.integration
+async def test_write_and_edit_land_bounded_results_through_the_guard(
+    tmp_path: Path, sandbox_client: Path
+) -> None:
+    """The write and the edit land through the real `ufo fs`, so this needs a built client."""
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
     handle = await carrier.create(
@@ -378,53 +379,6 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(tmp_path: P
     )
     assert json.loads(injected.content[0].text)["path"] == "name\n+++ injected"
     assert (workspace / "name\n+++ injected").read_text() == "safe\n"
-
-
-async def test_sbxfs_write_waits_for_the_shared_filesystem_lock(tmp_path: Path) -> None:
-    workspace = tmp_path / "shared"
-    spec = SandboxSpec(
-        conversation_id=uuid4(),
-        image_ref="ufo-sandbox:latest",
-        workspace_host_path=str(workspace),
-        proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM-BYTES"),
-        run_token="run-token",
-    )
-    first_carrier = LocalCarrier()
-    second_carrier = LocalCarrier()
-    first = make_context(
-        SandboxSession(carrier=first_carrier, handle=await first_carrier.create(spec)), tmp_path
-    )
-    second = make_context(
-        SandboxSession(carrier=second_carrier, handle=await second_carrier.create(spec)), tmp_path
-    )
-    await run(
-        "write",
-        first,
-        file_path="shared.txt",
-        content="old\n",
-        user_description="writing shared content",
-    )
-    second.read_paths.add("shared.txt")
-    lock_root = Path(tempfile.gettempdir()) / "ufo-sbxfs-locks"
-    lock_root.mkdir(mode=0o700, exist_ok=True)
-    lock_path = lock_root / hashlib.sha256(str(workspace / "shared.txt").encode()).hexdigest()
-    with lock_path.open("a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        pending = asyncio.create_task(
-            run(
-                "write",
-                second,
-                file_path="shared.txt",
-                content="new\n",
-                user_description="writing shared content",
-            )
-        )
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(pending), 0.1)
-        assert (workspace / "shared.txt").read_text() == "old\n"
-        fcntl.flock(lock, fcntl.LOCK_UN)
-    assert json.loads((await pending).content[0].text)["created"] is False
-    assert (workspace / "shared.txt").read_text() == "new\n"
 
 
 def test_file_tool_result_bounds_escaped_paths() -> None:

@@ -5,9 +5,9 @@ a real host directory (the same bind-mount the Docker carrier would use), comman
 subprocesses with cwd set there, and the `/workspace` paths tools pass are rewritten to it. Egress
 still routes through the sandbox proxy: each command inherits `HTTP(S)_PROXY` pointing at the proxy
 on localhost, carrying the turn's run token, plus the sentinel model keys and the proxy CA, so
-sentinel-swap and metering hold exactly as they do in a container. The in-sandbox `sbx` and `sbxfs`
-helpers are installed onto the command PATH — the same binaries the image bakes — so the file tools
-and the egress CLI work with only a Python interpreter present.
+sentinel-swap and metering hold exactly as they do in a container. The `ufo` client is installed on
+the command PATH — the same binary the image bakes — so `ufo fs` serves the file tools and `ufo llm`
+serves the in-sandbox egress CLI with no container present.
 
 A command's git is the sandbox's, never the host's: Apple's git ships
 `credential.helper=osxkeychain`, and storing a credential through it raises a keychain authorization
@@ -30,6 +30,8 @@ from io import BufferedReader
 from pathlib import Path, PurePosixPath
 from signal import SIGKILL
 
+from ufo.o11y import warn
+from ufo.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
 from ufo.sandbox.containment import PathNotFound, contained_file
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
@@ -41,7 +43,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
     SandboxSpec,
     host_argv,
-    sbxfs_file_op,
+    ufo_fs_file_op,
 )
 
 LOCAL_CONTAINER_ID = "local"
@@ -50,31 +52,31 @@ ENV_PASSTHROUGH = ("TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
 CA_FILENAME = "egress-ca.pem"
 EXEC_TIMEOUT_CODE = 124
 READ_CHUNK_BYTES = 1024 * 1024
-SANDBOX_BINARIES = ("sbx", "sbxfs")
-# Modules the scripts import, installed beside them exactly as the image bakes them: a script's own
-# directory is `sys.path[0]`, so this is how `sbxfs` reaches the containment guard under a carrier
-# that has no installed `ufo` package inside the sandbox.
-SANDBOX_MODULES = ("containment.py",)
 
 
 def _provision_scratch() -> Path:
-    """A process-lifetime scratch dir holding the command PATH's `sbx`/`sbxfs`, the modules they
-    import, and a home for tools that write under `$HOME` — created once per carrier, off the event
-    loop at construction. The workspace itself is never here: it is the durable bind-mount, kept
-    clear of scaffolding."""
+    """A process-lifetime scratch dir holding the command PATH's `ufo` client and a home for tools
+    that write under `$HOME` — created once per carrier, off the event loop at construction. The
+    binary is copied rather than linked, so every command of a running process runs the one build
+    resolved here. The workspace itself is never here: it is the durable bind-mount, kept clear of
+    scaffolding.
+
+    A checkout holding no build of the client warns and carries on. The carrier is still the shell,
+    the reads and the writes every other seam needs, and only the file tools and `ufo llm` want the
+    binary — so the failure belongs to the command that asks for it, named there, rather than to
+    every conversation this process opens."""
     root = Path(tempfile.mkdtemp(prefix="ufo-local-"))
     (root / "home").mkdir()
     bin_dir = root / "bin"
     bin_dir.mkdir()
-    source = Path(__file__).parent / "image"
-    for name in SANDBOX_BINARIES:
-        target = bin_dir / name
-        target.write_bytes((source / name).read_bytes())
-        target.chmod(0o755)
-    for name in SANDBOX_MODULES:
-        target = bin_dir / name
-        target.write_bytes((Path(__file__).parent / name).read_bytes())
-        target.chmod(0o644)
+    try:
+        source = client_binary()
+    except RuntimeError as error:
+        warn("sandbox.local.client_absent", reason=str(error))
+        return root
+    target = bin_dir / CLIENT_BINARY_NAME
+    target.write_bytes(source.read_bytes())
+    target.chmod(0o755)
     return root
 
 
@@ -143,7 +145,7 @@ class LocalCarrier:
         """The read-only shape of `create`: the same handle over the same host directory, minus the
         directory's creation — a browse of a conversation that never grew a workspace answers empty
         through the reads, never by making one. Commands are host subprocesses, so the handle still
-        carries the scratch PATH the `sbxfs` reads run under."""
+        carries the scratch PATH the `ufo fs` reads run under."""
         if not await asyncio.to_thread(Path(spec.workspace_host_path).is_dir):
             return None
         return SandboxHandle(
@@ -261,9 +263,9 @@ class LocalCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        """The scratch PATH every command runs under holds `sbxfs`, so a file op is that CLI run as
-        a host subprocess against the workspace directory."""
-        return await sbxfs_file_op(self, handle, op, params)
+        """The scratch PATH every command runs under holds the `ufo` client, so a file op is
+        `ufo fs` run as a host subprocess against the workspace directory."""
+        return await ufo_fs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The local carrier runs commands as host subprocesses sharing the host network, so an

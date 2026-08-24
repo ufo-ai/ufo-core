@@ -7,7 +7,6 @@ import base64
 import json
 import os
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -578,21 +577,12 @@ def _enumerate(op: str, root: Path, workdir: Path) -> tuple[list[str], list[str]
     )
 
 
-def _sbxfs_glob(root: Path, tmp_path: Path) -> list[str]:
-    """The paths the in-sandbox walk itself returns for the whole tree, from the real script run the
-    way a carrier runs it: beside the containment guard it imports."""
-    sandbox = Path(terminal.__file__).parent
-    installed = tmp_path / "bin"
-    installed.mkdir()
-    (installed / "sbxfs").write_bytes((sandbox / "image" / "sbxfs").read_bytes())
-    (installed / "containment.py").write_bytes((sandbox / "containment.py").read_bytes())
+def _ufo_fs_glob(root: Path, client: Path) -> list[str]:
+    """The paths the in-sandbox walk itself returns for the whole tree, from the real `ufo fs glob`
+    run the way a carrier runs it: one JSON argv, one JSON object on stdout. No `enum` param, so the
+    verb builds the listing itself — which is the half this compares against."""
     completed = subprocess.run(
-        [
-            sys.executable,
-            str(installed / "sbxfs"),
-            "glob",
-            json.dumps({"pattern": "**/*", "workspace": str(root)}),
-        ],
+        [str(client), "fs", "glob", json.dumps({"pattern": "**/*", "workspace": str(root)})],
         capture_output=True,
         text=True,
         check=False,
@@ -601,10 +591,13 @@ def _sbxfs_glob(root: Path, tmp_path: Path) -> list[str]:
     return [file["path"] for file in json.loads(completed.stdout)["files"]]
 
 
-def test_the_glob_walk_lists_every_file_sbxfs_would_have_walked(tmp_path: Path) -> None:
+@pytest.mark.integration
+def test_the_glob_walk_lists_every_file_ufo_fs_would_have_walked(
+    tmp_path: Path, sandbox_client: Path
+) -> None:
     """Parity with the container, which is what lets the client read the listing instead of the
-    tree: `sbxfs`'s glob is `Path.glob`, which enters `node_modules` and `.git` — so pruning the
-    names the `grep` walk prunes would hide files a glob run in the container returns."""
+    tree: `ufo fs glob` is `Path.glob`'s walk, which enters `node_modules` and `.git` — so pruning
+    the names the `grep` walk prunes would hide files a glob run in the container returns."""
     root = tmp_path / "workspace"
     names = ("src/app.py", "node_modules/pkg/index.js", ".git/config", ".venv/lib/x.py")
     for index, name in enumerate(names):
@@ -614,7 +607,7 @@ def test_the_glob_walk_lists_every_file_sbxfs_would_have_walked(tmp_path: Path) 
 
     paths, measurements = _enumerate("glob", root, tmp_path / "workdir")
 
-    assert sorted(paths) == sorted(_sbxfs_glob(root, tmp_path))
+    assert sorted(paths) == sorted(_ufo_fs_glob(root, sandbox_client))
     assert [(Path(path).stat().st_size, Path(path).stat().st_mtime) for path in paths] == [
         (int(line.split(" ")[0]), float(line.split(" ")[1])) for line in measurements
     ]
@@ -702,9 +695,9 @@ def test_the_changes_scan_diffs_only_repositories_that_report_changes(tmp_path: 
 
 
 def test_a_target_resolves_to_the_outermost_checkout_once(tmp_path: Path) -> None:
-    """`sbxfs`'s `_repositories` rule, ascending instead of walking: a target inside a vendored
-    clone answers as the checkout above it, targets sharing one checkout enumerate it once, and a
-    target whose directory is gone still resolves through the ancestors that remain."""
+    """The `changes` op's `_repositories` rule, ascending instead of walking: a target inside a
+    vendored clone answers as the checkout above it, targets sharing one checkout enumerate it
+    once, and a target whose directory is gone still resolves through the ancestors that remain."""
     root = _repository(tmp_path, "workspace")
     _repository(root, "vendored")
 

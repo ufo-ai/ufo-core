@@ -1,11 +1,21 @@
 use std::collections::HashSet;
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::time::UNIX_EPOCH;
 
 use serde_json::json;
 
+#[cfg(unix)]
+use crate::guard;
 use crate::ops::fileops::text::{
     failed, fnmatch, matches, refused, str_param, workdir_text, OpError, OpResult,
 };
+#[cfg(unix)]
+use crate::ops::fileops::text::{guarded, required};
+#[cfg(unix)]
+use crate::ops::fileops::walk;
 
 const GLOB_MAX_RESULTS: usize = 1000;
 const RECURSIVE: &str = "**";
@@ -36,7 +46,7 @@ fn inside(path: &str, root: &str) -> bool {
     path.starts_with(&format!("{root}/"))
 }
 
-fn contained_pattern<'a>(pattern: &'a str, root: &str) -> Result<&'a str, OpError> {
+pub fn contained_pattern<'a>(pattern: &'a str, root: &str) -> Result<&'a str, OpError> {
     if parts(pattern).contains(&"..") {
         return Err(refused(format!("pattern '{pattern}' leaves {root}")));
     }
@@ -156,6 +166,72 @@ fn measured(workdir: &Path, name: &str) -> Result<Vec<Measured>, OpError> {
         .collect()
 }
 
+/// The measurement of one walked hit, taken with an `lstat` that never follows a final link.
+#[cfg(unix)]
+fn measure(path: &Path) -> Option<Measured> {
+    let found = std::fs::symlink_metadata(path).ok()?;
+    let modified = found
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    Some(Measured {
+        path: path.to_string_lossy().into_owned(),
+        size: found.len() as i64,
+        modified,
+    })
+}
+
+/// The directory a walk starts from and the pattern to run there, both confined to the workspace:
+/// an absolute pattern names its own location, so it re-roots at the workspace rather than at the
+/// filesystem anchor, and a relative one walks from `path`.
+#[cfg(unix)]
+fn contained_glob<'a>(
+    params: &'a serde_json::Value,
+    workspace: &Path,
+) -> Result<(PathBuf, &'a str), OpError> {
+    let raw_pattern = required(params, "pattern")?;
+    let root = workspace.to_string_lossy().into_owned();
+    let pattern = contained_pattern(raw_pattern, &root)?;
+    let start = match params.get("path").and_then(|value| value.as_str()) {
+        Some(path) if !raw_pattern.starts_with('/') => path.to_string(),
+        _ => root,
+    };
+    let walked = guarded(guard::contained_dir(&start, workspace, false))?;
+    Ok((walked, pattern))
+}
+
+/// The same glob with the walk it needs run in process: the pattern and the start directory both go
+/// through the guard, and every hit passes the enumeration filter, so a file reached through a
+/// planted link is left out of the listing.
+#[cfg(unix)]
+pub fn run_contained(params: &serde_json::Value, workspace: &Path, workdir: &Path) -> OpResult {
+    let names = excluded(params)?;
+    let (walked, pattern) = contained_glob(params, workspace)?;
+    let (tests, directory_only) = glob_matcher(pattern)?;
+    let root = walked.to_string_lossy().into_owned();
+    let supplied = params.get("enum").and_then(|value| value.as_str());
+    let entries: Vec<Measured> = match supplied {
+        Some(name) => measured(workdir, name)?,
+        None => walk::glob_files(&walked)
+            .into_iter()
+            .filter_map(|hit| measure(&hit))
+            .collect(),
+    }
+    .into_iter()
+    .filter(|hit| guard::is_contained_regular(Path::new(&hit.path), workspace))
+    .collect();
+    selected(
+        entries,
+        &workspace.to_string_lossy(),
+        &root,
+        &tests,
+        directory_only,
+        &names,
+    )
+}
+
 pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
     let workspace = str_param(params, "workspace")?;
     let raw_pattern = str_param(params, "pattern")?;
@@ -171,12 +247,24 @@ pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
         path
     };
     let (tests, directory_only) = glob_matcher(pattern)?;
+    let entries = measured(workdir, str_param(params, "enum")?)?;
+    selected(entries, workspace, root, &tests, directory_only, &names)
+}
+
+fn selected(
+    entries: Vec<Measured>,
+    workspace: &str,
+    root: &str,
+    tests: &[Test],
+    directory_only: bool,
+    names: &HashSet<String>,
+) -> OpResult {
     let mut hits = Vec::new();
-    for hit in measured(workdir, str_param(params, "enum")?)? {
+    for hit in entries {
         if !inside(&hit.path, root) {
             continue;
         }
-        if directory_only || !match_parts(&tests, 0, &parts(relative_to(&hit.path, root)), 0)? {
+        if directory_only || !match_parts(tests, 0, &parts(relative_to(&hit.path, root)), 0)? {
             continue;
         }
         if parts(relative_to(&hit.path, workspace))
@@ -323,6 +411,69 @@ mod tests {
         let params = json!({"pattern": "a/**", "workspace": "/ws", "enum": "glob-enum"});
         let result = run(&params, &dir).unwrap();
         assert_eq!(result["count"], 0);
+    }
+
+    /// The exclusion runs before the cap, so a pruned tree cannot crowd the answer out: 1001 hits
+    /// with an excluded tree among them still answer 1000 files, none of them excluded.
+    #[test]
+    fn exclude_names_prune_before_the_cap() {
+        let entries: Vec<Measured> = (0..GLOB_MAX_RESULTS + 1)
+            .map(|index| Measured {
+                path: if index % 2 == 0 {
+                    format!("/ws/node_modules/pkg-{index}/file.rs")
+                } else {
+                    format!("/ws/src/file-{index}.rs")
+                },
+                size: index as i64,
+                modified: index as f64,
+            })
+            .collect();
+        let kept = entries.len() / 2;
+        let (tests, directory_only) = glob_matcher("**/*.rs").unwrap();
+        let names = HashSet::from(["node_modules".to_string()]);
+        let result = selected(entries, "/ws", "/ws", &tests, directory_only, &names).unwrap();
+        assert_eq!(result["count"], kept);
+        assert_eq!(result["truncated"], false);
+        assert!(result["truncated_message"].is_null());
+        assert!(!result["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["path"].as_str().unwrap().contains("node_modules")));
+        assert_eq!(result["files"][0]["path"], "/ws/src/file-999.rs");
+    }
+
+    /// Newest first, and the cap says how many of how many.
+    #[test]
+    fn the_cap_names_the_total_it_cut() {
+        let entries: Vec<Measured> = (0..GLOB_MAX_RESULTS + 2)
+            .map(|index| Measured {
+                path: format!("/ws/file-{index}.rs"),
+                size: 1,
+                modified: index as f64,
+            })
+            .collect();
+        let total = entries.len();
+        let (tests, directory_only) = glob_matcher("*.rs").unwrap();
+        let result = selected(
+            entries,
+            "/ws",
+            "/ws",
+            &tests,
+            directory_only,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(result["count"], GLOB_MAX_RESULTS);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(
+            result["truncated_message"],
+            format!("showing {GLOB_MAX_RESULTS} of {total} matches; refine the pattern")
+        );
+        assert_eq!(
+            result["files"][0]["path"],
+            format!("/ws/file-{}.rs", total - 1)
+        );
     }
 
     #[test]

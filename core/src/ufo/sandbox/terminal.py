@@ -43,7 +43,7 @@ from ufo.sandbox.session import (
 
 CLIENT_BACKEND = "client"
 _PATH_PARAMS = frozenset({"path", "workspace", "staged_path"})
-"""The `sbxfs` op params that name a workspace path and so map onto the bound directory; a
+"""The `ufo fs` op params that name a workspace path and so map onto the bound directory; a
 `pattern`, a `glob`, or an edit's text is a value, not a path, and is never rewritten."""
 OP_EXEC = "exec"
 OP_WRITE = "write"
@@ -108,11 +108,11 @@ walked="$UFO_OP_WORKDIR/glob-walk"
 listing in the client's op workdir, where the walk's `enum` param names it. The walks read the
 listing rather than the tree because the client must not re-decide what a walk visits — `find`
 meets entries in the `readdir` order `os.walk` does, which is what keeps a truncated result
-identical to `sbxfs`'s. `grep` prunes `WALK_SKIP_NAMES` because the `sbxfs` walk it mirrors does;
-`glob` mirrors `Path.glob`, which prunes nothing, so pruning here would hide files the
-container's own glob returns. Only glob measures with `stat` — over the listing it just wrote, never
-a second walk, because the client pairs the two sections by position — and its flags split by OS:
-`stat --version` succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD
+identical to the one `ufo fs` builds for itself. `grep` prunes `WALK_SKIP_NAMES` because the walk
+it mirrors does; `glob` mirrors `Path.glob`, which prunes nothing, so pruning here would hide files
+the container's own glob returns. Only glob measures with `stat` — over the listing it just wrote,
+never a second walk, because the client pairs the two sections by position — and its flags split by
+OS: `stat --version` succeeds on GNU/uutils (Linux), which take `-c '%s %.9Y'`, and fails on BSD
 (macOS), which takes `-f '%z %.9Fm'` — both print `<size> <sec>.<9-digit-nanos>`, so the client
 parses one shape and the double it reconstructs is the one `os.stat` reports on either. `find`,
 `git`, `cat`, `head -c`, and `xargs` behave alike across both."""
@@ -135,7 +135,7 @@ for target in "$@"; do resolve "$target"; done | /usr/bin/sort -z -u \
 """The `changes` scan's enumeration: argv carries the workspace-relative directories the
 conversation's file tools touched (`.` names the root itself) and each resolves *upward* to its
 outermost enclosing checkout — never a walk down the tree, whose cost on a bound directory is the
-member's whole disk rather than the agent's work. Ascending to the root keeps `sbxfs`'s own
+member's whole disk rather than the agent's work. Ascending to the root keeps the `changes` op's own
 `_repositories` rule (a repository nested inside another is what the checkout above already
 reports), a target that lost its directory still resolves through the ancestors that remain, and
 one under no checkout emits nothing. Roots dedupe through `sort -z -u` — GNU, BSD, and uutils
@@ -699,7 +699,7 @@ class TerminalCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        """One `sbxfs` op, run where the files are: the directive names the op and the client runs
+        """One `ufo fs` op, run where the files are: the directive names the op and the client runs
         its native implementation, so only the params and the result cross. A tree walk is two
         ops: the enumeration `find` first, through the same exec primitive, then the op reading
         its listing — what a walk visits is decided by a command this process composed, never by

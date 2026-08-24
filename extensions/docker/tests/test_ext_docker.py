@@ -622,7 +622,7 @@ async def test_entries_lists_container_paths_workspace_relative(
         match argv[0]:
             case "ps":
                 return 0, b"cid-listing\n", b""
-            case "exec" if "sbxfs" in argv:
+            case "exec" if any("command -v ufo" in arg for arg in argv):
                 return 0, listing.encode(), b""
             case _:
                 return 0, b"", b""

@@ -38,7 +38,7 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
-    sbxfs_file_op,
+    ufo_fs_file_op,
 )
 
 CARRIER_NAME = "docker"
@@ -206,7 +206,7 @@ class DockerCarrier:
         """The conversation's container when one exists — started again if reclaim stopped it, the
         same shape as resuming a provider-paused sandbox — else None, never a fresh one, and None
         again whenever the revive cannot deliver a running container, refused or raising: a read
-        promises absence, never an error. No egress env: a read runs `sbxfs` and `cat`, nothing
+        promises absence, never an error. No egress env: a read runs `ufo fs` and `cat`, nothing
         that leaves the box."""
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
         running = await self._running_id(name)
@@ -485,9 +485,10 @@ class DockerCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        """The image bakes `sbxfs`, so a file op is that CLI run through `exec` — which pins the
-        container for the op's duration and revives a stopped one, exactly as a bash command."""
-        return await sbxfs_file_op(self, handle, op, params)
+        """The image bakes the `ufo` client, so a file op is `ufo fs` run through `exec` — which
+        pins the container for the op's duration and revives a stopped one, exactly as a bash
+        command."""
+        return await ufo_fs_file_op(self, handle, op, params)
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
         """The docker carrier publishes no per-port host, so an in-sandbox service (a browser's CDP

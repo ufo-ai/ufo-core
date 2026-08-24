@@ -124,7 +124,6 @@ NAME_SEPARATOR = "-"
 CANDIDATES_FIELD = "candidates"
 ENV_ROOTS = Path("infra/envs")
 CONTAINMENT_MODULE = CORE_SRC / "sandbox" / "containment.py"
-SANDBOX_IMAGE_DIR = CORE_SRC / "sandbox" / "image"
 CONTAINMENT_IMPORT_PATH = "ufo.sandbox.containment"
 CONTAINMENT_IMPORT = "containment"
 CONTAINMENT_GUARDS = frozenset(
@@ -239,10 +238,6 @@ DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
     ): "skill dirs ship in the package tree",
     (CORE_SRC / "skills" / "runtime.py", "_load_core_skills"): "core's own skills ship in the tree",
     (CORE_SRC / "skills" / "runtime.py", "parse_skill"): "skill dirs ship in the package tree",
-    (SANDBOX_IMAGE_DIR / "sbxfs", "_file_lock"): (
-        "the lock name is a digest of the path, not the path: the lock file lives outside the"
-        " workspace on purpose, so no root contains it"
-    ),
     (CORE_SRC / "sandbox" / "session.py", "workspace_path"): (
         "issue #1112: the logical guard for a container path this process cannot stat; it must"
         " accept /workspace itself, so it stays beside the canonical guard rather than inside it"
@@ -302,15 +297,6 @@ def _python_files() -> list[Path]:
         for root in SOURCE_ROOTS
         for path in (ROOT / root).rglob("*.py")
         if not _vendored(path) and not _is_skill_content(path)
-    ]
-
-
-def _sandbox_scripts() -> list[Path]:
-    """The in-sandbox CLIs. They carry no `.py` suffix, so `_python_files` never collects them — and
-    they are the ingress that matters most: they run inside the sandbox on paths the model named,
-    where a planted link needs no race to win."""
-    return [
-        path for path in (ROOT / SANDBOX_IMAGE_DIR).iterdir() if path.is_file() and not path.suffix
     ]
 
 
@@ -1184,10 +1170,10 @@ def _ingress_containment_failures(trees: dict[Path, ast.Module]) -> list[str]:
 
 
 def _sandbox_program_failures(trees: dict[Path, ast.Module]) -> list[str]:
-    """An in-sandbox program that touches files imports the baked `containment` module rather than
+    """An in-sandbox program that touches files imports the `containment` module rather than
     checking paths itself. These programs run inside the sandbox on paths the model named, where a
-    planted symlink needs no race to win, and the image bakes the guard beside `sbxfs` precisely so
-    they can call it."""
+    planted symlink needs no race to win, and `SANDBOX_MODULE_BOOTSTRAP` carries the guard into the
+    program precisely so they can call it."""
     failures = []
     for rel, tree in trees.items():
         if not _containment_scope(rel):
@@ -1204,8 +1190,8 @@ def _sandbox_program_failures(trees: dict[Path, ast.Module]) -> list[str]:
                         continue
                     failures.append(
                         f"{rel}: {name} opens files in the sandbox without importing "
-                        f"{CONTAINMENT_IMPORT!r} — the image bakes the guard beside sbxfs, or name "
-                        f"the program in DEFERRED_INGRESS"
+                        f"{CONTAINMENT_IMPORT!r} — the bootstrap carries the guard into it, or "
+                        f"name the program in DEFERRED_INGRESS"
                     )
     return failures
 
@@ -1693,16 +1679,9 @@ def main() -> int:
     failures.extend(_directive_wire_failures(trees))
     failures.extend(_drawn_mark_failures())
     failures.extend(_to_thread_failures(trees))
-    ingress_trees = {
-        **trees,
-        **{
-            path.relative_to(ROOT): ast.parse(path.read_text(), filename=str(path))
-            for path in _sandbox_scripts()
-        },
-    }
-    failures.extend(_ingress_containment_failures(ingress_trees))
-    failures.extend(_sandbox_program_failures(ingress_trees))
-    failures.extend(_lexical_containment_failures(ingress_trees))
+    failures.extend(_ingress_containment_failures(trees))
+    failures.extend(_sandbox_program_failures(trees))
+    failures.extend(_lexical_containment_failures(trees))
     failures.extend(_set_cookie_failures(trees))
     failures.extend(_skill_failures())
     failures.extend(_skill_palette_failures())

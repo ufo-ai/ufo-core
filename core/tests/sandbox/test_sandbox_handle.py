@@ -60,7 +60,7 @@ from ufo.sandbox.session import (
     SandboxSession,
     SandboxSpec,
     _LateSandbox,
-    sbxfs_file_op,
+    ufo_fs_file_op,
 )
 from ufo.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
 from ufo.schema import tables
@@ -1426,7 +1426,12 @@ async def test_workspace_listing_warns_when_the_walk_truncates(
     assert any("workspace.listing_truncated" in record.message for record in caplog.records)
 
 
-async def test_workspace_listing_omits_git_metadata(db: None, tmp_path: Path) -> None:
+@pytest.mark.integration
+async def test_workspace_listing_omits_git_metadata(
+    db: None, tmp_path: Path, sandbox_client: Path
+) -> None:
+    """The listing is a real `ufo fs` glob through the local carrier, so this needs a built client.
+    Every other listing test drives a fake carrier and needs none."""
     workspace_id, conversation_id = await _conversation()
     sandboxes = _conversation_sandboxes(LocalCarrier(), tmp_path, "local")
 
@@ -1440,8 +1445,8 @@ async def test_workspace_listing_omits_git_metadata(db: None, tmp_path: Path) ->
 
 @dataclass
 class _TruncatingCarrier:
-    """Answers the sbxfs glob with a truncated listing — the fake stands in for the container walk
-    alone; the warn asserted is core's own."""
+    """Answers the `ufo fs` glob with a truncated listing — the fake stands in for the container
+    walk alone; the warn asserted is core's own."""
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         return SandboxHandle(
@@ -1464,7 +1469,7 @@ class _TruncatingCarrier:
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
     ) -> dict[str, object]:
-        return await sbxfs_file_op(cast(Carrier, self), handle, op, params)
+        return await ufo_fs_file_op(cast(Carrier, self), handle, op, params)
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
 

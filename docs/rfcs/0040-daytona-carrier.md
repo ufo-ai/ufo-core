@@ -76,7 +76,7 @@ is a frozen dataclass holding the `AsyncDaytona` client and the size→snapshot 
 | `attach` | `get(id)`; deleted → None; stopped/archived → `start()`. Never a fresh box. |
 | `exec` | One command via `process.exec` under `setsid`, the leader pid recorded on the box's own disk at launch (a per-run file the deadline's kill names, a per-turn file `stop_commands` sweeps with a session-leader guard); the deadline kills the whole group (`kill -9 -<pid>`), because Daytona's timeout severs the call and leaves the tree running — measured, and the same failure E2B already taught. Every exit code is a result (`ExecResult`, combined output on stdout — Daytona keeps no stderr division). |
 | `write` / `read` | `fs.upload_file` in; streamed download out in bounded chunks (SDK stream or httpx on the toolbox endpoint — probe decides). Missing path → `FileNotFoundError`. |
-| `file_op` | `sbxfs_file_op` — the image bakes `sbxfs`. |
+| `file_op` | `ufo_fs_file_op` — the image bakes the `ufo` client, and the op is `ufo fs`. |
 | `dial` | `get_preview_link(port)` → `DialTarget(host, tls=True, headers={"x-daytona-preview-token": token})`, fetched per dial because the token resets on restart; ensures the box is started, so a stopped box self-heals on the next request. |
 | `stop_commands` | `kill -9 -<pid>` per group `handle.turn_id` launched (`CommandStopping`), same turn-scoped reach as E2B. |
 

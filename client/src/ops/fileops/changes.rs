@@ -3,10 +3,16 @@ use std::path::Path;
 
 use serde_json::json;
 
+#[cfg(unix)]
+use crate::guard;
+#[cfg(unix)]
+use crate::ops::fileops::text::guarded;
 use crate::ops::fileops::text::{
     binary_extension, capped, decode_lossy, failed, listing, over, points, str_param, suffix,
     OpError, OpResult,
 };
+#[cfg(unix)]
+use crate::ops::fileops::walk;
 
 const CHANGES_INPUT_MAX_CHARS: usize = 20000;
 const CHANGES_INPUT_MAX_LINES: usize = 2000;
@@ -252,6 +258,7 @@ fn repository_change(
     status: &str,
     name: &str,
     patches: &HashMap<String, String>,
+    read: &dyn Fn(&str) -> Option<String>,
 ) -> Change {
     if let Some(patch) = patches.get(name) {
         return Change {
@@ -260,7 +267,7 @@ fn repository_change(
         };
     }
     let added = status == UNTRACKED_STATUS || status.starts_with('A');
-    let text = if added { added_text(path) } else { None };
+    let text = if added { read(path) } else { None };
     match text {
         None => Change {
             patch: String::new(),
@@ -298,12 +305,90 @@ fn entry_fields(entry: &str) -> (String, String) {
     (status, name)
 }
 
+/// One file git holds no HEAD version of, read off a pinned parent fd and bounded by the cap every
+/// other diff input takes.
+#[cfg(unix)]
+fn guarded_added_text(path: &str, workspace: &Path) -> Option<String> {
+    if binary_extension(&suffix(path)) {
+        return None;
+    }
+    let target = guard::contained_file(path, workspace, false).ok()?;
+    target.lstat().ok()??;
+    let bytes = target.read_bytes(CHANGES_INPUT_MAX_CHARS as u64 + 1).ok()?;
+    Some(decode_lossy(&bytes))
+}
+
+#[cfg(unix)]
+fn git(repository: &Path, args: &[&str]) -> String {
+    let outcome = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["-c", "core.quotePath=false"])
+        .args(args)
+        .output();
+    match outcome {
+        Ok(done) if done.status.success() => String::from_utf8_lossy(&done.stdout).into_owned(),
+        _ => String::new(),
+    }
+}
+
+/// The listing this op builds when no caller supplied one: every checkout under the workspace and
+/// git's own answer for each, in the record shape the host's shell program writes, so one reader
+/// serves both. git is the only thing that knows what a change is here — it counts what any writer
+/// did, reports deletions, and counts nothing outside a checkout.
+#[cfg(unix)]
+fn walked_items(root: &Path) -> Vec<String> {
+    let mut items = Vec::new();
+    for repository in walk::checkouts(root) {
+        items.push(REPOSITORY_FIELD.to_string());
+        items.push(repository.to_string_lossy().into_owned());
+        let status = git(
+            &repository,
+            &["status", "--porcelain=v1", "-z", "--no-renames", "-uall"],
+        );
+        items.extend(
+            status
+                .split('\0')
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string),
+        );
+        let diff = git(&repository, &["diff", "HEAD", "--no-renames", "-U3"]);
+        items.push(DIFF_FIELD.to_string());
+        items.push(diff.trim_end_matches('\n').to_string());
+    }
+    items
+}
+
+/// The same scan with its own walk: the workspace root goes through the guard by descent, the
+/// checkouts under it are found by `sbxfs`'s own rule, and a file with no HEAD version is read off a
+/// pinned parent fd. A `paths` param is accepted and ignored, as `sbxfs` accepts and ignores it: the
+/// answer is every uncommitted change under the workspace.
+#[cfg(unix)]
+pub fn run_contained(params: &serde_json::Value, workspace: &Path, workdir: &Path) -> OpResult {
+    let root = guarded(guard::contained_dir(
+        &workspace.to_string_lossy(),
+        workspace,
+        false,
+    ))?;
+    let items = match params.get("enum").and_then(|value| value.as_str()) {
+        Some(name) => listing(workdir, name)?,
+        None => walked_items(&root),
+    };
+    assemble(&items, &root.to_string_lossy(), &|path| {
+        guarded_added_text(path, workspace)
+    })
+}
+
 pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
     let workspace = str_param(params, "workspace")?;
     let items = listing(workdir, str_param(params, "enum")?)?;
+    assemble(&items, workspace, &added_text)
+}
+
+fn assemble(items: &[String], workspace: &str, read: &dyn Fn(&str) -> Option<String>) -> OpResult {
     let mut listed = Vec::new();
     let mut budget = CHANGES_TOTAL_MAX_CHARS;
-    for repository in checkouts(&items)? {
+    for repository in checkouts(items)? {
         let prefix = relative_to(&repository.path, workspace).to_string();
         let patches = tracked_patches(&repository.diff);
         for entry in &repository.entries {
@@ -311,8 +396,13 @@ pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
                 return Ok(json!({"changes": listed, "truncated": true}));
             }
             let (status, name) = entry_fields(entry);
-            let change =
-                repository_change(&joined(&repository.path, &name), &status, &name, &patches);
+            let change = repository_change(
+                &joined(&repository.path, &name),
+                &status,
+                &name,
+                &patches,
+                read,
+            );
             budget -= points(&change.patch) as i64;
             listed.push(json!({
                 "path": joined(&prefix, &name),

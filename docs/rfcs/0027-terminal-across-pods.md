@@ -57,7 +57,7 @@ carries the bytes.
 | Copy-in body (G serves what T staged) | blob keyed by op id; `send(body=…)` puts, `staged` gets, deleted when the op clears | `term/op/{op_id}` |
 | Large copy-out reply | reply body over the blob, not the stream; the reply record names the blob key | `term/reply/{op_id}` |
 
-Small replies (exec, every `sbxfs` file op) are JSON and ride the reply stream directly; only the
+Small replies (exec, every file op) are JSON and ride the reply stream directly; only the
 two copy primitives (read-out, write-in) touch the blob, and they already keep bytes off the
 directive line, so nothing new crosses that did not before.
 

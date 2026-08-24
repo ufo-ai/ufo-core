@@ -19,6 +19,9 @@ env:
   ECR_REGISTRY: 899147036157.dkr.ecr.us-east-1.amazonaws.com
   DEPLOY_ROLE_ARN: arn:aws:iam::899147036157:role/github-deploy
   TF_DIR: infra/envs/testing
+  # The `ufo` binary the sandbox image bakes, out of the five-target set the client job stages. The
+  # sandbox base is amd64, so the template publish takes the musl build for that architecture.
+  SANDBOX_CLIENT_BINARY: servers/control/clientbin/x86_64-unknown-linux-musl/ufo
   # The datadog terraform provider (monitors.tf) reads these at plan and apply.
   DD_API_KEY: ${{ secrets.DD_API_KEY }}
   DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
@@ -396,9 +399,31 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The sandbox image bakes the compiled `ufo` client, so the template publish below needs the
+      # linux binary this workflow's own client job already built — never a second Rust build here,
+      # and never a toolchain layer inside the sandbox image. A skipped client job means this tree
+      # already built, and the same pushed set the gateway reuses carries it. Both land the tree at
+      # `clientbin/<target>/ufo`, which UFO_CLIENT_BINARY names for the publish.
+      - uses: actions/download-artifact@v4
+        if: github.event_name != 'pull_request' && needs.client.result == 'success'
+        with:
+          pattern: clientbin-*
+          merge-multiple: true
+          path: servers/control/clientbin
+
+      - name: Reuse the pushed client binaries
+        if: github.event_name != 'pull_request' && needs.client.result == 'skipped'
+        env:
+          CLIENT_TREE: ${{ needs.changes.outputs.client_tree }}
+        run: |
+          docker create --name clientbin "$ECR_REGISTRY/ufo-clientbin:$CLIENT_TREE" noop
+          docker cp clientbin:/clientbin/. servers/control/clientbin
+          docker rm clientbin
+
       - name: Select sandbox template
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          UFO_CLIENT_BINARY: ${{ env.SANDBOX_CLIENT_BINARY }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             E2B_TEMPLATES=small=ufo-sbx-small,medium=ufo-sbx-medium,large=ufo-sbx-large
@@ -411,6 +436,7 @@ jobs:
       - name: Select daytona snapshots
         env:
           DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          UFO_CLIENT_BINARY: ${{ env.SANDBOX_CLIENT_BINARY }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             DAYTONA_SNAPSHOTS=small=plan-only,medium=plan-only,large=plan-only
@@ -420,14 +446,6 @@ jobs:
           fi
           test -n "$DAYTONA_SNAPSHOTS"
           echo "DAYTONA_SNAPSHOTS=$DAYTONA_SNAPSHOTS" >> "$GITHUB_ENV"
-
-      # Staged for the ufo-clientbin push after the apply.
-      - uses: actions/download-artifact@v4
-        if: github.event_name != 'pull_request' && needs.client.result == 'success'
-        with:
-          pattern: clientbin-*
-          merge-multiple: true
-          path: servers/control/clientbin
 
       - uses: hashicorp/setup-terraform@v3
         with:

@@ -110,7 +110,7 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult
 
 **Purpose**: Reads a workspace file through the sandbox file reader. It supports text files, images, PDFs, and presentations, and records that the path has been read so later edits or overwrites are allowed.
 
-**Data flow**: It receives a file path plus optional offset and limit. It asks the sandbox `sbxfs` tool to read that slice, records the path in `ctx.read_paths`, and converts the sandbox result into text, image content, PDF content, or a clear empty/no-lines message.
+**Data flow**: It receives a file path plus optional offset and limit. It asks the sandbox `ufo fs` tool to read that slice, records the path in `ctx.read_paths`, and converts the sandbox result into text, image content, PDF content, or a clear empty/no-lines message.
 
 **Call relations**: This is the public handler for the `read` tool. It calls `_pdf_result` for paginated document rendering and `_require_str` for image fields, then returns content in the format the tool system expects.
 
@@ -125,7 +125,7 @@ async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult
 
 **Purpose**: Writes text to a workspace file safely. If the target file already exists, the sandbox is told to allow the write only if this turn has already read that path.
 
-**Data flow**: It receives the desired path and content. It writes the content to a temporary staged file inside the sandbox, asks `sbxfs` to move it into place with the read-before-overwrite rule, adds size and line-count details, formats the result, and marks the path as read afterward.
+**Data flow**: It receives the desired path and content. It writes the content to a temporary staged file inside the sandbox, asks `ufo fs` to move it into place with the read-before-overwrite rule, adds size and line-count details, formats the result, and marks the path as read afterward.
 
 **Call relations**: This is the public handler for the `write` tool. It uses `_file_tool_result` to keep the response small and consistent with edit results.
 
@@ -140,7 +140,7 @@ async def edit_handler(ctx: ToolContext, args: EditInput) -> ToolResult
 
 **Purpose**: Applies exact text replacements to a file that the agent has already read in this turn. This protects against changing a file the agent has not seen.
 
-**Data flow**: It receives a file path and one or more replacements. It first checks that the path is in `ctx.read_paths`, encodes old and new strings safely as base64 text, sends the edits to the sandbox `sbxfs` editor, and returns a compact result.
+**Data flow**: It receives a file path and one or more replacements. It first checks that the path is in `ctx.read_paths`, encodes old and new strings safely as base64 text, sends the edits to the sandbox `ufo fs` editor, and returns a compact result.
 
 **Call relations**: This is the public handler for the `edit` tool. It calls `_file_tool_result` after the sandbox applies the edits, and it uses base64 encoding so arbitrary replacement text can travel safely through JSON.
 
@@ -170,7 +170,7 @@ async def glob_handler(ctx: ToolContext, args: GlobInput) -> ToolResult
 
 **Purpose**: Finds files in the workspace whose paths match a glob pattern, such as `**/*.py`. The search runs inside the sandbox instead of on the host.
 
-**Data flow**: It receives a pattern and optional starting directory, defaults the search to the workspace root, asks sandbox `sbxfs` to perform the match, and returns the matching paths as JSON text.
+**Data flow**: It receives a pattern and optional starting directory, defaults the search to the workspace root, asks sandbox `ufo fs` to perform the match, and returns the matching paths as JSON text.
 
 **Call relations**: This is the public handler for the `glob` tool. It keeps file discovery inside the container and only brings back the bounded list of results.
 
@@ -185,7 +185,7 @@ async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult
 
 **Purpose**: Searches workspace file contents for a regular expression. A regular expression is a search pattern that can match flexible text, not just one exact word.
 
-**Data flow**: It receives the search pattern plus optional file filters, context lines, case sensitivity, output mode, and result limit. It builds the sandbox search request, runs `sbxfs grep`, and returns the bounded search results as JSON text.
+**Data flow**: It receives the search pattern plus optional file filters, context lines, case sensitivity, output mode, and result limit. It builds the sandbox search request, runs `ufo fs grep`, and returns the bounded search results as JSON text.
 
 **Call relations**: This is the public handler for the `grep` tool. It sends all scanning work into the sandbox and returns only the summarized matches.
 

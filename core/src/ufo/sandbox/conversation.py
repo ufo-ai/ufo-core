@@ -244,7 +244,7 @@ class ConversationSandbox:
 
     async def entries(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
         """Member-visible files in the conversation's workspace, path-sorted. The in-container
-        `sbxfs glob` walk excludes Git metadata before its result cap; filtering in a surface would
+        `ufo fs glob` walk excludes Git metadata before its result cap; filtering in a surface would
         let metadata consume the cap and hide files. Empty when the conversation has no sandbox yet.
         Paths come back absolute in the walker's own view — `/workspace/…` from a containerised
         carrier, the host directory from the local carrier's argv rewrite — so each is made relative
@@ -252,7 +252,7 @@ class ConversationSandbox:
         session = await self.existing(conversation_id)
         if session is None:
             return ()
-        listed = await session.run_sbxfs(
+        listed = await session.run_ufo_fs(
             "glob",
             {
                 "pattern": "**/*",
@@ -262,7 +262,7 @@ class ConversationSandbox:
         )
         files = listed["files"]
         if not isinstance(files, list):
-            raise RuntimeError("sbxfs glob did not return a file list")
+            raise RuntimeError("ufo fs glob did not return a file list")
         if listed.get("truncated"):
             warn(
                 "workspace.listing_truncated",

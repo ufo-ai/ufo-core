@@ -1176,7 +1176,7 @@ async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object
 
 **Call relations**: Core calls this for higher-level sandbox filesystem operations. The helper can use the carrier’s read and write methods.
 
-*Call graph*: 1 external calls (sbxfs_file_op).
+*Call graph*: 1 external calls (ufo_fs_file_op).
 
 
 ##### `SampleCarrier.dial`  (lines 1117–1118)

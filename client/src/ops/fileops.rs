@@ -7,11 +7,25 @@ mod fs_glob;
 mod fs_grep;
 pub mod fs_read;
 mod fs_write;
+#[cfg(unix)]
+mod lock;
 mod text;
+#[cfg(unix)]
+mod walk;
 
 use std::path::Path;
 
-use text::OpError;
+#[cfg(unix)]
+use crate::guard;
+pub use text::OpError;
+#[cfg(unix)]
+pub use text::OpResult;
+#[cfg(unix)]
+use text::{guarded, required};
+
+/// The op names the verb accepts. Unix only, with the ops the verb dispatches to.
+#[cfg(unix)]
+pub const OPS: [&str; 6] = ["read", "write", "edit", "grep", "glob", "changes"];
 
 /// Run one named file op with its params JSON against the walk listings in `workdir`; `Ok` is the
 /// reply body (refusals ride inside it as `{"error": …}`), `Err` the `x-ufo-op-err` failure.
@@ -29,6 +43,33 @@ pub fn run(name: &str, params: &serde_json::Value, workdir: &Path) -> Result<Vec
         Ok(result) => Ok(reply(&result)),
         Err(OpError::Refused(message)) => Ok(reply(&serde_json::json!({"error": message}))),
         Err(OpError::Failed(message)) => Err(message),
+    }
+}
+
+/// Run one named file op for the `ufo fs` verb. Every path param goes through the containment guard,
+/// rooted at the workspace the params name, and a walking op builds its own listing when the caller
+/// supplied none — a sandbox script calls the verb with no host beside it to compose one.
+///
+/// The outcome stays split, unlike `run`: the verb answers a refusal on stdout and exit 1, and an
+/// unhandled failure on stderr, which is `sbxfs`'s own contract.
+#[cfg(unix)]
+pub fn run_contained(name: &str, params: &serde_json::Value, workdir: &Path) -> OpResult {
+    if !OPS.contains(&name) {
+        return Err(OpError::Failed(format!(
+            "ENOENT: no bundled program for {name}"
+        )));
+    }
+    let workspace = guarded(guard::contained_root(Path::new(required(
+        params,
+        "workspace",
+    )?)))?;
+    match name {
+        "read" => fs_read::run_contained(params, &workspace),
+        "edit" => fs_edit::run_contained(params, &workspace),
+        "write" => fs_write::run_contained(params, &workspace),
+        "grep" => fs_grep::run_contained(params, &workspace, workdir),
+        "glob" => fs_glob::run_contained(params, &workspace, workdir),
+        _ => changes::run_contained(params, &workspace, workdir),
     }
 }
 

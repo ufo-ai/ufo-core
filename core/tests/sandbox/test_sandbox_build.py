@@ -8,27 +8,32 @@ Dockerfile render also covers what the E2B template bakes."""
 
 import re
 import sys
+from collections.abc import Iterator
 from types import SimpleNamespace
 
+import pytest
 from e2b.template.types import BuildInfo
 from ufo_ext_daytona import snapshot_map
 
 import sandbox.build_template as build_template
 from sandbox.build_template import (
     APT_PACKAGES,
+    CLIENT_MANIFESTS,
+    CLIENT_STAGE_PATH,
     DAYTONA_TIERS,
     GH_INSTALL_COMMAND,
     NPM_PACKAGES,
     PIP_PACKAGES,
+    ROOT,
     RUNTIME_USER,
     SANDBOX_ENV,
     SANDBOX_MODULES,
-    SANDBOX_SCRIPTS,
     SANDBOX_TEMPLATE_READY_COMMAND,
     SANDBOX_TIERS,
     DaytonaSizing,
     Sizing,
     build_definition_digest,
+    client_definition,
     daytona_definition_digest,
     daytona_image,
     daytona_refs,
@@ -37,6 +42,23 @@ from sandbox.build_template import (
     template_name,
 )
 from ufo.sdk.sandbox import SANDBOX_SIZES
+
+
+@pytest.fixture(autouse=True)
+def staged_client() -> Iterator[None]:
+    """Every render COPYs the staged client from one path, and Daytona's builder refuses a COPY
+    source that is not there, so these offline renders need a file at that path — never a real
+    build, whose bytes no render reads and whose absence is no drift."""
+    if CLIENT_STAGE_PATH.exists():
+        yield
+        return
+    CLIENT_STAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CLIENT_STAGE_PATH.write_bytes(b"")
+    try:
+        yield
+    finally:
+        CLIENT_STAGE_PATH.unlink()
+
 
 EXPECTED_APT = (
     "python3",
@@ -136,8 +158,7 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
     for tool in (
         "python3",
         "node",
-        "sbx",
-        "sbxfs",
+        "ufo",
         "rg",
         "pdftotext",
         "pdftoppm",
@@ -148,16 +169,50 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
     assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
 
 
-def test_scripts_are_the_exec_and_workspace_helpers() -> None:
-    assert tuple(name for name, _ in SANDBOX_SCRIPTS) == ("sbx", "sbxfs")
+def test_the_baked_in_sandbox_cli_is_the_compiled_client() -> None:
+    """One binary where the image used to bake two Python scripts: `ufo fs` serves the file ops and
+    `ufo llm` the egress CLI. It is COPY'd from a staged path inside the repository, because the
+    build context is the repository root and `.dockerignore` keeps the crate's own `target/` out."""
+    dockerfile = pod_dockerfile()
+    assert str(CLIENT_STAGE_PATH.relative_to(ROOT)) in dockerfile
+    assert "/usr/local/bin/ufo" in dockerfile
+    for gone in ("/usr/local/bin/sbx", "/usr/local/bin/sbxfs"):
+        assert gone not in dockerfile
 
 
-def test_the_containment_guard_is_baked_beside_the_scripts() -> None:
-    """`sbxfs` confines a caller-supplied path with the module the serve process imports as
-    `ufo.sandbox.containment`, reached as a sibling of the script on `sys.path[0]` — so the image
-    has to carry that file beside the script, or the file ops lose their guard at import time."""
+def test_the_containment_guard_is_baked_beside_the_client() -> None:
+    """An in-sandbox python program imports the guard as the sibling module `containment`, and the
+    bin dir is `sys.path[0]` for a program run from there — so the image carries the same file the
+    serve process imports as `ufo.sandbox.containment`, never a second copy of the checks."""
     assert tuple(name for name, _ in SANDBOX_MODULES) == ("containment.py",)
     assert "/usr/local/bin/containment.py" in pod_dockerfile()
+
+
+def test_the_baked_client_moves_the_drift_digest_with_its_source(monkeypatch, tmp_path) -> None:
+    """A live template baked from older client source must fail --check rather than keep serving
+    file ops from a binary the host no longer ships. The binary's own bytes are not hashed — a
+    release build is not reproducible — so the crate's sources stand in for it."""
+    crate = tmp_path / "client"
+    (crate / "src").mkdir(parents=True)
+    for name in CLIENT_MANIFESTS:
+        (crate / name).write_text('version = "0.1.30"\n')
+    (crate / "src" / "main.rs").write_text("fn main() {}\n")
+    monkeypatch.setattr(build_template, "CLIENT_SOURCE_DIR", crate)
+    before = build_definition_digest(None)
+    (crate / "src" / "main.rs").write_text("fn main() { ported() }\n")
+    assert build_definition_digest(None) != before
+
+
+def test_the_baked_client_target_is_covered_by_the_drift_digest(monkeypatch) -> None:
+    """The target belongs to the definition, not to the builder's own architecture: an image baked
+    for another triple carries a binary this fleet's sandboxes cannot run."""
+    before = build_definition_digest(None)
+    monkeypatch.setattr(build_template, "SANDBOX_CLIENT_TARGET", "aarch64-unknown-linux-musl")
+    assert build_definition_digest(None) != before
+
+
+def test_the_client_definition_names_the_target_it_is_built_for() -> None:
+    assert client_definition()["target"] == build_template.SANDBOX_CLIENT_TARGET
 
 
 def test_baked_modules_are_covered_by_the_drift_digest(monkeypatch) -> None:
@@ -172,7 +227,7 @@ def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
     """The Docker image and the E2B template render from one `apply_layers`, so this over the
     Dockerfile covers both: the apt line with --no-install-recommends and the lists cleanup, the
     sudo strip, the pip --no-cache-dir install, the npm global install, the separate playwright
-    browser install, and both scripts copied to the bin dir."""
+    browser install, and the client binary copied to the bin dir."""
     dockerfile = pod_dockerfile()
     assert "--no-install-recommends" in dockerfile
     assert "rm -rf /var/lib/apt/lists/*" in dockerfile
@@ -182,8 +237,7 @@ def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
     assert "playwright install chromium" in dockerfile
     for package in EXPECTED_APT + EXPECTED_PIP + EXPECTED_NPM:
         assert package in dockerfile
-    assert "/usr/local/bin/sbx" in dockerfile
-    assert "/usr/local/bin/sbxfs" in dockerfile
+    assert "/usr/local/bin/ufo" in dockerfile
     assert "s3fs" not in dockerfile
     assert "sbxcred" not in dockerfile
 
@@ -233,6 +287,7 @@ def test_publish_builds_every_tier_and_prints_the_size_map(monkeypatch, capsys) 
         kill=lambda: None,
     )
     monkeypatch.setattr(sys, "argv", ["build-sandbox-template"])
+    monkeypatch.setattr(build_template, "stage_client_binary", lambda: CLIENT_STAGE_PATH)
     monkeypatch.setattr(build_template, "e2b_template", lambda size: object())
     monkeypatch.setattr(
         build_template.Template,
@@ -362,6 +417,7 @@ def test_daytona_publish_boots_nothing_for_a_standing_active_snapshot(monkeypatc
         def activate(self, snapshot):
             acts.append(("activate", "medium"))
 
+    monkeypatch.setattr(build_template, "stage_client_binary", lambda: CLIENT_STAGE_PATH)
     monkeypatch.setattr(build_template, "Daytona", lambda: SimpleNamespace(snapshot=Snapshots()))
     monkeypatch.setattr(
         build_template,

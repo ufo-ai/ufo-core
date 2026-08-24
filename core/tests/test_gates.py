@@ -587,17 +587,13 @@ def test_containment_gate_honours_the_deferred_row_allowlist() -> None:
         assert site in (gates.ROOT / rel).read_text(), f"{rel} no longer defines {site}"
 
 
-def test_containment_gate_reads_the_extensionless_in_sandbox_scripts() -> None:
-    """`sbxfs` runs inside the sandbox on paths the model named — the highest-risk ingress in the
-    tree — and carries no `.py` suffix, so a collection that globbed `*.py` could not see it and an
-    unguarded op there landed green."""
-    collected = {path.name for path in gates._sandbox_scripts()}
-    assert {"sbx", "sbxfs"} <= collected
-    assert all(not path.suffix for path in gates._sandbox_scripts())
-
-    script = gates.SANDBOX_IMAGE_DIR / "sbxfs"
+def test_containment_gate_reads_a_core_module_that_opens_a_handed_path() -> None:
+    """The file ops moved into the `ufo` client, so the sandbox holds no Python script of ours to
+    scan — but the gate still governs every core module that builds a host path from model, agent,
+    connector or provider input."""
+    module = gates.CORE_SRC / "sandbox" / "ingress_host.py"
     trees = {
-        script: ast.parse("def op_leak(params):\n    return Path(params['path']).read_text()\n")
+        module: ast.parse("def op_leak(params):\n    return Path(params['path']).read_text()\n")
     }
     failures = gates._ingress_containment_failures(trees)
     assert len(failures) == 1 and "op_leak" in failures[0]
@@ -697,7 +693,7 @@ def test_containment_gate_follows_a_path_through_the_loop_that_hands_it_out() ->
 
 def test_containment_gate_flags_a_sandbox_program_that_checks_paths_itself() -> None:
     """An in-sandbox program opens files on paths the model named, where a planted link needs no
-    race to win. The image bakes the guard beside sbxfs so the program can import it."""
+    race to win. The bootstrap carries the guard into the program so it can import it."""
     trees = {INGRESS_FILE: ast.parse('READ_PROG = "import os\\nopen(sys.argv[1])\\n"\n')}
     failures = gates._sandbox_program_failures(trees)
     assert len(failures) == 1 and "READ_PROG" in failures[0]

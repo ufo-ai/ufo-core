@@ -35,4 +35,5 @@ e2e-evidence.md
 workspaces/
 servers/control/clientbin/*
 !servers/control/clientbin/.gitkeep
+sandbox/artifacts/
 target/

@@ -7,13 +7,14 @@ name: sandbox-image
 on:
   push:
     branches: [main]
-    # Every input the key moves with: the definition, the files its layers bake, and `uv.lock`,
-    # which pins the e2b SDK whose `Template.to_dockerfile` renders the text being hashed. A push
-    # that moves the key with no publish behind it makes every PR pay the build, so this list
-    # over-triggers deliberately.
+    # Every input the key moves with: the definition, the files its layers bake, the client crate the
+    # baked `ufo` binary is built from, and `uv.lock`, which pins the e2b SDK whose
+    # `Template.to_dockerfile` renders the text being hashed. A push that moves the key with no
+    # publish behind it makes every PR pay the build, so this list over-triggers deliberately.
     paths:
       - sandbox/build_template.py
-      - core/src/ufo/sandbox/image/**
+      - client/**
+      - core/src/ufo/sandbox/client_binary.py
       - core/src/ufo/sandbox/containment.py
       - extensions/e2b/ufo_ext_e2b.py
       - uv.lock
@@ -50,6 +51,20 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync
+      # The image bakes the compiled `ufo` client in place of the deleted `sbx`/`sbxfs` scripts, so a
+      # build needs a binary for the sandbox target. This is the client's own release recipe run on
+      # the runner, never a Rust layer inside the image — that would add minutes and gigabytes to
+      # every sandbox. `build_template.py` stages what this leaves under `client/target`.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+          key: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - working-directory: client
+        run: cargo build --release --target x86_64-unknown-linux-musl
       - name: Publish the sandbox image under its definition key
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -64,5 +79,6 @@ jobs:
             echo "$IMAGE already published"
             exit 0
           fi
+          uv run python -c 'from sandbox.build_template import stage_client_binary; stage_client_binary()'
           docker build -t "$IMAGE" -f "$DOCKERFILE" .
           docker push "$IMAGE"

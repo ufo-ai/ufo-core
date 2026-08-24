@@ -34,7 +34,7 @@ is the detail behind this table.
 | Model clients | Hand-rolled over reqwest, ported from `models/{anthropic,openai}.py`. |
 | Cutover | Build beside, swap whole, one deploy at a time (dev → testing → prod). No dual-stack turn processing. No cross-language DBOS: drain, migrate, start. |
 | Scope change | **`servers/*` changes after all.** R6 adds fixtures under `servers/egress/tests/` and `servers/cache/tests/`, and R16 needs two changes to `servers/control/src/rls.rs`. The earlier non-goal was wrong. |
-| Out of scope | The portal and app frontends (browser TS). `sbx`/`sbxfs` and `containment.py`'s in-image copy, which stay Python permanently. `evals/` stays Python. Every wire. Every schema, beyond the baseline adoption. |
+| Out of scope | The portal and app frontends (browser TS). `containment.py`'s in-image copy, which stays Python permanently. `evals/` stays Python. Every wire. Every schema, beyond the baseline adoption. |
 
 ## Current state
 
@@ -350,9 +350,11 @@ diff would violate `docs/plan.md` and would answer a question nobody doubts.
 
 Newly placed prerequisites that previously lived in no unit: `access/`, `sources/`, `billing/`,
 `runtime/` and fourteen smaller modules — about 11,500 lines. The permanent Python residue is
-`sbx`, `sbxfs`, and `containment.py`'s in-image copy, which must be maintained in Rust for the
-host and Python for the sandbox image with matching semantics, and whose 665 lines of tests stay
-Python. R17 exempts them from deletion by name.
+`containment.py`'s in-image copy, which must be maintained in Rust for the host and Python for the
+sandbox image with matching semantics. R17 exempts it from deletion by name. The two in-sandbox CLIs
+that used to sit beside it are already Rust: `sbx` and `sbxfs` became the `ufo llm` and `ufo fs`
+verbs on the client, and `client/src/guard.rs` carries the guard's checks 2 to 4 for the paths those
+verbs are handed.
 
 ## Cost
 

@@ -1,5 +1,8 @@
 use std::path::Path;
 
+#[cfg(unix)]
+use crate::guard::GuardError;
+
 #[derive(Debug)]
 pub enum OpError {
     Refused(String),
@@ -14,6 +17,22 @@ pub fn refused(message: impl Into<String>) -> OpError {
 
 pub fn failed(message: impl Into<String>) -> OpError {
     OpError::Failed(message.into())
+}
+
+/// A guard refusal reaches the model the way `sbxfs`'s `ContainmentError` does: as the recoverable
+/// `{"error": …}` body, with the message untouched.
+#[cfg(unix)]
+pub fn guarded<T>(outcome: Result<T, GuardError>) -> Result<T, OpError> {
+    outcome.map_err(|error| refused(error.message()))
+}
+
+/// A param `sbxfs` reaches by subscript, so its absence is the `KeyError` the model reads back.
+#[cfg(unix)]
+pub fn required<'a>(params: &'a serde_json::Value, name: &str) -> Result<&'a str, OpError> {
+    params
+        .get(name)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| refused(format!("KeyError: '{name}'")))
 }
 
 pub fn str_param<'a>(params: &'a serde_json::Value, name: &str) -> Result<&'a str, OpError> {

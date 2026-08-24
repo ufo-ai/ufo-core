@@ -1,5 +1,5 @@
-"""End-to-end proof of the sbxfs-backed file tools against a real container: the built sandbox
-image, the real `sbxfs` CLI on PATH, real ripgrep/poppler, and — for `share_file` — both stores it
+"""End-to-end proof of the `ufo fs`-backed file tools against a real container: the built sandbox
+image, the real `ufo` client on PATH, real ripgrep/poppler, and — for `share_file` — both stores it
 can land an artifact in, the filesystem one it streams out of the container into and the S3 one the
 container uploads to itself. These are Docker-gated like test_sandbox_session; nothing here asserts
 a fake."""
@@ -107,7 +107,7 @@ endobj
 4 0 obj
 << /Length 46 >>
 stream
-BT /F1 24 Tf 40 100 Td (Hello sbxfs PDF) Tj ET
+BT /F1 24 Tf 40 100 Td (Hello ufo fs PDF) Tj ET
 endstream
 endobj
 5 0 obj
@@ -357,7 +357,7 @@ async def test_read_pdf_returns_text_then_page_image_blocks(
     result = await _run("read", ctx, file_path="doc.pdf")
     text_block = result.content[0]
     assert isinstance(text_block, TextContent)
-    assert "Hello sbxfs PDF" in text_block.text
+    assert "Hello ufo fs PDF" in text_block.text
     assert "of 1]" in text_block.text
     pages = [block for block in result.content if isinstance(block, ImageContent)]
     assert pages and pages[0].media_type == "image/png"
@@ -373,7 +373,7 @@ async def test_read_pptx_renders_slides_as_image_blocks(
         "from pptx import Presentation\n"
         "p = Presentation()\n"
         "slide = p.slides.add_slide(p.slide_layouts[5])\n"
-        "slide.shapes.title.text = 'Hello sbxfs PPTX'\n"
+        "slide.shapes.title.text = 'Hello ufo fs PPTX'\n"
         "p.save('/workspace/deck.pptx')\n"
         "PY\n"
     )
@@ -428,7 +428,7 @@ async def test_changes_reports_what_the_shell_did_to_a_checkout(
     )
     assert prepared.exit_code == 0, prepared.stderr
 
-    assert await ctx.sandbox.run_sbxfs("changes", {}) == {
+    assert await ctx.sandbox.run_ufo_fs("changes", {}) == {
         "changes": [
             {
                 "path": "checkout/mod.py",

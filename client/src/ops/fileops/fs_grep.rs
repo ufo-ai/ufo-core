@@ -3,104 +3,21 @@ use std::path::Path;
 
 use serde_json::json;
 
+#[cfg(unix)]
+use crate::guard;
+#[cfg(unix)]
+use crate::ops::fileops::text::guarded;
 use crate::ops::fileops::text::{
     basename, binary_extension, bool_param, capped, decode_lossy, failed, fnmatch, listing,
     matches, number_param, over, parent, points, refused, str_param, suffix, OpError, OpResult,
     BINARY_SNIFF_BYTES,
 };
+#[cfg(unix)]
+use crate::ops::fileops::{fs_glob, walk};
 
 const OUTPUT_MODES: &[&str] = &["content", "files_with_matches", "count"];
 const GREP_DEFAULT_HEAD: f64 = 100.0;
 const GREP_LINE_CHAR_CAP: usize = 2000;
-
-const TEXT_EXTENSIONS: &[&str] = &[
-    ".bash",
-    ".bat",
-    ".c",
-    ".cc",
-    ".cfg",
-    ".cjs",
-    ".clj",
-    ".cljs",
-    ".conf",
-    ".cpp",
-    ".cs",
-    ".css",
-    ".csv",
-    ".cxx",
-    ".dart",
-    ".dockerfile",
-    ".editorconfig",
-    ".env",
-    ".erl",
-    ".ex",
-    ".exs",
-    ".fish",
-    ".fs",
-    ".gitattributes",
-    ".gitignore",
-    ".go",
-    ".gql",
-    ".gradle",
-    ".graphql",
-    ".h",
-    ".hh",
-    ".hpp",
-    ".hs",
-    ".htm",
-    ".html",
-    ".ini",
-    ".ipynb",
-    ".java",
-    ".jl",
-    ".js",
-    ".json",
-    ".jsonl",
-    ".jsx",
-    ".kt",
-    ".kts",
-    ".less",
-    ".lock",
-    ".log",
-    ".lua",
-    ".m",
-    ".makefile",
-    ".markdown",
-    ".md",
-    ".mjs",
-    ".mk",
-    ".ml",
-    ".mm",
-    ".php",
-    ".pl",
-    ".pm",
-    ".properties",
-    ".proto",
-    ".ps1",
-    ".py",
-    ".pyi",
-    ".r",
-    ".rb",
-    ".rs",
-    ".rst",
-    ".sass",
-    ".scala",
-    ".scss",
-    ".sh",
-    ".sql",
-    ".swift",
-    ".tf",
-    ".tfvars",
-    ".toml",
-    ".ts",
-    ".tsv",
-    ".tsx",
-    ".txt",
-    ".xml",
-    ".yaml",
-    ".yml",
-    ".zsh",
-];
 
 fn type_extensions(kind: &str) -> &'static [&'static str] {
     match kind {
@@ -153,8 +70,12 @@ fn contained_text(path: &str) -> Option<String> {
     Some(decode_lossy(&bytes))
 }
 
-fn admitted(entries: &[String], params: &serde_json::Value) -> Result<Vec<String>, OpError> {
-    if let Some(glob) = params.get("glob").and_then(|value| value.as_str()) {
+fn admitted(
+    entries: &[String],
+    glob: Option<&str>,
+    kind: Option<&str>,
+) -> Result<Vec<String>, OpError> {
+    if let Some(glob) = glob {
         if !glob.is_empty() {
             let glob = fnmatch(glob)?;
             let mut kept = Vec::new();
@@ -166,7 +87,7 @@ fn admitted(entries: &[String], params: &serde_json::Value) -> Result<Vec<String
             return Ok(kept);
         }
     }
-    if let Some(kind) = params.get("type").and_then(|value| value.as_str()) {
+    if let Some(kind) = kind {
         if !kind.is_empty() {
             let wanted = type_extensions(kind);
             return Ok(entries
@@ -176,20 +97,28 @@ fn admitted(entries: &[String], params: &serde_json::Value) -> Result<Vec<String
                 .collect());
         }
     }
-    Ok(entries
-        .iter()
-        .filter(|path| TEXT_EXTENSIONS.contains(&suffix(path).as_str()))
-        .cloned()
-        .collect())
+    Ok(entries.to_vec())
 }
 
-fn candidates(params: &serde_json::Value, workdir: &Path) -> Result<Vec<String>, OpError> {
+fn selector(params: &serde_json::Value) -> (Option<&str>, Option<&str>) {
+    (
+        params.get("glob").and_then(|value| value.as_str()),
+        params.get("type").and_then(|value| value.as_str()),
+    )
+}
+
+fn candidates(
+    params: &serde_json::Value,
+    workdir: &Path,
+    glob: Option<&str>,
+    kind: Option<&str>,
+) -> Result<Vec<String>, OpError> {
     let entries = listing(workdir, str_param(params, "enum")?)?;
     let mut position: HashMap<&str, i64> = HashMap::new();
     for (index, path) in entries.iter().enumerate() {
         position.entry(path.as_str()).or_insert(index as i64);
     }
-    let mut ranked: Vec<(i64, String, String)> = admitted(&entries, params)?
+    let mut ranked: Vec<(i64, String, String)> = admitted(&entries, glob, kind)?
         .into_iter()
         .map(|path| {
             let rank = position.get(parent(&path)).copied().unwrap_or(-1);
@@ -218,7 +147,19 @@ fn count_matches(regex: &fancy_regex::Regex, text: &str) -> Result<usize, OpErro
     Ok(count)
 }
 
-pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
+/// What to look for, before anything is looked at: the one place the mode, the caps and the regex
+/// flags are read off the params, so both entry points scan on the same terms.
+struct Query<'a> {
+    mode: &'a str,
+    limit: usize,
+    before: usize,
+    after: usize,
+    pattern: &'a str,
+    multiline: bool,
+    ignore_case: bool,
+}
+
+fn query(params: &serde_json::Value) -> Result<Query<'_>, OpError> {
     let mode = params
         .get("output_mode")
         .and_then(|value| value.as_str())
@@ -226,26 +167,113 @@ pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
     if !OUTPUT_MODES.contains(&mode) {
         return Err(refused(format!("invalid output_mode: {mode}")));
     }
-    let limit = number_param(params, "head_limit", GREP_DEFAULT_HEAD).trunc() as usize;
     let context = number_param(params, "context", 0.0).trunc() as usize;
-    let before = match number_param(params, "before_context", 0.0).trunc() as usize {
-        0 => context,
-        explicit => explicit,
+    Ok(Query {
+        mode,
+        limit: number_param(params, "head_limit", GREP_DEFAULT_HEAD).trunc() as usize,
+        before: match number_param(params, "before_context", 0.0).trunc() as usize {
+            0 => context,
+            explicit => explicit,
+        },
+        after: match number_param(params, "after_context", 0.0).trunc() as usize {
+            0 => context,
+            explicit => explicit,
+        },
+        pattern: str_param(params, "pattern")?,
+        multiline: bool_param(params, "multiline"),
+        ignore_case: bool_param(params, "ignore_case"),
+    })
+}
+
+/// One enumerated file's text, read off a pinned parent fd, or `None` when it is binary or the guard
+/// does not vouch for it — what a guarded scan reads its hits through.
+#[cfg(unix)]
+fn guarded_text(path: &str, workspace: &Path) -> Option<String> {
+    if binary_extension(&suffix(path)) {
+        return None;
+    }
+    let target = guard::contained_file(path, workspace, false).ok()?;
+    let entry = target.lstat().ok()??;
+    let bytes = target.read_bytes(entry.size).ok()?;
+    if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
+        return None;
+    }
+    Some(decode_lossy(&bytes))
+}
+
+/// The same scan with its own walk: the directory it starts from goes through the guard by descent,
+/// each hit through the enumeration filter and a read off a pinned parent fd, and the `glob` — which
+/// selects paths of its own — through the pattern check. A `path` naming one file is a read of that
+/// file, so a link there is refused rather than silently skipped.
+#[cfg(unix)]
+pub fn run_contained(params: &serde_json::Value, workspace: &Path, workdir: &Path) -> OpResult {
+    let query = query(params)?;
+    let root = workspace.to_string_lossy().into_owned();
+    let (raw_glob, kind) = selector(params);
+    let glob = match raw_glob {
+        Some(glob) => Some(fs_glob::contained_pattern(glob, &root)?),
+        None => None,
     };
-    let after = match number_param(params, "after_context", 0.0).trunc() as usize {
-        0 => context,
-        explicit => explicit,
+    let entries = if params.get("enum").is_some_and(|value| value.is_string()) {
+        candidates(params, workdir, glob, kind)?
+    } else {
+        admitted(&start_walk(params, workspace, &root)?, glob, kind)?
     };
-    let pattern = str_param(params, "pattern")?;
-    let multiline = bool_param(params, "multiline");
-    let ignore_case = bool_param(params, "ignore_case");
+    let files = entries
+        .into_iter()
+        .filter(|path| guard::is_contained_regular(Path::new(path), workspace))
+        .collect();
+    scanned(&query, files, &|path| guarded_text(path, workspace))
+}
+
+/// The files a scan may read when it walks for itself: everything under the confined start
+/// directory, or the one file `path` names — whose own link, if it is one, is refused rather than
+/// skipped, because the caller named it.
+#[cfg(unix)]
+fn start_walk(
+    params: &serde_json::Value,
+    workspace: &Path,
+    root: &str,
+) -> Result<Vec<String>, OpError> {
+    let named = params
+        .get("path")
+        .and_then(|value| value.as_str())
+        .unwrap_or(root)
+        .to_string();
+    let walked = if guard::rooted(&named, workspace).is_file() {
+        vec![guarded(guard::contained_regular(&named, workspace))?]
+    } else {
+        walk::walk_files(&guarded(guard::contained_dir(&named, workspace, false))?)
+    };
+    Ok(walked
+        .iter()
+        .map(|hit| hit.to_string_lossy().into_owned())
+        .collect())
+}
+
+pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
+    let query = query(params)?;
+    let (glob, kind) = selector(params);
+    let files = candidates(params, workdir, glob, kind)?;
+    scanned(&query, files, &contained_text)
+}
+
+fn scanned(query: &Query, files: Vec<String>, read: &dyn Fn(&str) -> Option<String>) -> OpResult {
+    let Query {
+        mode,
+        limit,
+        before,
+        after,
+        pattern,
+        multiline,
+        ignore_case,
+    } = *query;
     let regex = grep_regex(pattern, multiline, ignore_case)?;
-    let files = candidates(params, workdir)?;
 
     if mode == "files_with_matches" {
         let mut matched: Vec<String> = Vec::new();
         for path in files {
-            let Some(text) = contained_text(&path) else {
+            let Some(text) = read(&path) else {
                 continue;
             };
             let hit = if multiline {
@@ -280,7 +308,7 @@ pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
         let mut counts = Vec::new();
         let mut total = 0;
         for path in files {
-            let Some(text) = contained_text(&path) else {
+            let Some(text) = read(&path) else {
                 continue;
             };
             let hit = if multiline {
@@ -305,7 +333,7 @@ pub fn run(params: &serde_json::Value, workdir: &Path) -> OpResult {
 
     let mut found: Vec<serde_json::Value> = Vec::new();
     for path in files {
-        let Some(text) = contained_text(&path) else {
+        let Some(text) = read(&path) else {
             continue;
         };
         let lines: Vec<&str> = text.split('\n').collect();

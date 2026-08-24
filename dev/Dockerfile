@@ -11,6 +11,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked --bin ufo-control \
     && cp target/release/ufo-control /usr/local/bin/ufo-control
 
+FROM rust:1-bookworm AS client
+WORKDIR /client
+COPY client/Cargo.toml client/Cargo.lock ./
+COPY client/src ./src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/client/target \
+    cargo build --release --locked --bin ufo \
+    && cp target/release/ufo /usr/local/bin/ufo
+
 # One image for the whole local stack: it carries both entry points — `ufoctl` (core serve, proxy,
 # migrate) and `ufo-control` (gateway, migrate, rls-bootstrap) — so every compose service is this
 # image with a different command. Built from source via uv, not the production `ufoctl bundle`
@@ -25,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.7 /uv /usr/local/bin/uv
 COPY --from=control /usr/local/bin/ufo-control /usr/local/bin/ufo-control
+COPY --from=client /usr/local/bin/ufo /usr/local/bin/ufo
 
 # The local Postgres speaks no TLS, so `sslmode=prefer` falls back to plaintext and no bundle is
 # needed here — the compose DSNs stay as they are.

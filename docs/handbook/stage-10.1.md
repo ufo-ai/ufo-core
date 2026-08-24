@@ -239,7 +239,7 @@ This file lets the system run sandbox work without Docker, cloud sandboxes, or e
 
 The important safety idea is that this is convenient, not truly isolated. A process is still a host process. So the file is careful about two things: it builds a clean environment for commands instead of giving them the server’s secret-filled environment, and it uses containment checks when reading or writing files so a path cannot escape the workspace through tricks like symbolic links.
 
-It also prepares a small scratch area. Think of it as a temporary toolbox beside the workspace: it contains helper commands such as `sbx` and `sbxfs`, a scratch home directory, and proxy certificate files. Commands inherit proxy settings and sentinel API keys so outbound network traffic still goes through the sandbox proxy, where it can be metered and controlled.
+It also prepares a small scratch area. Think of it as a temporary toolbox beside the workspace: it contains the compiled `ufo` client, a scratch home directory, and proxy certificate files. Commands inherit proxy settings and sentinel API keys so outbound network traffic still goes through the sandbox proxy, where it can be metered and controlled.
 
 The main class, `LocalCarrier`, can create or attach to a workspace, run commands, copy files in and out safely, delegate file operations to the sandbox file helper, and reject port dialing because local subprocesses do not have a separate externally reachable sandbox network address.
 
@@ -386,13 +386,13 @@ def _contained_source(self, handle: SandboxHandle, path: str) -> BufferedReader
 async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
 ```
 
-**Purpose**: Runs higher-level file operations through the same `sbxfs` helper used inside other sandbox carriers. This keeps local behavior aligned with container-style sandboxes.
+**Purpose**: Runs higher-level file operations through the same `ufo fs` helper used inside other sandbox carriers. This keeps local behavior aligned with container-style sandboxes.
 
-**Data flow**: It receives a sandbox handle, an operation name, and operation parameters. It passes those to `sbxfs_file_op`, which runs the helper command against the workspace and returns a dictionary result describing the operation outcome.
+**Data flow**: It receives a sandbox handle, an operation name, and operation parameters. It passes those to `ufo_fs_file_op`, which runs the helper command against the workspace and returns a dictionary result describing the operation outcome.
 
-**Call relations**: This method is the local carrier’s bridge to the shared sandbox file-operation system. Instead of reimplementing each file command here, it hands the request to `sbxfs_file_op`, using this carrier’s `exec` behavior underneath.
+**Call relations**: This method is the local carrier’s bridge to the shared sandbox file-operation system. Instead of reimplementing each file command here, it hands the request to `ufo_fs_file_op`, using this carrier’s `exec` behavior underneath.
 
-*Call graph*: 1 external calls (sbxfs_file_op).
+*Call graph*: 1 external calls (ufo_fs_file_op).
 
 
 ##### `LocalCarrier.dial`  (lines 261–269)
@@ -1171,11 +1171,11 @@ async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object
 
 **Purpose**: Runs a structured sandbox file operation, such as one provided by the shared sandbox filesystem tool. It gives the Docker carrier the same file-operation interface as other carriers.
 
-**Data flow**: It receives a sandbox handle, an operation name, and operation parameters. It passes those to the shared `sbxfs_file_op` helper, which runs the baked-in sandbox filesystem command through this carrier. It returns the operation’s result dictionary.
+**Data flow**: It receives a sandbox handle, an operation name, and operation parameters. It passes those to the shared `ufo_fs_file_op` helper, which runs the baked-in `ufo fs` command through this carrier. It returns the operation’s result dictionary.
 
 **Call relations**: Higher-level code can call this instead of hand-writing reads, writes, or command invocations. The shared helper calls back through the carrier’s execution path as needed.
 
-*Call graph*: 1 external calls (sbxfs_file_op).
+*Call graph*: 1 external calls (ufo_fs_file_op).
 
 
 ##### `DockerCarrier.dial`  (lines 480–487)
@@ -1735,13 +1735,13 @@ async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]
 async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
 ```
 
-**Purpose**: Runs a higher-level sandbox filesystem operation using UFO’s shared `sbxfs` helper. These are operations such as listing, statting, or manipulating files through a common carrier-independent interface.
+**Purpose**: Runs a higher-level sandbox filesystem operation using UFO’s shared `ufo fs` helper. These are operations such as listing, statting, or manipulating files through a common carrier-independent interface.
 
 **Data flow**: It receives a sandbox handle, operation name, and operation parameters. It passes them to the shared helper, which runs the corresponding tool inside the sandbox and returns a dictionary result.
 
-**Call relations**: This method is the E2B carrier’s bridge to the generic sandbox file-operation layer. It hands off to `sbxfs_file_op`, which in turn uses the carrier command path.
+**Call relations**: This method is the E2B carrier’s bridge to the generic sandbox file-operation layer. It hands off to `ufo_fs_file_op`, which in turn uses the carrier command path.
 
-*Call graph*: 1 external calls (sbxfs_file_op).
+*Call graph*: 1 external calls (ufo_fs_file_op).
 
 
 ##### `E2BCarrier.dial`  (lines 830–851)
@@ -2512,9 +2512,9 @@ async def exec(self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: in
 
 **Data flow**: An implementation receives a SandboxHandle, an argument list, and a timeout. It runs that exact command in the sandbox and returns an ExecResult containing stdout, stderr, exit code, and whether the backend timeout fired.
 
-**Call relations**: sbxfs_file_op calls this protocol method to run the sbxfs command inside the sandbox. SandboxSession methods such as bash, sh, python, and file checks also rely on carrier implementations of this contract.
+**Call relations**: ufo_fs_file_op calls this protocol method to run the `ufo fs` command inside the sandbox. SandboxSession methods such as bash, sh, python, and file checks also rely on carrier implementations of this contract.
 
-*Call graph*: called by 1 (sbxfs_file_op).
+*Call graph*: called by 1 (ufo_fs_file_op).
 
 
 ##### `Carrier.write`  (lines 325–337)
@@ -2566,7 +2566,7 @@ async def file_op(self, handle: SandboxHandle, op: str, params: dict[str, object
 
 **Data flow**: An implementation receives a handle, an operation name, and a dictionary of parameters. It performs the operation inside the sandbox and returns a parsed JSON-like dictionary; recoverable tool mistakes are reported as ValueError and unexpected failures as RuntimeError.
 
-**Call relations**: SandboxSession.run_sbxfs prepares safe parameters and calls this method. Backends that include the sbxfs command can use sbxfs_file_op as their shared implementation.
+**Call relations**: SandboxSession.run_ufo_fs prepares safe parameters and calls this method. Backends that bake the `ufo` client can use ufo_fs_file_op as their shared implementation.
 
 
 ##### `CommandStopping.stop_commands`  (lines 393–393)
@@ -2582,17 +2582,17 @@ async def stop_commands(self, handle: SandboxHandle) -> None
 **Call relations**: SandboxSession.stop_commands checks whether the carrier supports this protocol before calling it. This keeps normal carriers simple while allowing long-running remote command backends to clean up deliberately cancelled work.
 
 
-##### `sbxfs_file_op`  (lines 396–419)
+##### `ufo_fs_file_op`  (lines 396–419)
 
 ```
-async def sbxfs_file_op(carrier: Carrier, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
+async def ufo_fs_file_op(carrier: Carrier, handle: SandboxHandle, op: str, params: dict[str, object]) -> dict[str, object]
 ```
 
-**Purpose**: Provides a shared implementation of Carrier.file_op for sandboxes that have the sbxfs command installed. It runs one file operation inside the sandbox and turns the command's JSON output into a Python dictionary.
+**Purpose**: Provides a shared implementation of Carrier.file_op for sandboxes that bake the `ufo` client. It runs one file operation inside the sandbox and turns the command's JSON output into a Python dictionary.
 
-**Data flow**: It receives a carrier, handle, operation name, and parameters. It serializes the parameters as compact JSON, runs sbxfs through Carrier.exec, trims and parses stdout, checks that the result is a JSON object, turns reported sbxfs errors into ValueError, and returns the parsed dictionary on success.
+**Data flow**: It receives a carrier, handle, operation name, and parameters. It serializes the parameters as compact JSON, runs `ufo fs` through Carrier.exec, trims and parses stdout, checks that the result is a JSON object, turns reported errors into ValueError, and returns the parsed dictionary on success.
 
-**Call relations**: Carrier implementations can delegate their file_op method to this helper instead of repeating the same command-building and JSON-parsing code. It depends on Carrier.exec to actually run the sbxfs program in the sandbox.
+**Call relations**: Carrier implementations can delegate their file_op method to this helper instead of repeating the same command-building and JSON-parsing code. It depends on Carrier.exec to actually run the `ufo fs` command in the sandbox.
 
 *Call graph*: calls 1 internal fn (exec); 2 external calls (dumps, loads).
 
@@ -2607,9 +2607,9 @@ def workspace_path(path: str) -> str
 
 **Data flow**: It receives a path string, treats relative paths as being under /workspace, normalizes dot and dot-dot path parts, and checks that the final path is still inside /workspace. It returns the safe absolute path or raises an error if the path tries to climb out.
 
-**Call relations**: SandboxSession.write_file, file_exists, run_sbxfs, and read_file call this before handing paths to the carrier. It uses _resolve_parts to do the path cleanup in a simple, controlled way.
+**Call relations**: SandboxSession.write_file, file_exists, run_ufo_fs, and read_file call this before handing paths to the carrier. It uses _resolve_parts to do the path cleanup in a simple, controlled way.
 
-*Call graph*: calls 1 internal fn (_resolve_parts); called by 4 (file_exists, read_file, run_sbxfs, write_file); 1 external calls (PurePosixPath).
+*Call graph*: calls 1 internal fn (_resolve_parts); called by 4 (file_exists, read_file, run_ufo_fs, write_file); 1 external calls (PurePosixPath).
 
 
 ##### `_resolve_parts`  (lines 433–442)
@@ -2678,7 +2678,7 @@ async def python(self, program: str, *args: str, timeout_s: int | None=None) -> 
 
 **Purpose**: Runs a Python program inside the sandbox with the containment guard made importable. This is used for small trusted helper programs that need safe path handling inside the sandbox.
 
-**Data flow**: It receives Python source text, optional arguments, and an optional timeout. It prepends a bootstrap that locates the guard beside sbxfs, runs python3 in isolated mode, passes arguments separately, and returns the carrier's ExecResult.
+**Data flow**: It receives Python source text, optional arguments, and an optional timeout. It prepends a bootstrap that carries the guard’s own source into the program, runs python3 in isolated mode, passes arguments separately, and returns the carrier's ExecResult.
 
 **Call relations**: This method wraps Carrier.exec while adding the security bootstrap described by the constants in this file. It is the standard way for session code to run guarded Python snippets in the sandbox.
 
@@ -2739,17 +2739,17 @@ async def file_exists(self, path: str) -> bool
 *Call graph*: calls 1 internal fn (workspace_path).
 
 
-##### `SandboxSession.run_sbxfs`  (lines 556–567)
+##### `SandboxSession.run_ufo_fs`  (lines 556–567)
 
 ```
-async def run_sbxfs(self, op: str, args: dict[str, object]) -> dict[str, object]
+async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]
 ```
 
-**Purpose**: Runs one structured sbxfs-style file operation through the carrier. It prepares the operation so every file tool is confined to /workspace in the same way.
+**Purpose**: Runs one structured `ufo fs` file operation through the carrier. It prepares the operation so every file tool is confined to /workspace in the same way.
 
 **Data flow**: It receives an operation name and argument dictionary. It copies the arguments, scopes a string path argument if present, adds the fixed workspace root, calls Carrier.file_op, and returns the resulting dictionary.
 
-**Call relations**: This is the session-level entry into the carrier's file_op contract. It calls workspace_path before handing parameters off, while the carrier decides whether to use sbxfs_file_op or another backend-specific mechanism.
+**Call relations**: This is the session-level entry into the carrier's file_op contract. It calls workspace_path before handing parameters off, while the carrier decides whether to use ufo_fs_file_op or another backend-specific mechanism.
 
 *Call graph*: calls 1 internal fn (workspace_path).
 

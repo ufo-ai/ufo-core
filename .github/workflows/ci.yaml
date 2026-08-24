@@ -161,9 +161,29 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  sandbox-client:
+    needs: triage
+    if: needs.triage.outputs.checks == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+      - working-directory: client
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-client
+          path: client/target/release/ufo
+          if-no-files-found: error
+          retention-days: 1
+
   test-shard:
     name: test shard ${{ matrix.shard }}
-    needs: [triage, web]
+    needs: [triage, web, sandbox-client]
     if: needs.triage.outputs.checks == 'true'
     strategy:
       fail-fast: false
@@ -201,6 +221,11 @@ jobs:
         with:
           name: portal-static
           path: extensions/web/ufo_ext_web/static
+      - uses: actions/download-artifact@v4
+        with:
+          name: sandbox-client
+          path: client/target/release
+      - run: chmod +x client/target/release/ufo
       - run: make test SHARD="${{ matrix.shard }}"
       # Artifact names take no `/`, so the shard is in the index here and spelled in full inside
       # each `run-summary.json`.

@@ -3204,6 +3204,50 @@ def test_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca(workflow: str, job
     assert "sandbox/proxy_gate.py" in script
 
 
+def test_the_template_publish_takes_the_client_binary_a_pipeline_already_built() -> None:
+    """The sandbox image bakes the compiled `ufo` client, so publishing a template needs a linux
+    binary before `build_template.py` runs. The testing deploy takes the one its own client job
+    staged — or, when that job was skipped because this client tree already built, the pushed set it
+    reuses — so no second Rust build appears here. The production deploy runs no client job at all,
+    so it builds the crate for the sandbox target itself, before the publish."""
+    testing = _workflow(WORKFLOWS / "deploy.yml")
+    environment = testing["env"]
+    assert isinstance(environment, dict)
+    assert environment["SANDBOX_CLIENT_BINARY"] == (
+        "servers/control/clientbin/x86_64-unknown-linux-musl/ufo"
+    )
+    jobs = testing["jobs"]
+    assert isinstance(jobs, dict)
+    rollout = jobs["rollout"]
+    assert isinstance(rollout, dict)
+    steps = rollout["steps"]
+    assert isinstance(steps, list)
+    named = "${{ env.SANDBOX_CLIENT_BINARY }}"
+    for name in ("Select sandbox template", "Select daytona snapshots"):
+        publish = _step("rollout", name)
+        assert publish["env"]["UFO_CLIENT_BINARY"] == named
+        assert steps.index(publish) > steps.index(
+            next(step for step in steps if step.get("uses") == "actions/download-artifact@v4")
+        )
+        assert steps.index(publish) > steps.index(
+            _step("rollout", "Reuse the pushed client binaries")
+        )
+    assert not any("cargo build" in step.get("run", "") for step in steps)
+
+    production = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
+    assert isinstance(production, dict)
+    deploy = production["deploy"]
+    assert isinstance(deploy, dict)
+    prod_steps = deploy["steps"]
+    assert isinstance(prod_steps, list)
+    built = next(step for step in prod_steps if "cargo build --release" in step.get("run", ""))
+    assert built["working-directory"] == "client"
+    assert "x86_64-unknown-linux-musl" in built["run"]
+    assert prod_steps.index(built) < prod_steps.index(
+        _step("deploy", "Select sandbox template", "deploy-production.yml")
+    )
+
+
 def test_hosted_namespaces_hold_rollouts_until_nlb_targets_are_ready() -> None:
     for environment in DEPLOY_ENVIRONMENTS:
         terraform = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()

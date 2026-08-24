@@ -1,9 +1,18 @@
+#[cfg(unix)]
+use std::path::Path;
+
 use serde_json::json;
 
+#[cfg(unix)]
+use crate::guard;
+#[cfg(unix)]
+use crate::ops::fileops::lock;
 use crate::ops::fileops::text::{
     capped, decode_lossy, exists, failed, number_lines, points, read_bytes, refused, str_param,
     OpError, OpResult,
 };
+#[cfg(unix)]
+use crate::ops::fileops::text::{guarded, required};
 
 const EDIT_SNIPPET_CONTEXT: usize = 4;
 const EDIT_SNIPPET_MAX_CHARS: usize = 2000;
@@ -153,27 +162,58 @@ fn edit_snippet(text: &str, marker: &str) -> String {
     number_lines(&lines[start..end], start + 1, width).join("\n")
 }
 
+fn applied(text: &str, edits: &[Edit]) -> Result<(String, usize), OpError> {
+    let mut edited = text.to_string();
+    let mut total = 0;
+    for edit in edits {
+        let (next, count) = apply_edit(&edited, edit)?;
+        edited = next;
+        total += count;
+    }
+    Ok((edited, total))
+}
+
+fn result(path: &str, text: &str, total: usize, marker: &str) -> serde_json::Value {
+    json!({
+        "path": path,
+        "message": format!("{path}: {total} replacements"),
+        "replacements": total,
+        "snippet": capped(&edit_snippet(text, marker), EDIT_SNIPPET_MAX_CHARS),
+    })
+}
+
+/// The same edit with its path taken through the containment guard: the text is read off the pinned
+/// parent fd and written back to a staged sibling that is renamed onto the name, so neither a link
+/// at the target nor a directory swapped under it takes the edit.
+///
+/// The whole read-modify-write runs under the target's cross-process lock, so a second editor in
+/// another process reads this edit's text rather than the text it replaced.
+#[cfg(unix)]
+pub fn run_contained(params: &serde_json::Value, root: &Path) -> OpResult {
+    let path = required(params, "path")?;
+    let target = guarded(guard::contained_file(path, root, false))?;
+    let named = target.path().display().to_string();
+    let _held = lock::exclusive(target.path())?;
+    let Some(entry) = guarded(target.lstat())? else {
+        return Err(refused(format!("{named} not found")));
+    };
+    let edits = edit_list(params)?;
+    let text = decode_lossy(&guarded(target.read_bytes(entry.size + 1))?);
+    let (edited, total) = applied(&text, &edits)?;
+    guarded(target.replace_text(&edited, entry.mode))?;
+    Ok(result(&named, &edited, total, &edits[0].new_string))
+}
+
 pub fn run(params: &serde_json::Value) -> OpResult {
     let path = str_param(params, "path")?;
     if !exists(path) {
         return Err(refused(format!("{path} not found")));
     }
     let edits = edit_list(params)?;
-    let mut text = decode_lossy(&read_bytes(path)?);
-    let mut total = 0;
-    for edit in &edits {
-        let (applied, count) = apply_edit(&text, edit)?;
-        text = applied;
-        total += count;
-    }
+    let (text, total) = applied(&decode_lossy(&read_bytes(path)?), &edits)?;
     std::fs::write(path, text.as_bytes())
         .map_err(|_| failed(format!("Could not write file: {path}")))?;
-    Ok(json!({
-        "path": path,
-        "message": format!("{path}: {total} replacements"),
-        "replacements": total,
-        "snippet": capped(&edit_snippet(&text, &edits[0].new_string), EDIT_SNIPPET_MAX_CHARS),
-    }))
+    Ok(result(path, &text, total, &edits[0].new_string))
 }
 
 #[cfg(test)]

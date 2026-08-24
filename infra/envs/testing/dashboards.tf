@@ -683,8 +683,8 @@ resource "datadog_dashboard" "coding_quality" {
   }
 
   # Every way an edit gets refused, in one number: the read-before-edit precondition in
-  # `edit_handler`, plus everything `sbxfs` rejects — an `old_string` matching nothing, an anchor
-  # matching more than once, a missing file, a path leaving the workspace. `run_sbxfs` turns each of
+  # `edit_handler`, plus everything `ufo fs` rejects — an `old_string` matching nothing, an anchor
+  # matching more than once, a missing file, a path leaving the workspace. `run_ufo_fs` turns each of
   # those into the same `ValueError`, so this cannot separate the agent misremembering a file's
   # contents from the agent skipping the read that would have shown them. Splitting them needs a
   # distinct error class on the precondition; until then read the total, not a cause.

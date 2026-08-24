@@ -1,6 +1,10 @@
 mod clipboard;
 mod config;
+mod fscli;
+#[cfg(unix)]
+mod guard;
 mod jsonio;
+mod llm;
 mod ops;
 mod pr;
 mod ui;
@@ -29,10 +33,14 @@ Opens a conversation with your workspace assistant.
 
 Usage: ufo [--resume [id]] [--json] [message...]
        ufo login | logout
+       ufo fs {read|write|edit|grep|glob|changes} <json>
+       ufo llm [--model MODEL] [--max-tokens N] PROMPT
 
 Commands:
   login          Sign in again.
   logout         Sign out.
+  fs             Run one file op inside a sandbox and print its JSON result.
+  llm            Ask a model one question through the sandbox's egress proxy.
 
 Options:
   --resume [id]  Resume a conversation; bare --resume picks from this machine's list.
@@ -74,6 +82,13 @@ fn main() {
                 home.clear_signin();
                 rest = &rest[1..];
             }
+            // Both sandbox verbs return here rather than falling through: they run as an
+            // unprivileged user with no config, no login and no control plane to reach, so nothing
+            // below them may touch the client's home, the wire, or a terminal. The Windows build
+            // carries no ops behind `fs` and answers the verb's usage error there, rather than
+            // sending the op name as a message.
+            Some("fs") => process::exit(fscli::main(&rest[1..])),
+            Some("llm") => process::exit(llm::main(&rest[1..])),
             Some("--json") => {
                 json = true;
                 rest = &rest[1..];
@@ -285,7 +300,9 @@ fn private_workdir() -> Result<std::path::PathBuf, String> {
     let base = env::temp_dir();
     for _ in 0..16 {
         let candidate = base.join(format!("ufo.{}", random_hex::<8>()));
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut builder = builder;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;

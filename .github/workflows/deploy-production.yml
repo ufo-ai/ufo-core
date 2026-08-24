@@ -248,6 +248,21 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The sandbox image bakes the compiled `ufo` client. This workflow promotes a tested commit
+      # rather than running the client job, so it builds that binary for the sandbox target here:
+      # the client's own release recipe on the runner, never a Rust layer inside the image. The musl
+      # build is static, so it needs nothing from the base image's libc.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+          key: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - working-directory: client
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
       # The production e2b project holds no ufo-sbx templates, so the promoted commit publishes its
       # own under the production key instead of naming the testing project's tested build.
       - name: Select sandbox template

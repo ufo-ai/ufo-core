@@ -1,6 +1,15 @@
+#[cfg(unix)]
+use std::path::Path;
+
 use serde_json::json;
 
-use crate::ops::fileops::text::{failed, refused, str_param, OpError, OpResult};
+#[cfg(unix)]
+use crate::guard;
+#[cfg(unix)]
+use crate::ops::fileops::lock;
+#[cfg(unix)]
+use crate::ops::fileops::text::{failed, guarded, required};
+use crate::ops::fileops::text::{refused, str_param, OpError, OpResult};
 
 fn normalized(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
@@ -76,6 +85,47 @@ fn landed(target: &str, staged: &str, allow_existing: bool) -> OpResult {
     outcome
 }
 
+fn permitted(params: &serde_json::Value) -> bool {
+    params.get("allow_existing") == Some(&serde_json::Value::Bool(true))
+}
+
+/// The same write with both paths taken through the containment guard: the target's parent and the
+/// staged file's parent are each pinned by the descent, and the bytes land by a rename between the
+/// two pinned fds, so a directory swapped for a link after the check cannot redirect them.
+///
+/// The read-before-write check and the rename run under the target's cross-process lock, so a second
+/// writer in another process waits rather than landing between them.
+#[cfg(unix)]
+pub fn run_contained(params: &serde_json::Value, root: &Path) -> OpResult {
+    let target_param = required(params, "path")?;
+    let staged_param = required(params, "staged_path")?;
+    let target = guarded(guard::contained_file(target_param, root, true))?;
+    let staged = guarded(guard::contained_file(staged_param, root, false))?;
+    if staged.path() == target.path() {
+        return Err(refused("staged file must differ from its target"));
+    }
+    let outcome = (|| {
+        let _held = lock::exclusive(target.path())?;
+        let existing = guarded(target.lstat())?;
+        if existing.is_some() && !permitted(params) {
+            return Err(refused(format!(
+                "file {} must be read before it is written",
+                target.path().display()
+            )));
+        }
+        if guarded(staged.lstat())?.is_none() {
+            return Err(refused(format!("{} not found", staged.path().display())));
+        }
+        if let Some(entry) = existing {
+            guarded(staged.chmod(entry.mode))?;
+        }
+        guarded(target.replace_with(&staged))?;
+        Ok(json!({"created": existing.is_none()}))
+    })();
+    staged.unlink();
+    outcome
+}
+
 pub fn run(params: &serde_json::Value) -> OpResult {
     let target = str_param(params, "path")?;
     let staged = str_param(params, "staged_path")?;
@@ -83,8 +133,7 @@ pub fn run(params: &serde_json::Value) -> OpResult {
     if normalized(staged) == normalized(target) {
         return Err(refused("staged file must differ from its target"));
     }
-    let allow_existing = params.get("allow_existing") == Some(&serde_json::Value::Bool(true));
-    landed(target, staged, allow_existing)
+    landed(target, staged, permitted(params))
 }
 
 #[cfg(test)]
@@ -195,6 +244,42 @@ mod tests {
             }
             _ => panic!("expected refusal"),
         }
+    }
+
+    /// `test_tools.py`'s `test_sbxfs_write_waits_for_the_shared_filesystem_lock`, at the op: one
+    /// writer holds the target's lock, and the write that arrives next lands its bytes only after
+    /// that lock is released. `flock` is held per open file description, so a second `exclusive`
+    /// call in this process contends exactly as a second process does.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_waits_for_the_shared_filesystem_lock() {
+        use crate::ops::fileops::lock;
+        let root = std::fs::canonicalize(scratch("locked")).unwrap();
+        let target = root.join("shared.txt");
+        std::fs::write(&target, "old\n").unwrap();
+        let staged = root.join("staged");
+        std::fs::write(&staged, "new\n").unwrap();
+        let params = json!({
+            "path": target.to_str().unwrap(),
+            "staged_path": staged.to_str().unwrap(),
+            "allow_existing": true,
+        });
+        let held = lock::exclusive(&target).unwrap();
+        let writing = std::thread::spawn({
+            let root = root.clone();
+            move || run_contained(&params, &root)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !writing.is_finished(),
+            "the write did not wait for the lock"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old\n");
+        drop(held);
+        let result = writing.join().unwrap().unwrap();
+        assert_eq!(result["created"], false);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
+        assert!(!staged.exists());
     }
 
     #[test]

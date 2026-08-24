@@ -11,6 +11,7 @@ CROSS_CUTTING = ("testsupport/**", ".github/**", "*")
 CHECKS_ONLY_ROOTS = frozenset({"client", "docs"})
 GATED_JOBS = {
     "checks": "checks",
+    "sandbox-client": "checks",
     "web": "checks",
     "test-shard": "checks",
     "wheel": "wheel",
@@ -113,3 +114,34 @@ def test_paths_filter_action_is_pinned_to_a_commit() -> None:
         r"dorny/paths-filter@[0-9a-f]{40}",
         filter_step["uses"],
     )
+
+
+def test_test_shards_run_the_one_client_ci_built() -> None:
+    jobs = _jobs()
+    producer = jobs["sandbox-client"]
+    uploaded = [
+        step for step in producer["steps"] if step.get("uses") == "actions/upload-artifact@v4"
+    ]
+    assert any(step.get("run") == "cargo build --release --locked" for step in producer["steps"])
+    assert len(uploaded) == 1
+    assert uploaded[0]["with"] == {
+        "name": "sandbox-client",
+        "path": "client/target/release/ufo",
+        "if-no-files-found": "error",
+        "retention-days": "1",
+    }
+    shard = jobs["test-shard"]
+    assert "sandbox-client" in shard["needs"]
+    downloaded = [
+        step
+        for step in shard["steps"]
+        if step.get("uses") == "actions/download-artifact@v4"
+        and step["with"]["name"] == "sandbox-client"
+    ]
+    assert downloaded == [
+        {
+            "uses": "actions/download-artifact@v4",
+            "with": {"name": "sandbox-client", "path": "client/target/release"},
+        }
+    ]
+    assert any(step.get("run") == "chmod +x client/target/release/ufo" for step in shard["steps"])
