@@ -94,6 +94,13 @@ resource "datadog_monitor" "db_pool_exhausted" {
 # so the failure and the clear reach the same Slack target. The hourly renotify is the other half: a
 # row that cannot sync holds CRITICAL for as long as nobody fixes it, and one message at the
 # transition is all the channel would ever hold.
+#
+# A refused run submits nothing here, so a row that failed twice and then started being refused would
+# hold CRITICAL with no later run able to clear it — the park writes a log, never a status, and the
+# stream is not failing any more. `timeout_h` is what ends that: a failing row submits CRITICAL every
+# interval, so two hours of silence on one source id means the failure path stopped running for it,
+# whether the row parked, recovered under a status this monitor does not watch, or was removed. The
+# fleet going quiet altogether is the silence monitor's alert, not this one's.
 resource "datadog_monitor" "source_sync_failed" {
   name    = "ufo prod source sync failing"
   type    = "service check"
@@ -107,30 +114,7 @@ resource "datadog_monitor" "source_sync_failed" {
 
   notify_no_data    = false
   renotify_interval = 60
-
-  tags = ["env:prod", "managed-by:terraform"]
-}
-
-# A stream the provider keeps refusing is not failing: `_skip` parks the row after
-# SOURCE_REFUSAL_PARK_THRESHOLD refusals and submits WARNING, which takes that row out of the
-# CRITICAL monitor above. The park slows the row to SOURCE_PARK_RETRY_SECONDS rather than stopping
-# it, so a row that stays refused emits one point an hour and one that recovers stops emitting and
-# submits its own OK. The window therefore has to be wider than that hour, or the monitor would
-# resolve between two parks of the same row and alert again on the next one. No renotify: the fix is
-# a member re-granting a scope, which no amount of paging ops makes happen sooner, and the row comes
-# back on its own the run after the refusal lifts.
-resource "datadog_monitor" "source_sync_parked" {
-  name    = "ufo prod source sync parked"
-  type    = "query alert"
-  query   = "sum(last_4h):sum:ufo.source_sync_parked_total{env:prod} by {provider,stream}.as_count() >= 1"
-  message = "{{provider.name}} {{stream.name}} source sync parked: the provider refused that stream on every attempt, so the row reads once an hour instead of once a minute and holds its cursor and pages. Search source_sync.skipped for the source id and the refusal reason. A refusal that lifts on its own recovers on the next hourly read; one that names a missing scope needs the member who owns that connection to re-grant it, and reconnecting the account puts the row back inside the minute. @ops@flyingobject.ai @slack-alerts"
-
-  monitor_thresholds {
-    critical = 1
-  }
-
-  require_full_window = false
-  renotify_interval   = 0
+  timeout_h         = 2
 
   tags = ["env:prod", "managed-by:terraform"]
 }

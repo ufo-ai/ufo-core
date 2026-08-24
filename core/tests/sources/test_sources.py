@@ -2704,20 +2704,25 @@ async def _seed_connected_source(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
     return member_id, conversation_id, source_id
 
 
-async def test_a_refused_stream_parks_on_the_threshold_run_and_reports_it_as_a_warning(
+async def test_a_refused_stream_parks_on_the_threshold_run_and_records_it_without_alerting(
     db: None,
     database_url: str,
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A grant does not widen between two attempts, so retrying a refused stream every interval buys
     nothing and costs a request a minute for as long as nobody re-grants the scope. The refusals
     count, and the run that reaches the threshold parks the row with the reason the backend wrote.
-    That run is also the only one that reports the park: WARNING on the row's own check tags, which
-    is what takes a row that failed into CRITICAL and then started being refused off an alert no
-    later run could clear, plus one point on the park counter carrying the provider stream. Parking
-    writes nothing else — the cursor stands and a prior page keeps its place, so the reconnect that
-    unparks the row resumes it where it stopped."""
+
+    That run records the park where a sweep for stopped streams looks — a warning log naming the
+    row, the count and the reason, and one point on the park counter carrying the provider stream —
+    and
+    submits no service-check status at all. Nobody is paged for a park: only a member widening a
+    grant ends the refusal, and the row reads itself back every hour meanwhile. `ufo.source_sync`
+    stays the failure path's own signal, so a refused run leaves it untouched on either side of the
+    threshold. Parking writes nothing else — the cursor stands and a prior page keeps its place, so
+    the run that resumes the stream picks up where it stopped."""
     reader = _meter(monkeypatch)
     submitted: list[tuple[str, int, str, dict[str, str]]] = []
 
@@ -2734,15 +2739,16 @@ async def test_a_refused_stream_parks_on_the_threshold_run_and_reports_it_as_a_w
         tmp_path / "blobs",
     )
 
-    for refusals in range(1, SOURCE_REFUSAL_PARK_THRESHOLD):
-        await _sync(driver)
-        under = await _source_state(source_id)
-        assert under["consecutive_refusals"] == refusals
-        assert under["parked_at"] is None  # rescheduled as before, and claimed again next pass
-        await _make_due()
-    assert submitted == []
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        for refusals in range(1, SOURCE_REFUSAL_PARK_THRESHOLD):
+            await _sync(driver)
+            under = await _source_state(source_id)
+            assert under["consecutive_refusals"] == refusals
+            assert under["parked_at"] is None  # rescheduled as before, and claimed again next pass
+            await _make_due()
+        assert _events(caplog, "source_sync.parked") == []
 
-    await _sync(driver)
+        await _sync(driver)
 
     parked = await _source_state(source_id)
     assert parked["consecutive_refusals"] == SOURCE_REFUSAL_PARK_THRESHOLD
@@ -2754,15 +2760,19 @@ async def test_a_refused_stream_parks_on_the_threshold_run_and_reports_it_as_a_w
         seconds=SOURCE_PARK_RETRY_SECONDS - SOURCE_SYNC_INTERVAL_SECONDS
     )
     assert await _tombstone(kept_id) is False
-    assert submitted == [
-        (
-            SOURCE_SYNC_CHECK,
-            o11y.SERVICE_CHECK_WARNING,
-            f"{SOURCE_REFUSAL_PARK_THRESHOLD} consecutive refused runs, parked: {PARK_REASON}",
-            {"provider": SCRIPTED_BACKEND, "stream": "", "source_id": str(source_id)},
-        )
-    ]
+    parks = _events(caplog, "source_sync.parked")
+    assert len(parks) == 1
+    assert parks[0].levelno == logging.WARNING
+    assert parks[0].ufo == {
+        "workspace_id": str(workspace_id),
+        "source_id": str(source_id),
+        "provider": SCRIPTED_BACKEND,
+        "stream": "",
+        "consecutive_refusals": SOURCE_REFUSAL_PARK_THRESHOLD,
+        "reason": PARK_REASON,
+    }
     assert _metric_points(reader, PARKED_METRIC) == [{"provider": SCRIPTED_BACKEND, "stream": ""}]
+    assert submitted == []  # the park is not the failure path's check to speak on
 
 
 async def test_a_parked_source_waits_the_park_retry_and_then_reads_again(

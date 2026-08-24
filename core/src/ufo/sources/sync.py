@@ -20,8 +20,9 @@ it makes. `source_sync.failed` and `source_sync_failed_total` name a failed prov
 each source row's current state, CRITICAL from the run that failed until the run that
 succeeds. A provider that keeps refusing a stream is neither: after
 `SOURCE_REFUSAL_PARK_THRESHOLD` refusals the row parks — held at
-`SOURCE_PARK_RETRY_SECONDS` instead of the interval, counted by `source_sync_parked_total`, and
-WARNING on the check — until a run of it succeeds."""
+`SOURCE_PARK_RETRY_SECONDS` instead of the interval, and recorded by `source_sync.parked` and
+`source_sync_parked_total` — until a run of it succeeds. A park pages nobody: only a member widening
+a grant ends the refusal, so it is a warning to read, never an alert to answer."""
 
 import asyncio
 import hashlib
@@ -47,11 +48,11 @@ from ufo.db import owner_tx, workspace_tx
 from ufo.o11y import (
     SERVICE_CHECK_CRITICAL,
     SERVICE_CHECK_OK,
-    SERVICE_CHECK_WARNING,
     emit_metric,
     emit_service_check,
     log,
     log_error,
+    warn,
 )
 from ufo.schema import tables
 from ufo.turns.subjects import SHARED_SUBJECT
@@ -169,11 +170,11 @@ class StreamSkipped(RuntimeError):
     normal interval with the cursor held and the error counter cleared, rather than backing the
     source off as if it had errored. It also counts the refusal, and parks the source at
     `SOURCE_REFUSAL_PARK_THRESHOLD` of them, which holds it at `SOURCE_PARK_RETRY_SECONDS` rather
-    than the interval. A raiser therefore does not have to know whether the refusal will clear: one
-    that does costs an hour, and one that does not costs a request an hour instead of a request a
-    minute. A fault the caller can distinguish still reads better as a fault — it raises through and
-    takes the error backoff — but nothing about a stream stopping rests on the caller getting that
-    right."""
+    than the interval and writes a warning log, alerting nobody. A raiser therefore does not have to
+    know whether the refusal will clear: one that does costs an hour, and one that does not costs a
+    request an hour instead of a request a minute. A fault the caller can distinguish still reads
+    better as a fault — it raises through and takes the error backoff — but nothing about a stream
+    stopping rests on the caller getting that right."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -982,7 +983,8 @@ class SyncDriver:
         the recovery for every refusal alike, and it needs neither a member nor an operator. The
         reconnect and the resync that unpark only make it immediate instead of hourly. A park held
         until someone acted would put every stream a provider ever throttles behind a member's
-        attention, on a reason naming a scope that was never missing.
+        attention, on a reason naming a scope that was never missing — and would owe an alert, which
+        a row that reads itself back every hour does not.
 
         The count is read and the park decided inside the one statement, off the stored counter
         rather than the value this claim was taken on. An unpark lands while a claim is held — a
@@ -1026,25 +1028,31 @@ class SyncDriver:
             await self._report_parked(source, reason, row.consecutive_refusals)
 
     async def _report_parked(self, source: ClaimedSource, reason: str, refusals: int) -> None:
-        """A run that parked a refused stream, as the state of that row: a WARNING
-        `ufo.source_sync` check naming the reason the backend authored, plus the park counter. The
-        check is the point — a row that failed twice went CRITICAL and then started being refused
-        holds CRITICAL with nothing left able to submit an OK, so the alert renotifies hourly on a
-        row that is no longer failing. WARNING replaces it with what is true: the stream is refused
-        and reading once an hour, and `_report_ok` submits the OK that ends it. A parked row that
-        stays refused re-parks each hour, so the counter reads as a rate and the check as a state.
-        Reported after the write, so a transaction that could not park the row submits nothing. Each
-        emission is suppressed on its own, as on the failure path."""
+        """A run that parked a refused stream, as a record rather than a page: a warning log naming
+        the reason the backend authored and the row it belongs to, plus the park counter.
+
+        A park raises nobody at 3am. The stream is refused, and what ends that is a member widening
+        a grant — an operator woken for it has nothing to do, and the row is already reading itself
+        back every hour without either of them. So the park submits no service-check status at
+        all: warning severity is where a sweep for streams that stopped earning their interval
+        looks, and the counter carries the same fact as a rate. `ufo.source_sync` stays what it was,
+        the failure path's own signal, and a stale CRITICAL on a row that stopped failing is
+        resolved by that monitor's own timeout rather than by a status this path invents.
+
+        A parked row that stays refused re-parks each hour, so both the log and the counter read as
+        a cadence. Reported after the write, so a transaction that could not park the row says
+        nothing. Each emission is suppressed on its own, as on the failure path."""
         tags = _stream_tags(source)
         with suppress(Exception):
-            emit_metric(SOURCE_SYNC_PARKED_METRIC, **tags)
-        with suppress(Exception):
-            await emit_service_check(
-                SOURCE_SYNC_CHECK,
-                SERVICE_CHECK_WARNING,
-                f"{refusals} consecutive refused runs, parked: {reason}",
-                **_check_tags(source),
+            warn(
+                "source_sync.parked",
+                source_id=str(source.source_id),
+                **tags,
+                consecutive_refusals=refusals,
+                reason=reason,
             )
+        with suppress(Exception):
+            emit_metric(SOURCE_SYNC_PARKED_METRIC, **tags)
 
 
 PAGE_FEED_BATCH_MAX = 50
