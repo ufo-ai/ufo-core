@@ -343,9 +343,9 @@ def _openrouter_messages(
                     result_content = content.removeprefix(OPENAI_TOOL_ERROR_PREFIX)
                 try:
                     result = json.loads(result_content)
-                except ValueError:
+                except json.JSONDecodeError:
                     continue
-                except RecursionError:
+                except (ValueError, RecursionError):
                     message["content"] = json.dumps({"text": content})
                     continue
                 if _contains_json_reference(result):

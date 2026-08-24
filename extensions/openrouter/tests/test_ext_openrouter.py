@@ -339,21 +339,35 @@ def test_google_tool_results_distinguish_reference_keys_from_text() -> None:
     assert json.loads(rendered[-4]["content"]) == {"text": f"[tool error] {reference}"}
     assert rendered[-3]["content"] == text
     assert rendered[-2]["content"] == malformed
-    assert rendered[-1]["content"] == large_integer
+    assert json.loads(rendered[-1]["content"]) == {"text": large_integer}
 
 
-def test_google_tool_result_at_the_size_cap_does_not_exceed_the_parser_depth() -> None:
-    result = "[" * 9_997 + '{"$ref":"#/x"}' + "]" * 9_997
+def test_google_tool_results_within_the_size_cap_survive_parser_refusal() -> None:
+    reference = "[" * 9_997 + '{"$ref":"#/x"}' + "]" * 9_997
+    reference_free = "[" * 9_997 + '"costs $5"' + "]" * 9_997
     messages = (
         Message(role="user", content="inspect"),
-        Message(role="assistant", content=(ToolUseBlock(id="c1", name="inspect", input={}),)),
-        Message(role="user", content=(ToolResultBlock(tool_use_id="c1", content=result),)),
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(id="c1", name="reference", input={}),
+                ToolUseBlock(id="c2", name="reference_free", input={}),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(
+                ToolResultBlock(tool_use_id="c1", content=reference),
+                ToolResultBlock(tool_use_id="c2", content=reference_free),
+            ),
+        ),
     )
     request = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash", "messages": messages})
 
     rendered = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
 
-    assert json.loads(rendered[-1]["content"]) == {"text": result}
+    assert json.loads(rendered[-2]["content"]) == {"text": reference}
+    assert json.loads(rendered[-1]["content"]) == {"text": reference_free}
 
 
 def test_text_only_model_omits_tool_result_images_before_provider_call() -> None:
