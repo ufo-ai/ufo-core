@@ -1,32 +1,29 @@
 ---
 name: app-tasks-home
 description: Load when building or updating the Tasks app homepage — the workspace's scheduled tasks and source triggers.
-metadata:
-  depends:
-  - app-bridge
 ---
-# Deploy the Tasks homepage
+# Change the Tasks homepage
 
-`app.tsx` in this skill is the homepage: the Tasks screen as TSX, compiled in the browser by the
-portal's app kit (`UfoAppKit`, loaded by `app.js` off the portal that frames the page). It renders
-the tasks screen: scheduled tasks and source triggers, each opening into its record
-exactly as the portal draws it, and every component it composes comes off the kit, which versions
-with the portal deploy. The bridge client from the `app-bridge` skill (pulled by `depends`) mounts
-alongside.
+The homepage is served with the deploy: `app.tsx` in this skill is its source, built into the
+page every workspace reads until it changes one. It renders the tasks screen: the workspace's
+scheduled tasks and its source triggers, each with the state it is in.
 
-Deploy or redeploy it:
+To change it:
 
-1. Stage the page and the bridge client in one workspace directory:
-   `mkdir -p site && cp .skills/app-tasks-home/index.html .skills/app-tasks-home/app.js .skills/app-tasks-home/app.tsx .skills/app-bridge/bridge.js site/`
-2. `deploy_website` with that `site` directory and `site_name` `tasks-home`.
-3. `set_homepage` with the site name from the deploy result (only needed the first time; the
-   binding stays across later redeploys of the same site).
+1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
+   `cp .skills/app-tasks-home/app.tsx .skills/app-tasks-home/index.html tasks-home/`.
+2. Edit `app.tsx`. Import only from `ufo/kit` — React and its hooks, the portal's components,
+   `SectionApp`, `mountApp`, `getJson`, `navigate`. Any other bare import fails the deploy with
+   `failed to resolve import`; never install it, because a local `node_modules` makes that build
+   pass and ships a second React whose hooks break in the page.
+3. `deploy_website` with that directory and `site_name` `tasks-home`. It builds the page against
+   the deploy's own kit and hosts what the build wrote — do not run a build yourself, and do not
+   pass a `dist` directory.
+4. `set_homepage` with the site name from the deploy result, the first time only; the binding stays
+   across later redeploys of the same site.
 
-To change the page: `object_list` kind `site` with filter `homepage_agent` set to `mine` — the
-one row is your homepage — then `object_get` that row's name: the read materializes the deployed
-source into the sandbox directory its status names as `source_path`. Edit `app.tsx` there — plain
-TSX over the `UfoAppKit` exports (React and its hooks, the portal's components, `SectionApp`,
-`mountApp`, `getJson`, `navigate`) — and `deploy_website` that directory. Never edit a copy
-already on disk without a fresh `object_get`: it can be stale from an earlier deploy, and
-deploying it discards the member's newer page. Restage from the skill only when the member wants
-the page reset to the shipped screen.
+To change a page this workspace has already changed, start from its own source rather than from
+this skill: `object_get` the site — `object_list` kind `site` with filter `homepage_agent` set to
+`mine` names it — and edit the `app.tsx` under `src` in the directory its status names, then deploy
+that `src` directory. Copying this skill's `app.tsx` over it instead is how the page resets to the
+screen the deploy ships.

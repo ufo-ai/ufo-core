@@ -46,6 +46,13 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./tests/setup.ts"],
+    // An app page's whole dependency surface, resolved for the suite that imports the five real
+    // pages as modules. Only `vite.apps.config.ts` and the SDK build carry it otherwise; the
+    // portal's own bundle names neither.
+    alias: {
+      "ufo/kit/jsx-runtime": new URL("./src/apps/kit.ts", import.meta.url).pathname,
+      "ufo/kit": new URL("./src/apps/kit.ts", import.meta.url).pathname,
+    },
     include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     // A half-hour offset with no daylight rule: a run under it proves a wall clock is converted
     // to an instant rather than passed along, which a run under UTC cannot tell apart.

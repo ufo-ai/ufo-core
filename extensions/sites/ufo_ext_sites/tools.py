@@ -57,7 +57,16 @@ from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, serve_port, workspac
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.objects import effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page, shot_command
-from ufo_ext_sites.source import SOURCE_PUT_TTL_SECONDS, UPLOAD_SCRIPT, transfer
+from ufo_ext_sites.source import (
+    PROJECT_CONFIG,
+    PROJECT_CONFIG_BYTES,
+    PROJECT_DIST,
+    PROJECT_SOURCE,
+    SOURCE_PUT_TTL_SECONDS,
+    UPLOAD_SCRIPT,
+    transfer,
+    unpack_page_kit,
+)
 from ufo_ext_sites.store import (
     HostedSite,
     HostedSites,
@@ -188,6 +197,7 @@ SITE_MEDIA_TYPES = {
     "wasm": "application/wasm",
     "woff": "font/woff",
     "woff2": "font/woff2",
+    "ttf": "font/ttf",
     "mp4": "video/mp4",
     "webm": "video/webm",
     "pdf": "application/pdf",
@@ -425,7 +435,13 @@ async def _source_listing(ctx: ToolContext, project: str) -> dict[str, dict[str,
     return files
 
 
-async def _promote_source(ctx: ToolContext, project: str, conversation_id: UUID, name: str) -> str:
+async def _promote_source(
+    ctx: ToolContext,
+    project: str,
+    conversation_id: UUID,
+    name: str,
+    listing: dict[str, dict[str, object]],
+) -> str:
     """Store the served directory's bytes as the site's source of record and answer the manifest
     `register` writes: each deploy under its own key prefix, so the keys are immutable and every
     deploy's prefix stands in the store as the site's history. The bytes go straight from the
@@ -433,7 +449,6 @@ async def _promote_source(ctx: ToolContext, project: str, conversation_id: UUID,
     an S3 store takes them on presigned PUTs core mints for these exact keys, curled from inside
     the container, and a filesystem dev store takes the same files as streams — so a site's source
     never crosses this process."""
-    listing = await _source_listing(ctx, project)
     root = f"sites/{conversation_id}/{name}/{uuid4().hex}/"
     manifest = SourceManifest(
         root=root,
@@ -648,13 +663,42 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
     ):
         return await _redeploy_homepage(ctx, args, bound, port)
     name, _displaced = await _refuse_before_serving(ctx, args.site_name, port, args.visibility)
-    project = workspace_path(args.project_path)
-    manifest = await _promote_source(ctx, project, conversation, name)
+    project, listing = await _served_directory(ctx, workspace_path(args.project_path))
+    manifest = await _promote_source(ctx, project, conversation, name, listing)
     command = f"python3 -m http.server {port} --bind 0.0.0.0"
     served = await _serve(ctx, command, project, port, DEPLOY_LOG.format(port=port))
     hosted = await _host(ctx, name, port, args.visibility, manifest)
     await _illustrate(ctx, name, port, conversation)
     return _json_result({**served, **hosted, "entry_point": args.entry_point})
+
+
+async def _served_directory(
+    ctx: ToolContext, project: str
+) -> tuple[str, dict[str, dict[str, object]]]:
+    """The directory whose bytes are hosted, with its listing: a page project's build output, or the
+    directory it was handed.
+
+    A directory holding `app.tsx` is source, not a site — the app pages an agent edits arrive that
+    way, the one file to change and the page that names it, mounted by the skill it loaded — so this
+    writes the deploy's config and kit beside it, builds it here, and hosts the `dist` that build
+    wrote. No browser runs TSX, so a directory naming one could never have been served as it stands,
+    and building it is the only reading of it that works.
+
+    The agent never runs the build itself. A page deployed as its own source is the one mistake in
+    this flow, and a tool that always builds rules it out instead of describing it. The build's
+    output carries its own source, so a later read of the site starts from a project again."""
+    listing = await _source_listing(ctx, project)
+    if PROJECT_SOURCE not in listing:
+        return project, listing
+    await ctx.sandbox.write_file(f"{project}/{PROJECT_CONFIG}", PROJECT_CONFIG_BYTES)
+    await unpack_page_kit(ctx, project)
+    built = await ctx.sandbox.sh(
+        f"cd {shlex.quote(project)} && vite build", timeout_s=BUILD_TIMEOUT_SECONDS
+    )
+    if built.exit_code != 0:
+        raise RuntimeError(built.stderr.strip() or built.stdout.strip() or "the page did not build")
+    page = f"{project}/{PROJECT_DIST}"
+    return page, await _source_listing(ctx, page)
 
 
 async def _agent_homepage(ctx: ToolContext) -> HostedSite | None:
@@ -698,8 +742,8 @@ async def _redeploy_homepage(
         None,
         True,
     )
-    project = workspace_path(args.project_path)
-    manifest = await _promote_source(ctx, project, bound.conversation_id, bound.name)
+    project, listing = await _served_directory(ctx, workspace_path(args.project_path))
+    manifest = await _promote_source(ctx, project, bound.conversation_id, bound.name, listing)
     command = f"python3 -m http.server {scratch_port} --bind 0.0.0.0"
     served = await _serve(ctx, command, project, scratch_port, DEPLOY_LOG.format(port=scratch_port))
     updated = await sites.redeploy(bound.conversation_id, bound.name, manifest)

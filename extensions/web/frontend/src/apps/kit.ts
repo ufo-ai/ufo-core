@@ -1,4 +1,3 @@
-import { transform } from "@babel/standalone";
 import * as React from "react";
 import {
   useCallback,
@@ -16,14 +15,13 @@ import {
   IconWorldWww,
 } from "@tabler/icons-react";
 
-import type { ReactNode } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 
 import {
   connect,
   founded,
   installShims,
   navigate,
-  onOpenTarget,
   onPlaced,
 } from "@/apps/runtime";
 import type { AppInit } from "@/apps/runtime";
@@ -123,28 +121,16 @@ import { ConversationDetail } from "@/views/Conversations";
 
 import "@/theme.css";
 
-/** The platform surface an app page composes — the frontend's `ufo.sdk`, served from the portal's
- *  own static assets and versioned with the portal deploy. An app's page is TSX in its own
- *  extension: `run` fetches it, compiles it in the browser, and executes it with this kit as its
- *  only dependency, so app code lives entirely in the extension and stays editable as the source
- *  the member's agent deploys. */
+/* The JSX runtime a page's build compiles against, so the kit is a page's one dependency and the
+   React its JSX lands on is the React inside the kit rather than a second copy beside the page.
+   `JSX` rides with it: `jsxImportSource` names this module for the element types too, and a page
+   whose tags resolve to nothing typechecks as `any`. */
+export { Fragment, jsx, jsxs } from "react/jsx-runtime";
+export type { JSX } from "react/jsx-runtime";
 
-const COMPILE_PRESETS = ["typescript", ["react", { runtime: "classic" }]];
-
-/** The page's TSX as executable JS. Types erase; JSX lands on the `React` the kit exports. */
-export function compile(source: string): string {
-  const compiled = transform(source, { presets: COMPILE_PRESETS, filename: "app.tsx" });
-  if (typeof compiled.code !== "string") throw new Error("the page's source did not compile");
-  return compiled.code;
-}
-
-/** Fetch one same-origin TSX file and execute it. The file is a script, not a module: it reads
- *  the kit off the `UfoAppKit` global and mounts itself. */
-export async function run(url: string): Promise<void> {
-  const answer = await fetch(url);
-  if (!answer.ok) throw new Error(`the page's source did not load (${answer.status})`);
-  new Function(compile(await answer.text()))();
-}
+/** The platform surface an app page composes — the frontend's `ufo.sdk`. A page is TSX in its own
+ *  extension, built against this kit as its only dependency, so app code lives entirely in the
+ *  extension and stays editable as the source the member's agent deploys. */
 
 export type {
   Agent,
@@ -160,7 +146,9 @@ export type {
   PaneView,
   PanelState,
   Placement,
+  ReactMouseEvent,
   ReactNode,
+  RefObject,
   SharedFile,
   WorkspacePlace,
 };
@@ -182,7 +170,6 @@ export {
   founded,
   installShims,
   navigate,
-  onOpenTarget,
   onPlaced,
   mountApp,
   SectionApp,
@@ -269,8 +256,8 @@ export {
   Moment,
   day,
   /* The route table as page API: every builder it declares, the read that answers an address, and
-     the test that says which kind a route is. A page compiles in the browser against this surface,
-     so a builder it cannot reach is an address it spells by hand instead. */
+     the test that says which kind a route is. A page is built against this surface, so a builder it
+     cannot reach is an address it spells by hand instead. */
   agentHash,
   chatHash,
   conversationSlotHash,

@@ -1,7 +1,7 @@
-// The chat app's page: TSX compiled in the browser by the portal's app kit. Everything it
-// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
+// The chat app's page: a static site built with the portal's app kit. Edit this file and
+// redeploy to change the page.
 
-const {
+import {
   COLUMN,
   ChatPane,
   ConversationDetail,
@@ -10,7 +10,6 @@ const {
   Page,
   Pane,
   PaneNote,
-  React,
   agentHash,
   agentName,
   cn,
@@ -27,7 +26,8 @@ const {
   useEffect,
   useMainAgent,
   useState,
-} = UfoAppKit;
+} from "ufo/kit";
+import type { Agent, Conversation, Crumb, Member, WorkspacePlace } from "ufo/kit";
 
 /** The chat app's page. Bare, it is a simple list of the member's conversations; opened at one,
  *  that conversation whole; opened at the compose target, the start screen — composer and

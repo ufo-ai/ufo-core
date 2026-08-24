@@ -20,6 +20,7 @@ from evals.skill_selection.runner import skill_selection_task
 from evals.suites import (
     ab_reversal,
     app_builder,
+    app_home_change,
     authority_handoff,
     basics,
     browser_nav,
@@ -100,6 +101,11 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
     capability_task("ufo-app-bench", ufo_app_bench.CASES, judge_model=VISUAL_JUDGE_MODEL),
+    capability_task(
+        "app_home_change",
+        app_home_change.CASES,
+        wait_seconds=app_home_change.WORKFLOW_WAIT_SECONDS,
+    ),
     capability_task(
         "delegated_response_register",
         response_register.DELEGATED_CASES,

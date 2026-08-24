@@ -185,7 +185,13 @@ from ufo.schema.records import (
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience, room_audience
 from ufo.sdk.jobs import unseeded_agent_workspaces, untitled_conversation_workspaces
-from ufo.sdk.manifest import CredentialSlot, Manifest, SubagentProfile
+from ufo.sdk.manifest import (
+    AgentProvision,
+    AgentSpec,
+    CredentialSlot,
+    Manifest,
+    SubagentProfile,
+)
 from ufo.sdk.seats import Seats
 from ufo.serve import _mount_shared_surfaces
 from ufo.surfaces import hub_tail
@@ -5958,6 +5964,108 @@ def test_only_declared_asset_suffixes_are_served(tmp_path: Path) -> None:
     assert served["assets/index-abc.js"] == (b"boot()", "text/javascript; charset=utf-8")
 
 
+def _write_apps_tree(root: Path) -> None:
+    for path, body in (
+        ("radar/index.html", "<script src=/assets/radar-A1.js>"),
+        ("wiki/index.html", "<script src=/assets/wiki-B2.js>"),
+        ("assets/radar-A1.js", "r()"),
+        ("assets/wiki-B2.js", "w()"),
+        ("assets/pages-C3.css", ":root{}"),
+        ("assets/Inter-D4.woff2", "font"),
+    ):
+        file = root / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(body)
+
+
+def test_an_apps_tree_loads_whole_and_names_its_slugs_by_directory(tmp_path: Path) -> None:
+    """Every file of the tree is carried whatever its suffix — the ingress serving the tree holds
+    the media-type table over it, so `.html`, which this module's own asset table has no entry for,
+    reaches the store like everything else. A slug is a top-level directory other than the shared
+    `assets/`, so nothing reads a name out of an extension or a skill."""
+    _write_apps_tree(tmp_path)
+
+    apps = web_surface.load_apps(tmp_path)
+
+    assert apps is not None
+    assert apps.slugs == {"radar", "wiki"}
+    assert ".html" not in web_surface.ASSET_MEDIA_TYPES
+    assert apps.files["radar/index.html"] == b"<script src=/assets/radar-A1.js>"
+    assert apps.files["assets/pages-C3.css"] == b":root{}"
+    assert len(apps.files) == 6
+
+
+def test_an_apps_tree_carries_only_what_the_build_emitted(tmp_path: Path) -> None:
+    """A file browser dropping `.DS_Store` into the built tree must not join it. It has no suffix to
+    type and no page names it, but it would change the digest — republishing every file of the tree
+    under a fresh prefix and moving the `deploy_generation` every open app page remounts on."""
+    _write_apps_tree(tmp_path)
+    clean = web_surface.load_apps(tmp_path)
+    assert clean is not None
+
+    (tmp_path / ".DS_Store").write_bytes(b"\x00finder")
+    (tmp_path / "assets/.DS_Store").write_bytes(b"\x00finder")
+    (tmp_path / ".vite").mkdir()
+    (tmp_path / ".vite/manifest.json").write_text("{}")
+
+    littered = web_surface.load_apps(tmp_path)
+    assert littered is not None
+    assert littered.files == clean.files
+    assert littered.digest == clean.digest
+
+
+def test_the_apps_digest_is_the_content_of_the_whole_tree(tmp_path: Path) -> None:
+    """The digest names the fleet prefix the tree publishes under and folds to the generation the
+    homepage read reports, so it has to be derived from content alone: two pods building the same
+    bytes agree, a byte changed anywhere is a new digest, and a file added or removed is too."""
+    first, second = tmp_path / "first", tmp_path / "second"
+    _write_apps_tree(first)
+    _write_apps_tree(second)
+    built = web_surface.load_apps(first)
+    same = web_surface.load_apps(second)
+    assert built is not None and same is not None
+    assert built.digest == same.digest
+    assert len(built.digest) == 16
+
+    (second / "assets/radar-A1.js").write_text("r2()")
+    changed = web_surface.load_apps(second)
+    assert changed is not None and changed.digest != built.digest
+
+    (second / "assets/radar-A1.js").write_text("r()")
+    (second / "assets/extra-E5.js").write_text("")
+    added = web_surface.load_apps(second)
+    assert added is not None and added.digest != built.digest
+
+
+def test_a_deploy_that_built_no_app_pages_holds_no_bundle(tmp_path: Path) -> None:
+    """An unbuilt tree loads the extension: the routes that hold no built asset go on working and
+    the ones that need the tree name the build. So the load answers None rather than raising, both
+    for a directory the build never created and for one it left empty."""
+    assert web_surface.load_apps(tmp_path / "never-built") is None
+    (tmp_path / "empty").mkdir()
+    assert web_surface.load_apps(tmp_path / "empty") is None
+
+
+def test_the_shipped_apps_tree_is_five_pages_and_the_chunks_they_name() -> None:
+    """The five built-in apps as this deploy ships them: each slug one directory holding the page
+    the frame origin serves at `/`, every chunk that page names present under `assets/`, and nothing
+    else anywhere in the tree — the fork project is assembled by the site kind out of the app
+    extension's own source and the SDK the sites extension ships, so a byte a browser never fetches
+    does not ride this digest."""
+    apps = web_surface.APPS
+    assert apps is not None, f"the app pages are not built — run `{PORTAL_BUILD}`"
+    assert apps.slugs == {"artifacts", "chat", "radar", "tasks", "wiki"}
+    for slug in sorted(apps.slugs):
+        page = apps.files[f"{slug}/index.html"].decode()
+        named = re.findall(r'(?:src|href)="(/assets/[^"]+)"', page)
+        assert named, slug
+        for ref in named:
+            assert ref.removeprefix("/") in apps.files, ref
+    assert {path for path in apps.files if not path.startswith("assets/")} == {
+        f"{slug}/index.html" for slug in apps.slugs
+    }
+
+
 RUM_DEPLOY = {
     "UFO_WEB_RUM_APPLICATION_ID": "1ea7beef-0000-4000-8000-000000000001",
     "UFO_WEB_RUM_CLIENT_TOKEN": "pubdeadbeef",
@@ -9538,16 +9646,53 @@ async def test_homepage_seed_marks_an_app_agent_shipped_without_a_turn(db: None)
 
 async def test_publish_assets_writes_the_apps_tree_under_its_digest(tmp_path) -> None:
     """The apps bundle publishes under its content digest, skip-if-present (content addressed →
-    present is correct), so a repeat publish leaves an already-written file untouched."""
+    present is correct), so a repeat publish leaves an already-written file untouched. One listing
+    of the digest prefix is what "present" is read from, so a tree an interrupted publish left half
+    written is completed rather than trusted."""
     fleet = FleetBlobStore(backend=FilesystemBlobStore(root=tmp_path))
-    tree = {"radar/index.html": b"<html>", "radar/app.js": b"//r", "bridge.js": b"//b"}
-    digest = "abc123abc123abc1"
-    await web_surface._publish_assets(fleet, (tree, digest))
-    for path, body in tree.items():
-        assert await fleet.get(f"apps/{digest}/{path}") == body
-    await fleet.put(f"apps/{digest}/radar/index.html", b"<edited>")
-    await web_surface._publish_assets(fleet, (tree, digest))
-    assert await fleet.get(f"apps/{digest}/radar/index.html") == b"<edited>"
+    apps = web_surface.AppsBundle(
+        files={
+            "radar/index.html": b"<html>",
+            "wiki/index.html": b"<html>",
+            "assets/radar-AbC1.js": b"//r",
+            "assets/pages-DeF2.css": b":root{}",
+        },
+        digest="abc123abc123abc1",
+        slugs=frozenset({"radar", "wiki"}),
+    )
+    prefix = f"apps/{apps.digest}/"
+    await web_surface._publish_assets(fleet, apps)
+    for path, body in apps.files.items():
+        assert await fleet.get(prefix + path) == body
+
+    await fleet.put(prefix + "radar/index.html", b"<edited>")
+    await fleet.delete(prefix + "assets/pages-DeF2.css")
+    await web_surface._publish_assets(fleet, apps)
+    assert await fleet.get(prefix + "radar/index.html") == b"<edited>"
+    assert await fleet.get(prefix + "assets/pages-DeF2.css") == b":root{}"
+
+
+APP_NOTES = Manifest(
+    name="app_notes",
+    version="0.1.0",
+    agents=(
+        AgentProvision(
+            name="notes",
+            spec=AgentSpec(
+                prompt="You are the Notes app for this workspace.",
+                model="auto",
+                reasoning="medium",
+                internet_access_allowed=False,
+                visibility="workspace",
+            ),
+            icon="notes",
+        ),
+    ),
+)
+"""A sixth app extension the deploy installs and the frontend build knows nothing about — no
+`apps/notes/` page is built for it. It is what tells the two faults of a missing page apart: this
+one is installed, so its agent's homepage read is a broken deploy, while `app_wiki` is left out of
+this mount even though the build ships a `wiki/` page, so its agent's read is a tear-out."""
 
 
 @pytest.fixture
@@ -9556,9 +9701,9 @@ async def web_apps(
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AsyncClient, UUID, UUID, FleetBlobStore]]:
-    """The web surface mounted with the app home skills in its deploy tier and one app agent seeded,
-    so the homepage read resolves a row-less shipped page and the portal publish assembles the apps
-    bundle from real skill bytes."""
+    """The web surface mounted with the app extensions in its deploy tier and one app agent seeded,
+    so the homepage read resolves a row-less shipped page and the portal publish lands the built
+    apps tree."""
     config, hub, blob, sandboxes = dbos_runtime
     monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
     monkeypatch.setattr(web_surface, "_ASSET_PUBLISH", None)
@@ -9571,6 +9716,7 @@ async def web_apps(
         report_digest_manifest(),
         app_radar_manifest(),
         app_chat_manifest(),
+        APP_NOTES,
     )
     app = FastAPI()
     app.state.blob = blob
@@ -9611,10 +9757,12 @@ async def test_homepage_read_serves_a_row_less_shipped_app_page(
     web_apps: tuple[AsyncClient, UUID, UUID, "FleetBlobStore"],
 ) -> None:
     """An app agent with no forked hosted_site row resolves to the shipped page: the read answers
-    `set` with a frame link and a digest-derived generation, the portal publish has landed the apps
-    bundle under `apps/<digest>/` with the app's own index and the shared bridge, and the served
-    generation is that digest's fold — so the link names the bytes just published."""
+    `set` with a frame link and a digest-derived generation, the publish has landed the whole built
+    tree under `apps/<digest>/` — the app's own page and every shared chunk that page names — and
+    the served generation is that digest's fold, so the link names the bytes just published."""
     client, workspace_id, app_agent, fleet = web_apps
+    apps = web_surface.APPS
+    assert apps is not None, f"the app pages are not built — run `{PORTAL_BUILD}`"
     _member_id, token = await _seed_member(workspace_id, "shipped@example.com")
     # The shipped homepage read publishes the bundle before it hands out the link.
     read = await client.get(
@@ -9631,8 +9779,11 @@ async def test_homepage_read_serves_a_row_less_shipped_app_page(
     digests = {key.split("/")[1] for key in keys}
     assert len(digests) == 1
     digest = digests.pop()
-    assert f"apps/{digest}/radar/index.html" in keys
-    assert f"apps/{digest}/bridge.js" in keys
+    assert digest == apps.digest
+    assert keys == {f"apps/{digest}/{path}" for path in apps.files}
+    page = apps.files["radar/index.html"].decode()
+    for ref in re.findall(r'(?:src|href)="(/assets/[^"]+)"', page):
+        assert f"apps/{digest}{ref}" in keys, ref
     assert payload["deploy_generation"] == int(digest[:13], 16)
 
 

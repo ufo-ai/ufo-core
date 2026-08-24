@@ -88,7 +88,6 @@ test("ready is answered with the member's own init payload", async () => {
     member: MEMBER,
     agentId: AGENT_ID,
     place: {},
-    open: null,
     portal: location.origin,
   });
 });
@@ -117,7 +116,7 @@ test("init carries the addressed step the page stands at, and a place change doe
     crumb: { ...CRUMB, at: new URL(CRUMB.at, location.origin + BASE).href },
   });
   bridge.place(PLACE);
-  await vi.waitFor(() => expect(posted).toHaveLength(3));
+  await vi.waitFor(() => expect(posted).toHaveLength(2));
   expect(posted[1]).toEqual({ ufo: "place", place: PLACE });
 });
 
@@ -409,12 +408,11 @@ test("a place changing while the frame stands is posted, and a later ready carri
   deliver({ ufo: "ready" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(1));
   bridge.place(PLACE);
-  await vi.waitFor(() => expect(posted).toHaveLength(3));
+  await vi.waitFor(() => expect(posted).toHaveLength(2));
   expect(posted[1]).toEqual({ ufo: "place", place: PLACE });
-  expect(posted[2]).toEqual({ ufo: "open", target: CONVERSATION_ID });
   deliver({ ufo: "ready" }, iframe.contentWindow);
-  await vi.waitFor(() => expect(posted).toHaveLength(4));
-  expect(posted[3]).toMatchObject({ ufo: "init", place: PLACE, open: CONVERSATION_ID });
+  await vi.waitFor(() => expect(posted).toHaveLength(3));
+  expect(posted[2]).toMatchObject({ ufo: "init", place: PLACE });
 });
 
 test("a message from a child of the homepage window is ignored", async () => {

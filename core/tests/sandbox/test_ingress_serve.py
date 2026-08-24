@@ -2049,11 +2049,11 @@ SHIPPED_DIGEST = "9f3a1c2b4d5e6f70"
 SHIPPED_ETAG = f'"{SHIPPED_DIGEST}"'
 SHIPPED_INDEX = b'<!doctype html><script type="module" src="app.7c2b.js"></script>'
 SHIPPED_APP = b"mountApp()"
-SHIPPED_BRIDGE = b"connectBridge()"
+SHIPPED_KIT = b"export function mountApp() {}"
 SHIPPED_FILES = {
     f"{SHIPPED_SLUG}/index.html": (SHIPPED_INDEX, "text/html"),
     f"{SHIPPED_SLUG}/app.7c2b.js": (SHIPPED_APP, "text/javascript"),
-    "bridge.js": (SHIPPED_BRIDGE, "text/javascript"),
+    "assets/kit.4a9e.js": (SHIPPED_KIT, "text/javascript"),
 }
 
 
@@ -2064,7 +2064,7 @@ async def _seed_shipped_bundle(
 ) -> None:
     """Publish a precompiled apps tree the way the frontend build leaves one: one atomic tree under
     the deploy-wide fleet prefix `apps/<digest>/`, keys `<slug>/index.html`, `<slug>/app.<h>.js`
-    and the `_shared/kit.<h>.js` chunk every app imports. No workspace prefix, no hosted_site row,
+    and the `assets/kit.<h>.js` chunk every app imports. No workspace prefix, no hosted_site row,
     and no manifest — the ingress enumerates the tree by listing it, and the digest is the etag."""
     for path, (data, _media_type) in files.items():
         await blobs.put(f"apps/{digest}/{path}", data)
@@ -2100,7 +2100,8 @@ async def test_a_shipped_bundle_serves_row_less_from_the_fleet_store(db, stored_
     with the digest as its etag and the frame-ancestors CSP a workspace site carries. The synthetic
     anchor scopes the origin; the shipped claim names the deploy-wide bytes. The slug's own index
     answers `/`, its app bundle answers `/app.<h>.js`, and a tree file outside the slug subdir —
-    `bridge.js` — answers at its own path, proving a sibling resolves without the slug prefix."""
+    `assets/kit.<h>.js` — answers at its own path, proving a sibling resolves without the slug
+    prefix."""
     client, blobs = stored_ingress
     workspace_id = uuid4()
     anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
@@ -2121,9 +2122,9 @@ async def test_a_shipped_bundle_serves_row_less_from_the_fleet_store(db, stored_
     assert (app.status_code, app.content) == (200, SHIPPED_APP)
     assert app.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
 
-    bridge = await client.get(f"{_origin(anchor)}/bridge.js")
-    assert (bridge.status_code, bridge.content) == (200, SHIPPED_BRIDGE)
-    assert bridge.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
+    kit = await client.get(f"{_origin(anchor)}/assets/kit.4a9e.js")
+    assert (kit.status_code, kit.content) == (200, SHIPPED_KIT)
+    assert kit.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
 
 
 async def test_a_shipped_bundle_unknown_path_is_404(db, stored_ingress) -> None:

@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { act, screen, within } from "@testing-library/react";
@@ -29,26 +28,22 @@ import {
   type Route,
 } from "./harness";
 
-/** Each app's real page, run the way production runs it: the TSX read off the extension's own
- *  skill, compiled by the kit, executed against the `UfoAppKit` global, and mounted through the
- *  bridge handshake against a fake shell on this same window — jsdom's `window.top` is the window
- *  itself, so the runtime's posts land on our listener, and every call the page's shimmed fetch
- *  tunnels is answered through the harness wire. */
+/** Each app's real page, run the way a built page runs: the extension's own TSX imported as a
+ *  module against the kit `ufo/kit` resolves to, mounting itself through the bridge handshake
+ *  against a fake shell on this same window — jsdom's `window.top` is the window itself, so the
+ *  runtime's posts land on our listener, and every call the page's shimmed fetch tunnels is
+ *  answered through the harness wire. */
 
 const EXTENSIONS = join(import.meta.dirname, "..", "..", "..");
 
-function pageSource(app: string): string {
-  return readFileSync(
-    join(EXTENSIONS, "app_" + app, "ufo_ext_app_" + app, "skills", "app-" + app + "-home", "app.tsx"),
-    "utf8",
-  );
+function pagePath(app: string): string {
+  return join(EXTENSIONS, "app_" + app, "ufo_ext_app_" + app, "skills", "app-" + app + "-home", "app.tsx");
 }
 
 const INIT: AppInit = {
   member: { email: MEMBER.email, admin: true },
   agentId: AGENT.id,
   place: {},
-  open: null,
   portal: location.origin,
 };
 
@@ -113,9 +108,7 @@ async function runPage(
   vi.resetModules();
   const { calls, handler } = wire({ "/api/agents": () => json({ agents: [AGENT] }), ...routes });
   cleanups.push(shell(handler, init));
-  const kit = await import("@/apps/kit");
-  vi.stubGlobal("UfoAppKit", kit);
-  new Function(kit.compile(pageSource(app)))();
+  await import(/* @vite-ignore */ pagePath(app));
   return { calls };
 }
 

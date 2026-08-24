@@ -9,6 +9,7 @@ import tomli_w
 
 from evals import ablate
 from evals.ablate import (
+    BUILT_TREES,
     LOGS_DIR,
     RUNS_DIR,
     STACK_LOG,
@@ -442,6 +443,20 @@ def test_an_arm_installs_no_dev_group_and_the_failure_names_the_package(
         ablation._sync(tmp_path / "worktree")
 
     assert commands == [("uv", "sync", "--no-dev")]
+
+
+def test_an_arm_carries_the_app_page_build_output(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    for index, path in enumerate(BUILT_TREES):
+        source = repo / path / f"built-{index}"
+        source.parent.mkdir(parents=True)
+        source.write_text(str(index))
+
+    Ablation(repo=repo, spec=_spec(), out=tmp_path / "out")._carry_build_output(worktree)
+
+    for index, path in enumerate(BUILT_TREES):
+        assert (worktree / path / f"built-{index}").read_text() == str(index)
 
 
 def test_the_stack_runs_the_arm_environment_without_the_dev_group(

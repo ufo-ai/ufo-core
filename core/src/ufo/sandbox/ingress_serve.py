@@ -458,14 +458,13 @@ class IngressServe:
         }
 
     async def _shipped_manifest(self, shipped: ShippedClaim) -> dict[str, StoredFile] | None:
-        """The precompiled app bundle a shipped claim names, from the fleet store: every file of
-        the deploy-wide apps tree under `apps/<digest>/`, keyed by the request path that reaches
-        it. A file inside the claim's own slug subdir answers a root-relative request — so
-        `apps/<digest>/<slug>/index.html` is `/` and `apps/<digest>/<slug>/app.<h>.js` is
-        `/app.<h>.js` — while a file outside the slug subdir (`apps/<digest>/bridge.js`, the bridge
-        client every app shares) answers at its own path, `/bridge.js`, so one copy serves every
-        app. None when the digest names no published tree — a race against a redeploy that retired
-        it — answering 404 for the refresh to heal.
+        """The built app pages a shipped claim names, from the fleet store: every file of the
+        deploy-wide apps tree under `apps/<digest>/`, keyed by the request path that reaches it. A
+        file inside the claim's own slug subdir answers a root-relative request — so
+        `apps/<digest>/<slug>/index.html` is `/` — while a file outside it answers at its own path,
+        so `apps/<digest>/assets/<chunk>.js` is `/assets/<chunk>.js` and the one set of hashed
+        chunks the five pages share serves every app. None when the digest names no published tree
+        — a race against a redeploy that retired it — answering 404 for the refresh to heal.
 
         The etag is the digest itself: the tree is content-addressed, so a byte change anywhere is a
         new digest carried in a new token, and a held copy of any file revalidates against it.

@@ -17,5 +17,13 @@
     "paths": { "@/*": ["./src/*"], "@brand/*": ["../../../assets/brand/*"] },
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "tests", "dev-routing.ts", "vite.config.ts"]
+  "include": [
+    "src",
+    "tests",
+    "dev-routing.ts",
+    "vite-marks.ts",
+    "vite.config.ts",
+    "vite.apps.config.ts",
+    "vite.sdk.config.ts"
+  ]
 }

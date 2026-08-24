@@ -200,9 +200,7 @@ MAX_USAGE_WINDOW_SECONDS = 31_536_000
 USAGE_RANGES = {"7d": 604_800, "30d": 2_592_000, "90d": 7_776_000, "all": None}
 PORTAL_PATH = "/surface/web"
 CHAT_TARGET_PARAM = "c"
-PORTAL_BUILD = (
-    "npm --prefix extensions/web/frontend ci && npm --prefix extensions/web/frontend run build"
-)
+PORTAL_BUILD = "make build"
 STATIC_DIR = Path(__file__).parent / "static"
 PORTAL_FILE = STATIC_DIR / "index.html"
 PORTAL_HTML = PORTAL_FILE.read_text() if PORTAL_FILE.is_file() else None
@@ -352,59 +350,86 @@ STATIC_STORE_PREFIX = "static/web/"
 STORED_ASSET_NAME = re.compile(r"assets/[A-Za-z0-9._-]+")
 STORED_ASSETS_MAX = 64
 
+APPS_DIR = Path(__file__).parent / "apps"
 APPS_STORE_PREFIX = "apps/"
-APP_HOME_SKILL = re.compile(r"app-(?P<slug>[a-z0-9]+)-home")
-APP_BRIDGE_SKILL = "app-bridge"
-APP_PAGE_FILES = ("index.html", "app.js", "app.tsx")
-BRIDGE_FILE = "bridge.js"
+APPS_SHARED_DIRS = frozenset({"assets"})
 
 _ASSET_PUBLISH: asyncio.Task[None] | None = None
 _STORED_ASSETS: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
 
 
-def apps_bundle(ctx: SurfaceContext) -> tuple[dict[str, bytes], str]:
-    """The deploy-wide apps bundle and its digest, assembled from the app home skills' page files.
+@dataclass(frozen=True)
+class AppsBundle:
+    """The built app pages as the one tree every unforked workspace is served: every file's bytes
+    by tree-relative path, the content digest naming the fleet prefix they publish under, and the
+    slugs the tree holds a page for."""
 
-    One atomic tree — each app's `<slug>/index.html`, `<slug>/app.js`, `<slug>/app.tsx` and the one
-    shared `bridge.js` at the root — served row-less to every unforked workspace. The slug is the
-    app's home-skill name (`app-radar-home` → `radar`); `app-bridge` contributes the shared client.
-    The digest is `sha256` over the sorted `(path, bytes)` of the whole tree, first 16 hex: content
-    derived, so it is identical on every pod, names the fleet key prefix `apps/<digest>/`, and folds
-    to the `deploy_generation` the homepage read reports. Recomputed per call rather than held — the
-    inputs are a handful of small deploy-constant files, and the publish's own skip-if-present makes
-    a repeat cheap — so nothing stale survives a registry that changed between test cases."""
-    tree: dict[str, bytes] = {}
-    for name, _description in ctx.deploy_skills:
-        match = APP_HOME_SKILL.fullmatch(name)
-        if match is None:
-            continue
-        files = ctx.deploy_skill_files(name) or {}
-        for page in APP_PAGE_FILES:
-            body = files.get(page)
-            if body is not None:
-                tree[f"{match['slug']}/{page}"] = body
-    bridge = (ctx.deploy_skill_files(APP_BRIDGE_SKILL) or {}).get(BRIDGE_FILE)
-    if bridge is not None:
-        tree[BRIDGE_FILE] = bridge
+    files: Mapping[str, bytes]
+    digest: str
+    slugs: frozenset[str]
+
+
+def load_apps(directory: Path) -> AppsBundle | None:
+    """The built app pages, or None where the frontend build left nothing.
+
+    Read whole, once, at import. The digest is `sha256` over the sorted `(path, bytes)` of every
+    file, first 16 hex: content derived, so it is identical on every pod, names the fleet key
+    prefix `apps/<digest>/`, and folds to the `deploy_generation` the homepage read reports.
+    Hashing the tree per portal page load would stall the loop on the same megabytes every time.
+    Every file is carried whatever its suffix. The tree is the served bytes — five documents and
+    the hashed `assets/` they name — and the ingress that serves it at a frame origin's root holds
+    the one media-type table over them, so nothing here decides what a page may name (`.html`, the
+    suffix every page's own entry carries, is not in this module's table at all). A slug is a
+    top-level directory other than the shared `assets/`.
+
+    The set is what the build emits, which names no dot-prefixed path segment. A file browser
+    dropping `.DS_Store` into the output would otherwise join the tree, change the digest, and cost
+    a whole republish under a fresh prefix plus a `deploy_generation` every open app page remounts
+    on — a deploy's worth of churn from a byte no page names."""
+    if not directory.is_dir():
+        return None
+    files = {
+        relative.as_posix(): (directory / relative).read_bytes()
+        for relative in sorted(
+            path.relative_to(directory) for path in directory.rglob("*") if path.is_file()
+        )
+        if not any(part.startswith(".") for part in relative.parts)
+    }
+    if not files:
+        return None
     digest = sha256(
-        b"".join(f"{path}\x00".encode() + body for path, body in sorted(tree.items()))
+        b"".join(f"{path}\x00".encode() + body for path, body in sorted(files.items()))
     ).hexdigest()[:16]
-    return tree, digest
+    top = {path.split("/", 1)[0] for path in files if "/" in path}
+    return AppsBundle(files=files, digest=digest, slugs=frozenset(top - APPS_SHARED_DIRS))
 
 
-async def _publish_assets(blob: BlobStore, apps: tuple[dict[str, bytes], str]) -> None:
+APPS = load_apps(APPS_DIR)
+
+
+def apps() -> AppsBundle:
+    """The built app pages, or a fault naming the build that writes them. Every reader of the tree
+    is answering a request for a page, so an unbuilt deploy has to say which command it skipped
+    rather than serve an app the answer that it has no page."""
+    if APPS is None:
+        raise RuntimeError(f"the app pages are not built — run `{PORTAL_BUILD}`")
+    return APPS
+
+
+async def _publish_assets(blob: BlobStore, apps: AppsBundle) -> None:
     for name, (body, _media_type) in STATIC_ASSETS.items():
         key = STATIC_STORE_PREFIX + name
         if not await blob.exists(key):
             await blob.put(key, body)
-    tree, digest = apps
-    for path, body in tree.items():
-        key = f"{APPS_STORE_PREFIX}{digest}/{path}"
-        if not await blob.exists(key):
+    prefix = f"{APPS_STORE_PREFIX}{apps.digest}/"
+    published = {entry.key for entry in await blob.list(prefix)}
+    for path, body in apps.files.items():
+        key = prefix + path
+        if key not in published:
             await blob.put(key, body)
 
 
-def _assets_published(blob: BlobStore, apps: tuple[dict[str, bytes], str]) -> "asyncio.Task[None]":
+def _assets_published(blob: BlobStore, apps: AppsBundle) -> "asyncio.Task[None]":
     """This process's one publish of its built assets into the shared store (RFC 0031): every pod
     writes its own set before it serves its first page, so a hash a page names is in the store
     before any pod is asked for it — the causal order that makes a mixed-version roll harmless.
@@ -412,9 +437,20 @@ def _assets_published(blob: BlobStore, apps: tuple[dict[str, bytes], str]) -> "a
     failed publish fails the page that awaited it and is replaced here, so the next page retries
     rather than serving a reference nothing can answer.
 
-    The apps bundle rides the same publish: each digest-named file skipped when present (content
-    addressed → present is correct), so a shipped page's bytes are in the store under
-    `apps/<digest>/` before the homepage read hands out a link naming that digest."""
+    The apps bundle rides the same publish, under one prefix and so learned by one listing: the
+    files it already holds are skipped (content addressed → present is correct) and a tree left
+    half-written by an interrupted publish is completed, so a shipped page's bytes are all in the
+    store under `apps/<digest>/` before the homepage read hands out a link naming that digest.
+
+    That skip covers a retry, not a redeploy. `static/web/` keys carry a per-file hash, so an
+    unchanged chunk keeps its key across builds and is written once ever; `apps/<digest>/` is one
+    digest over the whole tree, so a byte changed anywhere moves the prefix and every file under it
+    is a first write. A deploy that touches one app page writes the whole tree again — 160 files,
+    6,888,632 bytes (6.6 MiB: 4.4 MiB of hashed `.js`, 1.4 MiB of mark sprites, 465 KiB of fonts,
+    339 KiB of images, 154 KiB of stylesheet) — and the prefixes before it stay. They have to: a
+    rolling deploy's outgoing pods serve theirs until they are gone, and an app page a member has
+    open names the digest it was minted against. 6.6 MiB of fleet store per deploy, kept, is the
+    price of a tree addressed by its content."""
     global _ASSET_PUBLISH
     task = _ASSET_PUBLISH
     if task is None or (task.done() and task.exception() is not None):
@@ -461,9 +497,9 @@ async def portal_page(ctx: SurfaceContext, request: Request) -> Response:
     the member reloads, the deploy they were told about is missing, and nothing in the page says
     why. Its assets revalidate and transfer only on a hash change, so the shell costs one request
     and no page is ever stale while looking current."""
-    if PORTAL_HTML is None:
+    if PORTAL_HTML is None or APPS is None:
         raise RuntimeError(f"portal app is not built — run `{PORTAL_BUILD}`")
-    await _assets_published(ctx.fleet_blob, apps_bundle(ctx))
+    await _assets_published(ctx.fleet_blob, APPS)
     shell = portal_shell(PORTAL_HTML, rum_config(os.environ))
     return HTMLResponse(shell, headers={"cache-control": "no-store"})
 
@@ -853,11 +889,9 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
         grants = await granted_emails(web_extension().store)
     # The agent carries its homepage — an app's own page or the answer it has none — so a screen
     # opens the page from the boot read and never asks per agent as the member moves between them.
-    # The bundle is digested and published once here; a deploy's next boot carries the fresh digest.
-    apps = apps_bundle(ctx)
-    await _assets_published(ctx.fleet_blob, apps)
+    await _assets_published(ctx.fleet_blob, apps())
     homepages = {
-        agent.id: await _homepage_state(ctx, agent, member_id, audience.admin, apps)
+        agent.id: await _homepage_state(ctx, agent, member_id, audience.admin)
         for agent in audience.agents
     }
     archived = [
@@ -4123,9 +4157,8 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
         return gated
     member_id, _email, audience, agent_id = gated
     summary = next(a for a in audience.agents if a.id == agent_id)
-    apps = apps_bundle(ctx)
-    await _assets_published(ctx.fleet_blob, apps)
-    return JSONResponse(await _homepage_state(ctx, summary, member_id, audience.admin, apps))
+    await _assets_published(ctx.fleet_blob, apps())
+    return JSONResponse(await _homepage_state(ctx, summary, member_id, audience.admin))
 
 
 async def _homepage_state(
@@ -4133,7 +4166,6 @@ async def _homepage_state(
     summary: AgentSummary,
     member_id: UUID,
     admin: bool,
-    apps: tuple[dict[str, bytes], str],
 ) -> dict[str, JsonValue]:
     """One agent's homepage: `set` for a forked hosted_site row or the shipped bundle, `none` when
     it has no page — a first page still building is simply `none` until it registers, and a page
@@ -4141,8 +4173,7 @@ async def _homepage_state(
     serving) so it answers `set` throughout. The boot index carries it on the agent object, so a
     screen paints the page from what boot resolved; the granular `/homepage` route answers the same
     shape for the pane's own poll, which lands a redeploy's new generation or a first page's arrival
-    within one poll. `apps` is the deploy-wide bundle the caller has already published, passed in so
-    a batch resolving every visible agent digests and publishes it once. The agent rule gates it — a
+    within one poll. The agent rule gates it — a
     private agent's page answers `none` to anyone but its owner and an admin — the same rule the
     frame gates each visit on, so the read never hands out a link that renders a refusal. A shipped
     page's `deploy_generation` is the digest folded to a JS-safe int, so the frame's identity moves
@@ -4171,11 +4202,21 @@ async def _homepage_state(
             "deploy_generation": bound.fields.get("deploy_generation", 0),
         }
     slug = shipped_app_slug(summary.provisioned_by)
-    tree, digest = apps
-    if slug is not None and f"{slug}/index.html" in tree:
-        url = shipped_homepage_url(ctx.public_base_url, ctx.workspace_id, summary.id, slug, digest)
+    bundle = apps()
+    if slug is not None and slug in bundle.slugs:
+        url = shipped_homepage_url(
+            ctx.public_base_url,
+            ctx.workspace_id,
+            summary.id,
+            slug,
+            bundle.digest,
+        )
         if url is not None:
-            return {"state": "set", "url": url, "deploy_generation": int(digest[:13], 16)}
+            return {
+                "state": "set",
+                "url": url,
+                "deploy_generation": int(bundle.digest[:13], 16),
+            }
     return {"state": "none"}
 
 

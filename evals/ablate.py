@@ -67,6 +67,10 @@ CONTROL_ARM = "control"
 INGESTION_PREFIX = "memory_ingestion"
 ARM_LABEL_PREFIX = "ablate"
 EGRESS_BINARY = Path("servers/egress/target/debug/ufo-egress")
+BUILT_TREES = (
+    Path("extensions/web/ufo_ext_web/apps"),
+    Path("extensions/sites/ufo_ext_sites/page/kit"),
+)
 RUNS_DIR = Path("eval-reports/runs")
 EXPERIMENTS_DIR = Path("eval-reports/experiments")
 WORKTREES_DIR = Path(".local/ablate")
@@ -103,6 +107,10 @@ class ExperimentSpec(BaseModel):
     base: str
     suites: tuple[str, ...]
     cases: tuple[str, ...] = ()
+    agent: str = ""
+    """The workspace agent every arm's cases run as, when the text under test is read by one agent
+    rather than by the deploy: an app agent's home skill is measured from that agent's own prompt.
+    Empty runs the default agent."""
     memory_ingestion: Path | None = None
     repeats: int = 1
     concurrency: int = 4
@@ -487,9 +495,17 @@ class Ablation:
         binary.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(self.repo / EGRESS_BINARY, binary)
         binary.chmod(0o755)
+        self._carry_build_output(root)
         config = root / "ablate-template.toml"
         config.write_text(tomli_w.dumps(self.spec.template))
         (root / "ablate-matrix.toml").write_text(tomli_w.dumps(self.matrix(arm, config)))
+
+    def _carry_build_output(self, root: Path) -> None:
+        """Carry the ignored app pages and page SDK into an arm worktree when they exist."""
+        for path in BUILT_TREES:
+            source = self.repo / path
+            if source.is_dir():
+                shutil.copytree(source, root / path, dirs_exist_ok=True)
 
     def _sync(self, root: Path) -> None:
         """Only what the arm runs: `evals.stack`, its serve and its eval children, never the repo's
@@ -511,7 +527,10 @@ class Ablation:
         A memory-ingestion snapshot travels as a row key, never as an argument. The stack owns
         `--memory-ingestion` and `--memory-ingestion-state`, because it materializes the corpus
         itself and only then knows where the readiness state landed."""
-        args = ["--concurrency", str(self.spec.concurrency), "--only", *self.spec.suites]
+        args = ["--concurrency", str(self.spec.concurrency)]
+        if self.spec.agent:
+            args += ["--agent", self.spec.agent]
+        args += ["--only", *self.spec.suites]
         if self.spec.cases:
             args += ["--case", *self.spec.cases]
         corpus: dict[str, object] = (

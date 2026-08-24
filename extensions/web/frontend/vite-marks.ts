@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import type { Plugin } from "vite";
-
-const BASE = "/surface/web/static/";
 
 const OUTLINE_NODES = new URL(
   "./node_modules/@tabler/icons/tabler-nodes-outline.json",
@@ -11,6 +10,10 @@ const OUTLINE_NODES = new URL(
 );
 const MARK_LETTER = /^[a-z]$/;
 const MARK_ATTRIBUTES = new Set(["d", "fill", "stroke", "opacity"]);
+const SPRITES = "__MARK_SPRITES__";
+/** This file, which spells that name rather than reading it: a suite importing the cut reaches
+ *  this module through the same pipeline, where a substitution would land inside the string. */
+const SELF = fileURLToPath(import.meta.url);
 
 type MarkNode = [tag: string, attributes: Record<string, string>];
 
@@ -54,42 +57,56 @@ export function markSprites(): Map<string, { file: string; body: string }> {
 }
 
 /**
- * The sprites, and the one name each is served under. `__MARK_SPRITES__` is how the module that
- * draws a mark learns those hashed names; the dev server answers them from memory, so the loop
+ * The sprites, and the URL the module that draws a mark reads each one from. `__MARK_SPRITES__`
+ * carries those URLs, and a build writes them as `import.meta.ROLLUP_FILE_URL_…` — the reference
+ * rollup keeps for a file it emitted, rendered as `new URL("assets/tabler-…", import.meta.url)`.
+ * That is a reference the next bundler follows: the vite a member runs over the SDK in their own
+ * sandbox emits the sprite into their page's own tree and rewrites the name, which is what a URL
+ * assembled from pieces at runtime can never make it do.
+ *
+ * The dev server has no bundle to emit into and answers the same names from memory, so the loop
  * that never builds the tree draws every mark the built page does. The emit is a build's alone —
- * `define` and the dev answer are wanted under both commands, and `emitFile` exists under neither
- * `vite dev` nor `vitest`.
+ * `emitFile` exists under neither `vite dev` nor `vitest`.
  */
 export function tablerMarks(): Plugin[] {
   const sprites = markSprites();
   const served = new Map([...sprites.values()].map(({ file, body }) => [file, body]));
+  const emitted = new Map<string, string>();
+  let base = "/";
   return [
     {
+      name: "tabler-marks-emit",
+      apply: "build",
+      buildStart() {
+        for (const [letter, { file, body }] of sprites) {
+          emitted.set(letter, this.emitFile({ type: "asset", fileName: file, source: body }));
+        }
+      },
+    },
+    {
       name: "tabler-marks",
-      config: () => ({
-        define: {
-          __MARK_SPRITES__: JSON.stringify(
-            Object.fromEntries([...sprites].map(([letter, { file }]) => [letter, file])),
-          ),
-        },
-      }),
+      configResolved(config) {
+        base = config.base;
+      },
+      transform(code, id) {
+        if (id.startsWith(SELF) || !code.includes(SPRITES)) return null;
+        const read = [...sprites].map(([letter, { file }]) => {
+          const reference = emitted.get(letter);
+          const url = reference
+            ? `import.meta.ROLLUP_FILE_URL_${reference}`
+            : JSON.stringify(base + file);
+          return `${letter}:${url}`;
+        });
+        return { code: code.replaceAll(SPRITES, `{${read.join(",")}}`), map: { mappings: "" } };
+      },
       configureServer(server) {
         server.middlewares.use((request, response, next) => {
-          const asked = (request.url ?? "").split("?")[0].replace(BASE, "").replace(/^\//, "");
+          const asked = (request.url ?? "").split("?")[0].replace(base, "").replace(/^\//, "");
           const body = served.get(asked);
           if (body === undefined) return next();
           response.setHeader("content-type", "image/svg+xml");
           response.end(body);
         });
-      },
-    },
-    {
-      name: "tabler-marks-emit",
-      apply: "build",
-      buildStart() {
-        for (const { file, body } of sprites.values()) {
-          this.emitFile({ type: "asset", fileName: file, source: body });
-        }
       },
     },
   ];

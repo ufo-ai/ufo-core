@@ -140,14 +140,20 @@ build-backend = "hatchling.build"
 # extensions and packs
 # (a source directory whose basename is the import name) map 1:1 through `packages`; the source tree
 # stays in core/, extensions/*, packs/*, testsupport/ exactly as it lives.
-# `artifacts` ships the npm-built pages — the debugger's and the portal's: hatchling drops
-# VCS-ignored files even under explicit `packages`, and this is its escape hatch for build products
-# that must ride the wheel. The portal emits hashed asset names, so its entry names a glob.
+# `artifacts` ships the npm-built trees — the debugger's page, the portal's, the app pages, and the
+# kit a forked page builds against: hatchling drops VCS-ignored files even under explicit
+# `packages`, and this is its escape hatch for build products that must ride the wheel. Each entry
+# names a whole build output directory rather than the names inside it, because a name the build
+# starts emitting is a file every test and `load_apps` reads out of the repo tree: a wheel holding
+# some of the tree serves a different content digest than the one the suite proved, and the paths it
+# lost 404 with the suite green. CI's wheel gate holds each of these directories against the built
+# wheel file by file.
 [tool.hatch.build]
 artifacts = [
-    "/extensions/debugger/ufo_ext_debugger/static/index.html",
-    "/extensions/web/ufo_ext_web/static/index.html",
-    "/extensions/web/ufo_ext_web/static/assets/*",
+    "/extensions/debugger/ufo_ext_debugger/static/*",
+    "/extensions/sites/ufo_ext_sites/page/kit/*",
+    "/extensions/web/ufo_ext_web/apps/*",
+    "/extensions/web/ufo_ext_web/static/*",
 ]
 
 [tool.hatch.build.targets.wheel]

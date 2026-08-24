@@ -42,7 +42,7 @@ install: $(WEB)/node_modules $(DEBUGGER)/node_modules ## Sync Python deps, npm t
 reinstall: ## Rebuild the wheel into the venv — single-file extensions are copied, not linked
 	uv sync --reinstall-package ufo
 
-build: $(WEB)/node_modules $(DEBUGGER)/node_modules ## Build the client, portal, and debugger pages
+build: $(WEB)/node_modules $(DEBUGGER)/node_modules ## Build the client, portal, app pages and SDK, and debugger
 	cargo build --manifest-path client/Cargo.toml --locked
 	npm --prefix $(WEB) run build
 	npm --prefix $(DEBUGGER) run build

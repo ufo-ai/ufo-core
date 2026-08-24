@@ -21,10 +21,9 @@ import type { PaneView } from "@/views/registry";
 
 
 /** An app homepage is the portal's own screen mounted alone: the view, its registry entry, and the
- *  section host are the code the portal ran when the screen was built in, so the page is the
- *  reference rendering rather than a copy of it — the runtime shims are the only seam. Links the
- *  page cannot claim as its own place ride the bridge's navigate verb; the frame's address never
- *  moves. */
+ *  section host are the portal's own modules, so the page is the reference rendering rather than a
+ *  copy of it — the runtime shims are the only seam. Links the page cannot claim as its own place
+ *  ride the bridge's navigate verb; the frame's address never moves. */
 
 /** Route every in-page link: a route the app claims changes its own place; anything else the shell
  *  may take goes over the bridge. Either way the click never mutates the frame's address. */

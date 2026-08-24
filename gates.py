@@ -225,6 +225,9 @@ DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
     (Path(EXTENSIONS_ROOT) / "web" / "ufo_ext_web" / "surface.py", "load_assets"): (
         "the portal's built asset directory is deploy input, listed at boot"
     ),
+    (Path(EXTENSIONS_ROOT) / "web" / "ufo_ext_web" / "surface.py", "load_apps"): (
+        "the built app pages are deploy input, read whole at boot"
+    ),
     (
         CORE_SRC / "ext" / "loader.py",
         "extension_digest",

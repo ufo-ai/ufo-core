@@ -1,7 +1,6 @@
 """The artifacts app: a workspace agent whose homepage lists the workspace's shared files and hosted
-sites. It ships as an `agents` provision on the shared apps infrastructure; its homepage is a static
-page it deploys and edits from the chat column beside it. The page reads through the `app-bridge`
-client."""
+sites. It ships as an `agents` provision on the shared apps infrastructure; its homepage is the
+static page this extension ships, edited and redeployed from the chat column beside it."""
 
 from pathlib import Path
 
@@ -17,9 +16,8 @@ ARTIFACTS_APP_PROMPT = (
     "sites and shared files in one grid newest first, read as tiles or a table, narrowed by "
     "search, scope, and a Sites/Images/Documents/Other filter, paged Newer/Older, with a viewer "
     "for an opened file (image inline, download as its own act, the way out to its conversation) "
-    "and Open links on site cards. On your first turn, load the skill `app-artifacts-home` and "
-    "follow it to deploy its page as your homepage. When a member asks you to change the page, "
-    "edit the deployed page and redeploy it — keep the shelf's controls and viewer working."
+    "and Open links on site cards. When a member asks you to change the page, load the skill "
+    "`app-artifacts-home` and follow it — keep the shelf's controls and viewer working."
 )
 
 ARTIFACTS_APP_AGENT = AgentProvision(

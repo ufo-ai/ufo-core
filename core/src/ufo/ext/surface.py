@@ -1702,15 +1702,6 @@ class SurfaceContext:
         `agent_skills` and this names the shared part."""
         return self._skills.index()
 
-    def deploy_skill_files(self, name: str) -> dict[str, bytes] | None:
-        """One deploy-tier skill's bundled asset files by name, keyed by their skill-relative path,
-        or None when this deploy loads no such skill — the bytes a surface publishes as an app's
-        served page (`index.html`, `app.js`, `app.tsx`), never the `SKILL.md` body. Deploy tier
-        only (`by_name`), so the answer is the same for every workspace and every reader; a member's
-        saved skills, which vary per workspace, are never reached here."""
-        skill = self._skills.by_name.get(name)
-        return None if skill is None else dict(skill.files)
-
     @property
     def models(self) -> tuple[str, ...]:
         """The model ids this deploy's registry serves, `auto` first — the closed set a portal

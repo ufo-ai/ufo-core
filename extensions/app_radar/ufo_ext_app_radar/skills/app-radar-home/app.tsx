@@ -1,7 +1,7 @@
-// The radar app's page: TSX compiled in the browser by the portal's app kit. Everything it
-// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
+// The radar app's page: a static site built with the portal's app kit. Edit this file and redeploy
+// to change the page.
 
-const {
+import {
   ARTIFACT_TEXT_BYTES,
   AgentIcon,
   Avatar,
@@ -20,7 +20,6 @@ const {
   PanelBlank,
   PanelEmpty,
   PressRow,
-  React,
   RebuildDialog,
   Section,
   SectionApp,
@@ -47,7 +46,8 @@ const {
   usePanelRead,
   useState,
   useTextArtifact,
-} = UfoAppKit;
+} from "ufo/kit";
+import type { Crumb, ObjectAddress, Placement, ReactMouseEvent } from "ufo/kit";
 
 const TASK_KIND = "scheduled_task";
 const RUN_PREFIX = "run/";

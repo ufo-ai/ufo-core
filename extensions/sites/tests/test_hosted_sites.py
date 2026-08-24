@@ -17,6 +17,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tarfile
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
@@ -45,7 +46,14 @@ from ufo_ext_sites.share_card import (
     CARD_NAME,
     CARD_WIDTH,
 )
-from ufo_ext_sites.source import CLAIM_TREE_PROG
+from ufo_ext_sites.source import (
+    CLAIM_TREE_PROG,
+    KIT_DIR,
+    KIT_MOUNT,
+    PAGE_KIT_ARCHIVE,
+    PROJECT_CONFIG,
+    PROJECT_SOURCE,
+)
 from ufo_ext_sites.store import (
     HostedSite,
     HostedSites,
@@ -86,6 +94,7 @@ from ufo_ext_sites.tools import (
     PUBLISH_WEBSITE_TOOL,
     SET_HOMEPAGE_TOOL,
     SOURCE_SKIP_NAMES,
+    _site_media_type,
 )
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_testsupport.surfaces import (
@@ -126,7 +135,9 @@ from ufo.sdk.audience import (
     room_audience,
 )
 from ufo.sdk.sandbox import serve_port, shipped_anchor
+from ufo.sdk.skills import RuntimeSkill
 from ufo.serve import RESERVED_HOST_PREFIXES, _mount_shared_surfaces
+from ufo.skills.runtime import SkillRegistry
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
@@ -145,6 +156,16 @@ TOOL_NARRATION = "putting the site online"
 SITE = "marketing"
 SOURCE_LISTING = {"index.html": {"size": 18, "sha256": "ab" * 32}}
 SOURCE_BYTES = b"<html>site</html>"
+APP_TREE_LISTING = {
+    "index.html": {"size": 300, "sha256": "aa" * 32},
+    "assets/index-C0gN-8iR.js": {"size": 900, "sha256": "bb" * 32},
+    "assets/index-Dr-unzSL.css": {"size": 400, "sha256": "cc" * 32},
+    "src/app.tsx": {"size": 120, "sha256": "dd" * 32},
+    "src/index.html": {"size": 90, "sha256": "ee" * 32},
+    "src/lib/starters.tsx": {"size": 40, "sha256": "99" * 32},
+    "src/vite.config.ts": {"size": 60, "sha256": "ff" * 32},
+}
+APP_TREE_PATHS = sorted(APP_TREE_LISTING)
 
 
 def _listed_source() -> ExecResult:
@@ -178,6 +199,35 @@ class FakeSandbox:
 
     async def write_file(self, path: str, content: bytes) -> None:
         return None
+
+    def read_file(self, path: str) -> AsyncIterator[bytes]:
+        async def bytes_of() -> AsyncIterator[bytes]:
+            yield SOURCE_BYTES
+
+        return bytes_of()
+
+
+@dataclass
+class WorkingSandbox:
+    """A sandbox whose written files persist, so the materialization stamp round-trips."""
+
+    files: dict[str, bytes] = field(default_factory=dict)
+    listing: dict[str, dict[str, object]] = field(default_factory=lambda: SOURCE_LISTING)
+    conversation_id: UUID = field(default_factory=uuid4)
+
+    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
+        if command.startswith("cat "):
+            held = self.files.get(shlex.split(command)[1], b"")
+            return ExecResult(stdout=held.decode(), stderr="", exit_code=0)
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if program is ENUMERATE_PROG:
+            return ExecResult(stdout=json.dumps(self.listing), stderr="", exit_code=0)
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def write_file(self, path: str, content: bytes) -> None:
+        self.files[path] = content
 
     def read_file(self, path: str) -> AsyncIterator[bytes]:
         async def bytes_of() -> AsyncIterator[bytes]:
@@ -370,9 +420,12 @@ async def _seed_member(
 
 
 async def _seed_conversation(
-    workspace: Workspace, audience: Audience, member_id: UUID | None
+    workspace: Workspace,
+    audience: Audience,
+    member_id: UUID | None,
+    conversation_id: UUID | None = None,
 ) -> UUID:
-    conversation_id = uuid4()
+    conversation_id = conversation_id or uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.conversation).values(
@@ -436,14 +489,17 @@ def _bind(
     *,
     serving_conversation_id: UUID | None = None,
     subagent_profile: str | None = None,
-    sandbox: FakeSandbox | ShootingSandbox | None = None,
+    sandbox: FakeSandbox | ShootingSandbox | WorkingSandbox | None = None,
+    skills: SkillRegistry | None = None,
 ) -> ToolContext:
     """The turn and the sandbox it runs in, bound together. `serving_conversation_id` is the
     conversation whose sandbox is answering — the turn's own unless this is a subagent turn, which
     runs in the sandbox of the turn that spawned it. `sandbox` is which stand-in answers that
-    container's commands: the plain one, or the one that photographs the page."""
+    container's commands: the plain one, or the one that photographs the page. `skills` is the
+    deploy's registry the turn resolves app pages through."""
     return replace(
         ctx,
+        skills=skills or ctx.skills,
         sandbox=replace(
             sandbox or FakeSandbox(),
             conversation_id=serving_conversation_id or conversation_id,
@@ -477,7 +533,7 @@ async def _deploy(
     *,
     site: str = SITE,
     visibility: str | None = None,
-    sandbox: FakeSandbox | ShootingSandbox | None = None,
+    sandbox: FakeSandbox | ShootingSandbox | WorkingSandbox | None = None,
     blob: WorkspaceBlobStore | None = None,
 ) -> dict[str, object]:
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience, blob=blob)
@@ -3001,6 +3057,67 @@ def _manifest_json(conversation_id: UUID, name: str, token: str) -> str:
     ).model_dump_json()
 
 
+def _manifest(root: str, listing: dict[str, dict[str, object]]) -> SourceManifest:
+    return SourceManifest(
+        root=root,
+        files={
+            path: SiteFile(
+                size=int(str(entry["size"])),
+                media_type="text/plain",
+                sha256=str(entry["sha256"]),
+            )
+            for path, entry in listing.items()
+        },
+    )
+
+
+def test_the_kit_alias_resolves_beside_the_page_a_deploy_builds(tmp_path: Path) -> None:
+    """A deploy writes the config and the kit beside the page it was handed, so the `./sdk/kit.js`
+    the config aliases `ufo/kit` to walks from that directory onto a file the same deploy wrote."""
+    for path in (PROJECT_SOURCE, PROJECT_CONFIG, "index.html", "sdk/kit.js"):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_bytes(b"landed")
+    aliased = ((tmp_path / PROJECT_CONFIG).parent / "./sdk/kit.js").resolve()
+    assert aliased == tmp_path / "sdk/kit.js"
+    assert aliased.is_file()
+
+
+def test_the_kit_archive_holds_the_deploys_whole_sdk_under_the_alias_it_resolves() -> None:
+    """The kit goes into a sandbox as one archive because it is 148 files: unpacked at `sdk/` beside
+    the project, `../sdk/kit.js` walks from the config onto a member of this same archive. Every
+    member is a regular file, which is what lets the unpack refuse anything else."""
+    with tarfile.open(fileobj=BytesIO(PAGE_KIT_ARCHIVE)) as archive:
+        members = archive.getmembers()
+    assert members, f"{KIT_DIR} is unbuilt: npm run build"
+    assert all(member.isfile() for member in members)
+    held = {member.name for member in members}
+    assert held == {
+        f"{KIT_MOUNT}/{path.relative_to(KIT_DIR).as_posix()}"
+        for path in KIT_DIR.rglob("*")
+        if path.is_file()
+    }
+    assert "sdk/kit.js" in held
+
+
+def test_every_kind_an_app_page_build_writes_is_typed_by_a_deploy() -> None:
+    """A built app page's `dist/` is not hand-written HTML: `vite build` re-emits the kit's
+    stylesheet, its logos and its font faces beside the page, then the project itself lands under
+    `src/`. Each of those suffixes is what a member's browser is served, and a font handed over as
+    `application/octet-stream` is one the page draws nothing with."""
+    for suffix, expected in (
+        ("html", "text/html; charset=utf-8"),
+        ("js", "text/javascript; charset=utf-8"),
+        ("css", "text/css; charset=utf-8"),
+        ("png", "image/png"),
+        ("svg", "image/svg+xml"),
+        ("ttf", "font/ttf"),
+        ("woff2", "font/woff2"),
+        ("ts", "text/plain; charset=utf-8"),
+        ("tsx", "text/plain; charset=utf-8"),
+    ):
+        assert _site_media_type(f"assets/held.{suffix}") == expected
+
+
 def test_a_source_root_must_be_a_sites_or_apps_prefix() -> None:
     """`_rooted` admits both serving families — `sites/` for a workspace fork, `apps/` for a shipped
     bundle — and refuses a root that ends elsewhere or does not end at a prefix, so a manifest can
@@ -3245,34 +3362,6 @@ async def test_object_get_gates_a_stranger_and_skips_a_serverful_app(db: None) -
     assert served["status"]["files"] == []
 
 
-@dataclass
-class WorkingSandbox:
-    """A sandbox whose written files persist, so the materialization stamp round-trips."""
-
-    files: dict[str, bytes] = field(default_factory=dict)
-    conversation_id: UUID = field(default_factory=uuid4)
-
-    async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
-        if command.startswith("cat "):
-            held = self.files.get(shlex.split(command)[1], b"")
-            return ExecResult(stdout=held.decode(), stderr="", exit_code=0)
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
-        if program is ENUMERATE_PROG:
-            return _listed_source()
-        return ExecResult(stdout="", stderr="", exit_code=0)
-
-    async def write_file(self, path: str, content: bytes) -> None:
-        self.files[path] = content
-
-    def read_file(self, path: str) -> AsyncIterator[bytes]:
-        async def bytes_of() -> AsyncIterator[bytes]:
-            yield SOURCE_BYTES
-
-        return bytes_of()
-
-
 async def test_a_repeat_object_get_inside_one_generation_transfers_nothing(db: None) -> None:
     workspace = await _seed_workspace()
     owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
@@ -3300,13 +3389,70 @@ async def test_a_repeat_object_get_inside_one_generation_transfers_nothing(db: N
         assert working.files[page] == SOURCE_BYTES
 
 
-async def _dispatch_get(tool: ToolDef, ctx: ToolContext, name: str) -> None:
-    await tool.handler(
+APP_PAGE_SKILLS = SkillRegistry(
+    {"app-chat-home": RuntimeSkill(name="app-chat-home", description="", instructions="")}
+)
+
+
+async def test_a_reset_to_shipped_leaves_no_source_to_shadow_the_next_fork(db: None) -> None:
+    """Resetting an app page to the shipped tree is deleting the forked row: the link stops
+    resolving, and the source the fork promoted stays in the store under its own immutable keys.
+    What the fork left in the sandbox cannot shadow the next fork — a new row's deploy generation
+    is above whatever the stale stamp holds, so the read claims the destination again and every
+    file under it is the new deploy's."""
+    workspace = await _seed_workspace()
+    owner_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(owner_id)
+    conversation = await _seed_conversation(
+        workspace, audience, owner_id, shipped_anchor(workspace.id, "chat")
+    )
+    blob = _source_store()
+    working = WorkingSandbox(listing=APP_TREE_LISTING)
+    deployed = await _deploy(
+        workspace, conversation, audience, owner_id, site="chat-home", blob=blob, sandbox=working
+    )
+    name = str(deployed["site"])
+    page = f"/workspace/sites/{name}/src/app.tsx"
+    tool, ctx = _tool("object_get", audience, blob=blob)
+    bound = replace(
+        _bind(ctx, workspace, conversation, owner_id, skills=APP_PAGE_SKILLS), sandbox=working
+    )
+
+    with ws(workspace.id):
+        await _dispatch_get(tool, bound, name)
+        working.files[page] = b"the member's edit"
+        await _verb(
+            "object_delete", workspace, conversation, owner_id, blob=blob, kind=SITE_KIND, name=name
+        )
+        assert await _stored(workspace) == ()
+        reforked = await _deploy(
+            workspace,
+            conversation,
+            audience,
+            owner_id,
+            site="chat-home",
+            blob=blob,
+            sandbox=working,
+        )
+        assert str(reforked["site"]) == name
+        status = await _dispatch_get(tool, bound, name)
+
+    assert status["files"] == APP_TREE_PATHS
+    assert working.files[page] == SOURCE_BYTES
+
+
+async def _dispatch_get(tool: ToolDef, ctx: ToolContext, name: str) -> dict[str, object]:
+    result = await tool.handler(
         ctx,
         tool.input_model.model_validate(
             {"user_description": TOOL_NARRATION, "kind": SITE_KIND, "name": name}
         ),
     )
+    fetched = yaml.safe_load(result.content[0].text)
+    assert isinstance(fetched, dict)
+    status = fetched["status"]
+    assert isinstance(status, dict)
+    return status
 
 
 async def test_a_homepage_redeploy_unhosts_what_its_scratch_server_displaces(db: None) -> None:

@@ -20,7 +20,8 @@ This mode runs as one process. It uses SQLite and local files. It does not need 
 2. Run `make setup`. This creates `.env`. It does not change an existing `.env`.
 3. Set `UFO_ANTHROPIC_API_KEY` and `UFO_OPENAI_API_KEY` in `.env`.
 4. Run `make init EMAIL=you@example.com`. This writes `ufo.toml`.
-5. Run `make build`. This builds the web portal, the local client.
+5. Run `make build`. This builds the web portal, the five app pages, the page SDK they are built
+   against, and the debugger pages.
 6. Run `make serve`. This starts the surfaces and the workers.
 7. In a second terminal, run `make portal`. The portal opens in your browser, signed in.
 

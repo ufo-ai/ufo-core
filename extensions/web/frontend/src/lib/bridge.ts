@@ -38,7 +38,6 @@ const ENDPOINTS: Endpoint[] = (
     ["GET", "agents/{id}/conversations/{cid}/transcript"],
     ["GET", "agents/{id}/conversations/{cid}/slots"],
     ["GET", "agents/{id}/conversations/{cid}/slots/{slot}"],
-    ["GET", "static/assets/{file}"],
     ["POST", "objects/{kind}", "json"],
     ["POST", "objects/{kind}/{name}/delete", "json"],
     ["POST", "agents/{id}/chat", "text"],
@@ -277,7 +276,6 @@ export function attachBridge({
           member: { email: member.email, admin: member.admin },
           agentId,
           place: standing,
-          open: standing.opens?.[0] ?? null,
           crumb:
             crumb?.at && framedNavigation(crumb.at)
               ? { ...crumb, at: new URL(crumb.at, location.origin + BASE).href }
@@ -442,7 +440,6 @@ export function attachBridge({
     place: (next: WorkspacePlace) => {
       standing = next;
       page?.postMessage({ ufo: "place", place: next }, { targetOrigin: "*" });
-      page?.postMessage({ ufo: "open", target: next.opens?.[0] ?? null }, { targetOrigin: "*" });
     },
   };
 }

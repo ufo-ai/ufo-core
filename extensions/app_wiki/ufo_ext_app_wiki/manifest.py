@@ -1,7 +1,7 @@
 """The wiki app: a workspace agent whose homepage reads the workspace's shared memory as a document
 and the member roster. It ships as an `agents` provision on the shared apps infrastructure; its
-homepage is a static page it deploys and edits from the chat column beside it. The page reads
-through the `app-bridge` client."""
+homepage is the static page this extension ships, edited and redeployed from the chat column beside
+it."""
 
 from pathlib import Path
 
@@ -17,10 +17,9 @@ WIKI_APP_PROMPT = (
     "from the workspace's consolidated memory, the People roster as the way into one member's own "
     "page, the shared memory set out under topic sections (how the team works, decisions, open "
     "work, history, facts), a details group, and a page-actions menu whose Rebuild page facts act "
-    "queues the derivation job through the main agent. On your first turn, load the skill "
-    "`app-wiki-home` and follow it to deploy its page as your homepage. When a member asks you to "
-    "change the page, edit the deployed page and redeploy it — keep the document shape and the "
-    "rebuild act."
+    "queues the derivation job through the main agent. When a member asks you to change the "
+    "page, load the skill `app-wiki-home` and follow it — keep the document shape and the rebuild "
+    "act."
 )
 
 WIKI_APP_AGENT = AgentProvision(

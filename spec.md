@@ -573,8 +573,18 @@ where the member has not opened it; every one of the app's conversations stands 
 beside it, and pressing one opens it. The homepage read has three states, so the page a
 member is waiting for is not the page that is not there: `building` while the seed run that builds
 an agent's first homepage is still working, drawn as the shape a page takes; `set` once one is
-bound; and `none`, where the pane draws the conversation column alone. Beside
-chat, each selected agent
+bound; and `none`, where the pane draws the conversation column alone. Five applications are pages
+the deploy carries: the chat, radar, tasks, artifacts, and wiki extensions ship one page source
+each, and the portal's build compiles the five into one static tree of shared hashed chunks,
+published under the digest of its own bytes and served at the frame origin's root. Such a page needs
+no workspace row, no sandbox, and no seed turn, so a workspace that has not edited its copy tracks
+the deploy. A page's whole dependency surface is one module — the portal's own components and reads,
+with the JSX runtime inside it — built beside the pages as the SDK a member's own copy compiles
+against: the app's agent takes the page project and that SDK into its sandbox, edits the one source
+file, builds it there, and deploys the result through the standing site tools, so the workspace then
+owns its copy at its own origin and unbinding it returns the app to the page the deploy carries.
+
+Beside chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its homepage (the frame link
 of the hosted site `set_homepage` bound — a background job seeds one homepage-build turn per
 agent, ever, in the acting member's own room; the homepage's audience IS the agent's, resolved at

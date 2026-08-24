@@ -1,6 +1,6 @@
 """The radar app: a workspace agent whose homepage shows the digest of recent scheduled runs. It
-ships as an `agents` provision on the shared apps infrastructure; its homepage is a static page it
-deploys and edits from the chat column beside it. The page reads through the `app-bridge` client."""
+ships as an `agents` provision on the shared apps infrastructure; its homepage is the static page
+this extension ships, edited and redeployed from the chat column beside it."""
 
 from pathlib import Path
 
@@ -16,9 +16,8 @@ RADAR_APP_PROMPT = (
     "run as an entry on a rail — its digest title, summary, and points, the task and moment it "
     "fired, and a cover picture — opening into the full story with its files, its report, its "
     "conversation, and the reports to read next. The header carries the Rebuild entries control. "
-    "On your first turn, load the skill `app-radar-home` and follow it to deploy its page as your "
-    "homepage. When a member asks you to change the page, edit the deployed page and redeploy it "
-    "— keep the feed, the story view, and the rebuild control working."
+    "When a member asks you to change the page, load the skill `app-radar-home` and follow it — "
+    "keep the feed, the story view, and the rebuild control working."
 )
 
 RADAR_APP_AGENT = AgentProvision(

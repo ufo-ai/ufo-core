@@ -95,7 +95,6 @@ from ufo.schema.records import (
     ToolIntent,
     TurnContext,
 )
-from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 from ufo.sources.backend import binding_name
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
@@ -1916,28 +1915,6 @@ def test_ingress_url_carries_the_shipped_claim(tmp_path, monkeypatch: pytest.Mon
     assert plain is not None
     plain_token = urlsplit(plain).path.removeprefix(f"{INGRESS_VIEW_PATH}/")
     assert verify_ingress_token(plain_token, datetime.now(UTC), INGRESS_VIEW_KIND).shipped is None
-
-
-def test_deploy_skill_files_reads_the_deploy_tier(tmp_path) -> None:
-    """A surface reads a deploy-tier skill's bundled files by name — the bytes a shipped app page is
-    served as — and gets None for a name this deploy loads no skill under. The `SKILL.md` body is
-    not among them: only the mounted asset files."""
-    skill = RuntimeSkill(
-        name="app-radar-home",
-        description="",
-        instructions="",
-        files=(("index.html", b"<html></html>"), ("app.js", b"//app")),
-        raw_skill_md="# home",
-    )
-    context = replace(
-        _context(uuid4(), StubDbos(), FilesystemBlobStore(root=tmp_path)),
-        _skills=SkillRegistry(by_name={"app-radar-home": skill}),
-    )
-    assert context.deploy_skill_files("app-radar-home") == {
-        "index.html": b"<html></html>",
-        "app.js": b"//app",
-    }
-    assert context.deploy_skill_files("app-nope-home") is None
 
 
 async def test_poller_delivers_a_done_turn_and_attaches_its_files(db: None, tmp_path) -> None:

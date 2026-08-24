@@ -1,10 +1,13 @@
+import re
 from pathlib import Path
 
 import ufo_ext_app_chat.manifest as app_chat
 
-
-def _skill_dir(name: str) -> Path:
-    return Path(app_chat.__file__).parent / "skills" / name
+SKILL_DIR = Path(app_chat.__file__).parent / "skills" / "app-chat-home"
+BUILD_ENTRY = (
+    Path(app_chat.__file__).parents[2] / "web" / "frontend" / "apps" / "chat" / "index.html"
+)
+MODULE_SCRIPT = re.compile(r'<script type="module" src="([^"]+)">')
 
 
 def test_app_chat_ships_one_workspace_agent() -> None:
@@ -15,37 +18,31 @@ def test_app_chat_ships_one_workspace_agent() -> None:
     assert provision.icon == "message-circle"
     assert provision.spec.visibility == "workspace"
     assert "app-chat-home" in provision.spec.prompt
-    # tools None gives the member-facing set, so the homepage seed job can build and bind the page.
     assert provision.tools is None
 
 
-def test_app_chat_ships_the_bridge_and_home_skills() -> None:
+def test_app_chat_ships_the_home_skill() -> None:
     manifest = app_chat.manifest()
-    names = {path.name for path in (spec.path for spec in manifest.skills)}
-    assert names == {"app-bridge", "app-chat-home"}
-    assert (_skill_dir("app-bridge") / "bridge.js").is_file()
-    assert (_skill_dir("app-bridge") / "SKILL.md").is_file()
+    assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-chat-home"}
+    assert (SKILL_DIR / "SKILL.md").is_file()
+    assert (SKILL_DIR / "app.tsx").is_file()
 
 
-def test_the_page_is_the_apps_own_tsx_run_by_the_kit() -> None:
-    page = (_skill_dir("app-chat-home") / "index.html").read_text()
-    assert '<script src="./bridge.js">' in page
-    assert '<script src="./app.js">' in page
-    loader = (_skill_dir("app-chat-home") / "app.js").read_text()
-    assert 'UfoAppKit.run("./app.tsx")' in loader
-    assert 'init.portal + "/surface/web/static/assets/"' in loader
-    source = (_skill_dir("app-chat-home") / "app.tsx").read_text()
-    assert "= UfoAppKit;" in source
+def test_the_built_page_is_the_apps_own_tsx() -> None:
+    entry = MODULE_SCRIPT.search(BUILD_ENTRY.read_text())
+    assert entry is not None
+    assert (BUILD_ENTRY.parent / entry[1]).resolve() == (SKILL_DIR / "app.tsx").resolve()
+    source = (SKILL_DIR / "app.tsx").read_text()
     assert "ChatPane" in source
     assert "mountApp(" in source
 
 
-def test_the_home_skill_stages_the_page_and_the_bridge() -> None:
-    skill = (_skill_dir("app-chat-home") / "SKILL.md").read_text()
-    assert "app-bridge" in skill
-    assert (
-        "cp .skills/app-chat-home/index.html .skills/app-chat-home/app.js "
-        ".skills/app-chat-home/app.tsx .skills/app-bridge/bridge.js site/"
-    ) in skill
-    assert "deploy_website" in skill
+def test_the_home_skill_edits_builds_and_deploys_the_project() -> None:
+    skill = (SKILL_DIR / "SKILL.md").read_text()
+    assert "Copy this skill's `app.tsx` and `index.html`" in skill
+    assert "Edit `app.tsx`" in skill
+    assert "`deploy_website` with that directory and `site_name` `chat-home`" in skill
+    assert "do not run a build yourself" in skill
     assert "set_homepage" in skill
+    assert "`object_get` the site" in skill
+    assert "edit the `app.tsx` under `src`" in skill

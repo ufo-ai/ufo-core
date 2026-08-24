@@ -195,10 +195,13 @@ PIP_PACKAGES = (
 )
 # Globally installed under the npm --prefix (/usr/local) so the pptx/docx/pdf/website/game scripts
 # `require()` them from any cwd; SANDBOX_ENV exports NODE_PATH so resolution is base-independent.
+# vite turns an app page's project — its source and the kit it composes against — into the static
+# site the agent deploys.
 # playwright drives the website-building game test client; its browser binary installs separately
 # into PLAYWRIGHT_BROWSERS_DIR (the npm package alone can't launch).
 NPM_PACKAGES = (
     "pptxgenjs",
+    "vite",
     "react",
     "react-dom",
     "react-icons",
@@ -221,6 +224,7 @@ set -ex
 command -v python3 >/dev/null
 command -v node >/dev/null
 command -v ufo >/dev/null
+command -v vite >/dev/null
 command -v rg >/dev/null
 command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null

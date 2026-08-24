@@ -2,12 +2,14 @@ import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
 import type { WorkspacePlace } from "@/lib/route";
 import type { Crumb } from "@/lib/title";
 
-/** The app page's side of the bridge (RFC 0039, `docs/apps-prototype-contracts.md` Contract 1),
- *  shaped so the portal's own modules run in the page unchanged: `connect` performs the
- *  ready/init handshake, and `installShims` reroutes the page's `fetch` and `EventSource` for
- *  `BASE`-prefixed paths through the shell's `call` verb — `lib/api`, `lib/turnStream`, and every
- *  kernel read work verbatim, and the page never speaks the protocol itself. Everything else —
- *  the page's own assets, absolute signed artifact links — keeps the native path. */
+/** The app page's side of the bridge (RFC 0039, `docs/apps-prototype-contracts.md` Contract 1) and
+ *  the whole of what a page needs from the portal: the page is a built bundle that imports this
+ *  module with the rest of the kit, so nothing is fetched off the portal to make it run. `connect`
+ *  performs the ready/init handshake, and `installShims` reroutes the page's `fetch` and
+ *  `EventSource` for `BASE`-prefixed paths through the shell's `call` verb — `lib/api`,
+ *  `lib/turnStream`, and every kernel read work verbatim, and the page never speaks the protocol
+ *  itself. Everything else — the page's own assets, absolute signed artifact links — keeps the
+ *  native path. */
 
 export type AppInit = {
   member: { email: string; admin: boolean };
@@ -15,17 +17,13 @@ export type AppInit = {
   /** The place the pane opened the page at, whole: the same record a portal tab stands on, so a page
    *  reads its screen off the address the member arrived with rather than off one field of it. */
   place: WorkspacePlace;
-  /** The place's first lane — the single-record reading a page that stands on one open target
-   *  takes, carried beside the whole record because a deployed page reads whichever of the two its
-   *  source was written against, and the kit serves every deployed page. */
-  open: string | null;
   /** Where this page stands in the portal, as the shell's own trail names it: the label and the
    *  address it stands at. The page's band draws it as its crumb whenever that band names something
    *  deeper than the page — a report, a member's page — so where the member is reads the same inside
    *  the frame as the tab title says outside it. One band per page: the crumb joins the page's own
    *  band rather than restoring a band above it. */
   crumb?: Crumb;
-  /** The portal's origin, which is where the page's own loader fetched the kit from. */
+  /** The portal's origin, which a page names an artifact of another conversation from. */
   portal: string;
 };
 
@@ -107,10 +105,14 @@ window.addEventListener("message", (event: MessageEvent) => {
   }
 });
 
-/** The handshake: announce `ready` until the shell's `init` arrives. A page opened outside the
- *  shell settles as a rejection after the bounded retries rather than spinning forever. */
+/** The handshake: announce `ready` until the shell's `init` arrives. The shell attaches its
+ *  listener when the pane mounts, so a frame whose bundle evaluated first would lose a single
+ *  `ready` — hence the retries. They are bounded because a page nothing frames would otherwise
+ *  post forever, and the wait is not: an `init` arriving after the last `ready` still mounts the
+ *  page, so a shell slower than the budget costs a page nothing. A page nothing frames stays
+ *  unmounted, which is all there is to draw without a shell to read through. */
 export function connect(): Promise<AppInit> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     if (init) {
       resolve(init);
       return;
@@ -118,12 +120,7 @@ export function connect(): Promise<AppInit> {
     announce = resolve;
     let attempts = 0;
     const retry = () => {
-      if (init) return;
-      if (attempts++ >= READY_ATTEMPTS) {
-        announce = null;
-        reject(new Error("no portal shell answered"));
-        return;
-      }
+      if (init || attempts++ >= READY_ATTEMPTS) return;
       send({ ufo: "ready" });
       setTimeout(retry, READY_RETRY_MS);
     };
@@ -143,12 +140,6 @@ export function founded(agentId: string, conversationId: string, title: string):
 
 /** The pane's place as it changes while the page stands — the live half of `init`'s `place`. Returns
  *  the unsubscribe. */
-/** The place's first lane as it changes while the page stands — the single-target reading of
- *  `onPlaced`, for a page whose screen stands on one open record. Returns the unsubscribe. */
-export function onOpenTarget(listener: (target: string | null) => void): () => void {
-  return onPlaced((place) => listener(place.opens?.[0] ?? null));
-}
-
 export function onPlaced(listener: (place: WorkspacePlace) => void): () => void {
   PLACE_LISTENERS.add(listener);
   return () => {

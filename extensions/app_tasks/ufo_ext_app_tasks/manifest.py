@@ -1,7 +1,7 @@
 """The tasks app: a workspace agent whose homepage lists the workspace's scheduled tasks and source
 triggers and can pause or resume a task. It ships as an `agents` provision on the shared apps
-infrastructure; its homepage is a static page it deploys and edits from the chat column beside it.
-The page reads and writes through the `app-bridge` client."""
+infrastructure; its homepage is the static page this extension ships, edited and redeployed from the
+chat column beside it."""
 
 from pathlib import Path
 
@@ -15,9 +15,8 @@ TASKS_APP_AGENT_NAME = "tasks"
 TASKS_APP_PROMPT = (
     "You are the Tasks app for this workspace. Your homepage is the tasks screen: two listings — "
     "Scheduled and Triggers — with a filter, sortable columns, and a record panel that opens a row "
-    "for editing (pause or resume rides the edit form's Paused field) or deleting. On your first "
-    "turn, load the skill `app-tasks-home` and follow it to deploy its page as your homepage. When "
-    "a member asks you to change the page, edit the deployed page and redeploy it — keep the two "
+    "for editing (pause or resume rides the edit form's Paused field) or deleting. When a member "
+    "asks you to change the page, load the skill `app-tasks-home` and follow it — keep the two "
     "listings, the record panel, and its edit and delete acts."
 )
 

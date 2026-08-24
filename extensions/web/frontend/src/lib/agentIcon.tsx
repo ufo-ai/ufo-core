@@ -47,8 +47,9 @@ import {
   Ziggurat,
 } from "@/lib/elementIcons";
 
-/** The sprite each opening letter's marks are drawn in, by letter, under the hashed name
- *  `vite.config.ts` cut and emitted it as. */
+/** The sprite each opening letter's marks are drawn in, by letter, at the URL the build resolved
+ *  for the file it emitted — a reference the bundler owns, so a page built against the kit reads
+ *  the sprites its own build emitted rather than a name only this tree answers. */
 declare const __MARK_SPRITES__: Record<string, string>;
 
 /** The product's own mark: reserved, so the picker offers it to no app, while the row that holds
@@ -204,14 +205,15 @@ function readSprite(letter: string): Promise<void> {
   return asked;
 }
 
-/** A sprite the surface cannot answer reads as no marks rather than rejecting: the caller reports
- *  the slug it could not draw and draws the unknown mark, which is what keeps a row whose mark is
- *  missing a row the member can still read and open. */
+/** Every mark one letter's sprite draws, from the URL the build resolved for the file it emitted
+ *  beside this module. A sprite the page cannot read reads as no marks rather than rejecting: the
+ *  caller reports the slug it could not draw and draws the unknown mark, which is what keeps a row
+ *  whose mark is missing a row the member can still read and open. */
 async function fetchSprite(letter: string): Promise<Map<string, MarkPath[]>> {
   const read = new Map<string, MarkPath[]>();
   const file = __MARK_SPRITES__[letter];
   if (!file) return read;
-  const answer = await fetch(import.meta.env.BASE_URL + file).catch(() => null);
+  const answer = await fetch(file).catch(() => null);
   if (!answer?.ok) {
     console.error("no marks were served for " + letter);
     return read;

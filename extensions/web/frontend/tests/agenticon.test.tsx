@@ -7,8 +7,10 @@ import { expect, test, vi } from "vitest";
 import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
 import { ELEMENT_ICONS } from "@/lib/elementIcons";
 
-/** The sprites `vite.config.ts` cut, named as it hashed them. */
+/** The sprites `vite.config.ts` cut, at the URLs it resolved them to. */
 declare const __MARK_SPRITES__: Record<string, string>;
+
+const SPRITE_A = new RegExp(`^${import.meta.env.BASE_URL}assets/tabler-a-[0-9a-f]{8}\\.svg$`);
 
 const STATIC = join(import.meta.dirname, "..", "..", "ufo_ext_web", "static");
 /** The brand's own artwork, where the brand keeps it: the portal wears these files rather than a
@@ -58,8 +60,8 @@ test("a mark the picker never offers draws, from tabler's own paths", async () =
   expect([...container.querySelectorAll("path")].map((path) => path.getAttribute("d"))).toEqual(
     OUTLINE.anchor.map(([, attributes]) => attributes.d),
   );
-  expect(asked).toEqual(["/surface/web/static/" + __MARK_SPRITES__.a]);
-  expect(__MARK_SPRITES__.a).toMatch(/^assets\/tabler-a-[0-9a-f]{8}\.svg$/);
+  expect(asked).toEqual([__MARK_SPRITES__.a]);
+  expect(__MARK_SPRITES__.a).toMatch(SPRITE_A);
 });
 
 test("the mark takes the ink around it, and states no colour of its own", async () => {
@@ -86,7 +88,7 @@ test("a second mark under a letter already read draws without asking again", asy
   const second = render(<AgentIcon name="wand" />);
   await waitFor(() => expect(second.container.querySelector("path")).not.toBeNull());
 
-  expect(asked).toEqual(["/surface/web/static/" + __MARK_SPRITES__.w]);
+  expect(asked).toEqual([__MARK_SPRITES__.w]);
   expect([...second.container.querySelectorAll("path")].map((path) => path.getAttribute("d"))).toEqual(
     OUTLINE.wand.map(([, attributes]) => attributes.d),
   );
@@ -108,6 +110,26 @@ test("a name no sprite answers is reported and drawn as the unknown mark, and it
   );
   expect(screen.getByText("Support")).toBeTruthy();
   expect(faults.mock.calls.map(String)).toContain("no app mark is drawn for zzz-no-such-mark");
+});
+
+/** A sprite the page cannot read is the other case, and it is not data: the URL is one this bundle
+ *  resolved for a file it emitted, so nothing but a build that lost the file answers it. That raises
+ *  where the mark was asked for. It hid here before, behind a caught fetch and a console line, as
+ *  every mark under the letter drawn from no paths at all — which is what a build whose marks were
+ *  unreachable looked like from the outside. */
+test("a sprite the page cannot read draws no mark, and the row around it stands", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("not found", { status: 404 })));
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  render(
+    <>
+      <AgentIcon name="quote" />
+      <span>Quotes</span>
+    </>,
+  );
+
+  await waitFor(() => expect(logged).toHaveBeenCalledWith("no marks were served for q"));
+  expect(screen.getByText("Quotes")).not.toBeNull();
 });
 
 test("a name that could name no mark at all is answered without a fetch", () => {

@@ -1,7 +1,7 @@
-// The artifacts app's page: TSX compiled in the browser by the portal's app kit. Everything it
-// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
+// The artifacts app's page: a static site built with the portal's app kit. Edit this file and redeploy
+// to change the page.
 
-const {
+import {
   ArtifactText,
   CardGrid,
   DataTable,
@@ -19,7 +19,6 @@ const {
   Panel,
   PanelBlank,
   PanelEmpty,
-  React,
   Section,
   SectionApp,
   Segmented,
@@ -47,7 +46,8 @@ const {
   useRef,
   useState,
   useViewer,
-} = UfoAppKit;
+} from "ufo/kit";
+import type { Face, FacetGroup, ObjectRow, PanelState, Placement, ReactNode, RefObject } from "ufo/kit";
 
 const SITE_KIND = "site";
 

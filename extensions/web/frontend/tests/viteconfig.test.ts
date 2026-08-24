@@ -1,5 +1,6 @@
 // @vitest-environment node
 // Loading the config runs esbuild, which needs the real platform globals jsdom replaces.
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { expect, test } from "vitest";
@@ -51,4 +52,37 @@ test("the rule routes each request through the predicate", async () => {
   expect(routed("POST", "/surface/web")).toBeUndefined();
   expect(routed("GET", "/surface/web/api/agents")).toBeUndefined();
   expect(routed("GET", "/ext/metronome/billing")).toBeUndefined();
+});
+
+/**
+ * The apps tree is one directory the pages build owns and the SDK build adds to, published whole
+ * under `apps/<digest>/` and read whole by the web surface. The digest covers every file, so a
+ * second build that emptied the directory, or a run of the two in the other order, would publish a
+ * tree missing either the pages or the module a forked page is built against — and no page would
+ * fail until a member forked one.
+ */
+test("the pages and the SDK build into the trees that serve and materialize them", async () => {
+  const loaded = async (config: string) => {
+    const found = await loadConfigFromFile(
+      { command: "build", mode: "production" },
+      join(import.meta.dirname, "..", config)
+    );
+    if (!found) throw new Error(`${config} did not load`);
+    return found.config.build ?? {};
+  };
+  const apps = await loaded("vite.apps.config.ts");
+  const sdk = await loaded("vite.sdk.config.ts");
+  expect(apps.outDir).toBe(join(import.meta.dirname, "..", "..", "ufo_ext_web", "apps"));
+  expect(sdk.outDir).toBe(
+    join(import.meta.dirname, "..", "..", "..", "sites", "ufo_ext_sites", "page", "kit")
+  );
+  expect(apps.emptyOutDir).toBe(true);
+  expect(sdk.emptyOutDir).toBe(true);
+
+  const script = JSON.parse(
+    readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")
+  ).scripts.build as string;
+  for (const config of ["vite.apps.config.ts", "vite.sdk.config.ts"]) {
+    expect(script.indexOf(config)).toBeGreaterThan(-1);
+  }
 });

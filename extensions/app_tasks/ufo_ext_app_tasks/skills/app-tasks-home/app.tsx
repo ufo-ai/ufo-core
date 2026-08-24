@@ -1,16 +1,16 @@
-// The tasks app's page: TSX compiled in the browser by the portal's app kit. Everything it
-// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
+// The tasks app's page: a static site built with the portal's app kit. Edit this file and redeploy
+// to change the page.
 
-const {
+import {
   Header,
   HeldRecords,
   ObjectPane,
-  React,
   SectionApp,
   mountApp,
   usePageHead,
   useState,
-} = UfoAppKit;
+} from "ufo/kit";
+import type { Placement } from "ufo/kit";
 
 /** What is armed to run an agent when nobody is typing: a clock, or a source that changed. The two
  *  are one destination because a member asking what stands ready here asks one question, and an

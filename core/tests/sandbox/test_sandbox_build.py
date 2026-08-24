@@ -96,6 +96,7 @@ EXPECTED_PIP = (
 )
 EXPECTED_NPM = (
     "pptxgenjs",
+    "vite",
     "react",
     "react-dom",
     "react-icons",

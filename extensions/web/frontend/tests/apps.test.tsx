@@ -1,12 +1,15 @@
 import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import { objectIndex, wire, AGENT, MEMBER, TASK_KIND } from "./harness";
+import type { AppInit } from "@/apps/kit";
+
+import { objectIndex, wire, AGENT, MEMBER, TASK_KIND, TURN_ID } from "./harness";
 
 /** The app page's side of the bridge, tested against a fake shell on this same window: jsdom's
  *  `window.top` is the window itself, so the runtime's posts land on our own listener and our
  *  replies land on the runtime's. Each test imports the module fresh — the correlation maps and
- *  the held init are module state. */
+ *  the held init are module state. A page reaches the shell through the imported kit and nothing
+ *  else, so no test here defines a global for it to find. */
 
 type Runtime = typeof import("@/apps/runtime");
 
@@ -14,7 +17,6 @@ const INIT = {
   member: { email: MEMBER.email, admin: true },
   agentId: AGENT.id,
   place: {},
-  open: null,
   portal: location.origin,
 };
 
@@ -44,8 +46,10 @@ async function connected(onCall: (message: Record<string, unknown>) => void): Pr
   return runtime;
 }
 
+const BEYOND_READY_BUDGET_MS = 5000;
 const cleanups: (() => void)[] = [];
 const nativeFetch = window.fetch;
+const nativeEventSource = window.EventSource;
 
 beforeEach(() => {
   vi.useRealTimers();
@@ -54,6 +58,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
   window.fetch = nativeFetch;
+  window.EventSource = nativeEventSource;
 });
 
 test("a portal fetch rides the bridge and comes back as the surface's own response", async () => {
@@ -236,7 +241,6 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
             member: { email: MEMBER.email, admin: true },
             agentId: AGENT.id,
             place: {},
-            open: null,
             portal: location.origin,
           }}
           view={{
@@ -258,21 +262,63 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
   expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
 });
 
-test("an app's TSX page compiles in the browser and runs against the kit global", async () => {
+test("a page mounted through the kit alone greets the shell, reads over the bridge, and takes a frame", async () => {
   vi.resetModules();
-  const { compile } = await import("@/apps/kit");
-  const spoken: string[] = [];
-  (window as { UfoAppKit?: unknown }).UfoAppKit = { say: (word: string) => spoken.push(word) };
-  const source = [
-    "const { say } = UfoAppKit;",
-    "type Held = { word: string };",
-    "const held: Held = { word: \"compiled\" };",
-    "function Page({ word }: Held) { return <b>{word}</b>; }",
-    "say(held.word + \":\" + typeof Page);",
-  ].join("\n");
-  new Function(compile(source))();
-  expect(spoken).toEqual(["compiled:function"]);
-  delete (window as { UfoAppKit?: unknown }).UfoAppKit;
+  const { getJson, mountApp, useEffect, useState } = await import("@/apps/kit");
+  const answers: Record<string, string> = {
+    "/api/agents": JSON.stringify({ agents: [AGENT], member: MEMBER }),
+    "/api/chats": JSON.stringify({ chats: [{ title: "Weekly report" }] }),
+  };
+  cleanups.push(
+    shell((message) => {
+      if (message.ufo !== "call") return;
+      const path = (message.path as string).split("?")[0];
+      if (path.endsWith("/stream")) {
+        window.postMessage({ ufo: "opened", id: message.id }, "*");
+        window.postMessage(
+          { ufo: "frame", id: message.id, event: "message", data: '{"text":"the turn spoke"}' },
+          "*",
+        );
+        return;
+      }
+      const body = answers[path];
+      window.postMessage(
+        body === undefined
+          ? { ufo: "data", id: message.id, ok: false, error: "no answer for " + path }
+          : { ufo: "data", id: message.id, ok: true, status: 200, body, refusal: null, fault: null },
+        "*",
+      );
+    }),
+  );
+
+  function Framed({ init }: { init: AppInit }) {
+    const [read, setRead] = useState("reading");
+    const [heard, setHeard] = useState("silent");
+    useEffect(() => {
+      void getJson<{ chats: { title: string }[] }>("/api/chats").then((answer) =>
+        setRead(answer.ok ? answer.payload.chats[0].title : answer.message),
+      );
+      const source = new EventSource("/surface/web/turns/" + TURN_ID + "/stream");
+      source.onmessage = (event) => setHeard((JSON.parse(event.data) as { text: string }).text);
+      return () => source.close();
+    }, []);
+    return (
+      <>
+        <p>{init.member.email}</p>
+        <p>{read}</p>
+        <p>{heard}</p>
+      </>
+    );
+  }
+
+  const root = document.createElement("div");
+  document.body.append(root);
+  cleanups.push(() => root.remove());
+  mountApp(root, (init) => <Framed init={init} />);
+
+  expect(await screen.findByText(MEMBER.email)).toBeTruthy();
+  expect(await screen.findByText("Weekly report")).toBeTruthy();
+  expect(await screen.findByText("the turn spoke")).toBeTruthy();
 });
 
 /** A page spells no address by hand: every builder the route table declares stands on the kit, so a
@@ -290,13 +336,35 @@ test("the kit publishes every route builder and the route-kind test", async () =
   expect(kit.routeIs).toBe(route.routeIs);
 });
 
-test("the open target is the place's first lane, live across place messages", async () => {
+test("the pane's place reaches the page live, whole, across place messages", async () => {
   const runtime = await connected(() => {});
-  const seen: (string | null)[] = [];
-  cleanups.push(runtime.onOpenTarget((target) => seen.push(target)));
+  const seen: (string | undefined)[] = [];
+  cleanups.push(runtime.onPlaced((place) => seen.push(place.opens?.[0])));
 
   window.postMessage({ ufo: "place", place: { opens: ["run-1"] } }, "*");
   await vi.waitFor(() => expect(seen).toContain("run-1"));
   window.postMessage({ ufo: "place", place: {} }, "*");
-  await vi.waitFor(() => expect(seen).toContain(null));
+  await vi.waitFor(() => expect(seen).toContain(undefined));
+});
+
+test("readies stop at the budget, and an init after the last one still mounts the page", async () => {
+  vi.resetModules();
+  const runtime = (await import("@/apps/runtime")) as Runtime;
+  const readies: unknown[] = [];
+  const count = (event: MessageEvent) => {
+    if ((event.data as { ufo?: string } | null)?.ufo === "ready") readies.push(event.data);
+  };
+  window.addEventListener("message", count);
+  cleanups.push(() => window.removeEventListener("message", count));
+
+  vi.useFakeTimers();
+  const pending = runtime.connect();
+  await vi.advanceTimersByTimeAsync(BEYOND_READY_BUDGET_MS);
+  const spent = readies.length;
+  await vi.advanceTimersByTimeAsync(BEYOND_READY_BUDGET_MS);
+  expect(readies.length).toBe(spent);
+  vi.useRealTimers();
+
+  window.postMessage({ ufo: "init", ...INIT }, "*");
+  expect((await pending).agentId).toBe(AGENT.id);
 });

@@ -1,7 +1,7 @@
-// The wiki app's page: TSX compiled in the browser by the portal's app kit. Everything it
-// composes comes off the UfoAppKit global; edit this file and redeploy to change the page.
+// The wiki app's page: a static site built with the portal's app kit. Edit this file and redeploy
+// to change the page.
 
-const {
+import {
   BANDS,
   Button,
   Dialog,
@@ -20,7 +20,6 @@ const {
   ObjectDetail,
   Panel,
   PanelBlank,
-  React,
   RebuildDialog,
   RowLines,
   SHARED_SUBJECT,
@@ -44,7 +43,15 @@ const {
   useRef,
   useState,
   useViewer,
-} = UfoAppKit;
+} from "ufo/kit";
+import type {
+  Crumb,
+  Member,
+  ObjectAddress,
+  Placement,
+  ReactNode,
+  ReactMouseEvent,
+} from "ufo/kit";
 
 /** What the store calls a consolidated summary: a cluster of facts the consolidator collapsed into
  *  one item. It is the only memory written to be read whole, so it is what a page opens on. */

@@ -9,9 +9,9 @@ date: 2026-08-22
 
 > User-defined apps and built-in apps run on one infrastructure and are equally capable. An app is
 > an agent plus its homepage page; the page gets one capability surface — object reads, journaled
-> object writes, entry points, and a synced component library — and the member edits any app from
-> the chat column beside it. The built-in portal screens (wiki, artifacts, radar, tasks, plus a new
-> chat screen) leave the web extension's compiled bundle and become five extensions, `app_chat`,
+> object writes, entry points, and the page SDK it is built against — and the member edits any app
+> from the chat column beside it. The built-in portal screens (wiki, artifacts, radar, tasks, plus a
+> new chat screen) leave the portal's own bundle and become five extensions, `app_chat`,
 > `app_radar`, `app_tasks`, `app_artifacts`, `app_wiki`. This revises spec.md's portal section and
 > the "prepared intents are the portal's one mutation path" doctrine.
 
@@ -119,7 +119,7 @@ Keyset-paged on the shared cursor like every listing. Three consumers, one mecha
   sandbox-served. Every user's static app survives sandbox reclaim; a built-in default never
   depends on a sandbox.
 - **The bridge** — a postMessage RPC between the pane and its iframe, origin-checked both ways,
-  with a small client the portal serves: `read`, `write`, `intent`, `navigate`, `place` (the app's
+  with the client the SDK carries: `read`, `write`, `intent`, `navigate`, `place` (the app's
   internal state rides the existing hash place-bag both ways, so permalinks keep working), and
   `tail` (journal subscription). An app page is member-authored content whose JS runs on load, and
   the shell cannot see clicks inside its frame — so a frame-initiated write to an admin-gated kind
@@ -131,15 +131,17 @@ Keyset-paged on the shared cursor like every listing. Three consumers, one mecha
   homepage read carries it; the pane keys the iframe on it, so a redeploy shows within one poll.
   The remount also re-mints the frame's ingress session, so a long-open app does not go dark at 1h.
 
-### The component system
+### The page SDK
 
-A library of portal-quality components — conversation list, chat UI, scheduling widget, contact
-card, file card — served versioned from the portal's static assets, importable by any app page,
-themed by the `ufo-style` tokens. Each component binds to a kind through the bridge (read + write)
-and stays live on the journal tail. The chat component is the one exception to object reads: it
-wraps the existing chat transport (transcript read, SSE turn stream, chat POST) through bridge
-passthroughs, because turn frames are not objects. A component enters the library with the first
-app that uses it, never speculatively.
+One module — `ufo/kit` — is a page's whole dependency surface: React, the JSX runtime, the
+portal's own components and kernel reads (conversation list, chat pane, scheduling widget,
+contact card, file card), the section host, and the bridge transport. A page is TSX importing that
+one name, so the same source builds in the portal's own vite build and in a member's sandbox, and
+the components a page composes are the ones the portal renders rather than copies of them. Each
+component binds to a kind through the bridge (read + write) and stays live on the journal tail.
+The chat component is the one exception to object reads: it wraps the existing chat transport
+(transcript read, SSE turn stream, chat POST) through the bridge, because turn frames are not
+objects. An export enters the SDK with the first app that uses it, never speculatively.
 
 ### Apps as extensions
 
@@ -147,21 +149,19 @@ The `agents` manifest point's provision gains an optional app declaration:
 
 ```python
 AgentProvision(name="Chat", spec=AgentSpec(...),
-               app=AppSpec(slug="chat", bundle=BUNDLE_DIR,
-                           entries=("new", "conversation")))
+               app=AppSpec(slug="chat", entries=("new", "conversation")))
 ```
 
 - **Slug** claims the route (`#/chat`) and the flyout identity; slugs are validated for collisions
   where the deploy is assembled, like every deploy-wide namespace.
-- **Bundle** is a directory of static files shipped with the extension — the app's default page,
-  served from the deploy's own assets at a stable frame URL, versioned with the extension. No
-  per-workspace row, no LLM seed turn (`seed_homepages` skips a bundle-carrying agent).
-- **The first edit forks**: the member asks in the chat column, the agent pulls the current page
-  source (blob- or package-backed bytes are readable), edits in its sandbox, and runs the ordinary
+- **The page** is one TSX file shipped in the extension's home skill, built with the portal into the
+  deploy's apps tree and served from it at a stable frame URL, versioned with the deploy. No
+  per-workspace row, no LLM seed turn (`seed_homepages` settles an app agent without one).
+- **The first edit forks**: the member asks in the chat column, the agent materialises the page
+  project and the SDK into its sandbox, edits `app.tsx`, builds it with vite, and runs the ordinary
   `deploy_website` + `set_homepage` — now it is a workspace site and the existing loop owns it.
-  The homepage read grows a `shipped` state beside `set`/`building`/`none`; reset is unbinding the
-  fork, falling back to the shipped bundle. Unedited workspaces track deploy upgrades; edited
-  workspaces own their copy — the RFC 0030 pattern.
+  Reset is unbinding the fork, falling back to the built page. Unedited workspaces track deploy
+  upgrades; edited workspaces own their copy — the RFC 0030 pattern.
 - **A fork is workspace-owned**: any member may ask the app's agent to edit and redeploy it — the
   site-creator gate relaxes for a homepage bound to an extension-shipped agent — and an admin may
   reset it to shipped. An app is a workspace surface, collaborative like the wiki's own content.
@@ -192,10 +192,10 @@ first; the four conversions replicate today's screens. Connectors, admin, and th
 | B1 | static site serving + deploy generation + pane remount/session refresh | every existing homepage and user app |
 | B2 | the bridge + the `app` manifest declaration + slug routing + generic app pane | `app_chat`, whole |
 | C | `app_radar`, `app_tasks`, `app_artifacts`, `app_wiki`, one unit each | each tears out its screen |
-| D | component library entries (conversation list, scheduling widget, contact card, chat UI), interleaved with C | the app whose bundle first embeds each |
+| D | SDK exports (conversation list, scheduling widget, contact card, chat pane), interleaved with C | the app whose page first composes each |
 
 A2 is deliberately before any app ships: converting the React screens to kind reads proves the
-kinds against the exact UI the bundles must then match.
+kinds against the exact UI the app pages then compose.
 
 ## Doctrine fit / implications
 
@@ -207,7 +207,7 @@ kinds against the exact UI the bundles must then match.
   docs update in the same commits as A1.
 - **Core earns only what extensions cannot express**: the journal (the object layer is core; no
   extension can observe another's writes), static serving (ingress is core), the app declaration
-  (the manifest is core, proven by the sample). The bridge and component library are the web
+  (the manifest is core, proven by the sample). The bridge and the page SDK are the web
   extension's. The five apps are extensions importing only `ufo.sdk`.
 - **One shape**: a converted screen exists only as its extension's app; the React view, its
   registry rows, and its bespoke read are deleted in the conversion unit. Unconverted screens stay
@@ -231,8 +231,8 @@ kinds against the exact UI the bundles must then match.
   dispatch and buys authority the handler already has. The journal audits better than the turn
   record it replaces (updates and deletes included), and the acts that genuinely need
   conversational delivery keep the lane.
-- **Provenance-tiered capability** (shipped bundles trusted, forks confirmed) — violates "equally
-  capable"; the gate keys on the kind's privilege, never on who authored the page.
+- **Provenance-tiered capability** (the deploy's own pages trusted, forks confirmed) — violates
+  "equally capable"; the gate keys on the kind's privilege, never on who authored the page.
 - **Declared member-action tools** — marking tools portal-invocable so app buttons dispatch them.
   Rejected: a button's call is an internal endpoint ending in object saves; the rebuilds reduce to
   kind writes, and tools stay a chat concern.

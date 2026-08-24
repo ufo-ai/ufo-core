@@ -5,8 +5,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
-    "allowUmdGlobalAccess": true,
-    "jsx": "react",
+    "jsx": "react-jsx",
+    "jsxImportSource": "ufo/kit",
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -16,11 +16,15 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "baseUrl": ".",
-    "paths": { "@/*": ["./src/*"], "@brand/*": ["../../../assets/brand/*"] },
+    "paths": {
+      "ufo/kit": ["./src/apps/kit.ts"],
+      "ufo/kit/jsx-runtime": ["./src/apps/kit.ts"],
+      "@/*": ["./src/*"],
+      "@brand/*": ["../../../assets/brand/*"]
+    },
     "types": ["vite/client"]
   },
   "files": [
-    "src/apps/pages.d.ts",
     "../../app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx",
     "../../app_chat/ufo_ext_app_chat/skills/app-chat-home/app.tsx",
     "../../app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx",

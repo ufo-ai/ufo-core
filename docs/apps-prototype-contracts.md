@@ -9,12 +9,13 @@ is wrong, stop and flag it.
 
 - **An app is a shipped agent** — an `AgentProvision` on the `agents` manifest point (see
   `extensions/app_chat/ufo_ext_app_chat/manifest.py`). It appears in the Applications flyout and
-  gets an editable homepage through existing infra (RFC 0030 provisioning, `seed_homepages`,
-  `AgentPane`, the `deploy_website` edit loop). User-defined apps and built-in apps are the same
-  thing.
-- **An app's homepage is a static page the extension ships as a skill asset**, deployed by the
-  seed turn. No new serving path: the seed loads the skill, copies its page into `/workspace`,
-  runs `deploy_website`, then `set_homepage`. Editing is the existing chat-column loop.
+  gets an editable homepage through existing infra (RFC 0030 provisioning, `AgentPane`, the
+  `deploy_website` edit loop). User-defined apps and built-in apps are the same thing.
+- **An app's homepage is a static site built from the page source the extension ships** — `app.tsx`
+  in the app's home skill, built by the portal's own vite build into the deploy-wide apps tree and
+  served row-less to every workspace that has not forked it (§The built app pages). Editing is the
+  existing chat-column loop: the agent edits the page in its sandbox and runs `deploy_website` +
+  `set_homepage`, which founds a workspace site the standing loop owns.
 - **Live data + navigation reach the page through the bridge** (below), because the framed page
   is cross-origin from the portal and cannot call the portal API directly.
 
@@ -52,9 +53,12 @@ the frame's requests under the viewer's own session with NO per-message gate (de
 `#/c/<uuid>` (open a conversation), `#/new/<agentId>` (new conversation), `#/agents/<agentId>`
 (open an app), `#/<section>` (a built-in section). Anything else is ignored (debt #5).
 
-**The bridge client** is a tiny JS module the app pages include, shipped as a shared skill asset
-`app-bridge` (Contract 4). It exposes `ufoRead(path)`, `ufoWrite(kind,name,spec)`,
-`ufoNavigate(to)`, and `onInit(cb)` over the protocol above. Pages never hand-roll postMessage.
+**The bridge client is part of the kit** — `extensions/web/frontend/src/apps/runtime.ts`, exported
+through `ufo/kit`. `connect()` performs the ready/init handshake; `installShims()` reroutes the
+page's `fetch` and its `EventSource` for `/surface/web/*` paths through the shell's `call` verb, so
+`lib/api`, `lib/turnStream`, and every kernel read run inside the page verbatim and the page never
+speaks the protocol itself. `mountApp` does both before it renders. Pages never hand-roll
+postMessage.
 
 ## Contract 2 — homepage generation (edits show)
 
@@ -107,28 +111,22 @@ Each app is a package `extensions/app_<name>/ufo_ext_app_<name>/` mirroring
 
 - The agent: `visibility="workspace"`, `model="auto"`, a prompt describing the page it maintains
   and that it edits+redeploys the page when asked.
-- The homepage skill: a skill folder `skills/app-<name>-home/` with `SKILL.md` (a one-line "deploy
-  this page as your homepage" workflow) and `assets/index.html` — a real static page that includes
-  the `app-bridge` client and renders the app's data via `ufoRead(...)`, navigates via
-  `ufoNavigate(...)`, and (for tasks/radar) writes via `ufoWrite(...)`. The agent's prompt tells
-  it, on its seed turn, to load this skill, copy the page into `/workspace`, deploy it, and bind
-  it as the homepage.
-- The shared `app-bridge` skill (ships once, in `app_chat` or a shared spot; app_chat owns it):
-  `assets/bridge.js` implementing Contract 1's client. Other apps' pages include it by depending
-  on the `app-bridge` skill so it mounts alongside.
+- The homepage skill: a skill folder `skills/app-<name>-home/` with `SKILL.md` (the edit-and-deploy
+  workflow) and `app.tsx` — the page as TSX, importing `ufo/kit` and nothing else. The build turns
+  it into the app's static site (§The built app pages); the agent edits that same file to change
+  the page.
 
 Apps and their pages (prototype):
 
-| App | Page reads (bridge `read`) | Page acts |
+| App | Page reads | Page acts |
 |---|---|---|
-| app_chat | `api/chats` | list conversations; click → `navigate #/c/<id>`; "New" → `navigate #/new/<agentId>` |
-| app_radar | `workspace/radar` | list digest entries; click → `navigate #/c/<id>`; "Rebuild" → `write`/intent |
+| app_chat | `api/chats`, the transcript read, the turn stream | one conversation whole — composer, streamed replies, starters; click → `navigate #/c/<id>` |
+| app_radar | `workspace/radar` | list digest entries; click → `navigate #/c/<id>`; "Rebuild" → the intents lane's fenced rebuild verb |
 | app_tasks | `objects/scheduled_task`, `objects/source_trigger` | list; pause/resume → `write scheduled_task` |
 | app_artifacts | `workspace/artifacts`, `objects/site` | list files+sites; click → open link |
 | app_wiki | `workspace/memory`, `objects/member` | list memory + roster; click a member → navigate |
 
-`app_chat` already ships the agent; this phase adds its homepage skill + the shared bridge skill,
-and upgrades its prompt to deploy the page.
+`app_chat` ships the agent, its homepage skill, and the prompt that maintains the page.
 
 ## Ownership (parallel workstreams — file-disjoint)
 
@@ -136,8 +134,8 @@ and upgrades its prompt to deploy the page.
 |---|---|---|
 | WS-Writes | `core/src/ufo/objects.py`, a core migration, `extensions/web/ufo_ext_web/surface.py` | Contract 3 (journal + `write_object` + endpoints) AND Contract 2's `generation` field in the homepage read |
 | WS-Sites | `extensions/sites/ufo_ext_sites/` | Contract 2's `hosted_site.generation` column + register bump + migration |
-| WS-Frontend | `extensions/web/frontend/` | Contract 1 (bridge module + AgentPane wiring + `app-bridge` is consumed here) + Contract 2's iframe remount + flyout showing apps + vitest |
-| WS-Apps | `extensions/app_*/` (not pyproject) | Contract 4 (4 new app extensions + homepage skills + the shared `app-bridge` skill + app_chat homepage upgrade) |
+| WS-Frontend | `extensions/web/frontend/` | Contract 1 (the bridge module, the kit's transport, and the AgentPane wiring) + Contract 2's iframe remount + flyout showing apps + vitest |
+| WS-Apps | `extensions/app_*/` (not pyproject) | Contract 4 (4 new app extensions + homepage skills + the app_chat page) |
 
 The orchestrator owns `pyproject.toml` (entry points + wheel packages for the 4 new extensions),
 `uv sync`, cross-workstream reconciliation, and end-to-end verification. Each workstream commits
@@ -153,30 +151,28 @@ that the contracts above do NOT reflect (the code is authoritative):
 |---|---|---|
 | C2 field `generation` | **`deploy_generation`** everywhere (site field, homepage payload key, frontend key) | `hosted_site.generation` already exists as a `Uuid` (grant invalidation); a distinct integer was needed |
 | C3 `DELETE objects/{kind}/{name}` | **`POST objects/{kind}/{name}/delete`** | `SurfaceRoute.method` is `Literal["GET","POST"]` — no DELETE verb exists. The bridge only applies, never deletes, so no frontend impact |
-| C3 turnless `write_object(...)` | The endpoint **admits a prepared-intent turn** (the proven `submit_intent` path); the real engine builds the context and applies the kind's real guards. External endpoint shape unchanged | A faithful turnless `ToolContext` is heavy/fragile (doctrine review finding #2). A direct write **is** a turn for now; true turnless writes deferred |
+| C3 turnless `write_object(...)` | The endpoint **admits a prepared-intent turn** (the proven `submit_intent` path); the real engine builds the context and applies the kind's real guards. External endpoint shape unchanged | A faithful turnless `ToolContext` is heavy/fragile (doctrine review finding #2). A direct write **is** a turn; a faithful turnless write is deferred |
 | C3 journal `spec_before_ref`/`spec_after_ref` (blob) | Specs stored **inline** (`spec_before`/`spec_after` TEXT) | Blob access from the core object layer isn't readily available; inline is simplest for the prototype. Row's external shape (verb/caller/kind/name) unaffected. Blob promotion deferred |
 | C3 journal ordering | **Journal-first**: the row is inserted ahead of the mutation under a deterministic id (`uuid5` of the dispatch's idempotency key) and withdrawn if the store refuses — so a reported failure is always a write that did not happen, and a crash-recovery re-run journals nothing twice. Rows carry non-null `name` and `agent_id` (the target agent on cross-agent writes) | one `workspace_tx()` cannot wrap the kind store's own transaction (`db.py` opens a fresh connection per tx; sqlite is single-writer), so atomicity is had by ordering + idempotency instead |
 | C2 `deploy_generation` counter | A **clock stamp** (µs epoch, BigInteger), strictly above the row's prior value on update | a counter dies with its row, so delete-and-recreate under the same name (same URL) repeated old values and the iframe key could collide |
 | C3 "reader deferred" | The **admin audit read** (`GET workspace/object-changes`) shipped in A1. It states verb, kind, name, caller, agent, and moment — never the stored specs: a kind's own read redacts what its owner withheld, and the audit must not answer what the record refuses | The repo gate rejects a column with no read site (the both-ends rule) — so the reader had to land now. Better than planned |
 | C1 `write` verb | Requires a non-empty `name` in the body (no nameless create) | endpoint validation; fine for the prototype's update-by-name uses |
-| C4 radar "Rebuild → write/intent" | app_radar is **read+navigate only** | a rebuild is a tool act and the bridge has no tool verb — matches RFC 0039's "app buttons are never tool dispatches" |
-| C4 skill assets under `assets/` | assets at the **skill folder root** (`.skills/<name>/index.html`) | the loader treats every non-`SKILL.md` file as an asset; flat paths simplify the seed's copy step |
+| C4 radar "Rebuild → write/intent" | the page's rebuild control posts **the intents lane's fenced verb** (`RebuildDialog`, `verb="rebuild_reports"`), never an object write | a rebuild is a tool act, so it rides the lane that carries tool acts; the fence admits only the verbs the shipped pages carry as controls |
+| C4 skill assets under `assets/` | the page at the **skill folder root** (`.skills/app-<slug>-home/app.tsx`) | the loader treats every non-`SKILL.md` file as an asset, and a flat path is the one both the build and the editing agent name |
 | C1 `ready` once | client **retries `ready`** (≤30×, 100ms) until `init`, then stops | the shell attaches its listener after mount; a single `ready` races and is lost |
 | local carrier `dial` raised | returns `DialTarget("127.0.0.1:<port>", tls=False)` (`core/src/ufo/sandbox/local.py:267`) | local sandboxes are host subprocesses sharing the host network, so an in-sandbox port is a loopback port; cost: one port namespace for every conversation — the newest deploy's server owns a contended port |
 | ingress base https-only | `http://localhost[:port]` admitted, that host alone (`core/src/ufo/config.py:224`); `ufoctl init` writes `ingress_public_url = "http://localhost:8100"` (`core/src/ufo/cli.py:88`) | a zero-services dev run serves sites with no certificate; every other host still requires https |
 | ingress cookie always `Secure` | `Secure` follows the configured base scheme — `IngressServe.cookie_secure` (`core/src/ufo/ingress_serve.py:207,740`), `set_session_cookie(secure=...)` (`core/src/ufo/sdk/http.py:29`) | browsers refuse to store a `Secure` cookie set by an http `*.localhost` origin, so every local site visit 403'd "needs a fresh link" |
 
-| C1 protocol verbs | **One generic `call`** (method + path + optional body + optional `x-ufo-*` headers, every other header dropped) over an endpoint table (GET reads incl. transcripts, starters, and conversation slots; POST object writes, deletes, the chat admit, the intents lane), plus a `credentials` row for the composer's credential form, an intent-verb fence (a frame posts only the rebuild verbs the shipped pages carry as controls), and stream-marked rows relayed as `opened` then `frame`/`end` messages (`turns/{id}/stream`, SSE parsed shell-side, `close` aborts, cap 8). A `data` reply relays the surface's answer verbatim: `ok`, `status`, the body text, and the refusal/session-fault headers. Client sugars `ufoRead`/`ufoWrite`/`ufoChat`/`ufoStream`/`ufoCall` ride it. `init` carries the pane's `open` target | the protocol never names a capability — adding one is adding an endpoint row (Alex: "this is a generic system"); verbatim relay is what lets the portal's own `lib/api` and `EventSource` consumers run inside a page unchanged |
+| C1 protocol verbs | **One generic `call`** (method + path + optional body + optional `x-ufo-*` headers, every other header dropped) over an endpoint table (GET reads incl. transcripts, starters, and conversation slots; POST object writes, deletes, the chat admit, the intents lane), plus a `credentials` row for the composer's credential form, an intent-verb fence (a frame posts only the rebuild verbs the shipped pages carry as controls), and stream-marked rows relayed as `opened` then `frame`/`end` messages (`turns/{id}/stream`, SSE parsed shell-side, `close` aborts, cap 8). A `data` reply relays the surface's answer verbatim: `ok`, `status`, the body text, and the refusal/session-fault headers. The built kit's transport shims ride it. `init` carries the pane's whole place | the protocol never names a capability — adding one is adding an endpoint row (Alex: "this is a generic system"); verbatim relay is what lets the portal's own `lib/api` and `EventSource` consumers run inside a page unchanged |
 | C1 frame identity | the app page is the pane iframe's direct document after the sites surface gates and redirects it to ingress: the client posts to `window.top`, and the shell accepts only its pane's `contentWindow` | source identity binds every bridge call to the one page the pane mounted |
 | deploy port 8000 fixed | **per-conversation ports** — `serve_port(conversation_id)` in 20000-39999 | on the local carrier all sandboxes share the host port namespace; one fixed port meant every deploy killed the previous server and every dial reached whoever deployed last |
-| C4 hand-written `index.html` pages | **the pages are the portal's own React views, composed off a runtime kit** (Alex: "reuse the original react code as much as possible" while apps stay self-editable extensions). The portal build ships `assets/app-kit.js`/`app-kit.css` (unhashed, unminified, fonts inlined; `vite.kit.config.ts`, entry `src/apps/kit.ts`): the frontend's `ufo.sdk` — the shipped screens (`mountRadar`/`mountTasks`/`mountWiki`/`mountArtifacts`/`mountChat`), the section host, React, and the bridge transport (`src/apps/runtime.ts`: a `fetch` wrapper and an `EventSource` class tunneling `/surface/web/*` over the bridge, so `lib/api`, `lib/turnStream`, and every kernel read run verbatim). Each extension keeps a thin committed page — `index.html` + `app.js` — that boots `bridge.js`, loads the kit off `init.portal`, and mounts its screen; an agent-directed rewrite recomposes kit exports in `app.js`. The chat app mounts `ChatPane` (one conversation, or the start screen with starters); section names stay in the address codec (`SECTIONS`), and a section address the portal no longer hosts lands on the app that ships it. Sprite fetches ride a `static/assets/{file}` endpoint row | a transcribed page re-breaks on every portal chrome change (lanes proved it); the kit versions with the portal deploy, so every app page renders the current chrome without redeploying, and the editable surface stays in the extension |
+| C4 hand-written `index.html` pages | **the pages are the portal's own React views** (Alex: "reuse the original react code as much as possible" while apps stay self-editable extensions). Each extension commits one file, `app.tsx`, whose whole dependency surface is the name `ufo/kit` — `src/apps/kit.ts`, the frontend's `ufo.sdk`: React and its hooks, the JSX runtime, the portal's components and kernel reads, the section host (`SectionApp`, `mountApp`), and the bridge transport (`src/apps/runtime.ts`). An agent-directed rewrite recomposes kit exports in `app.tsx`. The chat app mounts `ChatPane` (one conversation, or the start screen with starters); section names stay in the address codec (`SECTIONS`), and a section address the shell does not host itself lands on the app that ships it. A mark sprite is a file of the page's own tree, fetched off `/assets/` natively | a transcribed page re-breaks on every portal chrome change (lanes proved it); composing the portal's own views means every app page renders the current chrome, and the editable surface stays in the extension |
 | app-page chat attachments | a `FormData` body decomposes into `form` parts — strings and Files, which structured-clone whole — and the shell reassembles the multipart for the chat admit; any other non-string body is refused page-side | `postMessage` cannot carry `FormData` itself, only its entries |
 | pane band over a framed homepage | the pane draws **no band** — the page heads itself, and the shell's two acts (settings, the chat-lane toggle) float top right just under the band line, and the right-side chat is one editing conversation per app — the newest of the member's own directive conversations, or the composer when none exists | the page is the portal's own screen and draws the band the section drew; a pane band above it stated the name twice and pushed the page a row below the reference |
 | in-frame connect links | a reply's `/turns/{id}/connect` link resolves against the site origin and dies | it is an href, not a fetch, so the tunnel never sees it; acceptable for the prototype |
 
-Coupling to revisit for the real version: the four apps' home skills `depends: [app-bridge]`, which
-`app_chat` owns — fine for the unnarrowed dev/prototype set, but a pack shipping an app without
-`app_chat` would fail to resolve the bridge. Jobs that write objects outside `ObjectVerbs` do not
+Coupling to revisit for the real version: jobs that write objects outside `ObjectVerbs` do not
 journal (the verb path is the hook point). An app page's source is blob-backed (RFC 0039 B1,
 built): `deploy_website` promotes the served directory into the workspace blob store and
 `hosted_site.source_manifest` names the files, the ingress serves those bytes with no sandbox dial,
@@ -185,18 +181,53 @@ conversation's sandbox (its status names the `source_path`), and a homepage
 redeploy from another conversation updates the bound row in place — same origin, same link, no
 fork. `publish_website` backends stay sandbox-served. All flagged, none blocks the prototype.
 
-## Shipped app pages (PR A) — as-built
+## The built app pages
 
-Row-less, auto-updating app homepages served from one deploy-wide fleet bundle. Where the build
-diverged from the intended design (the code is authoritative):
+Row-less, auto-updating app homepages: one vite build turns the five extensions' page sources into
+one static tree, published under `apps/<digest>/` in the fleet store and served to every workspace
+that has not forked its copy.
+
+**The build.** `extensions/web/frontend/vite.apps.config.ts` — root `frontend/apps`, base `/`,
+outDir `extensions/web/ufo_ext_web/apps`. Five html entries, one per app, each naming that app's
+`app.tsx` in its extension's home skill. `ufo/kit` and `ufo/kit/jsx-runtime` resolve to
+`src/apps/kit.ts` and `jsxImportSource` is `ufo/kit`, so a page's whole dependency surface is that
+one name and the React its JSX lands on is the React inside the kit. The five pages share hashed
+chunks: 1.1 MB raw / 365 KB gzip of first paint held once between them, and 4-16 KB of entry chunk
+each. `vite.sdk.config.ts` emits the same kit as one portable ES module — `kit.js` + `kit.css` —
+into the sites extension's own package, where a single-page project can resolve it and the pages'
+split chunks would not.
+
+**The tree:**
+
+| Path | Contents |
+|---|---|
+| `<slug>/index.html` | the built page: a module script and a stylesheet under `/assets/` |
+| `assets/**` | the hashed chunks, the stylesheet, the fonts, the mark sprites |
+
+The slugs are the tree's top-level directories other than `assets`. Nothing else rides it: the tree
+is what a browser fetches, so its digest is a serving generation.
+
+**Serving.** The digest is `sha256` over the sorted `(path, bytes)` of the whole tree, first 16 hex:
+content derived, so it is identical on every pod, names the fleet prefix `apps/<digest>/`, and is
+the etag every file of the tree answers with. The frame link the homepage read hands out carries
+slug + digest, and the ingress serves the tree at the frame origin's root — a file inside the
+claim's slug directory answers a root-relative request (`<slug>/index.html` is `/`), a file outside
+it answers at its own path (`assets/x` is `/assets/x`) — so one copy of the chunks and the fonts
+serves all five pages.
+
+**A member's own page.** On its first change, the app's agent copies `app.tsx` and `index.html` from
+its home skill. On later changes, `object_get` materialises the last deployed source under the
+site's `src/` directory. The agent edits that source and passes it to `deploy_website`; the tool
+writes the current `vite.config.ts` and `sdk/` beside it, runs Vite, hosts the output, and carries
+the project's source in that output for the next read. The build needs no npm install or registry
+egress, and a page edited a year ago still builds against today's components.
+
+Where the build diverged from the intended design (the code is authoritative):
 
 | Design | As built | Why |
 |---|---|---|
-| the extension mints the shipped ingress token | the **producer lives in core**: `SurfaceContext.ingress_url` gains `shipped_slug`/`shipped_digest`, and `deploy_skill_files(name)` reads a deploy-tier skill's page bytes | the SDK gate (`gates.py`) forbids an extension importing `ufo.sandbox.ingress_token`, so the token can only be minted through a core surface — the producer half the foundation left unbuilt. `WorkspaceAgent` also gains `provisioned_by` so the seed sweep can tell an app agent apart |
+| the extension mints the shipped ingress token | the **producer lives in core**: `SurfaceContext.ingress_url` gains `shipped_slug`/`shipped_digest` | the SDK gate (`gates.py`) forbids an extension importing `ufo.sandbox.ingress_token`, so the token can only be minted through a core surface. `WorkspaceAgent.provisioned_by` identifies the app extension |
 | shipped url resolves direct-to-ingress | the homepage read hands a **portal embed link** (`shipped_homepage_url` → a `SURFACE_SITES` token carrying `{ws, agent, slug, digest, portal_embed}`); the sites surface recognizes it, gates on the app agent's visibility, and redirects an iframe request to a minted shipped-claim ingress URL | a stable sites link re-mints a fresh 900s view token per visit (a baked view URL would 403 on a reload past its TTL) and re-gates every visit; Fetch Metadata takes the direct path, the wrapper self-redirects when a framed client omits it, and ingress `frame-ancestors` admits only the portal and the workspace's app origins |
-| kit-over-bridge + vite precompile | shipped serves the **existing skill files unchanged** (`index.html`/`app.js`/`app.tsx` per slug + one shared `bridge.js`), assembled by `apps_bundle` and published under `apps/<digest>/` with an `apps/current` pointer | PR A is serving-only; the kit-over-bridge rework and babel precompile are PR B, layered on this |
-| fork = anchor-continuity upsert; reset = delete row; `object_get` materializes shipped source from the fleet | the **existing** `deploy_website`+`set_homepage` founds the forked homepage row (the read's forked-row step then serves it) and object-`delete` unhosts it back to shipped; the app agent gets the current source from its **mounted home skill**, not a fleet materialize | the fork already works through the standing tools; anchor-continuity (preserving cookies across the first edit) and fleet-source `object_get` are deferred, so a fork lands a new per-conversation origin |
-| the five manifests' first-turn prompt lines go | manifests and SKILL.md are **left unchanged**; seeding is turned off mechanically — `seed_homepages` marks an app agent `shipped` (settled, no turn), so the candidate query settles | standing rule: prompt text is the owner's, and a prompt/skill edit is gated on ablation — the stale first-turn line is inert without a seed turn, and editing it is a separate, ablated change |
-
-Deferred with this unit (flagged, not blocking): anchor-continuity fork upsert; `object_get` fleet
-materialize; the manifest prompt/SKILL.md rewrite; and the security-debt hardening RFC 0039 lists.
+| a `current` pointer file names the live tree | **no pointer** — the digest travels in the frame token, and the fleet keys are the whole record | a pointer with no reader is a declared surface with one end; the digest a page's link carries is what says which tree serves it |
+| fork = anchor-continuity upsert; reset = delete row | `deploy_website` builds and persists the page's source, `set_homepage` binds it, and `object_get` materialises that source for another edit; object-`delete` unhosts the row back to the built page | the standing tools own the fork and reset; a first fork uses its deploying conversation's origin |
+| the five manifests' first-turn prompt lines go | **gone**, and each prompt now names the home skill for a change a member asks for; seeding is off mechanically too — `seed_homepages` marks an app agent `shipped` (settled, no turn), so the candidate query settles | a shipped page needs no build turn, so a prompt directing one describes work that does not exist |
