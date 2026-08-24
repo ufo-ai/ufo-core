@@ -421,7 +421,7 @@ const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-
  *  one is drawn as part of the answer, and several stand in share order on one snapping row. Every
  *  other file follows in a card grid, including documents whose first page has a preview and images
  *  no preview was rendered for — only a drawable image belongs in the image carousel. Pressing an
- *  image goes to `onOpen` where the screen has an artifacts sidebar. A markdown card opens there
+ *  preview goes to `onOpen` where the screen has an artifacts sidebar. A markdown card opens there
  *  too; everywhere else a card links to the file itself. */
 function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
   const images = files.filter(
@@ -448,7 +448,7 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
       {documents.length ? (
         <div
           data-slot="attachment-grid"
-          className="mt-2xs grid grid-cols-2 gap-lg max-narrow:grid-cols-1"
+          className="mt-2xs grid grid-cols-2 items-start gap-lg max-narrow:grid-cols-1"
         >
           {documents.map((file, index) => (
             <FileCard key={file.filename + String(index)} file={file} onOpen={onOpen} />
@@ -460,8 +460,28 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
 }
 
 function FileCard({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
+  const thumbnail =
+    file.preview_url === null ? null : (
+      <AttachmentThumbnail filename={file.filename} previewUrl={file.preview_url} />
+    );
   return (
-    <Attachment size="sm" className="w-full min-w-0">
+    <Attachment size="sm" className={cn("w-full min-w-0", thumbnail && "flex-nowrap")}>
+      {thumbnail === null ? null : onOpen ? (
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-label={`Open ${file.filename}`}
+          className="shrink-0 cursor-pointer border-0 bg-transparent p-0"
+        >
+          {thumbnail}
+        </button>
+      ) : file.url ? (
+        <a href={file.url} aria-label={`Download ${file.filename}`} className="shrink-0">
+          {thumbnail}
+        </a>
+      ) : (
+        thumbnail
+      )}
       <AttachmentContent>
         <AttachmentTitle>
           {onOpen && file.media_type === MARKDOWN_MEDIA_TYPE ? (

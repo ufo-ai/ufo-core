@@ -1911,6 +1911,7 @@ test("a turn puts shared images in one carousel before its document grid", async
   const documents = reply.querySelector('[data-slot="attachment-grid"]') as HTMLElement;
   const portrait = within(carousel).getByRole("img", { name: "portrait.jpg" });
   const chart = within(carousel).getByRole("img", { name: "chart.png" });
+  const reportPreview = within(documents).getByRole("img", { name: "report.pdf" });
   const report = within(documents).getByRole("link", { name: "report.pdf" });
   const scan = within(documents).getByRole("link", { name: "scan.bmp" });
   const notes = within(documents).getByRole("button", { name: "notes.md" });
@@ -1918,6 +1919,7 @@ test("a turn puts shared images in one carousel before its document grid", async
   expect(carousel.children[0].contains(portrait)).toBe(true);
   expect(carousel.children[1].contains(chart)).toBe(true);
   expect(documents.children).toHaveLength(3);
+  expect(documents.children[0].contains(reportPreview)).toBe(true);
   expect(documents.children[0].contains(report)).toBe(true);
   expect(documents.children[1].contains(scan)).toBe(true);
   expect(documents.children[2].contains(notes)).toBe(true);
