@@ -21,6 +21,8 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
 
 from ufo import o11y
+from ufo.access.grants import GrantStore
+from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
@@ -60,9 +62,13 @@ from ufo.sources import rest, sync
 from ufo.sources.backend import ConnectorSourceConfig
 from ufo.sources.sync import (
     FOLDER_BACKEND,
+    SOURCE_PARK_RETRY_SECONDS,
+    SOURCE_REFUSAL_PARK_THRESHOLD,
     SOURCE_SYNC_CHECK,
     SOURCE_SYNC_FAILED_METRIC,
+    SOURCE_SYNC_INTERVAL_SECONDS,
     SOURCE_SYNC_JOB,
+    SOURCE_SYNC_PARKED_METRIC,
     SYNC_PROVIDER_FAULT_MAX_CHARS,
     CorePageFeed,
     CursorExpired,
@@ -2176,6 +2182,9 @@ async def _source_state(source_id: UUID) -> sa.RowMapping:
                     sa.select(
                         tables.source.c.cursor,
                         tables.source.c.consecutive_errors,
+                        tables.source.c.consecutive_refusals,
+                        tables.source.c.parked_at,
+                        tables.source.c.parked_reason,
                         tables.source.c.next_sync_at,
                     ).where(tables.source.c.id == source_id)
                 )
@@ -2600,6 +2609,8 @@ async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
     assert skip_state["consecutive_errors"] == 0
     assert skip_state["cursor"] == "held-cursor"
     assert skip_state["next_sync_at"] > baseline
+    assert skip_state["consecutive_refusals"] == 1  # counted, and under the park threshold
+    assert (skip_state["parked_at"], skip_state["parked_reason"]) == (None, None)
     assert await _tombstone(kept_id) is False
 
     failed_id = source_row_id(workspace_id, FOLDER_BACKEND, {"root": str(missing)})
@@ -2609,9 +2620,355 @@ async def test_stream_skipped_records_a_skip_not_a_failure_and_never_tombstones(
     assert len(active) == 2
 
 
+PARK_REASON = "google_drive: drive.readonly scope not granted (403)"
+PARKED_METRIC = f"ufo.{SOURCE_SYNC_PARKED_METRIC}"
+
+
+async def _park(source_id: UUID, reason: str = PARK_REASON) -> None:
+    """The row exactly as the run that reached the threshold left it, without driving the refusals
+    that got it there: the two marks, the counter at the threshold, the claim freed, and the park
+    retry ahead of it. What the tests below are about is what a row in that state does next."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.source)
+            .values(
+                consecutive_refusals=SOURCE_REFUSAL_PARK_THRESHOLD,
+                parked_at=datetime.now(UTC),
+                parked_reason=reason,
+                claimed_by=None,
+                claim_expires_at=None,
+                next_sync_at=datetime.now(UTC) + timedelta(seconds=SOURCE_PARK_RETRY_SECONDS),
+                updated_at=sa.func.now(),
+            )
+            .where(tables.source.c.id == source_id)
+        )
+
+
+async def _seed_connected_source(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
+    """A member's connection and one connector source bound to it — the shape a reconnect of that
+    account lands on. Answers the member, the conversation it was connected in, and the source."""
+    member_id, conversation_id, connection_id, source_id = uuid4(), uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                surface="probe",
+                queue_key=str(conversation_id),
+                member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider=CONNECTOR_PROVIDER,
+                account_id=CONNECTOR_ACCOUNT,
+                host=CONNECTOR_HOST,
+                owner_member_id=member_id,
+                conversation_id=conversation_id,
+                shared=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend=CONNECTOR_PROVIDER,
+                config={"account": CONNECTOR_ACCOUNT, "stream": CONNECTOR_STREAM},
+                subject=member_subject(member_id),
+                owner_member_id=member_id,
+                connection_id=connection_id,
+                cursor="held-cursor",
+                next_sync_at=sa.func.now(),
+                claimed_by=None,
+                claim_expires_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id, conversation_id, source_id
+
+
+async def test_a_refused_stream_parks_on_the_threshold_run_and_reports_it_as_a_warning(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant does not widen between two attempts, so retrying a refused stream every interval buys
+    nothing and costs a request a minute for as long as nobody re-grants the scope. The refusals
+    count, and the run that reaches the threshold parks the row with the reason the backend wrote.
+    That run is also the only one that reports the park: WARNING on the row's own check tags, which
+    is what takes a row that failed into CRITICAL and then started being refused off an alert no
+    later run could clear, plus one point on the park counter carrying the provider stream. Parking
+    writes nothing else — the cursor stands and a prior page keeps its place, so the reconnect that
+    unparks the row resumes it where it stopped."""
+    reader = _meter(monkeypatch)
+    submitted: list[tuple[str, int, str, dict[str, str]]] = []
+
+    async def _record(name: str, status: int, message: str = "", /, **tags: str) -> None:
+        submitted.append((name, status, message, tags))
+
+    monkeypatch.setattr(sync, "emit_service_check", _record)
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, "held-cursor")
+    kept_id = await _seed_prior_page(workspace_id, source_id, "kept/doc")
+    driver, _ = _scripted_driver(
+        [StreamSkipped(PARK_REASON)] * SOURCE_REFUSAL_PARK_THRESHOLD,
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    for refusals in range(1, SOURCE_REFUSAL_PARK_THRESHOLD):
+        await _sync(driver)
+        under = await _source_state(source_id)
+        assert under["consecutive_refusals"] == refusals
+        assert under["parked_at"] is None  # rescheduled as before, and claimed again next pass
+        await _make_due()
+    assert submitted == []
+
+    await _sync(driver)
+
+    parked = await _source_state(source_id)
+    assert parked["consecutive_refusals"] == SOURCE_REFUSAL_PARK_THRESHOLD
+    assert parked["parked_at"] is not None
+    assert parked["parked_reason"] == PARK_REASON
+    assert parked["cursor"] == "held-cursor"
+    # the loop is slowed to the park retry, not the interval it was on for the two runs before
+    assert parked["next_sync_at"] - under["next_sync_at"] >= timedelta(
+        seconds=SOURCE_PARK_RETRY_SECONDS - SOURCE_SYNC_INTERVAL_SECONDS
+    )
+    assert await _tombstone(kept_id) is False
+    assert submitted == [
+        (
+            SOURCE_SYNC_CHECK,
+            o11y.SERVICE_CHECK_WARNING,
+            f"{SOURCE_REFUSAL_PARK_THRESHOLD} consecutive refused runs, parked: {PARK_REASON}",
+            {"provider": SCRIPTED_BACKEND, "stream": "", "source_id": str(source_id)},
+        )
+    ]
+    assert _metric_points(reader, PARKED_METRIC) == [{"provider": SCRIPTED_BACKEND, "stream": ""}]
+
+
+async def test_a_parked_source_waits_the_park_retry_and_then_reads_again(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A park slows a stream, it never stops one. Nothing but `next_sync_at` holds a parked row
+    back, so both due reads pass it over while the hour runs and hand it straight back when the hour
+    is up — the marks are state a member reads, never a gate on the driver. This is what keeps a
+    refusal that clears by itself, on a connector that cannot tell a throttle from a missing scope,
+    from needing a member: the run after the wait is the one that recovers it. A live source beside
+    it syncs throughout, because parking one feed is not a stop on the workspace."""
+    workspace_id = await _workspace()
+    parked_id = await _seed_scripted_source(workspace_id, None)
+    live_id = await _seed_scripted_source(workspace_id, None)
+    driver, _ = _scripted_driver([], database_url, tmp_path / "blobs")
+    await _park(parked_id)
+
+    assert await driver.candidate_workspaces() == (workspace_id,)
+    with ws(workspace_id):
+        assert await _claims(driver) == (live_id,)  # the hour is still running
+
+    await _park(live_id)
+
+    assert await driver.candidate_workspaces() == ()
+    with ws(workspace_id):
+        assert await _claims(driver) == ()
+
+    await _make_due()  # the park retry elapses
+
+    assert await driver.candidate_workspaces() == (workspace_id,)
+    with ws(workspace_id):
+        assert set(await _claims(driver)) == {parked_id, live_id}
+
+
+async def test_the_run_that_finally_succeeds_releases_a_parked_source(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The recovery every refusal shares, with no member and no operator in it: the park expires,
+    the provider answers this time, and the writer clears both marks and the counter so the stream
+    is back on the interval. Without that clearing a recovered stream would read as parked forever
+    on the panel and hold its WARNING check."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    page = Page(
+        source_ref="docs/plan",
+        body="the launch window opens at dawn",
+        stream="docs",
+        title="Launch plan",
+    )
+    driver, _ = _scripted_driver([SyncResult(pages=(page,))], database_url, tmp_path / "blobs")
+    await _park(source_id)
+    await _make_due()
+    due = (await _source_state(source_id))["next_sync_at"]  # the park retry, elapsed
+
+    await _sync(driver)
+
+    state = await _source_state(source_id)
+    assert (state["parked_at"], state["parked_reason"]) == (None, None)
+    assert state["consecutive_refusals"] == 0
+    # the only two values this writer can leave are the interval and the park retry
+    ahead = state["next_sync_at"] - due
+    assert timedelta(0) < ahead < timedelta(seconds=SOURCE_PARK_RETRY_SECONDS)
+
+
+async def test_a_reconnect_of_the_same_account_unparks_the_sources_it_carries(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The whole recovery story, with no operator in it: the member re-grants the scope, the connect
+    reuses the connection row the refused source hangs off, and every live source of that
+    connection comes back — marks cleared, both counters at zero, due now — so the next pass claims
+    it and resumes from the cursor it stopped on. A source of no connection stays where it is:
+    nothing about this reconnect says its own refusal was dealt with."""
+    workspace_id = await _workspace()
+    main_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
+    member_id, conversation_id, source_id = await _seed_connected_source(workspace_id)
+    unrelated_id = await _seed_scripted_source(workspace_id, None)
+    driver, _ = _scripted_driver([], database_url, tmp_path / "blobs")
+    for row_id in (source_id, unrelated_id):
+        await _park(row_id)
+
+    with ws(workspace_id), agent(main_id):
+        await GrantStore().record(
+            provider=CONNECTOR_PROVIDER,
+            account_id=CONNECTOR_ACCOUNT,
+            host=CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
+        assert await _claims(driver) == (source_id,)  # unparked and due, through the driver's read
+
+    released = await _source_state(source_id)
+    assert (released["parked_at"], released["parked_reason"]) == (None, None)
+    assert (released["consecutive_refusals"], released["consecutive_errors"]) == (0, 0)
+    assert released["cursor"] == "held-cursor"
+    held = await _source_state(unrelated_id)
+    assert held["parked_reason"] == PARK_REASON
+    assert held["consecutive_refusals"] == SOURCE_REFUSAL_PARK_THRESHOLD
+
+
+async def test_a_resync_unparks_the_source_it_names(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The manual override, for a scope fixed on the provider's side where no connect flow runs and
+    no connection row is written. A parked row is never claimed, so a resync that only pulled
+    `next_sync_at` forward would do nothing on exactly the row someone is trying to revive."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, "held-cursor")
+    driver, _ = _scripted_driver([], database_url, tmp_path / "blobs")
+    await _park(source_id)
+
+    with ws(workspace_id):
+        await context_for("sources", frozenset()).schedule_source_sync((source_id,))
+        assert await _claims(driver) == (source_id,)
+
+    state = await _source_state(source_id)
+    assert (state["parked_at"], state["parked_reason"], state["consecutive_refusals"]) == (
+        None,
+        None,
+        0,
+    )
+    assert state["cursor"] == "held-cursor"
+
+
+async def test_a_successful_run_clears_the_refusal_counter(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """Refusals count consecutive runs, so the count ends where the refusals end. A token that
+    momentarily fails to refresh is one refusal, and a stream that carried that count forever would
+    park on two more of them however far apart they fell."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    page = Page(
+        source_ref="docs/plan",
+        body="the launch window opens at dawn",
+        stream="docs",
+        title="Launch plan",
+    )
+    driver, _ = _scripted_driver(
+        [StreamSkipped(PARK_REASON), SyncResult(pages=(page,))], database_url, tmp_path / "blobs"
+    )
+
+    await _sync(driver)
+    assert (await _source_state(source_id))["consecutive_refusals"] == 1
+    await _make_due()
+    await _sync(driver)
+
+    state = await _source_state(source_id)
+    assert (state["consecutive_refusals"], state["parked_at"]) == (0, None)
+
+
+async def test_an_unpark_landing_under_the_claim_survives_the_refused_run(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The member acts once, and once is enough. A source one refusal short of the threshold is
+    claimed, and the resync or reconnect that clears its counter lands while that claim is held —
+    neither unpark touches `claimed_by`, so the refused run's writer still matches the row. Counting
+    from the value the claim was taken on would park it on a count the member had already reset,
+    with the row unclaimable, no check or counter saying so, and nothing left to tell them the act
+    was discarded. The count is read where it is written, so their zero is what this refusal counts
+    from: one refusal, no marks, and the row due again on the next pass."""
+    reader = _meter(monkeypatch)
+    submitted: list[tuple[str, int, str, dict[str, str]]] = []
+
+    async def _record(name: str, status: int, message: str = "", /, **tags: str) -> None:
+        submitted.append((name, status, message, tags))
+
+    monkeypatch.setattr(sync, "emit_service_check", _record)
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, "held-cursor")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.source)
+            .values(consecutive_refusals=SOURCE_REFUSAL_PARK_THRESHOLD - 1)
+            .where(tables.source.c.id == source_id)
+        )
+    driver = SyncDriver(
+        backends={
+            SCRIPTED_BACKEND: _ResyncingSource(
+                source_id=source_id,
+                workspace_id=workspace_id,
+                outcome=StreamSkipped(PARK_REASON),
+            )
+        },
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+
+    await _sync(driver)
+
+    state = await _source_state(source_id)
+    assert (state["parked_at"], state["parked_reason"]) == (None, None)
+    assert state["consecutive_refusals"] == 1  # the member's zero, then this refusal
+    assert state["cursor"] == "held-cursor"
+    assert submitted == []
+    assert _metric_points(reader, PARKED_METRIC) == []
+    assert await _claims(driver) == (source_id,)  # the request stands: due again immediately
+
+
 CONNECTOR_PROVIDER = "slack"
 CONNECTOR_STREAM = "messages"
 CONNECTOR_ACCOUNT = "ca_T0ACME"
+CONNECTOR_HOST = "slack.com"
 SYNC_METRIC = f"ufo.{SOURCE_SYNC_FAILED_METRIC}"
 
 

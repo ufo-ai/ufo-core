@@ -111,6 +111,30 @@ resource "datadog_monitor" "source_sync_failed" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
+# A stream the provider keeps refusing is not failing: `_skip` parks the row after
+# SOURCE_REFUSAL_PARK_THRESHOLD refusals and submits WARNING, which takes that row out of the
+# CRITICAL monitor above. The park slows the row to SOURCE_PARK_RETRY_SECONDS rather than stopping
+# it, so a row that stays refused emits one point an hour and one that recovers stops emitting and
+# submits its own OK. The window therefore has to be wider than that hour, or the monitor would
+# resolve between two parks of the same row and alert again on the next one. No renotify: the fix is
+# a member re-granting a scope, which no amount of paging ops makes happen sooner, and the row comes
+# back on its own the run after the refusal lifts.
+resource "datadog_monitor" "source_sync_parked" {
+  name    = "ufo prod source sync parked"
+  type    = "query alert"
+  query   = "sum(last_4h):sum:ufo.source_sync_parked_total{env:prod} by {provider,stream}.as_count() >= 1"
+  message = "{{provider.name}} {{stream.name}} source sync parked: the provider refused that stream on every attempt, so the row reads once an hour instead of once a minute and holds its cursor and pages. Search source_sync.skipped for the source id and the refusal reason. A refusal that lifts on its own recovers on the next hourly read; one that names a missing scope needs the member who owns that connection to re-grant it, and reconnecting the account puts the row back inside the minute. @ops@flyingobject.ai @slack-alerts"
+
+  monitor_thresholds {
+    critical = 1
+  }
+
+  require_full_window = false
+  renotify_interval   = 0
+
+  tags = ["env:prod", "managed-by:terraform"]
+}
+
 # A page-change consumer advances its cursor only after its handler returns, so a batch the handler
 # cannot accept is replayed every tick and holds every later page in that workspace behind it. The
 # threshold is what separates the two faults this counts: a provider blip fails once or twice and

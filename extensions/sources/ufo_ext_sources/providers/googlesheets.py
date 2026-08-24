@@ -87,9 +87,9 @@ from ufo.sdk.sources import (
     StreamPage,
     StreamSkipped,
     StreamSpec,
-    dict_or_empty,
     list_or_empty,
 )
+from ufo_ext_sources.providers import google
 
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SHEETS_API_URL = "https://sheets.googleapis.com/v4"
@@ -97,17 +97,7 @@ DRIVE_PAGE_SIZE = 1000
 PAGE_SIZE = 100
 REFUSED_LIMIT = 50
 VALUES_BATCH_SIZE = 50
-_REFUSAL_STATUS = frozenset({401, 403})
 _METADATA_FALLBACK_STATUS = frozenset({403, 404})
-_QUOTA_STATUS = "RESOURCE_EXHAUSTED"
-_QUOTA_REASONS = frozenset(
-    {
-        "dailyLimitExceeded",
-        "quotaExceeded",
-        "rateLimitExceeded",
-        "userRateLimitExceeded",
-    }
-)
 _SERVICE_ERROR_DOMAIN = "googleapis.com"
 _GRANT_REASONS = frozenset({"accessNotConfigured", "insufficientPermissions"})
 DRIVE_FILE_FIELDS = "id,name,webViewLink,createdTime,modifiedTime,owners(emailAddress,displayName)"
@@ -201,7 +191,7 @@ class GoogleSheetsConnector(RestConnector):
             retried = None
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
-            if status in _REFUSAL_STATUS and not _is_quota_refusal(_error_detail(error)):
+            if google.refused_for_scope(error):
                 raise StreamSkipped(
                     f"googlesheets: {stream.name!r} refused ({status}); the grant cannot read "
                     "Drive or Sheets"
@@ -256,7 +246,7 @@ class GoogleSheetsConnector(RestConnector):
                 params={"fields": DRIVE_CARRIED_FIELDS, "supportsAllDrives": "true"},
             )
         except httpx.HTTPStatusError as error:
-            if not _is_per_file_refusal(error.response.status_code, _error_detail(error)):
+            if not _is_per_file_refusal(error.response.status_code, google.error_detail(error)):
                 raise
             gone = error.response.status_code == 404
             return _FileVisit(file_id=file_id, record=None, refused=not gone)
@@ -275,7 +265,7 @@ class GoogleSheetsConnector(RestConnector):
                 params={"includeGridData": "false"},
             )
         except httpx.HTTPStatusError as error:
-            if not _is_per_file_refusal(error.response.status_code, _error_detail(error)):
+            if not _is_per_file_refusal(error.response.status_code, google.error_detail(error)):
                 raise
             refused = True
             meta = {"spreadsheetId": file_id, "properties": {"title": file.get("name")}}
@@ -339,7 +329,7 @@ class GoogleSheetsConnector(RestConnector):
                     },
                 )
             except httpx.HTTPStatusError as error:
-                if not _is_per_file_refusal(error.response.status_code, _error_detail(error)):
+                if not _is_per_file_refusal(error.response.status_code, google.error_detail(error)):
                     raise
                 for title, sheet_id in chunk:
                     grid = (
@@ -352,7 +342,7 @@ class GoogleSheetsConnector(RestConnector):
                         )
                     except httpx.HTTPStatusError as tab_error:
                         if not _is_per_file_refusal(
-                            tab_error.response.status_code, _error_detail(tab_error)
+                            tab_error.response.status_code, google.error_detail(tab_error)
                         ):
                             raise
                         tab_refused = True
@@ -419,27 +409,13 @@ def _settled(refused: set[str], file_id: str, still_refused: bool) -> set[str]:
     return refused | {file_id} if still_refused else refused - {file_id}
 
 
-def _error_detail(error: httpx.HTTPStatusError) -> dict[str, Any]:
-    try:
-        body = error.response.json()
-    except ValueError:
-        return {}
-    return dict_or_empty(dict_or_empty(body).get("error"))
-
-
 def _is_per_file_refusal(status: int, detail: dict[str, Any]) -> bool:
     return (
         status in _METADATA_FALLBACK_STATUS
         and bool(detail)
-        and not _is_quota_refusal(detail)
+        and not google.is_quota_refusal(detail)
         and not _is_grant_refusal(detail)
     )
-
-
-def _is_quota_refusal(detail: dict[str, Any]) -> bool:
-    if detail.get("status") == _QUOTA_STATUS:
-        return True
-    return any(item.get("reason") in _QUOTA_REASONS for item in list_or_empty(detail.get("errors")))
 
 
 def _is_grant_refusal(detail: dict[str, Any]) -> bool:

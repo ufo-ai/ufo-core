@@ -16,6 +16,7 @@ export type Source = {
   shared: boolean;
   consecutive_errors: number;
   next_sync_at: string;
+  parked_reason: string | null;
 };
 
 export type SourcesPayload = { sources: Source[] };
@@ -46,10 +47,20 @@ type SourceRow = {
   access: string;
   errors: string;
   next_sync: string | null;
+  parked: string | null;
   shared: boolean;
   own: boolean;
   apply: SourceSpec | null;
 };
+
+/** What a row says instead of a due time when the provider has stopped answering one of its
+ *  streams: the reason the backend wrote, which names the scope to re-grant. A parked stream is
+ *  never claimed again, so a row holding one is not syncing everything the member asked for,
+ *  however healthy its error count and its next due time read. */
+function parked(streams: Source[]): string | null {
+  const reasons = streams.flatMap((entry) => (entry.parked_reason ? [entry.parked_reason] : []));
+  return reasons.length === 0 ? null : [...new Set(reasons)].join(" ");
+}
 
 function rows(payload: SourcesPayload): SourceRow[] {
   const bindings = new Map<string, Source[]>();
@@ -74,6 +85,7 @@ function rows(payload: SourcesPayload): SourceRow[] {
       access: access(first.shared),
       errors: String(streams.reduce((total, entry) => total + entry.consecutive_errors, 0)),
       next_sync: streams.map((entry) => entry.next_sync_at).sort()[0],
+      parked: parked(streams),
       shared: first.shared,
       own: first.own,
       apply: {
@@ -97,6 +109,7 @@ function rows(payload: SourcesPayload): SourceRow[] {
       access: access(entry.shared),
       errors: String(entry.consecutive_errors),
       next_sync: entry.next_sync_at,
+      parked: parked([entry]),
       shared: entry.shared,
       own: entry.own,
       apply: null,
@@ -108,7 +121,8 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
   read: "/workspace/sources",
   rows,
   rowKey: (row) => row.key,
-  search: (row) => [row.name ?? "", row.backend, row.streams, row.owner ?? ""].join(" "),
+  search: (row) =>
+    [row.name ?? "", row.backend, row.streams, row.owner ?? "", row.parked ?? ""].join(" "),
   chips: [
     { label: "Only you", has: (row) => !row.shared },
     { label: "Workspace", has: (row) => row.shared },
@@ -126,7 +140,8 @@ export const SOURCES: ListingSpec<SourcesPayload, SourceRow> = {
     {
       field: "next_sync",
       label: "Next Sync",
-      render: (at) => <Moment at={at} />,
+      render: (at, row) =>
+        row.parked === null ? <Moment at={at} /> : <span title={row.parked}>Parked</span>,
     },
   ],
   empty:

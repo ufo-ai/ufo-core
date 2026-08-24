@@ -18,7 +18,10 @@ derivation state lives in the indexer's own mirror. The driver polls; it never f
 it makes. `source_sync.failed` and `source_sync_failed_total` name a failed provider stream;
 `source_sync.ok` records what a successful run wrote; the `ufo.source_sync` service check carries
 each source row's current state, CRITICAL from the run that failed until the run that
-succeeds."""
+succeeds. A provider that keeps refusing a stream is neither: after
+`SOURCE_REFUSAL_PARK_THRESHOLD` refusals the row parks — held at
+`SOURCE_PARK_RETRY_SECONDS` instead of the interval, counted by `source_sync_parked_total`, and
+WARNING on the check — until a run of it succeeds."""
 
 import asyncio
 import hashlib
@@ -44,6 +47,7 @@ from ufo.db import owner_tx, workspace_tx
 from ufo.o11y import (
     SERVICE_CHECK_CRITICAL,
     SERVICE_CHECK_OK,
+    SERVICE_CHECK_WARNING,
     emit_metric,
     emit_service_check,
     log,
@@ -57,10 +61,13 @@ SOURCE_SYNC_JOB = "source_sync"
 SOURCE_SYNC_SCHEDULE = "0 * * * * *"
 SOURCE_SYNC_INTERVAL_SECONDS = 60
 SOURCE_ERROR_BACKOFF_CAP_SECONDS = 3600
+SOURCE_REFUSAL_PARK_THRESHOLD = 3
+SOURCE_PARK_RETRY_SECONDS = 3600
 CLAIM_LEASE_SECONDS = 300
 DUE_BATCH_MAX_SOURCES = 50
 SOURCE_BLOB_PREFIX = "sources"
 SOURCE_SYNC_FAILED_METRIC = "source_sync_failed_total"
+SOURCE_SYNC_PARKED_METRIC = "source_sync_parked_total"
 SOURCE_SYNC_CHECK = "source_sync"
 SYNC_PROVIDER_FAULT_MAX_CHARS = 500
 
@@ -159,8 +166,14 @@ class StreamSkipped(RuntimeError):
     that is not a data failure — a missing OAuth scope, a disabled workspace object, a plan gate.
     The driver records the run as skipped, not failed: it commits no pages, so snapshot
     delete-detection never runs and the source's existing pages stand, and it reschedules at the
-    normal interval with the cursor held and the error counter untouched, rather than backing the
-    source off as if it had errored. A genuine fault still raises through and fails the run."""
+    normal interval with the cursor held and the error counter cleared, rather than backing the
+    source off as if it had errored. It also counts the refusal, and parks the source at
+    `SOURCE_REFUSAL_PARK_THRESHOLD` of them, which holds it at `SOURCE_PARK_RETRY_SECONDS` rather
+    than the interval. A raiser therefore does not have to know whether the refusal will clear: one
+    that does costs an hour, and one that does not costs a request an hour instead of a request a
+    minute. A fault the caller can distinguish still reads better as a fault — it raises through and
+    takes the error backoff — but nothing about a stream stopping rests on the caller getting that
+    right."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -406,7 +419,7 @@ class ClaimedSource:
     claimed_at: datetime
 
 
-def _rescheduled(claimed: ClaimedSource, when: datetime) -> sa.Case[datetime]:
+def _rescheduled(claimed: ClaimedSource, when: datetime | sa.Case[datetime]) -> sa.Case[datetime]:
     """The completing writer's `next_sync_at`: `when`, unless a resync was requested while this
     claim held the row. `schedule_source_sync` writes `next_sync_at=now` under a live claim by
     design — the lease serializes concurrent *syncs*, not the scheduling of the next one — so any
@@ -498,7 +511,9 @@ class SyncDriver:
     the dispatcher binds only those and a workspace with nothing due is never opened. On a
     per-tenant deploy `owner_tx` resolves to the single workspace, unchanged. Due means readable
     too: a source the archive took every reader from is nobody's feed, so it is neither a candidate
-    nor claimed until a restore gives it one back."""
+    nor claimed until a restore gives it one back. A parked row — one the provider refused often
+    enough that `_skip` slowed it to an hour — is due like any other row, an hour out instead of a
+    minute."""
 
     backends: Mapping[str, SourceBackend]
     blob: WorkspaceBlobStore
@@ -543,7 +558,7 @@ class SyncDriver:
                         **_stream_tags(source),
                         reason=skipped.reason,
                     )
-                await self._skip(source)
+                await self._skip(source, skipped.reason)
             except Exception as error:
                 cursor_reset = isinstance(error, CursorExpired)
                 errors, next_sync_at = self._error_backoff(source, datetime.now(UTC))
@@ -813,6 +828,9 @@ class SyncDriver:
                         source, now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS)
                     ),
                     consecutive_errors=0,
+                    consecutive_refusals=0,
+                    parked_at=None,
+                    parked_reason=None,
                     claimed_by=None,
                     claim_expires_at=None,
                     updated_at=sa.func.now(),
@@ -945,29 +963,87 @@ class SyncDriver:
                 )
             )
 
-    async def _skip(self, source: ClaimedSource) -> None:
+    async def _skip(self, source: ClaimedSource, reason: str) -> None:
         """A backend raised `StreamSkipped`: the source is intentionally unreadable this run (a
         missing scope, a plan gate), not failed. Free the claim and reschedule at the normal
         interval with the cursor held and the error counter reset — no pages committed, so snapshot
-        delete-detection never runs and the source's existing pages stand."""
+        delete-detection never runs and the source's existing pages stand.
+
+        The refusal also counts, and at `SOURCE_REFUSAL_PARK_THRESHOLD` the row parks: held at
+        `SOURCE_PARK_RETRY_SECONDS` instead of the interval, with the two marks naming why. A grant
+        does not widen between two attempts, so retrying a refused stream every interval costs a
+        request a minute for as long as nobody re-grants the scope; three refusals absorb a token
+        that momentarily failed to refresh and end that loop within about five minutes.
+
+        A park slows a stream, it never stops one. Whether a refusal will clear by itself is the
+        provider's business and not always legible here — a throttle Google spells `403`, a
+        rate-limited org, a plan gate lifted an hour later — so the driver keeps reading a parked
+        row, and the run that finally succeeds clears the marks and the counter in `_write`. That is
+        the recovery for every refusal alike, and it needs neither a member nor an operator. The
+        reconnect and the resync that unpark only make it immediate instead of hourly. A park held
+        until someone acted would put every stream a provider ever throttles behind a member's
+        attention, on a reason naming a scope that was never missing.
+
+        The count is read and the park decided inside the one statement, off the stored counter
+        rather than the value this claim was taken on. An unpark lands while a claim is held — a
+        reconnect of the account, a resync — and it writes that counter back to zero without
+        touching the claim, so a park computed from the claimed value would discard the act the
+        member just made and push the row an hour out with nobody left to tell. Reading the counter
+        here makes their zero the base this refusal counts from. The row the statement answers with
+        is therefore what parked, or nothing at all."""
         now = datetime.now(UTC)
+        counted = tables.source.c.consecutive_refusals + 1
+        parks = counted >= SOURCE_REFUSAL_PARK_THRESHOLD
         async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(tables.source)
-                .values(
-                    next_sync_at=_rescheduled(
-                        source, now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS)
-                    ),
-                    consecutive_errors=0,
-                    claimed_by=None,
-                    claim_expires_at=None,
-                    updated_at=sa.func.now(),
+            row = (
+                await connection.execute(
+                    sa.update(tables.source)
+                    .values(
+                        next_sync_at=_rescheduled(
+                            source,
+                            sa.case(
+                                (parks, now + timedelta(seconds=SOURCE_PARK_RETRY_SECONDS)),
+                                else_=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                            ),
+                        ),
+                        consecutive_errors=0,
+                        consecutive_refusals=counted,
+                        parked_at=sa.case((parks, now), else_=None),
+                        parked_reason=sa.case((parks, reason), else_=None),
+                        claimed_by=None,
+                        claim_expires_at=None,
+                        updated_at=sa.func.now(),
+                    )
+                    .where(
+                        tables.source.c.id == source.source_id,
+                        tables.source.c.claimed_by == source.claim,
+                        tables.source.c.removed_at.is_(None),
+                    )
+                    .returning(tables.source.c.parked_at, tables.source.c.consecutive_refusals)
                 )
-                .where(
-                    tables.source.c.id == source.source_id,
-                    tables.source.c.claimed_by == source.claim,
-                    tables.source.c.removed_at.is_(None),
-                )
+            ).one_or_none()
+        if row is not None and row.parked_at is not None:
+            await self._report_parked(source, reason, row.consecutive_refusals)
+
+    async def _report_parked(self, source: ClaimedSource, reason: str, refusals: int) -> None:
+        """A run that parked a refused stream, as the state of that row: a WARNING
+        `ufo.source_sync` check naming the reason the backend authored, plus the park counter. The
+        check is the point — a row that failed twice went CRITICAL and then started being refused
+        holds CRITICAL with nothing left able to submit an OK, so the alert renotifies hourly on a
+        row that is no longer failing. WARNING replaces it with what is true: the stream is refused
+        and reading once an hour, and `_report_ok` submits the OK that ends it. A parked row that
+        stays refused re-parks each hour, so the counter reads as a rate and the check as a state.
+        Reported after the write, so a transaction that could not park the row submits nothing. Each
+        emission is suppressed on its own, as on the failure path."""
+        tags = _stream_tags(source)
+        with suppress(Exception):
+            emit_metric(SOURCE_SYNC_PARKED_METRIC, **tags)
+        with suppress(Exception):
+            await emit_service_check(
+                SOURCE_SYNC_CHECK,
+                SERVICE_CHECK_WARNING,
+                f"{refusals} consecutive refused runs, parked: {reason}",
+                **_check_tags(source),
             )
 
 

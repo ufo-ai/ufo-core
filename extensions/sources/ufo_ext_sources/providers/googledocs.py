@@ -7,7 +7,8 @@ Docs API (`GET https://docs.googleapis.com/v1/documents/{id}`). The stream is in
 query filters server-side past the stored `modifiedTime` watermark, and each record lifts that time
 to a flat `updated_at` the sync advances a cursor over. A doc the grant can list but not open
 (`403`/`404`) lands as a title-only stub so one unreadable file never fails the run; a Drive-list
-refusal (`401`/`403`) yields `StreamSkipped`. A Google Doc's text lives in a nested `body.content`
+refusal (`401`/`403`) naming the grant yields `StreamSkipped`, and one naming a usage limit raises
+(`ufo_ext_sources.providers.google`). A Google Doc's text lives in a nested `body.content`
 tree of paragraphs, so `render` walks that tree into the readable prose a member would see. The
 credential is resolved through the auth proxy the runner threads — this connector holds no token.
 The write path is intentionally absent — the source seam only reads."""
@@ -18,6 +19,7 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo_ext_sources.providers import google
 
 DOC_MIME = "application/vnd.google-apps.document"
 DOCS_API_URL = "https://docs.googleapis.com/v1"
@@ -28,7 +30,6 @@ DRIVE_FIELDS = (
     "nextPageToken,files(id,name,webViewLink,createdTime,modifiedTime,"
     "owners(emailAddress,displayName))"
 )
-_REFUSAL_STATUS = frozenset({401, 403})
 _DOC_MISSING_STATUS = frozenset({403, 404})
 
 GOOGLE_DOCS_STREAMS: list[StreamSpec] = [
@@ -76,7 +77,7 @@ class GoogleDocsConnector(RestConnector):
                         yield page
                         page = []
         except httpx.HTTPStatusError as error:
-            if error.response.status_code in _REFUSAL_STATUS:
+            if google.refused_for_scope(error):
                 raise StreamSkipped(
                     f"googledocs: {stream.name!r} refused ({error.response.status_code}); the "
                     "grant lacks the Drive or Docs scope, or was not shared the document"

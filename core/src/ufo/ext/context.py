@@ -897,7 +897,9 @@ class SourceRecord:
     """One live content-sync source as `ExtensionContext.sources` reads it: the row's identity,
     the backend's typed per-source parameters as stored, and the timing marks a caller renders as
     status; `subject` is the disclosure every synced page is stamped with, `owner_member_id` the
-    registering member (None for a deploy- or extension-registered feed). A value object — never
+    registering member (None for a deploy- or extension-registered feed). `parked_at` and
+    `parked_reason` are set on a row the provider refused often enough to slow it to an hour: it is
+    not failing, so nothing else in the status says it is barely reading. A value object — never
     leaves the process."""
 
     id: UUID
@@ -908,6 +910,8 @@ class SourceRecord:
     connection_id: UUID | None
     next_sync_at: datetime
     consecutive_errors: int
+    parked_at: datetime | None
+    parked_reason: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -2208,6 +2212,9 @@ class ExtensionContext:
                         cursor=None,
                         next_sync_at=registered_at,
                         consecutive_errors=0,
+                        consecutive_refusals=0,
+                        parked_at=None,
+                        parked_reason=None,
                         claimed_by=None,
                         claim_expires_at=None,
                         created_at=registered_at,
@@ -2350,6 +2357,8 @@ class ExtensionContext:
                 tables.source.c.connection_id,
                 tables.source.c.next_sync_at,
                 tables.source.c.consecutive_errors,
+                tables.source.c.parked_at,
+                tables.source.c.parked_reason,
                 tables.source.c.created_at,
                 tables.source.c.updated_at,
             )
@@ -2373,6 +2382,8 @@ class ExtensionContext:
                 connection_id=row["connection_id"],
                 next_sync_at=row["next_sync_at"],
                 consecutive_errors=row["consecutive_errors"],
+                parked_at=row["parked_at"],
+                parked_reason=row["parked_reason"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
@@ -2594,11 +2605,23 @@ class ExtensionContext:
         the one sanctioned way to resync on demand. The claim lease serializes concurrent syncs of
         one source, and a request landing while a sync holds that lease survives it: the completing
         writer reschedules only the sync it actually ran (`sources.sync._rescheduled`). Fails loud
-        when no live source matched."""
+        when no live source matched.
+
+        A resync also unparks: the registrar asking for one is saying the refusal that parked the
+        row is dealt with, and a parked row is an hour from its next look, so leaving the marks
+        would make this act read as done while the row sat out that hour. The reconnect that widens
+        the grant unparks by itself — this is the override for a scope fixed on the provider's side,
+        where no connection row is written."""
         async with workspace_tx() as connection:
             updated = await connection.execute(
                 sa.update(tables.source)
-                .values(next_sync_at=datetime.now(UTC), updated_at=sa.func.now())
+                .values(
+                    next_sync_at=datetime.now(UTC),
+                    parked_at=None,
+                    parked_reason=None,
+                    consecutive_refusals=0,
+                    updated_at=sa.func.now(),
+                )
                 .where(
                     tables.source.c.id.in_(source_ids),
                     tables.source.c.workspace_id == self.store.workspace_id,

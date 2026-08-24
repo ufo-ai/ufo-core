@@ -196,6 +196,8 @@ class _Stream:
     name: str
     next_sync_at: datetime
     consecutive_errors: int
+    parked_at: datetime | None
+    parked_reason: str | None
     source_id: UUID
     created_at: datetime
     updated_at: datetime
@@ -286,6 +288,8 @@ async def _bindings_from_ext(ext: ExtensionContext) -> tuple[_Binding, ...]:
                 name=config.stream,
                 next_sync_at=record.next_sync_at,
                 consecutive_errors=record.consecutive_errors,
+                parked_at=record.parked_at,
+                parked_reason=record.parked_reason,
                 source_id=record.id,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
@@ -494,6 +498,10 @@ class SourceObjects(MemberReadableObjects[SourceSpec, ObjectOwner]):
                 stream.name: {
                     "next_sync_at": stream.next_sync_at.isoformat(),
                     "consecutive_errors": stream.consecutive_errors,
+                    "parked_at": (
+                        None if stream.parked_at is None else stream.parked_at.isoformat()
+                    ),
+                    "parked_reason": stream.parked_reason,
                     "backfill_after": (
                         None if stream.backfill_after is None else stream.backfill_after.isoformat()
                     ),

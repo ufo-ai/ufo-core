@@ -9,9 +9,10 @@ next page (or the fresh `newStartPageToken` at the end). A `410` on the changes 
 expired, so the connector raises `CursorExpired` and core refetches fresh. `shared_drives` re-reads
 the whole set each run; `permissions`, `comments`, and `revisions` fan out over every file to its
 sub-collection. A grant that lacks the Drive scope (`401`/`403`) yields `StreamSkipped` so the run
-records a skip, not a failure. `render` lifts a file's name, mime type, owners, and link into a
-readable body. The credential is resolved through the auth proxy the runner threads — this connector
-holds no token. The write path is intentionally absent — the source seam only reads."""
+records a skip, not a failure; a refusal naming a usage limit instead of the grant raises
+(`ufo_ext_sources.providers.google`). `render` lifts a file's name, mime type, owners, and link
+into a readable body. The credential is resolved through the auth proxy the runner threads — this
+connector holds no token. The write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -26,11 +27,11 @@ from ufo.sdk.sources import (
     StreamSpec,
     list_or_empty,
 )
+from ufo_ext_sources.providers import google
 
 PAGE_SIZE = 1000
 CHILD_PAGE_SIZE = 100
 DRIVE_PAGE_SIZE = 100
-_REFUSAL_STATUS = frozenset({401, 403})
 _CHILD_REFUSAL_STATUS = frozenset({403, 404})
 FILE_FIELDS = (
     "nextPageToken,files(id,name,mimeType,webViewLink,createdTime,modifiedTime,"
@@ -110,7 +111,7 @@ class GoogleDriveConnector(RestConnector):
                 f"googledrive: stream {stream.name!r} has no paginate dispatch"
             )
         except httpx.HTTPStatusError as error:
-            if error.response.status_code in _REFUSAL_STATUS:
+            if google.refused_for_scope(error):
                 raise StreamSkipped(
                     f"googledrive: {stream.name!r} refused ({error.response.status_code}); the "
                     "grant lacks the Drive scope"

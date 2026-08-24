@@ -21,7 +21,9 @@ moves surface as add/delete pairs), the net-added ids are body-fetched, and the 
 tombstones alongside the new `historyId`. A `404` on the history walk means the id aged out of
 Gmail's window, so the connector raises `CursorExpired` and core refetches from scratch — the next
 run backfills the same pinned window, never a fresh one; a grant that lacks the scope (`401`/`403`)
-yields `StreamSkipped` so the run records a skip, not a failure; a message that vanished between the
+yields `StreamSkipped` so the run records a skip, not a failure, while a refusal naming a usage
+limit instead of the grant raises (`ufo_ext_sources.providers.google`); a message that vanished
+between the
 history walk and its body fetch (`404`) is skipped. The credential is resolved through the auth
 proxy the runner threads — this connector holds no token. The write path is intentionally absent —
 the source seam only reads."""
@@ -43,6 +45,7 @@ from ufo.sdk.sources import (
     StreamSkipped,
     StreamSpec,
 )
+from ufo_ext_sources.providers import google
 
 GMAIL_API_BASE = "https://gmail.googleapis.com"
 MESSAGES_PATH = "/gmail/v1/users/me/messages"
@@ -50,7 +53,6 @@ HISTORY_PATH = "/gmail/v1/users/me/history"
 PROFILE_PATH = "/gmail/v1/users/me/profile"
 LIST_PAGE_SIZE = 500
 BODIES_CHUNK_SIZE = 200
-_REFUSAL_STATUS = frozenset({401, 403})
 _HEADER_INTEREST = frozenset({"from", "to", "cc", "subject"})
 _BLOCK_TAGS = frozenset(
     {
@@ -133,7 +135,7 @@ class GmailConnector(RestConnector):
                     next_cursor=next_history if index == last else None,
                 )
         except httpx.HTTPStatusError as error:
-            if error.response.status_code in _REFUSAL_STATUS:
+            if google.refused_for_scope(error):
                 raise StreamSkipped(
                     f"gmail: {stream.name!r} refused ({error.response.status_code}); the grant "
                     "lacks the Gmail read scope"

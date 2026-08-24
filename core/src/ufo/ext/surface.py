@@ -979,7 +979,12 @@ class SourceView(BaseModel):
     connector-registered row — the `source` kind's binding name plus the spec fields that
     reconstruct the binding, so the panel's per-binding acts (resync, share, remove) submit the
     same object the chat verbs mutate. A config- or feed-registered row is not kind-managed and
-    carries None."""
+    carries None.
+
+    `parked_reason` is what a refused stream reads as, and carries the park: it is set exactly on a
+    row the driver slowed to an hour. Without it the panel shows a row the provider has stopped
+    answering as healthy — no errors, next sync a minute out — while it syncs nothing. The text is
+    the backend's own, and names the scope to re-grant to have it back inside the minute."""
 
     backend: str
     shared: bool
@@ -987,6 +992,7 @@ class SourceView(BaseModel):
     own: bool
     consecutive_errors: int
     next_sync_at: datetime
+    parked_reason: str | None = None
     name: str | None = None
     stream: str | None = None
     account_id: str | None = None
@@ -3417,6 +3423,7 @@ class SurfaceContext:
                 tables.source.c.owner_member_id,
                 tables.source.c.consecutive_errors,
                 tables.source.c.next_sync_at,
+                tables.source.c.parked_reason,
                 tables.source.c.config,
             )
             .select_from(
@@ -3447,6 +3454,7 @@ class SurfaceContext:
                 own=admin or row.owner_member_id == member_id,
                 consecutive_errors=row.consecutive_errors,
                 next_sync_at=row.next_sync_at,
+                parked_reason=row.parked_reason,
                 **_binding_fields(row.backend, row.config),
             )
             for row in rows

@@ -326,7 +326,17 @@ class GrantStore:
         transaction as the grant: the surfaces draw a settled control off that stamp, and one
         written separately could fail on its own and leave a reply still asking for an act already
         done — or, written before the conversation is told, cost the member the answer they are
-        owed."""
+        owed.
+
+        Reusing the connection row is also what releases the feeds bound to it. A source the
+        provider refused into a park, and one that backed off to the hour cap, are both an hour from
+        their next look, and this act is the answer to both: the same account reconnected with the
+        scope it needs. So the reconnect clears the park marks, both counters, and the backoff on
+        every live source of that connection, and those rows sync on the next tick with their
+        cursors and pages intact — the hour they would otherwise have waited, spent. Nothing here is
+        load-bearing for recovery: a refused stream reads once an hour on its own and the run that
+        succeeds releases it. This only makes it immediate, which is what the member who just
+        re-granted the scope expects."""
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in account_id):
             raise ValueError("account_id has a control character; refusing to record the grant")
         async with workspace_tx() as connection:
@@ -414,6 +424,22 @@ class GrantStore:
                         tables.turn.c.workspace_id == self.workspace_id,
                     )
                 )
+            await connection.execute(
+                sa.update(tables.source)
+                .values(
+                    parked_at=None,
+                    parked_reason=None,
+                    consecutive_refusals=0,
+                    consecutive_errors=0,
+                    next_sync_at=datetime.now(UTC),
+                    updated_at=sa.func.now(),
+                )
+                .where(
+                    tables.source.c.workspace_id == self.workspace_id,
+                    tables.source.c.connection_id == existing.id,
+                    tables.source.c.removed_at.is_(None),
+                )
+            )
         return existing.id
 
     async def active_grants(self) -> tuple[Grant, ...]:

@@ -77,6 +77,7 @@ METRICS = (
     "tool_call_total",
     "page_change_stalled_total",
     "source_sync_failed_total",
+    "source_sync_parked_total",
     "surface_listener_parked_total",
     "repl_run_total",
     "objective_step_recorded_total",
@@ -125,6 +126,7 @@ UP_DOWN_METRICS = {
 }
 SERVICE_CHECKS = ("source_sync",)
 SERVICE_CHECK_OK = 0
+SERVICE_CHECK_WARNING = 1
 SERVICE_CHECK_CRITICAL = 2
 SERVICE_CHECK_HOST = "ufo-fleet"
 SERVICE_CHECK_TIMEOUT_SECONDS = 10

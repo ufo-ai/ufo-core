@@ -743,6 +743,54 @@ test("share flips the value it carries, and remove posts no spec at all", async 
 });
 
 
+test("a parked stream reads as parked rather than due, and the reason is on the cell", async () => {
+  wire({
+    "/workspace/sources": () =>
+      json({
+        sources: [
+          {
+            name: "gmail-main",
+            backend: "gmail",
+            stream: "messages",
+            account_id: "acct",
+            base_url: null,
+            owner_email: "member@example.com",
+            shared: false,
+            own: true,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-01T06:00:00",
+            parked_reason: "gmail: 'messages' refused (403); the grant lacks the Gmail read scope",
+          },
+          {
+            name: "notion-main",
+            backend: "notion",
+            stream: "pages",
+            account_id: "acct",
+            base_url: null,
+            owner_email: "member@example.com",
+            shared: false,
+            own: true,
+            consecutive_errors: 0,
+            next_sync_at: "2026-08-02T06:00:00",
+            parked_reason: null,
+          },
+        ],
+      }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <PlacedWorkspace view="sources" />
+    </MainAgentProvider>,
+  );
+
+  await waitFor(() => expect(cellsOf("messages")[5]).toBe("Parked"));
+  expect(rowOf("messages").querySelectorAll("td")[5].querySelector("span")?.title).toBe(
+    "gmail: 'messages' refused (403); the grant lacks the Gmail read scope",
+  );
+  expect(cellsOf("pages")[5]).toBe("Aug 2 2026");
+});
+
+
 test("every declaration keys its rows on fields its own payload carries", () => {
   expect(
     SOURCES.rows({
@@ -759,6 +807,7 @@ test("every declaration keys its rows on fields its own payload carries", () => 
           own: false,
           consecutive_errors: 0,
           next_sync_at: "2026-08-01T06:00:00",
+          parked_reason: null,
         },
       ],
     }).map(SOURCES.rowKey),

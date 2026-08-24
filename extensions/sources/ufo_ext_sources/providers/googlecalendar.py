@@ -6,7 +6,8 @@ carried opaquely as the run cursor: the first run has no token, so it bootstraps
 lookback window) with `showDeleted` and captures the `nextSyncToken`; a subsequent run passes the
 stored token, upserts changed events, and tombstones cancelled ones. A `410` means the token
 expired, so the connector raises `CursorExpired` and core refetches fresh; a grant that lacks the
-scope (`401`/`403`) yields `StreamSkipped` so the run records a skip, not a failure.
+scope (`401`/`403`) yields `StreamSkipped` so the run records a skip, not a failure; a refusal
+naming a usage limit instead of the grant raises (`ufo_ext_sources.providers.google`).
 
 `calendar_events` folds an event's attendees onto its record and `render` lifts the title, time
 range, location, attendees, and description into a readable body. `event_attendees` explodes each
@@ -22,11 +23,11 @@ from typing import Any
 import httpx
 
 from ufo.sdk.sources import CursorExpired, RestConnector, StreamPage, StreamSkipped, StreamSpec
+from ufo_ext_sources.providers import google
 
 EVENTS_PATH = "/calendar/v3/calendars/primary/events"
 LIST_PAGE_SIZE = 250
 BOOTSTRAP_LOOKBACK_DAYS = 90
-_REFUSAL_STATUS = frozenset({401, 403})
 _RESPONSE_MAP = {
     "accepted": "accepted",
     "declined": "declined",
@@ -100,7 +101,7 @@ class GoogleCalendarConnector(RestConnector):
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 410:
                 raise CursorExpired(f"googlecalendar syncToken {cursor} expired") from error
-            if error.response.status_code in _REFUSAL_STATUS:
+            if google.refused_for_scope(error):
                 raise StreamSkipped(
                     f"googlecalendar: {stream.name!r} refused ({error.response.status_code}); "
                     "the grant lacks the Calendar scope"

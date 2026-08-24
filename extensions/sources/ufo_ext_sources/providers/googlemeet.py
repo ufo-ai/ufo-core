@@ -13,7 +13,8 @@ window forever. Transcript entries are retained by the Meet API only for the cur
 record window, so the rendered page also carries the durable Google Docs destination for transcripts
 and smart notes. When the same grant can read the smart-notes Google Doc, the connector inlines its
 plain text; if Docs refuses or the file disappeared, the page keeps the link instead of failing the
-run. A Meet API refusal (`401`/`403`) records the stream as skipped, not failed."""
+run. A Meet API refusal (`401`/`403`) naming the grant records the stream as skipped, not failed;
+one naming a usage limit raises (`ufo_ext_sources.providers.google`)."""
 
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
@@ -23,6 +24,7 @@ from urllib.parse import quote
 import httpx
 
 from ufo.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec, list_or_empty
+from ufo_ext_sources.providers import google
 
 MEET_API_BASE = "https://meet.googleapis.com"
 DOCS_API_URL = "https://docs.googleapis.com/v1"
@@ -31,7 +33,6 @@ CONFERENCE_PAGE_SIZE = 100
 ARTIFACT_PAGE_SIZE = 100
 ENTRY_PAGE_SIZE = 100
 RESYNC_LOOKBACK = timedelta(days=1)
-_REFUSAL_STATUS = frozenset({401, 403})
 _DOC_MISSING_STATUS = frozenset({403, 404})
 
 GOOGLE_MEET_STREAMS: list[StreamSpec] = [
@@ -80,7 +81,7 @@ class GoogleMeetConnector(RestConnector):
                 if not isinstance(token, str) or not token:
                     return
         except httpx.HTTPStatusError as error:
-            if error.response.status_code in _REFUSAL_STATUS:
+            if google.refused_for_scope(error):
                 raise StreamSkipped(
                     f"googlemeet: {stream.name!r} refused ({error.response.status_code}); "
                     "the grant lacks the Google Meet scope or cannot read these artifacts"

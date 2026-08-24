@@ -1065,6 +1065,41 @@ async def test_a_windowed_connector_row_projects_its_window(db: None, tmp_path) 
     assert (view.stream, view.account_id, view.base_url) == ("messages", "acct-7", "")
 
 
+async def test_a_parked_source_carries_its_reason_and_an_unparked_one_carries_none(
+    db: None, tmp_path
+) -> None:
+    """The panel reads the source rows straight, so a row the driver stopped claiming has to say so
+    here or it reads as healthy: no errors, and a next sync a minute out it will never take. The
+    reason is the backend's own text, which names the scope to re-grant."""
+    workspace_id, _, _ = await _seed()
+    reason = "gmail: 'messages' refused (403); the grant lacks the Gmail read scope"
+    async with workspace_tx() as connection:
+        for backend, parked_reason in (("gmail", reason), ("folder", None)):
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    backend=backend,
+                    config={},
+                    subject=SHARED_SUBJECT,
+                    owner_member_id=None,
+                    next_sync_at=sa.func.now(),
+                    parked_at=sa.func.now() if parked_reason else None,
+                    parked_reason=parked_reason,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    listed = await context.list_sources(uuid4(), admin=True)
+
+    assert [(view.backend, view.parked_reason) for view in listed] == [
+        ("folder", None),
+        ("gmail", reason),
+    ]
+
+
 async def test_list_installations_orders_by_surface(db: None, tmp_path) -> None:
     workspace_id, agent_id, _ = await _seed()
     async with workspace_tx() as connection:

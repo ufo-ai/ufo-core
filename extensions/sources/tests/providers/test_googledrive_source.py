@@ -8,6 +8,7 @@ from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import httpx
+import pytest
 from ufo_ext_sources.providers.googledrive import GoogleDriveConnector
 
 from ufo.access.connectors import Credential
@@ -174,3 +175,28 @@ async def test_scope_refusal_yields_stream_skipped() -> None:
     except StreamSkipped:
         return
     raise AssertionError("a 403 from Drive must raise StreamSkipped")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {
+            "code": 403,
+            "message": "Rate Limit Exceeded",
+            "errors": [{"reason": "userRateLimitExceeded"}],
+        },
+        {"code": 403, "message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"},
+    ],
+    ids=["usage-limits-reason", "resource-exhausted-status"],
+)
+async def test_a_quota_refusal_is_not_a_scope_skip(error: dict[str, object]) -> None:
+    """A `403` naming a usage limit is not a refusal the grant can answer: it clears as the quota
+    window rolls, so it fails the run and takes the error backoff. Skipped instead, it would spend
+    the driver's park threshold and take a stream that was about to come back out of reach until
+    someone reconnected an account that was never the problem."""
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": error})
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _fetch("files", refuse)
