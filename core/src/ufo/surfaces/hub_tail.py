@@ -48,21 +48,22 @@ async def tail_frames(
     frames: asyncio.Queue[tuple[str, LiveFrame]] = asyncio.Queue()
     start = since if since and await hub.covers(turn_id, since) else ""
     pump = asyncio.ensure_future(_pump(hub, turn_id, start, frames))
-    poll = asyncio.ensure_future(_poll_status(turn_id, frames, billing_url))
+    tasks = [pump]
     try:
         stored = await turn_status_frame(turn_id, billing_url)
         if stored is not None:
             yield "", stored
             return
+        tasks.append(asyncio.ensure_future(_poll_status(turn_id, frames, billing_url)))
         while True:
             cursor, frame = await frames.get()
             yield cursor, frame
             if isinstance(frame, Terminal | Parked):
                 return
     finally:
-        pump.cancel()
-        poll.cancel()
-        await asyncio.gather(pump, poll, return_exceptions=True)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _pump(

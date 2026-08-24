@@ -62,6 +62,41 @@ async def test_ended_tail_leaves_no_pump_or_poll_behind(db: None) -> None:
     keep.cancel()
 
 
+async def test_poll_starts_after_the_durable_precheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    poll_started = asyncio.Event()
+
+    async def status(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:
+        started.set()
+        await release.wait()
+        return None
+
+    async def poll(
+        turn_id: UUID,
+        frames: asyncio.Queue[tuple[str, LiveFrame]],
+        billing_url: str | None,
+    ) -> None:
+        poll_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(hub_tail, "turn_status_frame", status)
+    monkeypatch.setattr(hub_tail, "_poll_status", poll)
+    task = asyncio.create_task(_drain(tail_frames(InProcessHub(), uuid4())))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not poll_started.is_set()
+        release.set()
+        await asyncio.wait_for(poll_started.wait(), timeout=1)
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_tail_resumes_from_a_covered_cursor(db: None) -> None:
     hub = InProcessHub()
     turn_id = uuid4()
