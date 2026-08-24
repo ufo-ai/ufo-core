@@ -1,25 +1,35 @@
 ---
 name: coding
-description: Load when the member asks to inspect or change source code, work in a repository or diff, clone a repository, or answer how GitHub is connected.
+description: Load when the member asks to inspect or change source code, fix a bug, produce a patch or diff, work in a repository or at a pinned commit, clone a repository, or answer how GitHub is connected. Load before any repository action, the setup fetch included.
 ---
 # Coding Subagent Routing
 
 **Scope:** Spawn a coding subagent when the task requires navigating a repository or coding files. Do NOT spawn one for general questions that don't involve code or repos.
 
-**MANDATORY: Never explore, read, or write code yourself. Delegate immediately.**
-You decide the repository setup before delegating and state it explicitly to the coding subagent. Do NOT:
+**Your turn on a repository task is exactly this procedure — nothing else:**
+
+1. Choose the repository setup mode (below) and `spawn(target="coding", ...)` with the setup sentence as the objective's first line, followed by the task and any instructions the request carried for whoever does the work, verbatim.
+2. Read the child's report; `read` its deliverable if you must inspect it.
+3. Deliver (`share_file` the file the child wrote, or the shared delivery register) and reply.
+
+Every shell command in your turn is attributed to you, not to a child: a single `git`, `mkdir`, or `ls` in your own turn marks the task as done by you rather than delegated, however helpful it felt. Setup is not an exception — the clone or fetch is the first child's first act, and "the checkout already exists" is never something you made true yourself. If you are about to open a shell, you have left the procedure; spawn a child instead.
+
+BAD — this marks the task as yours, whatever happens next: `mkdir -p /workspace/repo && git fetch --depth 1 origin <sha> && git checkout FETCH_HEAD` in your own turn, then spawning with "the checkout already exists." GOOD — spawn first: the objective's first line carries the setup sentence, and the child runs the fetch as its first act.
+
+Do NOT:
 
 - Browse the repo's directory structure or file contents
-- Read, fetch, or open any source code files (e.g., fetching a GitHub file URL)
+- Read, fetch, or open any source code files (e.g., a raw.githubusercontent.com or GitHub file URL)
 - Try to "understand the architecture" or "get a complete picture" before delegating
 - Use any tool to inspect code contents — not even a single file
 - Browse the repo via `gh api` or URL fetching to read file trees, directory structures, or file contents
+- Prepare `/workspace` — the child creates its own paths, runs its own setup, and verifies its own work (applying the patch, running tests) before it reports; put those requirements in the objective
 
 The coding subagent works in your `/workspace` with `bash`, `git`, `read`, `write`, and `edit`, and can navigate codebases far more effectively than you can. Its checkout, edits, and notes land where you and every later child read them. Pass any non-code context (tickets, requirements, user instructions) in the objective — let the subagent explore the code.
 
 ## Repository Setup Contract
 
-The main agent owns the clone/no-clone decision. Do not make the coding subagent infer whether cloning is needed from vague phrases like "in the repo" or "in this codebase."
+The main agent owns the clone/no-clone decision — the decision only. Every setup command, clone or pinned fetch alike, runs inside the first child; a `git` command in your own turn is this skill misapplied. Do not make the coding subagent infer whether cloning is needed from vague phrases like "in the repo" or "in this codebase."
 
 One remote clone per turn. Children work in your `/workspace`, so the first remote clone is the only fetch: pick the path yourself and give it to the first spawn. You do not run the clone — the first child does, which keeps you out of the repository.
 
@@ -32,6 +42,7 @@ Before calling `spawn(target="coding", ...)`, choose exactly one setup mode and 
 - **Clone a repo:** Use for the first spawn of the turn that needs the repository. Start the objective with: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, then work inside it.` For fan-out, use: `Repository setup: clone https://github.com/org/repo into /workspace/org-repo with git, verify the checkout, report the checked-out branch as the base, then finish without task work.` Name that path and reuse it below. A public repository clones with no connection; a private one needs the workspace connected to GitHub (below).
 
   **A clone that fails to authenticate means the workspace is not connected. Call `connect_github` — that is the next action, not a fallback route.** Reaching the files another way is the trap here, and every route is forbidden, not just the obvious one: no `gh api` file reads, and no `GITHUB_DOWNLOAD_A_REPOSITORY_ARCHIVE_ZIP`/`_TAR`, zipball, tarball, or `GITHUB_GET_RAW_REPOSITORY_CONTENT` through `call_external_tool`. A snapshot fetched that way has no `.git`, cannot push, and hides from the member that nothing is connected.
+- **Pinned commit:** Use when the task names an exact commit. Start the objective with: `Repository setup: fetch commit <sha> from https://github.com/org/repo into /workspace/org-repo with git at depth 1 and check out exactly that commit, then work inside it. The checkout is the only route to the files — no raw.githubusercontent.com, zipball, or tarball fetches.` As with a clone, you never run the fetch — the first child does.
 - **Existing checkout:** Use for any later spawn after the child using that path has finished. Start the objective with: `Repository setup: use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. Do not clone.` The URL is what the child falls back to if the path is not there.
 - **Local checkout:** Use for every spawn that overlaps another child. Start the objective with: `Repository setup: copy the committed tree at /workspace/org-repo to /workspace/org-repo-<slug> with git, base the work on <base>, keep the source as workspace, use https://github.com/org/repo as origin, then work inside it.` This copies from disk without a fetch, separates the source's branches from GitHub's, and keeps pushes pointed at GitHub.
 - **No repository:** Use only for coding-adjacent tasks that do not need repository files. Start the objective with: `Repository setup: no repository clone is needed.`
