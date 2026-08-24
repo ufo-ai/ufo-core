@@ -750,16 +750,15 @@ def test_the_cards_brand_files_are_the_portals_own() -> None:
     assert (assets / FONT_ASSET).read_bytes() == (portal / "fonts" / FONT_ASSET).read_bytes()
 
 
-def test_the_shot_is_drawn_by_the_image_own_browser_under_its_own_wall() -> None:
-    """Both shots a card costs are taken by the browser the sandbox image and the CI runner already
-    carry, which is the one the site's page shot is taken with, so a card costs no renderer that
-    either of them has to install separately.
+def test_the_shot_is_drawn_by_the_sandbox_browser_under_its_own_wall() -> None:
+    """Both shots a card costs are taken by the browser available to the sandbox and the CI runner,
+    which is the one the site's page shot is taken with, so a card costs no second renderer.
 
-    The wall is asserted with it, because nothing on the browser's command line ends a run: the run
-    is walled from outside, and the shot on disk rather than the browser's status is what says the
-    picture was drawn. `--virtual-time-budget` is asserted absent, because the capture waits for
-    that budget and virtual time stands still while any fetch is pending, so a browser carrying it
-    draws nothing at all wherever a background service holds one open.
+    The wall is asserted with it, because nothing on the browser's command line ends a run: the
+    driver walls itself and kills the browser through its one exit. `--virtual-time-budget` is
+    asserted absent, because the capture waits for that budget and virtual time stands still while
+    any fetch is pending, so a browser carrying it draws nothing at all wherever a background
+    service holds one open.
 
     The unattended flags ride in every run for the same reason: a runner has no keyring, no keychain
     and no crash server, and a browser that waits on one of those spends the whole wall and draws
@@ -775,8 +774,9 @@ def test_the_shot_is_drawn_by_the_image_own_browser_under_its_own_wall() -> None
         root="/workspace",
     )
 
-    for browser in BROWSER_COMMANDS:
-        assert browser in command
+    assert f"for browser in {shlex.join(BROWSER_COMMANDS)}; do" in command
+    assert shlex.quote("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") in command
+    assert shlex.quote("/Applications/Chromium.app/Contents/MacOS/Chromium") in command
     assert "playwright" not in command
     assert "--virtual-time-budget" not in command
     for flag in UNATTENDED_FLAGS.split():
@@ -784,7 +784,8 @@ def test_the_shot_is_drawn_by_the_image_own_browser_under_its_own_wall() -> None
     assert "--password-store=basic" in command
     assert "--use-mock-keychain" in command
     assert "--disable-component-extensions-with-background-pages" in command
-    assert f"timeout --signal=KILL {SHOT_DEADLINE_SECONDS}s" in command
+    assert f"DEADLINE = {SHOT_DEADLINE_SECONDS}" in command
+    assert "timeout " not in command
     assert SHOT_DEADLINE_SECONDS < CARD_TIMEOUT_SECONDS
     assert f"test -s {shlex.quote(shot)}" in command
 

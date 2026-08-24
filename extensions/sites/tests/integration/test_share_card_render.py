@@ -3,7 +3,7 @@ programs place the shot and encode the JPEG.
 
 Nothing here is faked. `card_page` builds the same markup the sandbox gets, `PAGE_PROG` and
 `ENCODE_PROG` run as the sandbox runs them — through the containment guard, against a workspace root
-— and `shot_command` launches the browser the sandbox image carries. So this is where the card's
+— and `shot_command` launches the browser available to the sandbox. So this is where the card's
 measurements are actually proved: 1200x630, the panel on the left, the site's page on the right at
 the size the shot decision fixes, under every platform's byte ceiling, and progressive.
 
@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from ufo_ext_sites.share_card import (
+    BROWSER_COMMANDS,
     CARD_HEIGHT,
     CARD_SHOT_DRAWN,
     CARD_SHOT_SCALE,
@@ -52,7 +53,6 @@ from ufo_ext_sites.tools import PREVIEW_HEIGHT, PREVIEW_WIDTH
 
 from ufo.sandbox.session import SANDBOX_MODULE_BOOTSTRAP, SANDBOX_PYTHON_FLAG
 
-BROWSERS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
 CARD_BYTES_MAX = 5 * 1024 * 1024
 """What every platform will draw: a card above this is dropped rather than shown."""
 SITE_NAME = "ufo-architecture-map"
@@ -186,7 +186,7 @@ def _chromium_draws() -> bool:
     browser as a skip, and the card's assertions stay strict wherever one does draw. Chromium's
     helpers can outlive the shot and write the profile while the scratch directory comes down, so
     its cleanup tolerates a straggler's leavings instead of failing collection."""
-    if next((path for path in map(shutil.which, BROWSERS) if path), None) is None:
+    if next((path for path in map(shutil.which, BROWSER_COMMANDS) if path), None) is None:
         return False
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as scratch:
         root = Path(scratch)

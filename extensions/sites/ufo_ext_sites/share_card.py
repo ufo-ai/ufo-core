@@ -14,7 +14,7 @@ inside the member's sandbox where no checkout exists; a test holds each copy byt
 original, exactly as the gateway's compiled-in copies are held.
 
 The card is drawn where its ingredients already are: the site answers on the sandbox's own loopback
-and the sandbox image carries chromium, so one headless run photographs the page and a second draws
+and the sandbox has Chrome or Chromium, so one headless run photographs the page and a second draws
 the composed card from markup this module builds and hands over. Each run drives the browser over
 its own protocol pipe rather than one-shotting it, because the settle point a shot needs is not the
 load event — `SETTLE_WALL_SECONDS` says what it is instead. Nothing pastes pixels — the panel
@@ -86,14 +86,12 @@ CARD_PROFILE_DIR = "/tmp/ufo-share-card"
 takes: a one-shot chromium holds the profile lock for its run, and two runs sharing a directory
 would fail whichever started second."""
 SHOT_DEADLINE_SECONDS = 30
-"""The kill wall the browser's whole run is given, held outside the browser because nothing on its
-command line holds it: `--timeout` does not bound it either, since `--headless=new` takes the switch
-and ignores it. So `timeout` ends the run and kills the whole process group with it, and the shot on
-disk rather than the exit status is what says whether the picture was drawn — a browser killed after
-it wrote one still drew it. Well inside `CARD_TIMEOUT_SECONDS`, so this is what stops a stuck run
-and the caller's wall never has to. The settle the driver waits for is bounded by
-`LOAD_WALL_SECONDS` and `SETTLE_WALL_SECONDS` together, both well inside this, so what reaches this
-wall is a browser that stopped answering rather than a page still settling."""
+"""The kill wall the browser driver's whole run is given. Its alarm raises through the run's one
+`finally`, which kills and reaps the browser, so macOS needs no separate `timeout` executable and a
+browser that stops answering leaves no helper held behind. Well inside `CARD_TIMEOUT_SECONDS`, so
+this stops a stuck run before the caller's wall. The settle the driver waits for is bounded by
+`LOAD_WALL_SECONDS` and `SETTLE_WALL_SECONDS` together, both well inside this, so what reaches the
+outer wall is a browser that stopped answering rather than a page still settling."""
 LOAD_WALL_SECONDS = 12
 """How long the driver waits for the page's `load` event before it starts reading frames. A page
 whose subresource never answers never fires it, so the wait is bounded and the settle below happens
@@ -119,7 +117,14 @@ SHOT_TOKEN = "SHARE_CARD_SHOT_DATA_URI"
 """What the page carries where the shot's `data:` URI goes. The substitution happens in the sandbox,
 because the shot's bytes are there and never cross this process."""
 
-BROWSER_COMMANDS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
+BROWSER_COMMANDS = (
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+)
 QUIET_FLAGS = (
     "--disable-background-networking --disable-sync --disable-component-update "
     "--no-first-run --no-default-browser-check --disable-client-side-phishing-detection"
@@ -170,6 +175,7 @@ from containment import ContainmentError, contained_file
 from PIL import Image
 
 FLAGS = "{flags}"
+DEADLINE = {deadline}
 LOAD_WALL = {load_wall}
 SETTLE_WALL = {settle_wall}
 FRAME = {frame}
@@ -185,18 +191,27 @@ READ_BYTES = 65536
 
 def main():
     browser, url, width, height, scale, shot, profile, root = sys.argv[1:9]
-    driven = Driven([browser] + FLAGS.split() + ["--user-data-dir=" + profile, "about:blank"])
+    driven = None
+    signal.signal(signal.SIGALRM, expired)
+    signal.alarm(DEADLINE)
     try:
+        driven = Driven([browser] + FLAGS.split() + ["--user-data-dir=" + profile, "about:blank"])
         picture = settled(driven, url, int(width), int(height), float(scale))
+        if picture is None:
+            raise SystemExit("the page drew one flat colour, which is no picture of it")
+        try:
+            with contained_file(shot, root) as target:
+                target.replace_bytes(picture, 0o600)
+        except ContainmentError as error:
+            raise SystemExit(str(error))
     finally:
-        driven.stop()
-    if picture is None:
-        raise SystemExit("the page drew one flat colour, which is no picture of it")
-    try:
-        with contained_file(shot, root) as target:
-            target.replace_bytes(picture, 0o600)
-    except ContainmentError as error:
-        raise SystemExit(str(error))
+        signal.alarm(0)
+        if driven is not None:
+            driven.stop()
+
+
+def expired(_number, _frame):
+    raise SystemExit("the browser did not draw inside its wall")
 
 
 def settled(driven, url, width, height, scale):
@@ -362,14 +377,14 @@ browser, the url, the width, the height, the device scale factor, the shot, the 
 directory, and the workspace root.
 
 The protocol is spoken from the standard library over the browser's own pipe, so the shot costs the
-image no driver it does not already carry and the renderer stays the one chromium the sandbox and
-the CI runner both have. The picture goes down through the containment guard, the way every other
-write inside the sandbox does: the shot's name sits in a directory the agent writes."""
+browser no driver the sandbox does not already carry. The picture goes down through the containment
+guard, the way every other write inside the sandbox does: the shot's name sits in a directory the
+agent writes."""
 SHOT_HEREDOC = "UFO_SHOT_DRIVER"
 SHOT_CMD = (
-    "for browser in " + " ".join(BROWSER_COMMANDS) + "; do\n"
+    "for browser in " + shlex.join(BROWSER_COMMANDS) + "; do\n"
     '  command -v "$browser" >/dev/null 2>&1 || continue\n'
-    '  timeout --signal=KILL {deadline}s python3 {isolated} - "$browser" {url} {width} {height}'
+    '  python3 {isolated} - "$browser" {url} {width} {height}'
     " {scale} {shot} {profile} {root} <<'" + SHOT_HEREDOC + "'\n"
     "{driver}\n" + SHOT_HEREDOC + "\n"
     "  test -s {shot}\n"
@@ -509,10 +524,9 @@ def shot_command(
     *, url: str, width: int, height: int, scale: int, shot: str, profile: str, root: str
 ) -> str:
     """One headless chromium run drawing `url` at `width`x`height` into `shot`, under whichever of
-    the image's browsers is present — the same browsers the site's own page shot is taken with, and
-    the only renderer the sandbox image and the CI runner both carry. `scale` is the
-    deviceScaleFactor the raster is multiplied by, and `root` is the workspace the shot is contained
-    under.
+    the sandbox's browsers is present — the same browser the site's own page shot is taken with.
+    `scale` is the deviceScaleFactor the raster is multiplied by, and `root` is the workspace the
+    shot is contained under.
 
     The browser is driven rather than one-shot: `SHOT_PROG` launches it over its own protocol pipe,
     waits for the page to load and then for it to stop moving, and captures there — so a page that
@@ -534,6 +548,7 @@ def shot_command(
         driver=SANDBOX_MODULE_BOOTSTRAP
         + SHOT_PROG.format(
             flags=SHOT_FLAGS,
+            deadline=SHOT_DEADLINE_SECONDS,
             load_wall=LOAD_WALL_SECONDS,
             settle_wall=SETTLE_WALL_SECONDS,
             frame=FRAME_SECONDS,

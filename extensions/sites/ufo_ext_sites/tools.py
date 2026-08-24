@@ -487,7 +487,7 @@ async def _illustrate(ctx: ToolContext, name: str, port: int, conversation_id: U
     deployed it.
 
     The renderer and the bytes are both local at this one moment: the site answers on the sandbox's
-    own loopback and the sandbox image carries chromium, so one headless run draws the page and core
+    own loopback and the sandbox has Chrome or Chromium, so one headless run draws the page and core
     takes the PNG from there into the artifact namespace. A picture the member never asked for is
     not worth a deploy, so a sandbox with no chromium, a page that draws nothing but one flat
     colour, a shot path that cannot be cleared, and a store that cannot take the bytes each leave
