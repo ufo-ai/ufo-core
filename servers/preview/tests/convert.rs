@@ -49,6 +49,17 @@ async fn pptx_converts() {
 
 #[tokio::test]
 #[ignore]
+async fn parallel_office_requests_complete() {
+    tokio::join!(
+        converts(Kind::Docx, "fixture.docx"),
+        converts(Kind::Xlsx, "fixture.xlsx"),
+        converts(Kind::Pptx, "fixture.pptx"),
+        converts(Kind::Csv, "fixture.csv"),
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn csv_converts() {
     converts(Kind::Csv, "fixture.csv").await
 }

@@ -102,7 +102,6 @@ impl Config {
                 Some(v) => v
                     .parse()
                     .map_err(|e| format!("UFO_PREVIEW_CONCURRENCY: {e}"))?,
-                // LibreOffice's UNO bridge aborts under high parallel soffice launches.
                 None => std::thread::available_parallelism()
                     .map(|n| n.get().min(DEFAULT_CONCURRENCY_CEILING))
                     .unwrap_or(2),

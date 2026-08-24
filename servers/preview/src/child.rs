@@ -23,10 +23,12 @@ type RlimitResource = libc::__rlimit_resource_t;
 type RlimitResource = libc::c_int;
 
 const CHILD_MAX_OPEN_FILES: u64 = 4096;
+static SPAWN_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 /// Run one child to completion under `limits`: an environment built from scratch (cleared,
 /// then `envs` applied), its own session (so the deadline can kill the whole group), rlimits
-/// set between fork and exec.
+/// set between fork and exec. Child creation is process-serialized; children run concurrently
+/// after spawn.
 pub async fn run(
     mut cmd: tokio::process::Command,
     limits: &Limits,
@@ -63,7 +65,14 @@ pub async fn run(
             Ok(())
         });
     }
-    let child = cmd.spawn().map_err(ChildError::Spawn)?;
+    let child = {
+        let _permit = SPAWN_PERMITS
+            .acquire()
+            .await
+            .expect("child spawn semaphore closed");
+        cmd.spawn()
+    }
+    .map_err(ChildError::Spawn)?;
     let pid = child.id();
     let waited = tokio::time::timeout(limits.deadline, child.wait_with_output()).await;
     match waited {
