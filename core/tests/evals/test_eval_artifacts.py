@@ -716,6 +716,7 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         "daily-brief",
         "daily-brief-rework",
     ]
+    assert all(case.judge_on_deterministic_failure for case in BENCH_CASES)
     assert UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS == 900.0
     for case in BENCH_CASES[:3]:
         assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in case.digest_tag

@@ -323,8 +323,9 @@ class CapabilityCase:
     joins that answer, for a case whose reply is expected to carry its detail in a shared file
     rather than inline; `artifact_rubric` judges the Markdown files the turn shared, or, when
     `written_report` names a workspace glob, the Markdown the turn wrote there without sharing;
-    `visual_rubric` judges its rendered page images. Each reaches the model judge only after the
-    deterministic grader passes and requires a judge model on the task. `seed`, when set, receives
+    `visual_rubric` judges its rendered page images. Each requires a judge model on the task and
+    runs after the deterministic grader passes, or after a failure when
+    `judge_on_deterministic_failure` is set. `seed`, when set, receives
     (workspace_id, agent_id, blob) before the case's conversation opens and establishes the state
     the case runs against, resetting whatever it owns. `prepare`, when set, runs once the
     conversation's workspace directory exists and its files are staged, and before the turn opens,
@@ -355,6 +356,7 @@ class CapabilityCase:
     seed: CapabilitySeed | None = None
     prepare: WorkspacePrepare | None = None
     artifact_probe: ArtifactProbe | None = None
+    judge_on_deterministic_failure: bool = False
 
     def __post_init__(self) -> None:
         paths = tuple(reference.path for reference in self.references)
@@ -376,6 +378,8 @@ class CapabilityCase:
         }
         if self.visual_rubric:
             payload["visualRubric"] = list(self.visual_rubric)
+        if self.judge_on_deterministic_failure:
+            payload["judgeOnDeterministicFailure"] = True
         if self.artifact_rubric:
             payload["artifactRubric"] = list(self.artifact_rubric)
         if self.written_report:
@@ -614,7 +618,10 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
             if not result.clean:
                 return CapabilitySample(result.output, _unclean_verdict(result), result.trajectory)
     deterministic = await case.grader(result.output)
-    if not deterministic.passed or not (case.rubric or case.artifact_rubric or case.visual_rubric):
+    has_semantic_rubric = bool(case.rubric or case.artifact_rubric or case.visual_rubric)
+    if not has_semantic_rubric or (
+        not deterministic.passed and not case.judge_on_deterministic_failure
+    ):
         return CapabilitySample(result.output, deterministic, result.trajectory)
     if target.judge is None:
         return CapabilitySample(
@@ -661,7 +668,9 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
     return CapabilitySample(
         result.output,
         CapabilityVerdict(
-            all(verdict.passed for verdict in verdicts), reason, deterministic.evidence
+            deterministic.passed and all(verdict.passed for verdict in verdicts),
+            reason,
+            deterministic.evidence,
         ),
         result.trajectory,
         judge=tuple(criterion for verdict in verdicts for criterion in verdict.criteria),

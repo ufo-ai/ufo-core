@@ -4893,6 +4893,38 @@ async def test_visual_case_fails_deterministically_when_no_page_was_rendered() -
     assert judge.messages == ()
 
 
+async def test_visual_case_can_record_judgment_after_a_deterministic_failure() -> None:
+    async def failed(_output: CapabilityOutput) -> CapabilityVerdict:
+        return CapabilityVerdict(False, "contrast failed")
+
+    judge = RecordingJudge()
+    case = CapabilityCase(
+        "memo",
+        "build a memo",
+        failed,
+        visual_rubric=("no text is clipped",),
+        judge_on_deterministic_failure=True,
+    )
+
+    result = await run_capability_case(
+        case,
+        ArtifactTarget((SharedArtifact("page-1.png", _png_bytes()),), judge),
+    )
+
+    assert not result.passed
+    assert "contrast failed" in result.reason
+    assert len(judge.messages) == 1
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["judge"] == [
+        {
+            "criterion": "no text is clipped",
+            "passed": True,
+            "reason": "supported by the answer",
+        }
+    ]
+    assert case.payload()["judgeOnDeterministicFailure"] is True
+
+
 async def test_visual_case_fails_closed_without_a_model_judge() -> None:
     case = CapabilityCase(
         "memo", "build a memo", rendered_pages_scorer(1), visual_rubric=("no clipping",)

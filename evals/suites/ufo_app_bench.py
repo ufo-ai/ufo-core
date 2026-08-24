@@ -494,6 +494,7 @@ def _screen(name: str, information_inventory: str) -> CapabilityCase:
             f"wait-{WORKFLOW_WAIT_SECONDS:g}"
         ),
         artifact_probe=_AppBenchProbe(name),
+        judge_on_deterministic_failure=True,
     )
 
 
@@ -548,5 +549,6 @@ CASES = (
             f"ufo-app-bench:daily-brief-rework:pull-before-redeploy:wait-{WORKFLOW_WAIT_SECONDS:g}"
         ),
         artifact_probe=_AppBenchProbe("daily-brief-rework"),
+        judge_on_deterministic_failure=True,
     ),
 )
