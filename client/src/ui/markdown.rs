@@ -1,6 +1,9 @@
 //! Markdown rendered to styled transcript lines: headings, emphasis, lists, tables, quotes,
 //! rules, and fenced code blocks highlighted through the theme's roles.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
@@ -24,28 +27,40 @@ const FOOT: [&str; 3] = ["└", "┴", "┘"];
 const CODE_INDENT: &str = "  ";
 const LIST_INDENT: usize = 2;
 const CELL_FRAME: usize = 3;
+const COLORED_BLOCKS_MAX: usize = 512;
+const COLORED_BYTES_MAX: usize = 1 << 20;
 const INK_DARK: &str = "base16-ocean.dark";
 const INK_LIGHT: &str = "InspiredGitHub";
 
-/// Render one block of finished markdown to styled lines wrapped at `width`.
+/// Render one block of finished markdown to styled lines wrapped at `width`. A block that settles
+/// is rendered again at every width the terminal takes, so its colours are held.
 pub fn render(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    Render::new(theme, width).run(text)
+    Render::new(theme, width, Colours::Held).run(text)
+}
+
+/// Render text that changes on the next delta — a reply's open tail. Its colours are computed and
+/// dropped: every delta is a different string, so holding them would fill the memo with prefixes
+/// nothing reads again.
+pub fn render_live(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    Render::new(theme, width, Colours::Dropped).run(text)
+}
+
+/// Whether a render's code colours are worth keeping.
+#[derive(Clone, Copy, PartialEq)]
+enum Colours {
+    Held,
+    Dropped,
 }
 
 /// Accumulates a streamed reply and commits fully-arrived markdown blocks as source text,
 /// holding back the open tail so a half-arrived construct is never committed mid-block. The
 /// committed source keeps its own blank separators, so the transcript re-wraps it whole.
+#[derive(Default)]
 pub struct StreamRenderer {
     pending: String,
 }
 
 impl StreamRenderer {
-    pub fn new() -> StreamRenderer {
-        StreamRenderer {
-            pending: String::new(),
-        }
-    }
-
     /// Feed one delta; returns the source now safe to commit to the transcript. A block still
     /// arriving — an open fence, a table, a list, a paragraph — is held back whole.
     pub fn push(&mut self, chunk: &str) -> String {
@@ -149,6 +164,7 @@ struct Cells {
 
 struct Render<'a> {
     theme: &'a Theme,
+    colours: Colours,
     width: usize,
     lines: Vec<Line<'static>>,
     spans: Vec<Span<'static>>,
@@ -165,9 +181,10 @@ struct Render<'a> {
 }
 
 impl<'a> Render<'a> {
-    fn new(theme: &'a Theme, width: u16) -> Render<'a> {
+    fn new(theme: &'a Theme, width: u16, colours: Colours) -> Render<'a> {
         Render {
             theme,
+            colours,
             width: (width as usize).max(1),
             lines: Vec::new(),
             spans: Vec::new(),
@@ -482,39 +499,30 @@ impl<'a> Render<'a> {
             }
             return;
         }
-        let (syntaxes, inks) = assets();
-        let syntax = syntaxes
-            .find_syntax_by_token(lang)
-            .unwrap_or_else(|| syntaxes.find_syntax_plain_text());
-        let name = match self.theme.scheme {
-            Scheme::Dark => INK_DARK,
-            Scheme::Light => INK_LIGHT,
+        let coloured = match self.colours {
+            Colours::Held => highlighted(lang, self.theme.scheme, code),
+            Colours::Dropped => Rc::new(colour(lang, self.theme.scheme, code)),
         };
-        let ink = inks.themes.get(name).expect("syntect default theme");
-        let mut lit = HighlightLines::new(syntax, ink);
-        for raw in code.split_inclusive('\n') {
-            let mut row = vec![Span::styled(CODE_INDENT, self.theme.code_block)];
-            match lit.highlight_line(raw, syntaxes) {
-                Ok(pieces) => {
+        for row in coloured.iter() {
+            let mut spans = vec![Span::styled(CODE_INDENT, self.theme.code_block)];
+            match row {
+                Colored::Pieces(pieces) => {
                     let mut used = 0;
-                    for (style, piece) in pieces {
-                        let text = wrap::clip(
-                            piece.trim_end_matches(['\r', '\n']),
-                            cap.saturating_sub(used),
-                        );
+                    for (color, piece) in pieces {
+                        let text = wrap::clip(piece, cap.saturating_sub(used));
                         if text.is_empty() {
                             continue;
                         }
                         used += wrap::width(text);
-                        row.push(Span::styled(text.to_string(), self.fg(style.foreground)));
+                        spans.push(Span::styled(text.to_string(), self.fg(*color)));
                     }
                 }
-                Err(_) => row.push(Span::styled(
-                    wrap::clip(raw.trim_end_matches(['\r', '\n']), cap).to_string(),
+                Colored::Plain(text) => spans.push(Span::styled(
+                    wrap::clip(text, cap).to_string(),
                     self.theme.code_block,
                 )),
             }
-            self.lines.push(Line::from(row));
+            self.lines.push(Line::from(spans));
         }
     }
 
@@ -597,6 +605,84 @@ impl<'a> Render<'a> {
     }
 }
 
+/// One code line's colors: the highlighter's pieces, or the raw line when it refused to parse.
+enum Colored {
+    Pieces(Vec<(InkColor, String)>),
+    Plain(String),
+}
+
+/// A block's colors, which depend on its source, its language, and the scheme — never on the
+/// width. Highlighting is the whole cost of drawing code (a fenced reply renders two orders of
+/// magnitude slower than the same reply as prose, and the first block of a syntax pays the
+/// regex compile on top), while a re-wrap only re-clips. So the colors are held per block and a
+/// resize pays nothing for them. Bounded, and per thread, so no lock sits on the paint path.
+fn highlighted(lang: &str, scheme: Scheme, code: &str) -> Rc<Vec<Colored>> {
+    let key = (lang.to_string(), scheme, code.to_string());
+    if let Some(held) = COLORS.with(|memo| memo.borrow().held.get(&key).cloned()) {
+        return held;
+    }
+    let held = Rc::new(colour(lang, scheme, code));
+    COLORS.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        memo.bytes += code.len();
+        if memo.held.len() >= COLORED_BLOCKS_MAX || memo.bytes >= COLORED_BYTES_MAX {
+            memo.held.clear();
+            memo.bytes = code.len();
+        }
+        memo.held.insert(key, held.clone());
+    });
+    held
+}
+
+/// What the memo holds, and how much source it took to fill: a block is bounded in count, but a
+/// count alone bounds no memory when one block can be a hundred kilobytes.
+#[derive(Default)]
+struct Memo {
+    held: HashMap<(String, Scheme, String), Rc<Vec<Colored>>>,
+    bytes: usize,
+}
+
+thread_local! {
+    static COLORS: RefCell<Memo> = RefCell::new(Memo::default());
+}
+
+/// How many blocks the memo holds, for the tests that bound it.
+#[cfg(test)]
+pub(crate) fn held_blocks() -> usize {
+    COLORS.with(|memo| memo.borrow().held.len())
+}
+
+/// One block's colours, computed. Pure: the same source, language, and scheme always answer the
+/// same way, which is what makes holding them sound.
+fn colour(lang: &str, scheme: Scheme, code: &str) -> Vec<Colored> {
+    let (syntaxes, inks) = assets();
+    let syntax = syntaxes
+        .find_syntax_by_token(lang)
+        .unwrap_or_else(|| syntaxes.find_syntax_plain_text());
+    let name = match scheme {
+        Scheme::Dark => INK_DARK,
+        Scheme::Light => INK_LIGHT,
+    };
+    let ink = inks.themes.get(name).expect("syntect default theme");
+    let mut lit = HighlightLines::new(syntax, ink);
+    code.split_inclusive('\n')
+        .map(|raw| match lit.highlight_line(raw, syntaxes) {
+            Ok(pieces) => Colored::Pieces(
+                pieces
+                    .into_iter()
+                    .map(|(style, piece)| {
+                        (
+                            style.foreground,
+                            piece.trim_end_matches(['\r', '\n']).to_string(),
+                        )
+                    })
+                    .collect(),
+            ),
+            Err(_) => Colored::Plain(raw.trim_end_matches(['\r', '\n']).to_string()),
+        })
+        .collect()
+}
+
 fn assets() -> &'static (SyntaxSet, ThemeSet) {
     static ASSETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
     ASSETS.get_or_init(|| {
@@ -670,6 +756,95 @@ mod tests {
 
     fn lit() -> Theme {
         Theme::for_mode(ColorMode::TrueColor, Scheme::Dark)
+    }
+
+    const FENCED: &str = "```rust\nfn parse(line: &str) -> usize {\n    line.len()\n}\n```\n";
+
+    fn styles(lines: &[Line<'static>]) -> Vec<Vec<(String, Style)>> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| (span.content.to_string(), span.style))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A reply streams its fenced block one delta at a time, and the dock draws the open tail on
+    /// every one of them. Each delta is a longer prefix of the same block, so holding their colours
+    /// would leave a prefix per delta resident — the whole block over again, hundreds of times.
+    #[test]
+    fn a_streaming_tail_holds_no_colours() {
+        let theme = lit();
+        let before = held_blocks();
+        let block = "```rust\nfn parse(line: &str) -> usize {\n    line.len()\n}\n";
+        for end in 1..=block.len() {
+            if block.is_char_boundary(end) {
+                render_live(&block[..end], &theme, 60);
+            }
+        }
+        assert_eq!(
+            held_blocks(),
+            before,
+            "an open tail is drawn once per delta and never read again"
+        );
+    }
+
+    #[test]
+    fn a_settled_block_is_held_once_however_often_it_is_drawn() {
+        let theme = lit();
+        let before = held_blocks();
+        for width in [40, 60, 80, 100] {
+            render(FENCED, &theme, width);
+        }
+        assert_eq!(
+            held_blocks(),
+            before + 1,
+            "every width reads the one held entry"
+        );
+    }
+
+    #[test]
+    fn a_block_rendered_twice_is_coloured_the_same_way() {
+        let theme = lit();
+        assert_eq!(
+            styles(&render(FENCED, &theme, 60)),
+            styles(&render(FENCED, &theme, 60)),
+            "a held block renders exactly as the first pass did"
+        );
+    }
+
+    /// The colors are held per block, the clipping is not: a cache that kept clipped text would
+    /// hand the second width the first width's rows.
+    #[test]
+    fn a_held_block_still_clips_to_the_width_it_is_asked_for() {
+        let theme = lit();
+        let wide = render(FENCED, &theme, 60);
+        let narrow = render(FENCED, &theme, 20);
+        assert_eq!(wide.len(), narrow.len(), "clipping never drops a code line");
+        let widest = wide.iter().map(|line| line.width()).max().unwrap_or(0);
+        let narrowest = narrow.iter().map(|line| line.width()).max().unwrap_or(0);
+        assert!(
+            narrowest <= 20 && narrowest < widest,
+            "the narrow render clips: {narrowest} against {widest}"
+        );
+    }
+
+    #[test]
+    fn each_scheme_colours_a_block_its_own_way() {
+        let dark = render(FENCED, &lit(), 60);
+        let light = render(
+            FENCED,
+            &Theme::for_mode(ColorMode::TrueColor, Scheme::Light),
+            60,
+        );
+        assert_ne!(
+            styles(&dark),
+            styles(&light),
+            "the scheme belongs to what is held, or a light terminal draws dark code"
+        );
     }
 
     #[test]
@@ -874,7 +1049,7 @@ mod tests {
 
     #[test]
     fn stream_holds_an_open_fence_until_it_closes() {
-        let mut stream = StreamRenderer::new();
+        let mut stream = StreamRenderer::default();
         assert!(stream.push("```rust\n").is_empty());
         assert!(stream.push("fn main() {}\n").is_empty());
         assert_eq!(stream.open_tail(), "```rust\nfn main() {}\n");
@@ -884,7 +1059,7 @@ mod tests {
 
     #[test]
     fn stream_holds_a_table_until_a_blank_line_ends_it() {
-        let mut stream = StreamRenderer::new();
+        let mut stream = StreamRenderer::default();
         assert!(stream.push("| a | b |\n| - | - |\n").is_empty());
         assert!(stream.push("| 1 | 2 |\n").is_empty());
         assert_eq!(
@@ -896,7 +1071,7 @@ mod tests {
 
     #[test]
     fn stream_commits_a_paragraph_on_its_blank_line() {
-        let mut stream = StreamRenderer::new();
+        let mut stream = StreamRenderer::default();
         assert!(stream.push("one two\nthree\n").is_empty());
         assert_eq!(stream.push("\nnext"), "one two\nthree\n\n");
         assert_eq!(stream.open_tail(), "next");
@@ -910,7 +1085,7 @@ mod tests {
              - one\n- two\n  - nested\n\n1. first\n2. second\n\n\
              ```rust\nfn main() {}\n```\n\n\
              | a | b |\n| - | - |\n| 1 | 2 |\n\n> quoted\n\n---\n\nlast word\n";
-        let mut stream = StreamRenderer::new();
+        let mut stream = StreamRenderer::default();
         let mut committed = String::new();
         let mut delta = String::new();
         for ch in source.chars() {
@@ -927,7 +1102,7 @@ mod tests {
 
     #[test]
     fn stream_holds_a_list_until_a_block_follows_it() {
-        let mut stream = StreamRenderer::new();
+        let mut stream = StreamRenderer::default();
         assert!(stream.push("1. one\n").is_empty());
         assert!(stream.push("2. two\n\n").is_empty());
         assert_eq!(stream.push("after"), "1. one\n2. two\n\n");

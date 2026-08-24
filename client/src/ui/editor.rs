@@ -58,8 +58,9 @@ pub struct EditorLayout {
     pub cursor_col: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 enum Unit {
+    #[default]
     None,
     Insert,
     Delete,
@@ -75,6 +76,7 @@ struct Snapshot {
 
 /// The in-flight ask: the text, the byte cursor, and where history browsing stands. The draft the
 /// walk began from is also the prefix it visits entries under.
+#[derive(Default)]
 pub struct AskState {
     pub text: String,
     pub cursor: usize,
@@ -90,22 +92,6 @@ pub struct AskState {
 }
 
 impl AskState {
-    pub fn new() -> AskState {
-        AskState {
-            text: String::new(),
-            cursor: 0,
-            hist_at: None,
-            draft: String::new(),
-            pastes: BTreeMap::new(),
-            images: BTreeMap::new(),
-            kills: Vec::new(),
-            killing: false,
-            undos: Vec::new(),
-            unit: Unit::None,
-            sticky: None,
-        }
-    }
-
     /// Apply one key, wrapping at `width` display columns for vertical motion.
     pub fn apply(&mut self, key: Key, history: &[String], width: usize) -> Outcome {
         let unit = self.unit;
@@ -548,12 +534,6 @@ fn image_marker(at: usize) -> String {
     format!("[Image #{at}]")
 }
 
-impl Default for AskState {
-    fn default() -> AskState {
-        AskState::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,7 +565,7 @@ mod tests {
 
     #[test]
     fn inserts_at_cursor() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Char('a'), Key::Char('c'), Key::Left, Key::Char('b')],
@@ -597,7 +577,7 @@ mod tests {
 
     #[test]
     fn word_movement_and_kill() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Paste("one two three".into()), Key::KillWord],
@@ -612,7 +592,7 @@ mod tests {
 
     #[test]
     fn kill_line_erases_before_cursor() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Paste("abcdef".into()), Key::Left, Key::KillLine],
@@ -625,7 +605,7 @@ mod tests {
     #[test]
     fn history_walks_and_restores_draft() {
         let history = vec!["first".to_string(), "second".to_string()];
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::HistPrev], &history);
         assert_eq!(state.text, "second");
         drive(&mut state, &[Key::HistPrev, Key::HistPrev], &history);
@@ -645,7 +625,7 @@ mod tests {
             "cargo test".to_string(),
             "git push".to_string(),
         ];
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         typed(&mut state, "git");
         drive(&mut state, &[Key::HistPrev], &history);
         assert_eq!(state.text, "git push");
@@ -664,7 +644,7 @@ mod tests {
     #[test]
     fn a_prefix_skips_the_entry_it_equals() {
         let history = vec!["git push --force".to_string(), "git push".to_string()];
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         typed(&mut state, "git push");
         drive(&mut state, &[Key::HistPrev], &history);
         assert_eq!(state.text, "git push --force");
@@ -675,7 +655,7 @@ mod tests {
     #[test]
     fn a_prefix_matching_nothing_leaves_the_ask_alone() {
         let history = vec!["first".to_string(), "second".to_string()];
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         typed(&mut state, "draft");
         drive(&mut state, &[Key::Left, Key::HistPrev], &history);
         assert_eq!(state.text, "draft");
@@ -688,7 +668,7 @@ mod tests {
     #[test]
     fn a_multiline_draft_filters_on_the_whole_text() {
         let history = vec!["one\nfour".to_string(), "one\ntwo three".to_string()];
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Paste("one\ntwo".into()), Key::HistPrev],
@@ -704,7 +684,7 @@ mod tests {
     #[test]
     fn a_multibyte_prefix_is_boundary_safe() {
         let history = vec!["état".to_string(), "eau".to_string(), "élan".to_string()];
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         typed(&mut state, "é");
         drive(&mut state, &[Key::HistPrev], &history);
         assert_eq!(state.text, "élan");
@@ -719,7 +699,7 @@ mod tests {
     #[test]
     fn editing_a_history_entry_detaches_it() {
         let history = vec!["old news".to_string(), "old".to_string()];
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::HistPrev, Key::Char(' ')], &history);
         assert_eq!(state.text, "old ");
         drive(&mut state, &[Key::HistPrev], &history);
@@ -730,7 +710,7 @@ mod tests {
 
     #[test]
     fn eof_on_empty_cancels_and_deletes_otherwise() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         assert_eq!(state.apply(Key::Eof, &[], WIDE), Outcome::Cancel);
         drive(&mut state, &[Key::Paste("ab".into()), Key::Home], &[]);
         assert_eq!(state.apply(Key::Eof, &[], WIDE), Outcome::Continue);
@@ -739,13 +719,13 @@ mod tests {
 
     #[test]
     fn submit_passes_through() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         assert_eq!(state.apply(Key::Enter, &[], WIDE), Outcome::Submit);
     }
 
     #[test]
     fn multibyte_editing_is_boundary_safe() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Paste("héé".into()), Key::Left, Key::Backspace],
@@ -757,7 +737,7 @@ mod tests {
 
     #[test]
     fn newline_keys_insert_and_enter_submits() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Char('a'), Key::ShiftEnter], &[]);
         drive(&mut state, &[Key::Char('b'), Key::InsertNewline], &[]);
         assert_eq!(state.text, "a\nb\n");
@@ -766,7 +746,7 @@ mod tests {
 
     #[test]
     fn home_and_end_are_line_scoped() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Paste("one\ntwo\nthree".into())], &[]);
         drive(&mut state, &[Key::Home], &[]);
         assert_eq!(state.cursor, 8);
@@ -782,7 +762,7 @@ mod tests {
 
     #[test]
     fn kill_to_end_takes_the_rest_of_the_line() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[
@@ -799,7 +779,7 @@ mod tests {
 
     #[test]
     fn rows_and_cursor_cells_follow_the_wrap() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Paste("abcdefgh\nij".into())], &[]);
         let layout = state.render(3);
         assert_eq!(layout.rows, vec!["abc", "def", "gh", "ij"]);
@@ -808,10 +788,10 @@ mod tests {
 
     #[test]
     fn cursor_cells_count_wide_and_multibyte_chars() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Paste("héllo".into())], &[]);
         assert_eq!(state.render(WIDE).cursor_col, 5);
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Paste("日本語".into())], &[]);
         let layout = state.render(WIDE);
         assert_eq!(layout.cursor_col, 6);
@@ -820,7 +800,7 @@ mod tests {
 
     #[test]
     fn vertical_motion_keeps_a_sticky_column() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Paste("aaaaaaaaaa\nbb\ncccccccccc".into())],
@@ -838,7 +818,7 @@ mod tests {
 
     #[test]
     fn vertical_motion_crosses_wrapped_rows_of_one_line() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Paste("abcdefghijklmno".into())], &[]);
         drive_at(&mut state, 5, &[Key::Left, Key::CursorUp], &[]);
         let layout = state.render(5);
@@ -849,7 +829,7 @@ mod tests {
 
     #[test]
     fn sticky_column_survives_a_wide_short_line() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Paste("日本語日本語\nx\n日本語日本語".into())],
@@ -863,7 +843,7 @@ mod tests {
     #[test]
     fn vertical_motion_reaches_history_at_the_edges() {
         let history = vec!["one\ntwo three".to_string(), "earlier".to_string()];
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Paste("one\ntwo".into())], &[]);
         drive(&mut state, &[Key::CursorUp], &history);
         assert_eq!(state.text, "one\ntwo");
@@ -875,7 +855,7 @@ mod tests {
 
     #[test]
     fn kills_merge_then_yank_restores_them() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[
@@ -892,7 +872,7 @@ mod tests {
 
     #[test]
     fn a_pause_between_kills_starts_a_new_entry() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[
@@ -910,7 +890,7 @@ mod tests {
 
     #[test]
     fn forward_kills_append_to_the_entry() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[
@@ -928,7 +908,7 @@ mod tests {
 
     #[test]
     fn undo_coalesces_words_and_seals_at_a_space() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         typed(&mut state, "ab cd");
         drive(&mut state, &[Key::Undo], &[]);
         assert_eq!(state.text, "ab ");
@@ -941,7 +921,7 @@ mod tests {
 
     #[test]
     fn undo_restores_a_kill_and_a_run_of_deletes() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         typed(&mut state, "hello");
         drive(&mut state, &[Key::KillWord], &[]);
         assert_eq!(state.text, "");
@@ -955,7 +935,7 @@ mod tests {
 
     #[test]
     fn undo_stops_at_the_cap() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         for _ in 0..UNDO_MAX + 20 {
             drive(&mut state, &[Key::Char('x'), Key::Char(' ')], &[]);
         }
@@ -968,7 +948,7 @@ mod tests {
 
     #[test]
     fn a_big_paste_collapses_to_one_marker() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         let pasted = big(12);
         drive(&mut state, &[Key::Paste(pasted.clone())], &[]);
         assert_eq!(state.text, "[paste #1 +12 lines]");
@@ -979,7 +959,7 @@ mod tests {
 
     #[test]
     fn a_long_single_line_paste_collapses_too() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         let pasted = "x".repeat(PASTE_CHARS + 1);
         drive(&mut state, &[Key::Paste(pasted.clone())], &[]);
         assert_eq!(state.text, "[paste #1 +1 lines]");
@@ -988,7 +968,7 @@ mod tests {
 
     #[test]
     fn a_marker_moves_and_deletes_as_one() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Paste(big(12)), Key::Char('!')], &[]);
         drive(&mut state, &[Key::Left, Key::Left], &[]);
         assert_eq!(state.cursor, 0);
@@ -1001,7 +981,7 @@ mod tests {
 
     #[test]
     fn deleting_a_marker_renumbers_the_higher_ones() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         let first = big(11);
         let second = big(12);
         let third = big(13);
@@ -1026,7 +1006,7 @@ mod tests {
 
     #[test]
     fn killing_a_marker_rings_its_contents() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         let pasted = big(12);
         drive(
             &mut state,
@@ -1042,7 +1022,7 @@ mod tests {
 
     #[test]
     fn undo_brings_a_deleted_marker_back() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         let pasted = big(12);
         drive(
             &mut state,
@@ -1057,7 +1037,7 @@ mod tests {
 
     #[test]
     fn an_image_paste_shows_a_marker_and_expands_to_its_path() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Image("/tmp/shot.png".into())], &[]);
         assert_eq!(state.text, "[Image #1]");
         assert_eq!(state.expand(), "[Image #1: /tmp/shot.png]");
@@ -1067,7 +1047,7 @@ mod tests {
 
     #[test]
     fn images_and_text_pastes_number_independently() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         let pasted = big(12);
         drive(
             &mut state,
@@ -1080,7 +1060,7 @@ mod tests {
 
     #[test]
     fn an_image_marker_moves_and_deletes_as_one() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Image("/tmp/a.png".into())], &[]);
         drive(&mut state, &[Key::Left], &[]);
         assert_eq!(state.cursor, 0);
@@ -1093,7 +1073,7 @@ mod tests {
 
     #[test]
     fn deleting_an_image_marker_renumbers_the_rest() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[
@@ -1115,7 +1095,7 @@ mod tests {
 
     #[test]
     fn undo_brings_a_deleted_image_back() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Image("/tmp/a.png".into()), Key::Backspace],
@@ -1129,7 +1109,7 @@ mod tests {
 
     #[test]
     fn killing_an_image_marker_rings_its_path() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(
             &mut state,
             &[Key::Image("/tmp/a.png".into()), Key::KillLine],
@@ -1143,7 +1123,7 @@ mod tests {
 
     #[test]
     fn word_motion_steps_over_a_marker() {
-        let mut state = AskState::new();
+        let mut state = AskState::default();
         drive(&mut state, &[Key::Paste(big(12)), Key::Char('x')], &[]);
         drive(&mut state, &[Key::WordLeft, Key::WordLeft], &[]);
         assert_eq!(state.cursor, 0);

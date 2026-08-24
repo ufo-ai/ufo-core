@@ -163,7 +163,7 @@ pub fn install_self(
     };
     let mut lines = vec![format!("✓ Installed ufo ({})", target.display())];
     #[cfg(unix)]
-    if let Some(line) = add_to_path(&bin_dir, &target) {
+    if let Some(line) = add_to_path(&bin_dir, &target, &ShellEnv::read()) {
         lines.push(line);
     }
     #[cfg(windows)]
@@ -237,14 +237,36 @@ fn copy_self(bin_dir: &Path, staged: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// What the shell says about itself, read once so every decision below is a function of its
+/// arguments.
 #[cfg(unix)]
-fn add_to_path(bin_dir: &Path, target: &Path) -> Option<String> {
-    let path_var = env::var("PATH").unwrap_or_default();
+struct ShellEnv {
+    path: String,
+    home: String,
+    shell: String,
+    zdotdir: Option<String>,
+}
+
+#[cfg(unix)]
+impl ShellEnv {
+    fn read() -> ShellEnv {
+        ShellEnv {
+            path: env::var("PATH").unwrap_or_default(),
+            home: env::var("HOME").unwrap_or_default(),
+            shell: env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+            zdotdir: env::var("ZDOTDIR").ok().filter(|dir| !dir.is_empty()),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn add_to_path(bin_dir: &Path, target: &Path, shell: &ShellEnv) -> Option<String> {
+    let path_var = &shell.path;
     let bin = bin_dir.to_string_lossy().to_string();
     if path_var.split(':').any(|entry| entry == bin) {
         return None;
     }
-    let home_dir = env::var("HOME").unwrap_or_default();
+    let home_dir = shell.home.clone();
     if !home_dir.is_empty() {
         let local_bin = format!("{home_dir}/.local/bin");
         if path_var.split(':').any(|entry| entry == local_bin) {
@@ -260,7 +282,7 @@ fn add_to_path(bin_dir: &Path, target: &Path) -> Option<String> {
     } else {
         bin.clone()
     };
-    let profile = profile_file(&home_dir);
+    let profile = profile_file(shell);
     let line = if profile
         .extension()
         .is_some_and(|extension| extension == "fish")
@@ -288,22 +310,19 @@ fn add_to_path(bin_dir: &Path, target: &Path) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn profile_file(home_dir: &str) -> PathBuf {
-    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    if shell.ends_with("/zsh") {
-        let base = env::var("ZDOTDIR")
-            .ok()
-            .filter(|z| !z.is_empty())
-            .unwrap_or_else(|| home_dir.into());
+fn profile_file(shell: &ShellEnv) -> PathBuf {
+    let home_dir = shell.home.as_str();
+    if shell.shell.ends_with("/zsh") {
+        let base = shell.zdotdir.clone().unwrap_or_else(|| home_dir.into());
         return Path::new(&base).join(".zshrc");
     }
-    if shell.ends_with("/bash") {
+    if shell.shell.ends_with("/bash") {
         if cfg!(target_os = "macos") {
             return Path::new(home_dir).join(".bash_profile");
         }
         return Path::new(home_dir).join(".bashrc");
     }
-    if shell.ends_with("/fish") {
+    if shell.shell.ends_with("/fish") {
         return Path::new(home_dir).join(".config/fish/conf.d/ufo.fish");
     }
     Path::new(home_dir).join(".profile")
@@ -461,5 +480,151 @@ mod tests {
         sweep_retired(&home);
         assert!(!retired.exists());
         let _ = fs::remove_dir_all(&home.root);
+    }
+
+    #[cfg(unix)]
+    fn shell_env(home: &Path, shell: &str) -> ShellEnv {
+        ShellEnv {
+            path: "/usr/bin:/bin".to_string(),
+            home: home.to_string_lossy().to_string(),
+            shell: shell.to_string(),
+            zdotdir: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zsh_writes_into_zdotdir_when_it_names_one() {
+        let home = scratch("zdotdir");
+        let mut shell = shell_env(&home, "/bin/zsh");
+        assert_eq!(profile_file(&shell), home.join(".zshrc"));
+        shell.zdotdir = Some(home.join("dots").to_string_lossy().to_string());
+        assert_eq!(profile_file(&shell), home.join("dots/.zshrc"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_shell_names_its_own_profile() {
+        let home = scratch("profiles");
+        let bash = if cfg!(target_os = "macos") {
+            ".bash_profile"
+        } else {
+            ".bashrc"
+        };
+        assert_eq!(
+            profile_file(&shell_env(&home, "/bin/bash")),
+            home.join(bash)
+        );
+        assert_eq!(
+            profile_file(&shell_env(&home, "/usr/local/bin/fish")),
+            home.join(".config/fish/conf.d/ufo.fish")
+        );
+        assert_eq!(
+            profile_file(&shell_env(&home, "/bin/sh")),
+            home.join(".profile")
+        );
+        assert_eq!(
+            profile_file(&shell_env(&home, "/bin/nu")),
+            home.join(".profile")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bin_already_on_path_is_left_alone() {
+        let home = scratch("onpath");
+        let bin_dir = home.join(".ufo/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let mut shell = shell_env(&home, "/bin/zsh");
+        shell.path = format!("/usr/bin:{}", bin_dir.display());
+        assert!(add_to_path(&bin_dir, &bin_dir.join("ufo"), &shell).is_none());
+        assert!(!home.join(".zshrc").exists(), "no profile is touched");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_gains_one_export_line_naming_home() {
+        let home = scratch("export");
+        let bin_dir = home.join(".ufo/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let target = bin_dir.join("ufo");
+        let shell = shell_env(&home, "/bin/zsh");
+        let said = add_to_path(&bin_dir, &target, &shell).expect("the profile is written");
+        let written = fs::read_to_string(home.join(".zshrc")).expect("the profile exists");
+        assert!(
+            written.contains(r#"export PATH="$HOME/.ufo/bin:$PATH""#),
+            "the line names $HOME, not the expanded path: {written}"
+        );
+        assert!(said.contains(".zshrc"), "the member is told where: {said}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bin_outside_home_is_written_as_the_path_it_is() {
+        let home = scratch("outside");
+        fs::create_dir_all(&home).unwrap();
+        let bin_dir = std::path::Path::new("/opt/ufo/bin");
+        let shell = shell_env(&home, "/bin/zsh");
+        let said =
+            add_to_path(bin_dir, &bin_dir.join("ufo"), &shell).expect("the profile is written");
+        let written = fs::read_to_string(home.join(".zshrc")).expect("the profile exists");
+        assert!(
+            written.contains(r#"export PATH="/opt/ufo/bin:$PATH""#),
+            "a bin outside home cannot be shortened to $HOME: {written}"
+        );
+        assert!(said.contains("/opt/ufo/bin"), "{said}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_second_install_appends_nothing() {
+        let home = scratch("twice");
+        let bin_dir = home.join(".ufo/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let target = bin_dir.join("ufo");
+        let shell = shell_env(&home, "/bin/zsh");
+        add_to_path(&bin_dir, &target, &shell).expect("the first install writes");
+        let once = fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert!(add_to_path(&bin_dir, &target, &shell).is_none());
+        assert_eq!(fs::read_to_string(home.join(".zshrc")).unwrap(), once);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fish_takes_its_own_path_command() {
+        let home = scratch("fish");
+        let bin_dir = home.join(".ufo/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let shell = shell_env(&home, "/opt/homebrew/bin/fish");
+        add_to_path(&bin_dir, &bin_dir.join("ufo"), &shell).expect("the profile is written");
+        let written =
+            fs::read_to_string(home.join(".config/fish/conf.d/ufo.fish")).expect("fish conf");
+        assert!(
+            written.contains(r#"fish_add_path -g "$HOME/.ufo/bin""#),
+            "fish takes fish_add_path, never export: {written}"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_local_bin_on_path_takes_a_link_instead_of_a_profile_line() {
+        let home = scratch("localbin");
+        let bin_dir = home.join(".ufo/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let target = bin_dir.join("ufo");
+        fs::write(&target, b"binary").unwrap();
+        let mut shell = shell_env(&home, "/bin/zsh");
+        shell.path = format!("/usr/bin:{}/.local/bin", home.display());
+        let said = add_to_path(&bin_dir, &target, &shell).expect("the link is made");
+        let link = home.join(".local/bin/ufo");
+        assert_eq!(fs::read_link(&link).unwrap(), target);
+        assert!(said.contains(".local/bin"), "{said}");
+        assert!(!home.join(".zshrc").exists(), "no profile is touched");
+        let _ = fs::remove_dir_all(&home);
     }
 }

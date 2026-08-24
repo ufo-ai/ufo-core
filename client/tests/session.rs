@@ -2,12 +2,25 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 #[cfg(unix)]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
-#[cfg(unix)]
 use std::time::Duration;
+
+/// How long the gateway waits for a request on a connection before calling it abandoned.
+const REQUEST_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a scripted session may run before the client is killed and its output reported.
+const CLIENT_WAIT: Duration = Duration::from_secs(30);
+
+/// How long a test waits for the post it is timing itself against.
+const ARRIVAL_WAIT: Duration = Duration::from_secs(15);
+
+/// How long a test waits for the gateway to serve its script out.
+const SCRIPT_WAIT: Duration = Duration::from_secs(10);
 
 struct Exchange {
     reply_lines: &'static [&'static str],
@@ -17,8 +30,31 @@ struct Exchange {
 
 struct Served {
     url: String,
-    handle: JoinHandle<Vec<Request>>,
+    gateway: Gateway,
     arrived: std::sync::mpsc::Receiver<()>,
+}
+
+/// The scripted gateway, still serving.
+struct Gateway {
+    stop: Arc<AtomicBool>,
+    served_out: std::sync::mpsc::Receiver<()>,
+    handle: JoinHandle<Vec<Request>>,
+}
+
+impl Gateway {
+    /// Every request of a script served out. A client that leaves the script unfinished costs
+    /// [`SCRIPT_WAIT`] once and fails the assertion that asked, rather than hanging the suite.
+    fn requests(self) -> Vec<Request> {
+        let _ = self.served_out.recv_timeout(SCRIPT_WAIT);
+        self.done()
+    }
+
+    /// Everything that arrived, now — for a session that ends with its script part-served, whose
+    /// tail nothing will ever ask for.
+    fn done(self) -> Vec<Request> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.join().expect("the gateway thread")
+    }
 }
 
 #[derive(Debug)]
@@ -40,24 +76,34 @@ fn serve(script: Vec<Exchange>) -> Served {
     listener.set_nonblocking(true).expect("nonblocking");
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (arrival, arrived) = std::sync::mpsc::channel();
+    let (last, served_out) = std::sync::mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = stop.clone();
     let handle = thread::spawn(move || {
         let mut seen = Vec::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        for exchange in script {
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
+        'script: for exchange in script {
+            // A connection the client abandoned without speaking — a lane it opened as it left —
+            // is no exchange: this one still belongs to whichever request arrives next.
+            let (mut stream, request) = loop {
+                if stopped.load(Ordering::Relaxed) {
+                    break 'script;
+                }
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        if std::time::Instant::now() > deadline {
-                            return seen;
-                        }
-                        thread::sleep(std::time::Duration::from_millis(10));
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
                     }
                     Err(error) => panic!("accept: {error}"),
+                };
+                stream.set_nonblocking(false).expect("blocking stream");
+                stream
+                    .set_read_timeout(Some(REQUEST_WAIT))
+                    .expect("request deadline");
+                if let Some(request) = read_request(&mut stream) {
+                    break (stream, request);
                 }
             };
-            stream.set_nonblocking(false).expect("blocking stream");
-            let request = read_request(&mut stream);
             seen.push(request);
             let _ = arrival.send(());
             if exchange.delay_ms > 0 {
@@ -79,7 +125,7 @@ fn serve(script: Vec<Exchange>) -> Served {
                 stream.flush().expect("flush");
                 thread::sleep(std::time::Duration::from_millis(100));
                 rst_close(stream);
-                continue;
+                continue 'script;
             }
             let status_line = match exchange.status {
                 200 => "200 OK",
@@ -92,11 +138,16 @@ fn serve(script: Vec<Exchange>) -> Served {
             );
             stream.write_all(response.as_bytes()).expect("respond");
         }
+        let _ = last.send(());
         seen
     });
     Served {
         url,
-        handle,
+        gateway: Gateway {
+            stop,
+            served_out,
+            handle,
+        },
         arrived,
     }
 }
@@ -125,23 +176,28 @@ fn rst_close(stream: std::net::TcpStream) {
     drop(stream);
 }
 
-fn read_request(stream: &mut std::net::TcpStream) -> Request {
+/// The request one accepted connection carries, or None when it carries none: a client that went
+/// away before writing, or one that said nothing before the deadline.
+fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     let mut raw = Vec::new();
     let mut buffer = [0u8; 4096];
     let (
         headers_end,
-        mut content_length,
-        mut op_header,
-        mut slot_header,
-        mut stop_header,
-        mut send_header,
-        mut send_id,
-        mut unsend_header,
-        mut timezone_header,
-        mut since_header,
-        mut listen_header,
+        content_length,
+        op_header,
+        slot_header,
+        stop_header,
+        send_header,
+        send_id,
+        unsend_header,
+        timezone_header,
+        since_header,
+        listen_header,
     ) = loop {
-        let read = stream.read(&mut buffer).expect("read");
+        let read = match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => return None,
+            Ok(read) => read,
+        };
         raw.extend_from_slice(&buffer[..read]);
         let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
             continue;
@@ -211,18 +267,56 @@ fn read_request(stream: &mut std::net::TcpStream) -> Request {
         }
         raw.extend_from_slice(&buffer[..read]);
     }
-    let _ = &mut content_length;
-    Request {
+    Some(Request {
         body: String::from_utf8_lossy(&raw[headers_end..]).to_string(),
-        op_header: op_header.take(),
-        slot_header: slot_header.take(),
-        stop_header: stop_header.take(),
-        send_header: send_header.take(),
-        send_id: send_id.take(),
-        unsend_header: unsend_header.take(),
-        timezone_header: timezone_header.take(),
-        since_header: since_header.take(),
-        listen_header: listen_header.take(),
+        op_header,
+        slot_header,
+        stop_header,
+        send_header,
+        send_id,
+        unsend_header,
+        timezone_header,
+        since_header,
+        listen_header,
+    })
+}
+
+/// Wait out the scripted session. A client that outlives it is killed and everything it said is
+/// reported: a session that will not end is a failure to read, never a suite that hangs.
+fn wait_for_client(mut child: Child) -> Output {
+    let mut out_pipe = child.stdout.take().expect("piped stdout");
+    let mut err_pipe = child.stderr.take().expect("piped stderr");
+    let out = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = out_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let err = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = err_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = std::time::Instant::now() + CLIENT_WAIT;
+    let status = loop {
+        match child.try_wait().expect("wait on the client") {
+            Some(status) => break status,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "the client never exited within {}s\nstdout:\n{}\nstderr:\n{}",
+                    CLIENT_WAIT.as_secs(),
+                    String::from_utf8_lossy(&out.join().expect("stdout reader")),
+                    String::from_utf8_lossy(&err.join().expect("stderr reader")),
+                );
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    Output {
+        status,
+        stdout: out.join().expect("stdout reader"),
+        stderr: err.join().expect("stderr reader"),
     }
 }
 
@@ -249,7 +343,7 @@ fn run_client(url: &str, args: &[&str], stdin: &str, home: &std::path::Path) -> 
             .unwrap()
             .write_all(stdin.as_bytes())
             .expect("feed stdin");
-        child.wait_with_output().expect("client exits")
+        wait_for_client(child)
     };
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
@@ -285,6 +379,27 @@ impl OnPty {
     /// Everything ever painted, so a popup that came and went is still evidence.
     fn painted(&self) -> String {
         String::from_utf8_lossy(&self.painted.lock().unwrap()).to_string()
+    }
+
+    /// Reap the client. A session the script ended has already exited; one still running is
+    /// killed and the screen it was holding is reported.
+    fn reaped(&mut self) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + CLIENT_WAIT;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("wait on the client") {
+                return status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                panic!(
+                    "the client never exited within {}s:\n{}",
+                    CLIENT_WAIT.as_secs(),
+                    self.screen()
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn ended(&mut self) -> bool {
@@ -589,7 +704,7 @@ fn plain_session_round_trips_ask_and_exit() {
     ]);
     let home = scratch_home("plain");
     let (stdout, code) = run_client(&served.url, &[], "hi\n", &home);
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     assert_eq!(code, 0);
     assert!(stdout.contains("hello there"), "stdout: {stdout}");
     assert!(stdout.contains("The answer."), "stdout: {stdout}");
@@ -612,6 +727,31 @@ fn plain_session_round_trips_ask_and_exit() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A lane the client opened and abandoned — one it was still connecting as it left — carries no
+/// request, so the gateway holds its script for whoever speaks next.
+#[test]
+fn an_abandoned_connection_is_no_exchange() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &["say\thello", "exit\t0"],
+    }]);
+    let address = served
+        .url
+        .strip_prefix("http://")
+        .expect("a host:port url")
+        .to_string();
+    drop(std::net::TcpStream::connect(&address).expect("connect"));
+    let home = scratch_home("abandoned");
+    let (stdout, code) = run_client(&served.url, &["hi"], "", &home);
+    let requests = served.gateway.requests();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("hello"), "stdout: {stdout}");
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0].body, "hi");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 fn exec_op_runs_and_replies_on_the_op_channel() {
     let served = serve(vec![
@@ -628,7 +768,7 @@ fn exec_op_runs_and_replies_on_the_op_channel() {
     ]);
     let home = scratch_home("ops");
     let (stdout, code) = run_client(&served.url, &["start"], "", &home);
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     assert_eq!(code, 0, "stdout: {stdout}");
     assert!(stdout.contains("done"));
     assert_eq!(requests.len(), 2);
@@ -660,7 +800,7 @@ fn json_mode_speaks_the_event_protocol() {
     }]);
     let home = scratch_home("json");
     let (stdout, code) = run_client(&served.url, &["--json", "go"], "", &home);
-    let _ = served.handle.join().unwrap();
+    served.gateway.done();
     assert_eq!(code, 0, "stdout: {stdout}");
     let events: Vec<serde_json::Value> = stdout
         .lines()
@@ -699,7 +839,7 @@ fn resume_replays_history_before_the_tail() {
     }]);
     let home = scratch_home("resume");
     let (stdout, code) = run_client(&served.url, &[], "", &home);
-    let _ = served.handle.join().unwrap();
+    served.gateway.done();
     assert_eq!(code, 0, "stdout: {stdout}");
     let member = stdout
         .find("\u{203a} earlier question")
@@ -740,7 +880,7 @@ fn a_command_burst_while_the_wire_waits_loses_nothing() {
     ]);
     let home = scratch_home("burst");
     let (stdout, code) = run_client(&served.url, &[], "alpha\nbeta\ngamma\n", &home);
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     assert_eq!(code, 0, "stdout: {stdout}");
     assert_eq!(requests[1].slot_header.as_deref(), Some("s1"));
     assert_eq!(
@@ -801,18 +941,20 @@ fn a_finished_ops_reply_outranks_a_queued_message() {
         let mut stdin = child.stdin.take().unwrap();
         let arrived = served.arrived;
         let writer = thread::spawn(move || {
-            arrived.recv().expect("the first post arrives");
+            arrived
+                .recv_timeout(ARRIVAL_WAIT)
+                .expect("the first post arrives");
             thread::sleep(std::time::Duration::from_millis(200));
             let _ = stdin.write_all(b"{\"type\":\"send\",\"text\":\"queued while the op ran\"}\n");
         });
-        let output = child.wait_with_output().expect("client exits");
+        let output = wait_for_client(child);
         writer.join().unwrap();
         (
             String::from_utf8_lossy(&output.stdout).to_string(),
             output.status.code().unwrap_or(-1),
         )
     };
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     assert_eq!(code, 0, "stdout: {stdout}");
     for attempt in 1..=3 {
         assert_eq!(
@@ -873,18 +1015,20 @@ fn a_mid_turn_send_posts_instantly_and_settles_on_absorption() {
         let mut stdin = child.stdin.take().unwrap();
         let arrived = served.arrived;
         let writer = thread::spawn(move || {
-            arrived.recv().expect("the first post arrives");
+            arrived
+                .recv_timeout(ARRIVAL_WAIT)
+                .expect("the first post arrives");
             thread::sleep(std::time::Duration::from_millis(200));
             let _ = stdin.write_all(b"{\"type\":\"send\",\"text\":\"while the turn ran\"}\n");
         });
-        let output = child.wait_with_output().expect("client exits");
+        let output = wait_for_client(child);
         writer.join().unwrap();
         (
             String::from_utf8_lossy(&output.stdout).to_string(),
             output.status.code().unwrap_or(-1),
         )
     };
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     assert_eq!(code, 0, "stdout: {stdout}");
     assert_eq!(requests.len(), 3, "{requests:?}");
     assert_eq!(requests[1].send_header.as_deref(), Some("1"));
@@ -925,7 +1069,7 @@ fn the_first_frame_is_painted_before_the_loop_waits_on_anything() {
     let mut session = run_client_on_pty(&served.url, &["echoed"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the launch message reaches the gateway");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let first_frame = loop {
@@ -941,7 +1085,7 @@ fn the_first_frame_is_painted_before_the_loop_waits_on_anything() {
     };
     let _ = session.child.kill();
     let _ = session.child.wait();
-    let _ = served.handle.join();
+    served.gateway.done();
     assert!(
         first_frame.contains(SPINNER_FIRST) && !first_frame.contains(SPINNER_SECOND),
         "a tick advances the spinner before painting, and the turn is open before the frame: {first_frame:?}"
@@ -972,13 +1116,13 @@ fn esc_on_a_running_turn_posts_the_stop() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the turn's own post reaches the gateway");
     session
         .keys
         .write_all(b"\x1b")
         .expect("Esc reaches the pty");
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     let _ = session.child.kill();
     let _ = session.child.wait();
     assert_eq!(requests.len(), 2, "{requests:?}");
@@ -1016,7 +1160,7 @@ fn an_ack_naming_no_arrival_settles_the_row_at_once() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the turn's own post reaches the gateway");
     std::thread::sleep(std::time::Duration::from_millis(300));
     session
@@ -1028,8 +1172,8 @@ fn an_ack_naming_no_arrival_settles_the_row_at_once() {
         assert!(std::time::Instant::now() < deadline, "client never exited");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(
         requests.len(),
         3,
@@ -1127,7 +1271,7 @@ fn a_pasted_image_marks_the_entry_and_sends_its_path() {
     let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the first post reaches the gateway");
     session
         .keys
@@ -1149,8 +1293,8 @@ fn a_pasted_image_marks_the_entry_and_sends_its_path() {
         [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 1]
     );
     session.keys.write_all(b"\r").expect("Enter sends");
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert_eq!(
         requests[1].body,
@@ -1196,7 +1340,7 @@ fn a_clipboard_read_lands_only_in_the_entry_that_asked() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the opening post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
     session
@@ -1215,7 +1359,7 @@ fn a_clipboard_read_lands_only_in_the_entry_that_asked() {
     let screen = session.screen();
     let _ = session.child.kill();
     let _ = session.child.wait();
-    let _ = served.handle.join();
+    served.gateway.done();
     assert!(
         !screen.contains("sk-live-abc123"),
         "the masked value never reaches the composer: {screen}"
@@ -1236,7 +1380,7 @@ fn a_clipboard_deadline_frees_ctrl_v() {
     let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the first post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
     session.keys.write_all(b"\x16").expect("the first Ctrl+V");
@@ -1262,7 +1406,7 @@ fn a_clipboard_deadline_frees_ctrl_v() {
     }
     let _ = session.child.kill();
     let _ = session.child.wait();
-    let _ = served.handle.join();
+    served.gateway.done();
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -1288,7 +1432,7 @@ fn a_dropped_image_path_attaches_as_an_image() {
     let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the first post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
     let dropped = format!(
@@ -1314,8 +1458,8 @@ fn a_dropped_image_path_attaches_as_an_image() {
         png
     );
     session.keys.write_all(b"\r").expect("Enter sends");
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert_eq!(
         requests[1].body,
@@ -1366,7 +1510,7 @@ fn ctrl_v_with_a_copied_image_file_attaches_it() {
     let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the first post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
     session.keys.write_all(b"\x16").expect("Ctrl+V");
@@ -1385,8 +1529,8 @@ fn ctrl_v_with_a_copied_image_file_attaches_it() {
         png
     );
     session.keys.write_all(b"\r").expect("Enter sends");
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(
         requests[1].body,
         format!("[Image #1: {relative}]"),
@@ -1408,7 +1552,7 @@ fn an_image_at_the_path_popup_names_the_drop() {
     let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the first post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
     session.press(b"read @");
@@ -1428,7 +1572,7 @@ fn an_image_at_the_path_popup_names_the_drop() {
     let painted = session.painted();
     let _ = session.child.kill();
     let _ = session.child.wait();
-    let _ = served.handle.join();
+    served.gateway.done();
     assert!(
         !painted.contains("[Image #"),
         "no marker lands outside the composer: {painted}"
@@ -1460,7 +1604,7 @@ fn a_hung_clipboard_tool_never_wedges_the_session() {
     let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the first post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
     session.keys.write_all(b"\x16").expect("Ctrl+V");
@@ -1468,7 +1612,7 @@ fn a_hung_clipboard_tool_never_wedges_the_session() {
         .keys
         .write_all(b"still alive\r")
         .expect("typing continues while the tool hangs");
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     let _ = session.child.kill();
     let _ = session.child.wait();
     assert_eq!(requests.len(), 2, "{requests:?}");
@@ -1499,7 +1643,7 @@ fn ctrl_v_pastes_text_into_the_masked_entry() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the opening post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
     session.keys.write_all(b"\x16").expect("Ctrl+V");
@@ -1513,7 +1657,7 @@ fn ctrl_v_pastes_text_into_the_masked_entry() {
         thread::sleep(Duration::from_millis(50));
     }
     session.press(b"\r");
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     let _ = session.child.kill();
     let _ = session.child.wait();
     assert_eq!(
@@ -1538,7 +1682,7 @@ fn an_empty_clipboard_names_itself() {
     let mut session = run_client_on_pty(&served.url, &["hi"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the first post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
     session.keys.write_all(b"\x16").expect("Ctrl+V");
@@ -1556,7 +1700,7 @@ fn an_empty_clipboard_names_itself() {
     }
     let _ = session.child.kill();
     let _ = session.child.wait();
-    let _ = served.handle.join();
+    served.gateway.done();
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -1594,7 +1738,7 @@ fn up_recalls_the_queued_send_and_enter_sends_it_again() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the turn's own post reaches the gateway");
     std::thread::sleep(std::time::Duration::from_millis(300));
     session
@@ -1603,7 +1747,7 @@ fn up_recalls_the_queued_send_and_enter_sends_it_again() {
         .expect("the mid-turn message reaches the pty");
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the send reaches the gateway");
     std::thread::sleep(std::time::Duration::from_millis(400));
     session
@@ -1612,7 +1756,7 @@ fn up_recalls_the_queued_send_and_enter_sends_it_again() {
         .expect("Up reaches the pty");
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the unsend reaches the gateway");
     std::thread::sleep(std::time::Duration::from_millis(400));
     session
@@ -1624,8 +1768,8 @@ fn up_recalls_the_queued_send_and_enter_sends_it_again() {
         assert!(std::time::Instant::now() < deadline, "client never exited");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(requests.len(), 5, "{requests:?}");
     assert_eq!(requests[1].send_header.as_deref(), Some("1"));
     assert_eq!(requests[1].body, "later thought");
@@ -1688,7 +1832,7 @@ fn a_tty_send_settles_into_the_transcript_when_the_turn_absorbs_it() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the turn's own post reaches the gateway");
     std::thread::sleep(std::time::Duration::from_millis(300));
     session
@@ -1700,8 +1844,8 @@ fn a_tty_send_settles_into_the_transcript_when_the_turn_absorbs_it() {
         assert!(std::time::Instant::now() < deadline, "client never exited");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(requests.len(), 3, "{requests:?}");
     assert_eq!(
         requests[1].send_header.as_deref(),
@@ -1757,8 +1901,8 @@ fn an_idle_tty_listens_and_prints_the_turn_that_wakes_the_conversation() {
         assert!(std::time::Instant::now() < deadline, "client never exited");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(requests.len(), 3, "{requests:?}");
     assert_eq!(requests[0].body, "go");
     assert_eq!(
@@ -1820,7 +1964,7 @@ fn a_detach_holds_while_the_listen_armed_turn_keeps_streaming() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the opening turn posts");
     std::thread::sleep(std::time::Duration::from_millis(300));
     session
@@ -1829,11 +1973,11 @@ fn a_detach_holds_while_the_listen_armed_turn_keeps_streaming() {
         .expect("the prompt message types");
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the send lane posts");
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the woken wire resumes the tail");
     std::thread::sleep(std::time::Duration::from_millis(300));
     session.keys.write_all(b"\x02").expect("Ctrl+B detaches");
@@ -1847,8 +1991,8 @@ fn a_detach_holds_while_the_listen_armed_turn_keeps_streaming() {
         assert!(std::time::Instant::now() < deadline, "client never exited");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(requests.len(), 4, "{requests:?}");
     assert_eq!(requests[1].send_header.as_deref(), Some("1"));
     assert_eq!(requests[1].body, "next");
@@ -1903,8 +2047,8 @@ fn a_severed_bounce_runs_the_reconnect_ladder_to_its_end() {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let requests = served.handle.join().unwrap();
-    let status = session.child.wait().expect("the client exits");
+    let requests = served.gateway.requests();
+    let status = session.reaped();
     assert!(!status.success(), "a dead link ends with the error, not 0");
     assert_eq!(requests.len(), 5, "{requests:?}");
     assert_eq!(requests[1].listen_header.as_deref(), Some("1"));
@@ -1946,7 +2090,7 @@ fn a_listen_bounce_does_not_clear_the_secret_being_typed() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the turn's own post reaches the gateway");
     std::thread::sleep(std::time::Duration::from_millis(300));
     session
@@ -1955,7 +2099,7 @@ fn a_listen_bounce_does_not_clear_the_secret_being_typed() {
         .expect("the first half types before the bounce");
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the idle bounce reaches the gateway");
     std::thread::sleep(std::time::Duration::from_millis(300));
     session
@@ -1964,11 +2108,11 @@ fn a_listen_bounce_does_not_clear_the_secret_being_typed() {
         .expect("the second half types after the bounce");
     served
         .arrived
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the secret posts");
     let _ = session.child.kill();
-    let requests = served.handle.join().unwrap();
-    let _ = session.child.wait();
+    let requests = served.gateway.requests();
+    session.reaped();
     assert_eq!(requests.len(), 3, "{requests:?}");
     assert_eq!(requests[1].listen_header.as_deref(), Some("1"));
     assert_eq!(requests[2].slot_header.as_deref(), Some("api_key"));
@@ -2008,7 +2152,7 @@ fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
     let mut session = run_client_on_pty(&served.url, &[], &home, None);
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the opening post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
 
@@ -2020,7 +2164,7 @@ fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
     );
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("one Enter answers the email prompt");
 
     thread::sleep(Duration::from_millis(800));
@@ -2031,7 +2175,7 @@ fn the_sign_in_prompts_take_one_enter_and_list_no_paths() {
         "the answered question leaves the composer while the code is in flight: {entered}"
     );
 
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     thread::sleep(Duration::from_millis(600));
     let signed_in = session.screen();
     let _ = session.child.kill();
@@ -2067,7 +2211,7 @@ fn the_path_popup_sends_on_enter_and_answers_an_interrupt() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the opening post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
 
@@ -2081,7 +2225,7 @@ fn the_path_popup_sends_on_enter_and_answers_an_interrupt() {
     session.press(b"zzzznothing\r");
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("Enter sends the entry the popup could not complete");
 
     thread::sleep(Duration::from_millis(800));
@@ -2092,7 +2236,7 @@ fn the_path_popup_sends_on_enter_and_answers_an_interrupt() {
         "Ctrl-C ends the session while the popup holds input"
     );
 
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     assert_eq!(requests[1].body, "read @zzzznothing", "{requests:?}");
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -2124,7 +2268,7 @@ fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the opening post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
 
@@ -2138,7 +2282,7 @@ fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
     session.press(b"\r");
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the pasted key answers the secret prompt");
     thread::sleep(Duration::from_millis(800));
 
@@ -2148,10 +2292,10 @@ fn a_bracketed_paste_reaches_the_masked_entry_and_the_path_popup() {
     session.press(b"\r");
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the mention the pasted filter completed posts");
 
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     let _ = session.child.kill();
     let _ = session.child.wait();
     assert_eq!(
@@ -2197,7 +2341,7 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the turn's own post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
 
@@ -2221,7 +2365,7 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
 
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the poll reconnects for the answer");
     thread::sleep(Duration::from_millis(800));
 
@@ -2253,8 +2397,8 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
 
     session.press(b"\x03");
     assert!(session.ended(), "Ctrl+C ends the session");
-    let _ = served.handle.join();
-    let _ = session.child.wait();
+    served.gateway.done();
+    session.reaped();
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -2279,7 +2423,7 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
     let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
     served
         .arrived
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(ARRIVAL_WAIT)
         .expect("the turn's own post reaches the gateway");
     thread::sleep(Duration::from_millis(800));
 
@@ -2357,8 +2501,8 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
 
     session.press(b"\x03");
     assert!(session.ended(), "Ctrl+C ends the session");
-    let _ = served.handle.join();
-    let _ = session.child.wait();
+    served.gateway.done();
+    session.reaped();
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -2409,7 +2553,7 @@ fn a_piped_session_logs_every_step_and_counts_them() {
     }]);
     let home = scratch_home("plain-rollup");
     let (stdout, code) = run_client(&served.url, &["go"], "", &home);
-    let _ = served.handle.join().unwrap();
+    served.gateway.done();
     assert_eq!(code, 0, "stdout: {stdout}");
     let thought = stdout
         .find("Reading the notes first.")
@@ -2445,7 +2589,7 @@ fn a_piped_session_counts_no_step_for_an_answer_a_run_narrated_over() {
     }]);
     let home = scratch_home("plain-background-run");
     let (stdout, code) = run_client(&served.url, &["go"], "", &home);
-    let _ = served.handle.join().unwrap();
+    served.gateway.done();
     assert_eq!(code, 0, "stdout: {stdout}");
     assert!(
         stdout.contains("Completed 2 steps"),
@@ -2470,7 +2614,7 @@ fn a_piped_session_counts_a_run_once_however_much_it_did() {
     }]);
     let home = scratch_home("plain-run-rollup");
     let (stdout, code) = run_client(&served.url, &["go"], "", &home);
-    let _ = served.handle.join().unwrap();
+    served.gateway.done();
     assert_eq!(code, 0, "stdout: {stdout}");
     for step in [
         "running spawn: reviewer",
@@ -2671,7 +2815,7 @@ fn a_replayed_enter_sends_what_was_typed_into_the_probe() {
     );
     played.framed(Duration::from_secs(10));
     assert!(played.ended(Duration::from_secs(20)), "the client exits");
-    let requests = served.handle.join().unwrap();
+    let requests = served.gateway.requests();
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert_eq!(requests[0].body, "go");
     assert_eq!(

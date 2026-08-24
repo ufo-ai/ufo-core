@@ -246,6 +246,23 @@ impl<W: Write> AltScreen<W> {
         }
     }
 
+    /// Everything written so far, for a screen over a buffer.
+    #[cfg(test)]
+    pub fn written(&self) -> &[u8]
+    where
+        W: AsRef<[u8]>,
+    {
+        self.out.as_ref()
+    }
+
+    /// Write bytes the frame diff knows nothing about — a clipboard or image sequence the terminal
+    /// answers itself. They go to the screen's own sink, so nothing reaches a terminal the caller
+    /// did not hand over.
+    pub fn splice(&mut self, bytes: &str) {
+        let _ = self.out.write_all(bytes.as_bytes());
+        let _ = self.out.flush();
+    }
+
     pub fn enter(&mut self) -> std::io::Result<()> {
         self.prev.clear();
         #[cfg(unix)]

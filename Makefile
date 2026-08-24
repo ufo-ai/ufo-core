@@ -29,7 +29,8 @@ STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
 COMPOSE := $(STACK_ENV) docker compose --project-name $(STACK_NAME)
 
 .PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs db \
-	check fmt test test-one test-control test-preview test-web test-integration
+	check fmt test test-one test-control test-preview test-client test-client-load \
+	cover-client bench-client test-web test-integration
 
 help: ## List targets
 	@grep -hE '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) \
@@ -145,6 +146,23 @@ test-preview: ## Run the preview renderer suite — needs soffice and scripts/fe
 
 check-preview: ## Run the preview crate's static gates — fmt and clippy
 	cd servers/preview && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+
+test-client: ## Run the client crate's suite
+	cd client && cargo nextest run
+
+test-client-load: ## Run the client crate's suite with every core busy — hunts wall-clock fragility
+	cd client && hogs=$$(( $$(getconf _NPROCESSORS_ONLN) * 2 )); pids=""; i=0; \
+	while [ $$i -lt $$hogs ]; do (while :; do :; done) & pids="$$pids $$!"; i=$$((i + 1)); done; \
+	cargo nextest run; status=$$?; kill $$pids 2>/dev/null; exit $$status
+
+cover-client: ## Measure the client crate's coverage — fails below the line floor
+	cd client && cargo llvm-cov nextest --branch --fail-under-lines 89
+
+bench-client: ## Benchmark the client crate
+	cd client && cargo bench
+
+check-client: ## Run the client crate's static gates — fmt and clippy
+	cd client && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 test-web: $(WEB)/node_modules ## Run the portal's vitest suite
 	npm --prefix $(WEB) test

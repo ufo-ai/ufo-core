@@ -877,6 +877,17 @@ mod tests {
                     Ok(_) => seen.push(byte[0]),
                 }
             }
+            let head = String::from_utf8_lossy(&seen).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(0);
+            let mut body = vec![0u8; length];
+            if length > 0 {
+                socket.read_exact(&mut body).expect("the body arrives");
+                seen.extend_from_slice(&body);
+            }
             socket.write_all(reply.as_bytes()).expect("the reply lands");
             String::from_utf8_lossy(&seen).into_owned()
         });
@@ -928,6 +939,83 @@ mod tests {
         assert_eq!(
             session.stop().expect("a signed-in stop").send(),
             Err("the server answered 400: a stop admits no message".to_string())
+        );
+        let _ = serving.join();
+    }
+
+    #[test]
+    fn a_secret_travels_in_the_body_under_its_slot() {
+        let (base, serving) = served("200 OK", "say\tstored\nask\t>");
+        let session = stopping(base);
+        assert_eq!(
+            session.post_secret("sealed1", "s1", "sk-live-abc123"),
+            Ok(vec!["stored".to_string()])
+        );
+        let request = serving.join().expect("the server thread");
+        let lowered = request.to_lowercase();
+        assert!(lowered.contains("x-ufo-secret: sealed1"), "{request}");
+        assert!(lowered.contains("x-ufo-slot: s1"), "{request}");
+        let (head, body) = request.split_once("\r\n\r\n").expect("a head and a body");
+        assert_eq!(body, "sk-live-abc123");
+        assert!(
+            !head.contains("sk-live-abc123"),
+            "the value never rides a header: {head}"
+        );
+    }
+
+    #[test]
+    fn a_refused_secret_still_says_what_the_server_answered() {
+        let (base, serving) = served("400 Bad Request", "say\tthat slot is closed");
+        let session = stopping(base);
+        assert_eq!(
+            session.post_secret("sealed1", "s1", "value"),
+            Ok(vec!["that slot is closed".to_string()])
+        );
+        let _ = serving.join();
+    }
+
+    #[test]
+    fn a_sealed_id_cannot_open_a_header_of_its_own() {
+        let (base, serving) = served("200 OK", "");
+        let session = stopping(base);
+        let _ = session.post_secret("sealed1\r\nx-evil: 1", "s1", "value");
+        let request = serving.join().expect("the server thread");
+        assert!(
+            !request
+                .to_lowercase()
+                .lines()
+                .any(|line| line.starts_with("x-evil")),
+            "a control character in the sealed id opens no header: {request}"
+        );
+    }
+
+    #[test]
+    fn a_retracted_arrival_comes_back_to_the_member() {
+        let (base, serving) = served("200 OK", "");
+        let lane = stopping(base).send_lane().expect("a signed-in lane");
+        assert_eq!(lane.retract("arr-9"), Ok(true));
+        let request = serving.join().expect("the server thread");
+        assert!(
+            request.to_lowercase().contains("x-ufo-unsend: arr-9"),
+            "{request}"
+        );
+    }
+
+    #[test]
+    fn an_arrival_a_turn_took_up_is_no_longer_the_members() {
+        let (base, serving) = served("409 Conflict", "already folded");
+        let lane = stopping(base).send_lane().expect("a signed-in lane");
+        assert_eq!(lane.retract("arr-9"), Ok(false));
+        let _ = serving.join();
+    }
+
+    #[test]
+    fn a_refused_unsend_names_what_the_server_answered() {
+        let (base, serving) = served("500 Internal Server Error", "no such arrival");
+        let lane = stopping(base).send_lane().expect("a signed-in lane");
+        assert_eq!(
+            lane.retract("arr-9"),
+            Err("unsend failed (500): no such arrival".to_string())
         );
         let _ = serving.join();
     }

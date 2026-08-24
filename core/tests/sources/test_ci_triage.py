@@ -8,7 +8,7 @@ ROOT = Path(__file__).parents[3]
 CI = ROOT / ".github" / "workflows" / "ci.yaml"
 NON_PR_FORCES_TRUE = "github.event_name != 'pull_request' ||"
 CROSS_CUTTING = ("testsupport/**", ".github/**", "*")
-CHECKS_ONLY_ROOTS = frozenset({"client", "docs"})
+CHECKS_ONLY_ROOTS = frozenset({"docs"})
 GATED_JOBS = {
     "checks": "checks",
     "sandbox-client": "checks",
@@ -17,6 +17,7 @@ GATED_JOBS = {
     "wheel": "wheel",
     "control-test": "control",
     "rls": "control",
+    "client": "client",
 }
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "ufo"
-version = "0.1.32"
+version = "0.1.33"
 edition = "2021"
 
 [[bin]]
@@ -36,4 +36,25 @@ strip = true
 codegen-units = 1
 
 [dev-dependencies]
+divan = { package = "codspeed-divan-compat", version = "5" }
 vt100 = "0.15"
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "render"
+harness = false
+
+[[bench]]
+name = "startup"
+harness = false
+
+[[bench]]
+name = "frame"
+harness = false
+
+[[bench]]
+name = "stream"
+harness = false

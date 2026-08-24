@@ -1,16 +1,3 @@
-mod clipboard;
-mod config;
-mod egress;
-mod fscli;
-#[cfg(unix)]
-mod guard;
-mod jsonio;
-mod llm;
-mod ops;
-mod pr;
-mod ui;
-mod wire;
-
 use std::collections::VecDeque;
 use std::env;
 use std::io::{BufRead, IsTerminal};
@@ -21,13 +8,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
 
-use crate::clipboard::Clip;
-use crate::ops::OpRuntime;
-use crate::ui::history::{list_conversations, record_conversation, PastConversation};
-use crate::ui::picker::{PickOutcome, Picker};
-use crate::ui::plain::Plain;
-use crate::ui::{App, ClipEntry, Reply};
-use crate::wire::{Directive, OpRequest, PostBody, SendLane, SentAck, Session, Stop};
+use ufo::clipboard::{self, Clip};
+#[cfg(unix)]
+use ufo::interrupt;
+use ufo::ops::{self, OpRuntime};
+use ufo::ui::history::{list_conversations, record_conversation, PastConversation};
+use ufo::ui::picker::{PickOutcome, Picker};
+use ufo::ui::plain::Plain;
+use ufo::ui::{self, App, ClipEntry, Reply};
+use ufo::wire::{Directive, OpRequest, PostBody, SendLane, SentAck, Session, Stop};
+use ufo::{config, fscli, jsonio, llm, pr};
 
 const HELP: &str = "\
 Opens a conversation with your workspace assistant.
@@ -487,6 +477,7 @@ struct Wire {
     opened: bool,
     install: bool,
     installed_this_run: bool,
+    pause: Duration,
 }
 
 impl Wire {
@@ -687,7 +678,7 @@ impl Wire {
             attempt: *attempts,
             retry_in_s: RECONNECT_PAUSE.as_secs(),
         });
-        thread::sleep(RECONNECT_PAUSE);
+        thread::sleep(self.pause);
         true
     }
 
@@ -856,7 +847,14 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
 
     let (raw, probe) = ui::RawGuard::enter();
     let theme = ui::theme::Theme::detect(false, probe.scheme);
-    let mut app = App::new(&home.root, theme, host, channel_name.clone(), cwd);
+    let mut app = App::new(
+        std::io::stdout(),
+        &home.root,
+        theme,
+        host,
+        channel_name.clone(),
+        cwd,
+    );
     let (evt_tx, evt_rx) = channel::<LoopEvent>();
     let (cmd_tx, cmd_rx) = channel::<WireCmd>();
 
@@ -895,6 +893,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         opened: false,
         install: false,
         installed_this_run: false,
+        pause: RECONNECT_PAUSE,
     };
     let first_for_wire = first.clone();
     thread::spawn(move || wire.run(first_for_wire));
@@ -1291,6 +1290,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
         opened: false,
         install: false,
         installed_this_run: false,
+        pause: RECONNECT_PAUSE,
     };
     thread::spawn(move || wire.run(first));
 
@@ -1442,6 +1442,7 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
         opened: false,
         install: false,
         installed_this_run: false,
+        pause: RECONNECT_PAUSE,
     };
     let first_nonempty = !first.is_empty();
     thread::spawn(move || wire.run(first));
@@ -1570,95 +1571,10 @@ fn emit_json(event: &jsonio::Event) {
     let _ = out.flush();
 }
 
-#[cfg(unix)]
-mod interrupt {
-    use std::ffi::CString;
-    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
-
-    static RESUME: AtomicUsize = AtomicUsize::new(0);
-    static MODES: AtomicPtr<(libc::c_int, libc::termios)> = AtomicPtr::new(std::ptr::null_mut());
-    static ALT: AtomicBool = AtomicBool::new(false);
-
-    /// Hold the terminal's modes as they are, before raw mode replaces them: the handler exits
-    /// through `_exit`, which runs no destructor, so it puts these back itself or the member's
-    /// shell is left without echo.
-    pub fn hold_modes() {
-        if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
-            return;
-        }
-        let mut modes: libc::termios = unsafe { std::mem::zeroed() };
-        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut modes) } != 0 {
-            return;
-        }
-        let held = Box::into_raw(Box::new((libc::STDIN_FILENO, modes)));
-        drop_held(MODES.swap(held, Ordering::SeqCst));
-    }
-
-    pub fn release_modes() {
-        drop_held(MODES.swap(std::ptr::null_mut(), Ordering::SeqCst));
-    }
-
-    /// Whether the alternate screen is up, and so whether the handler leaves it.
-    pub fn hold_alt(entered: bool) {
-        ALT.store(entered, Ordering::SeqCst);
-    }
-
-    fn drop_held(held: *mut (libc::c_int, libc::termios)) {
-        if !held.is_null() {
-            drop(unsafe { Box::from_raw(held) });
-        }
-    }
-
-    /// Put the terminal back from inside the handler. Async-signal-safe: an atomic load, `write`,
-    /// and `tcsetattr`, all on the POSIX safe list — crossterm's own calls are not.
-    fn restore_terminal() {
-        if ALT.load(Ordering::SeqCst) {
-            let leave = crate::ui::term::ALT_LEAVE.as_bytes();
-            unsafe {
-                libc::write(1, leave.as_ptr() as *const libc::c_void, leave.len());
-            }
-        }
-        let held = MODES.load(Ordering::SeqCst);
-        if !held.is_null() {
-            unsafe { libc::tcsetattr((*held).0, libc::TCSANOW, &(*held).1) };
-        }
-    }
-
-    pub fn set_resume(line: &str) {
-        let rendered = if line.is_empty() {
-            "\x1b[?25h\n".to_string()
-        } else {
-            format!("\x1b[?25h\n{line}\n")
-        };
-        let owned = CString::new(rendered).expect("resume line has no NUL");
-        RESUME.store(owned.into_raw() as usize, Ordering::SeqCst);
-    }
-
-    extern "C" fn on_sigint(_signal: libc::c_int) {
-        restore_terminal();
-        let pointer = RESUME.load(Ordering::SeqCst);
-        unsafe {
-            if pointer != 0 {
-                let length = libc::strlen(pointer as *const libc::c_char);
-                libc::write(2, pointer as *const libc::c_void, length);
-            } else {
-                let fallback = b"\x1b[?25h\n";
-                libc::write(2, fallback.as_ptr() as *const libc::c_void, fallback.len());
-            }
-            libc::_exit(130);
-        }
-    }
-
-    pub fn install() {
-        let handler = on_sigint as extern "C" fn(libc::c_int);
-        unsafe {
-            libc::signal(libc::SIGINT, handler as libc::sighandler_t);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
@@ -1736,8 +1652,201 @@ mod tests {
             opened: false,
             install: false,
             installed_this_run: false,
+            pause: Duration::ZERO,
         };
         (wire, cmd_tx, evt_rx)
+    }
+
+    fn said(evt: &Receiver<WireEvent>) -> Vec<String> {
+        let mut said = Vec::new();
+        while let Ok(event) = evt.try_recv() {
+            match event {
+                WireEvent::MemberEcho(text) => said.push(format!("echo:{text}")),
+                WireEvent::Dir(Directive::Note(text)) => said.push(format!("note:{text}")),
+                WireEvent::Fatal(text) => said.push(format!("fatal:{text}")),
+                WireEvent::Reconnecting {
+                    attempt,
+                    retry_in_s,
+                } => said.push(format!("retry:{attempt}:{retry_in_s}")),
+                _ => {}
+            }
+        }
+        said
+    }
+
+    #[test]
+    fn a_finished_op_outranks_everything_queued() {
+        let (mut wire, cmd, _evt) = listening_wire(None);
+        cmd.send(WireCmd::Say("typed while the op ran".into()))
+            .expect("the wire holds its receiver");
+        wire.op_reply = Some(PostBody::OpReply {
+            op_id: "op1".into(),
+            reply: Ok(b"done".to_vec()),
+        });
+        wire.poll = Some(5.0);
+        let body = wire.next_body();
+        assert!(matches!(body, Some(PostBody::OpReply { op_id, .. }) if op_id == "op1"));
+        assert!(wire.poll.is_none(), "the op reply cancels a pending poll");
+        assert_eq!(
+            wire.queue.len(),
+            1,
+            "the message stays queued for the next post"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_messages_posts_as_one_turn() {
+        let (mut wire, cmd, evt) = listening_wire(None);
+        for text in ["first", "second", "third"] {
+            cmd.send(WireCmd::Say(text.into()))
+                .expect("the wire holds its receiver");
+        }
+        wire.detached = true;
+        let body = wire.next_body();
+        assert!(
+            matches!(&body, Some(PostBody::Message(text)) if text == "first\n\nsecond\n\nthird")
+        );
+        assert!(!wire.detached, "a member's message reattaches the wire");
+        assert!(wire.queue.is_empty());
+        assert_eq!(
+            said(&evt),
+            vec!["echo:first", "echo:second", "echo:third"],
+            "every message is echoed to the member in order"
+        );
+    }
+
+    #[test]
+    fn a_shutdown_drops_the_work_the_wire_was_holding() {
+        let (mut wire, cmd, _evt) = listening_wire(Some(30.0));
+        wire.queue.push_back("unsent".into());
+        wire.poll = Some(1.0);
+        wire.op_reply = Some(PostBody::Empty);
+        cmd.send(WireCmd::Shutdown)
+            .expect("the wire holds its receiver");
+        drop(cmd);
+        assert!(wire.next_body().is_none(), "a shut wire posts nothing more");
+        assert!(wire.queue.is_empty());
+        assert!(wire.poll.is_none());
+        assert!(wire.op_reply.is_none());
+        assert!(wire.listen.is_none());
+    }
+
+    #[test]
+    fn a_detached_poll_waits_for_the_member_instead_of_firing() {
+        let (mut wire, cmd, _evt) = listening_wire(None);
+        wire.detached = true;
+        wire.poll = Some(0.0);
+        cmd.send(WireCmd::Say("back".into()))
+            .expect("the wire holds its receiver");
+        let body = wire.next_body();
+        assert!(
+            matches!(&body, Some(PostBody::Message(text)) if text == "back"),
+            "a detached wire lets its poll go and posts what the member said"
+        );
+    }
+
+    #[test]
+    fn an_attached_poll_fires_on_its_own() {
+        let (mut wire, cmd, _evt) = listening_wire(None);
+        wire.poll = Some(0.0);
+        drop(cmd);
+        assert!(
+            matches!(wire.next_body(), Some(PostBody::Empty)),
+            "the interval elapsing asks the conversation whether it spoke"
+        );
+        assert!(wire.poll.is_none(), "the poll fires once, not forever");
+    }
+
+    #[test]
+    fn a_wake_reattaches_and_asks_at_once() {
+        let (mut wire, cmd, _evt) = listening_wire(Some(30.0));
+        wire.detached = true;
+        cmd.send(WireCmd::Wake)
+            .expect("the wire holds its receiver");
+        drop(cmd);
+        assert!(matches!(wire.next_body(), Some(PostBody::Empty)));
+        assert!(!wire.detached, "waking reattaches the wire");
+    }
+
+    #[test]
+    fn a_poll_the_member_beat_posts_the_message_instead() {
+        let (mut wire, cmd, _evt) = listening_wire(None);
+        wire.poll = Some(0.0);
+        cmd.send(WireCmd::Say("beat the poll".into()))
+            .expect("the wire holds its receiver");
+        let body = wire.next_body();
+        assert!(matches!(&body, Some(PostBody::Message(text)) if text == "beat the poll"));
+    }
+
+    #[test]
+    fn a_first_failure_before_any_stream_names_the_gateway() {
+        let (mut wire, _cmd, evt) = listening_wire(None);
+        let mut attempts = 0;
+        assert!(!wire.reconnect(&mut attempts, "connection refused"));
+        assert_eq!(attempts, 1);
+        assert_eq!(
+            said(&evt),
+            vec!["fatal:No response from https://gw (connection refused)"]
+        );
+    }
+
+    #[test]
+    fn an_opened_stream_retries_to_its_last_attempt() {
+        let (mut wire, _cmd, evt) = listening_wire(None);
+        wire.opened = true;
+        let mut attempts = 0;
+        for attempt in 1..=RECONNECT_ATTEMPTS {
+            assert!(wire.reconnect(&mut attempts, "lost connection"));
+            assert_eq!(attempts, attempt);
+        }
+        assert!(
+            !wire.reconnect(&mut attempts, "lost connection"),
+            "the ladder ends after {RECONNECT_ATTEMPTS} attempts"
+        );
+        let mut expected: Vec<String> = (1..=RECONNECT_ATTEMPTS)
+            .map(|attempt| format!("retry:{attempt}:{}", RECONNECT_PAUSE.as_secs()))
+            .collect();
+        expected.push("fatal:lost connection".to_string());
+        assert_eq!(said(&evt), expected);
+    }
+
+    #[test]
+    fn an_empty_secret_is_never_posted() {
+        let (mut wire, _cmd, evt) = listening_wire(None);
+        wire.fulfill_secret("sealed1", "s1", "");
+        assert_eq!(
+            said(&evt),
+            vec!["note:Skipped s1"],
+            "an empty secret names the slot it skipped instead of reaching the wire"
+        );
+    }
+
+    #[test]
+    fn an_onboarding_conversation_is_never_recorded() {
+        let (mut wire, _cmd, _evt) = listening_wire(None);
+        let home = env::temp_dir().join(format!("ufo-record-test-{}", process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).expect("a scratch home");
+        wire.home = config::Home { root: home.clone() };
+        wire.record("first words");
+        assert!(
+            !wire.recorded,
+            "a session with no workspace records nothing"
+        );
+        assert!(list_conversations(&home).is_empty());
+        wire.session.workspace_url = Some("https://w.example".into());
+        wire.record("first words");
+        assert!(wire.recorded);
+        let logged = list_conversations(&home);
+        assert_eq!(logged.len(), 1);
+        assert_eq!(logged[0].first_message, "first words");
+        wire.record("second words");
+        assert_eq!(
+            list_conversations(&home).len(),
+            1,
+            "only the conversation's first message is recorded"
+        );
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

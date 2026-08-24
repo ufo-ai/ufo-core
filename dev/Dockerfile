@@ -13,8 +13,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM rust:1-bookworm AS client
 WORKDIR /client
+# Cargo validates every target the manifest declares before it selects one, so the benches the
+# manifest names are copied even though this stage builds only the binary.
 COPY client/Cargo.toml client/Cargo.lock ./
 COPY client/src ./src
+COPY client/benches ./benches
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/client/target \
     cargo build --release --locked --bin ufo \

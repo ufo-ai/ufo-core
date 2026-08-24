@@ -168,4 +168,97 @@ mod tests {
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(outside);
     }
+
+    fn runtime(name: &str) -> OpRuntime {
+        let root = std::env::temp_dir().join(format!("ufo-op-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        OpRuntime {
+            workdir: root.clone(),
+            cwd: root,
+        }
+    }
+
+    fn offline_session() -> Session {
+        Session::new(
+            "http://127.0.0.1:1".into(),
+            Some("http://127.0.0.1:1".into()),
+            "abc".into(),
+            None,
+            "sid".into(),
+            None,
+            false,
+            false,
+        )
+    }
+
+    fn asking(kind: &str, arg: &str, params: &str) -> OpRequest {
+        OpRequest {
+            op_id: "op1".into(),
+            kind: kind.into(),
+            name: "read".into(),
+            timeout_s: 30,
+            arg: arg.into(),
+            params: params.into(),
+        }
+    }
+
+    #[test]
+    fn an_unknown_kind_is_refused_by_name() {
+        let rt = runtime("unknown");
+        let outcome = run_op(&rt, &offline_session(), &asking("telepathy", "", "{}"));
+        assert_eq!(outcome, Err("unknown op kind: telepathy".to_string()));
+        let _ = fs::remove_dir_all(&rt.workdir);
+    }
+
+    #[test]
+    fn a_fileop_whose_params_are_not_json_says_so() {
+        let rt = runtime("badparams");
+        let outcome = run_op(&rt, &offline_session(), &asking(OP_FILE, "", "not json"));
+        let failure = outcome.expect_err("params that are not JSON are refused");
+        assert!(
+            failure.starts_with("fileop failed: params are not JSON"),
+            "{failure}"
+        );
+        let _ = fs::remove_dir_all(&rt.workdir);
+    }
+
+    #[test]
+    fn a_read_op_answers_the_bytes_at_its_path() {
+        let rt = runtime("read");
+        let path = rt.workdir.join("answer.txt");
+        fs::write(&path, b"payload").unwrap();
+        let asked = asking(OP_READ, path.to_str().unwrap(), "");
+        assert_eq!(
+            run_op(&rt, &offline_session(), &asked),
+            Ok(b"payload".to_vec())
+        );
+        let _ = fs::remove_dir_all(&rt.workdir);
+    }
+
+    #[test]
+    fn a_read_op_names_the_path_it_could_not_find() {
+        let rt = runtime("readmissing");
+        let missing = rt.workdir.join("gone.txt");
+        let asked = asking(OP_READ, missing.to_str().unwrap(), "");
+        assert_eq!(
+            run_op(&rt, &offline_session(), &asked),
+            Err(format!("ENOENT: {}", missing.display()))
+        );
+        let _ = fs::remove_dir_all(&rt.workdir);
+    }
+
+    #[test]
+    fn a_write_op_that_cannot_land_says_which_path() {
+        let rt = runtime("write");
+        let blocker = rt.workdir.join("afile");
+        fs::write(&blocker, b"not a directory").unwrap();
+        let target = blocker.join("under-a-file.txt");
+        let asked = asking(OP_WRITE, target.to_str().unwrap(), "");
+        assert_eq!(
+            run_op(&rt, &offline_session(), &asked),
+            Err(format!("EIO: could not write {}", target.display()))
+        );
+        let _ = fs::remove_dir_all(&rt.workdir);
+    }
 }

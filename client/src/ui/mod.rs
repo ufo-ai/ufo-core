@@ -2,7 +2,7 @@
 //! sends, the composer (or a picker, a masked secret entry, or the hotkey sheet), rule, footer.
 //! Every member-visible string renders through the theme's roles.
 
-mod editor;
+pub mod editor;
 pub mod history;
 pub mod markdown;
 pub mod osc;
@@ -196,12 +196,12 @@ struct PathPick {
 }
 
 /// The dock and everything drawn in it.
-pub struct App {
+pub struct App<W: Write = io::Stdout> {
     pub theme: Theme,
     pub caps: Caps,
     signals: Signals,
     progress: Progress,
-    screen: AltScreen<io::Stdout>,
+    screen: AltScreen<W>,
     status: StatusRow,
     stream: markdown::StreamRenderer,
     ask: AskState,
@@ -239,17 +239,18 @@ pub struct App {
     rows: u16,
 }
 
-impl App {
+impl<W: Write> App<W> {
     pub fn new(
+        out: W,
         home_root: &std::path::Path,
         theme: Theme,
         host: String,
         channel: String,
         cwd: PathBuf,
-    ) -> App {
+    ) -> App<W> {
         let caps = Caps::detect();
         let (cols, rows) = sane_size();
-        let mut screen = AltScreen::new(io::stdout(), theme.mode);
+        let mut screen = AltScreen::new(out, theme.mode);
         let _ = screen.enter();
         App {
             signals: Signals {
@@ -258,8 +259,8 @@ impl App {
             progress: Progress::new(),
             screen,
             status: StatusRow::new(),
-            stream: markdown::StreamRenderer::new(),
-            ask: AskState::new(),
+            stream: markdown::StreamRenderer::default(),
+            ask: AskState::default(),
             prompt: PROMPT_IDLE.to_string(),
             history: History::load(home_root),
             queued: VecDeque::new(),
@@ -835,7 +836,7 @@ impl App {
                 if self.working && self.ask.text.is_empty() {
                     return Reply::Stop;
                 }
-                self.ask = AskState::new();
+                self.ask = AskState::default();
                 return Reply::None;
             }
             _ => {}
@@ -849,7 +850,7 @@ impl App {
             Outcome::Cancel => Reply::Exit,
             Outcome::Submit => {
                 let text = self.ask.expand();
-                self.ask = AskState::new();
+                self.ask = AskState::default();
                 if text.trim().is_empty() {
                     return Reply::None;
                 }
@@ -1180,7 +1181,7 @@ impl App {
         if tail.trim().is_empty() || self.retained.scrolled() > 0 {
             return Vec::new();
         }
-        markdown::render(
+        markdown::render_live(
             tail.trim_end_matches('\n'),
             &self.theme,
             self.transcript_width(),
@@ -1348,9 +1349,7 @@ impl App {
         if bytes.is_empty() {
             return;
         }
-        let mut out = io::stdout();
-        let _ = out.write_all(bytes.as_bytes());
-        let _ = out.flush();
+        self.screen.splice(bytes);
     }
 
     /// Leave the alternate screen and print the whole conversation into the terminal's own
@@ -1519,6 +1518,503 @@ mod tests {
             .filter(|(_, step)| *step > 0)
             .map(|(unit, _)| unit)
             .collect()
+    }
+
+    /// An app whose screen writes into memory: no terminal is touched, and what it would have
+    /// painted is readable. Each one gets a home of its own, because the composer's history is a
+    /// file — a shared one would let a recall in a later test read what an earlier test typed.
+    fn app_on_memory() -> App<Vec<u8>> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "ufo-ui-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home");
+        App::new(
+            Vec::new(),
+            &home.clone(),
+            Theme::for_mode(ColorMode::TrueColor, theme::Scheme::Dark),
+            "ufo.test".to_string(),
+            "host.1".to_string(),
+            home,
+        )
+    }
+
+    fn asked(op: &str, kind: &str, params: &str) -> OpRequest {
+        OpRequest {
+            op_id: "op1".to_string(),
+            kind: kind.to_string(),
+            name: op.to_string(),
+            timeout_s: 30,
+            arg: String::new(),
+            params: params.to_string(),
+        }
+    }
+
+    /// Every member message the transcript holds, in order — the caret marks them.
+    fn members(app: &mut App<Vec<u8>>) -> Vec<String> {
+        let theme = app.theme.clone();
+        app.retained
+            .document(&theme)
+            .iter()
+            .map(Line::to_string)
+            .filter(|line| line.starts_with('›'))
+            .map(|line| line.trim_start_matches('›').trim().to_string())
+            .collect()
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn typed(app: &mut App<Vec<u8>>, text: &str) {
+        for character in text.chars() {
+            app.on_key(key(KeyCode::Char(character)));
+        }
+    }
+
+    #[test]
+    fn enter_sends_what_was_typed_and_leaves_the_composer_empty() {
+        let mut app = app_on_memory();
+        typed(&mut app, "hello there");
+        let reply = app.on_key(key(KeyCode::Enter));
+        assert!(matches!(&reply, Reply::Send(text) if text == "hello there"));
+        assert!(app.ask.text.is_empty());
+    }
+
+    #[test]
+    fn escape_stops_a_running_turn_but_first_clears_a_draft() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        typed(&mut app, "a draft");
+        assert!(
+            matches!(app.on_key(key(KeyCode::Esc)), Reply::None),
+            "escape with a draft clears it rather than stopping the turn"
+        );
+        assert!(app.ask.text.is_empty());
+        assert!(matches!(app.on_key(key(KeyCode::Esc)), Reply::Stop));
+    }
+
+    #[test]
+    fn detach_is_offered_only_while_a_turn_runs() {
+        let mut app = app_on_memory();
+        assert!(matches!(app.on_key(ctrl(KeyCode::Char('b'))), Reply::None));
+        app.begin_turn();
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('b'))),
+            Reply::Detach
+        ));
+    }
+
+    #[test]
+    fn the_hotkey_sheet_opens_on_an_empty_composer_and_any_key_closes_it() {
+        let mut app = app_on_memory();
+        typed(&mut app, "?");
+        assert!(
+            matches!(app.focus, Focus::Keys),
+            "a lone question mark opens the sheet"
+        );
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(matches!(app.focus, Focus::Compose));
+        typed(&mut app, "draft?");
+        assert!(
+            matches!(app.focus, Focus::Compose),
+            "a question mark inside a draft is just a character"
+        );
+        assert_eq!(app.ask.text, "draft?");
+    }
+
+    #[test]
+    fn ctrl_v_asks_for_the_clipboard_and_ctrl_o_copies_the_last_reply() {
+        let mut app = app_on_memory();
+        assert!(matches!(
+            app.on_key(ctrl(KeyCode::Char('v'))),
+            Reply::Clipboard(ClipEntry::Compose)
+        ));
+        app.last_reply = "the answer".to_string();
+        app.caps.osc52 = false;
+        app.on_key(ctrl(KeyCode::Char('o')));
+        assert!(
+            !String::from_utf8_lossy(app.screen.written()).contains("52;c;"),
+            "a terminal that cannot take a clipboard sequence is never sent one"
+        );
+        app.caps.osc52 = true;
+        app.on_key(ctrl(KeyCode::Char('o')));
+        let painted = String::from_utf8_lossy(app.screen.written()).into_owned();
+        assert!(
+            painted.contains("52;c;"),
+            "the reply is copied through the terminal's own clipboard: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_chooser_answers_a_pick_and_a_cancel() {
+        let mut app = app_on_memory();
+        app.choose("which?", &["first".to_string(), "second".to_string()]);
+        app.on_key(key(KeyCode::Down));
+        let reply = app.on_key(key(KeyCode::Enter));
+        assert!(matches!(&reply, Reply::Choice(choice) if choice == "second"));
+        assert!(app.chooser.is_none());
+        assert!(matches!(app.focus, Focus::Compose));
+        app.choose("again?", &["only".to_string()]);
+        assert!(matches!(
+            app.on_key(key(KeyCode::Esc)),
+            Reply::ChoiceCancelled
+        ));
+        assert!(app.chooser.is_none());
+    }
+
+    #[test]
+    fn a_secret_entry_hides_what_is_typed_and_answers_on_enter() {
+        let mut app = app_on_memory();
+        app.secret_begin("paste the key");
+        typed(&mut app, "sk-live-abc");
+        assert!(app.collecting_secret());
+        app.paint();
+        let painted = String::from_utf8_lossy(app.screen.written()).into_owned();
+        assert!(
+            !painted.contains("sk-live-abc"),
+            "a secret never reaches the screen: {painted:?}"
+        );
+        assert!(
+            painted.contains('•'),
+            "what the member typed is drawn masked: {painted:?}"
+        );
+        let reply = app.on_key(key(KeyCode::Enter));
+        assert!(matches!(&reply, Reply::Secret(value) if value == "sk-live-abc"));
+        assert!(!app.collecting_secret());
+        assert!(matches!(app.focus, Focus::Compose));
+    }
+
+    #[test]
+    fn a_pasted_secret_loses_the_newline_that_came_with_it() {
+        let mut app = app_on_memory();
+        app.secret_begin("paste the key");
+        app.on_paste("sk-live-abc\n".to_string());
+        let reply = app.on_key(key(KeyCode::Enter));
+        assert!(
+            matches!(&reply, Reply::Secret(value) if value == "sk-live-abc"),
+            "a key copied with its trailing newline still posts clean: {reply:?}"
+        );
+    }
+
+    #[test]
+    fn a_secret_entry_can_be_abandoned() {
+        let mut app = app_on_memory();
+        app.secret_begin("paste the key");
+        typed(&mut app, "half");
+        assert!(matches!(app.on_key(key(KeyCode::Esc)), Reply::Secret(value) if value.is_empty()));
+        assert!(!app.collecting_secret());
+    }
+
+    #[test]
+    fn a_choose_key_with_no_chooser_falls_back_to_the_composer() {
+        let mut app = app_on_memory();
+        app.focus = Focus::Choose;
+        assert!(matches!(app.on_key(key(KeyCode::Enter)), Reply::None));
+        assert!(matches!(app.focus, Focus::Compose));
+    }
+
+    #[test]
+    fn up_on_an_empty_composer_recalls_only_when_something_is_queued() {
+        let mut app = app_on_memory();
+        assert!(
+            matches!(app.on_key(key(KeyCode::Up)), Reply::None),
+            "nothing queued, nothing recalled"
+        );
+        app.push_queued("queued words");
+        app.sent_ack("queued words", "arr-1");
+        let reply = app.on_key(key(KeyCode::Up));
+        assert!(matches!(&reply, Reply::Recall { text, .. } if text == "queued words"));
+    }
+
+    #[test]
+    fn a_painted_frame_states_the_transcript_and_the_endpoint() {
+        let mut app = app_on_memory();
+        app.say("the assistant spoke");
+        app.member_echo("the member answered");
+        app.paint();
+        let painted = String::from_utf8_lossy(app.screen.written()).into_owned();
+        assert!(painted.contains("the assistant spoke"), "{painted}");
+        assert!(painted.contains("the member answered"));
+        assert!(
+            painted.contains("host.1"),
+            "the footer names the conversation"
+        );
+    }
+
+    /// The dock draws the open tail on every delta and on every tick. Whatever it draws there is a
+    /// different string each time, so the renderer it reaches for must not be the holding one.
+    #[test]
+    fn a_streaming_reply_leaves_nothing_held_until_it_commits() {
+        let mut app = app_on_memory();
+        let before = markdown::held_blocks();
+        for delta in [
+            "```rust\n",
+            "fn parse(line",
+            ": &str) -> usize {\n",
+            "    line.len()\n",
+            "}\n",
+        ] {
+            app.txt(delta);
+            app.paint();
+        }
+        assert_eq!(
+            markdown::held_blocks(),
+            before,
+            "the open tail is drawn, never held"
+        );
+        app.txt("```\n\n");
+        app.paint();
+        assert!(
+            markdown::held_blocks() > before,
+            "the block holds its colours once it settles into the transcript"
+        );
+    }
+
+    #[test]
+    fn a_narration_names_the_call_it_belongs_to() {
+        let mut app = app_on_memory();
+        app.narration = Some(("exec".to_string(), "counting the rows".to_string()));
+        app.op_started(&asked("exec", "exec", "{}"));
+        assert_eq!(app.running_desc.as_deref(), Some("counting the rows"));
+        app.narration = Some(("read".to_string(), "a different call".to_string()));
+        app.op_started(&asked("exec", "exec", "{}"));
+        assert!(
+            app.running_desc.is_none(),
+            "a narration for another tool is not adopted"
+        );
+    }
+
+    #[test]
+    fn the_op_log_keeps_its_newest_rows_and_drops_the_rest() {
+        let mut app = app_on_memory();
+        for run in [
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+        ] {
+            app.op_finished(
+                &asked("exec", "exec", &format!(r#"{{"argv":["make","{run}"]}}"#)),
+                &Ok(b"{\"code\":0,\"out_b64\":\"\"}".to_vec()),
+            );
+        }
+        assert_eq!(
+            app.op_log.len(),
+            OP_LOG_ROWS,
+            "eight calls overflow a log of {OP_LOG_ROWS} rows"
+        );
+        let logged: String = app.op_log.iter().map(Line::to_string).collect();
+        assert!(
+            logged.contains("theta"),
+            "the newest call survives the cap: {logged}"
+        );
+        assert!(
+            !logged.contains("alpha"),
+            "and the oldest is what gets dropped: {logged}"
+        );
+        assert!(
+            app.running_op.is_none(),
+            "a finished op is no longer running"
+        );
+    }
+
+    #[test]
+    fn a_failed_op_states_its_failure() {
+        let mut app = app_on_memory();
+        app.op_finished(
+            &asked("exec", "exec", r#"{"argv":["make"]}"#),
+            &Err("ENOENT: no such tool".to_string()),
+        );
+        let logged: String = app.op_log.iter().map(Line::to_string).collect();
+        assert!(logged.contains("ENOENT: no such tool"), "{logged}");
+    }
+
+    #[test]
+    fn a_prompt_a_choice_and_a_secret_each_take_the_focus() {
+        let mut app = app_on_memory();
+        app.choose("which one?", &["first".to_string(), "second".to_string()]);
+        assert!(matches!(app.focus, Focus::Choose));
+        assert!(app.chooser.is_some());
+        app.secret_begin("paste the key");
+        assert!(matches!(app.focus, Focus::Secret));
+        assert!(app.collecting_secret());
+        app.ask_prompt("your turn");
+        assert!(matches!(app.focus, Focus::Compose));
+        assert_eq!(app.prompt, "your turn");
+        app.ask_prompt("");
+        assert_eq!(
+            app.prompt, PROMPT_IDLE,
+            "an empty ask restores the idle prompt"
+        );
+    }
+
+    #[test]
+    fn an_acknowledged_send_settles_when_the_turn_absorbs_it() {
+        let mut app = app_on_memory();
+        app.push_queued("while the turn ran");
+        app.sent_ack("while the turn ran", "arr-9");
+        assert_eq!(app.queued[0].arrival.as_deref(), Some("arr-9"));
+        app.absorbed(&["arr-9".to_string()]);
+        assert!(app.queued.is_empty(), "the absorbed row leaves the queue");
+        assert_eq!(members(&mut app), vec!["while the turn ran"]);
+    }
+
+    #[test]
+    fn an_absorb_that_outran_its_ack_settles_the_row_once() {
+        let mut app = app_on_memory();
+        app.push_queued("raced");
+        app.absorbed(&["arr-9".to_string()]);
+        assert_eq!(
+            app.queued.len(),
+            1,
+            "nothing settles before its ack arrives"
+        );
+        assert_eq!(app.early_absorbed, vec!["arr-9".to_string()]);
+        app.sent_ack("raced", "arr-9");
+        assert!(
+            app.queued.is_empty(),
+            "the late ack settles the row at once"
+        );
+        assert!(app.early_absorbed.is_empty(), "the parked id is consumed");
+        assert_eq!(members(&mut app), vec!["raced"]);
+    }
+
+    #[test]
+    fn parked_arrivals_never_grow_without_bound() {
+        let mut app = app_on_memory();
+        let ids: Vec<String> = (0..EARLY_ABSORBED_MAX + 8)
+            .map(|n| format!("arr-{n}"))
+            .collect();
+        app.absorbed(&ids);
+        assert_eq!(app.early_absorbed.len(), EARLY_ABSORBED_MAX);
+        assert_eq!(
+            app.early_absorbed.first().map(String::as_str),
+            Some("arr-8"),
+            "the oldest parked ids are the ones dropped"
+        );
+    }
+
+    #[test]
+    fn a_recall_waits_for_the_send_to_be_acknowledged() {
+        let mut app = app_on_memory();
+        app.push_queued("not yet sent");
+        assert!(matches!(app.recall_queued(), Reply::None));
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|(said, _)| said.contains("Still sending")),
+            "the member is told the send is still in flight"
+        );
+        app.sent_ack("not yet sent", "arr-1");
+        let reply = app.recall_queued();
+        assert!(
+            matches!(&reply, Reply::Recall { text, arrival_id } if text == "not yet sent" && arrival_id == "arr-1")
+        );
+        assert!(app.queued[0].retracting);
+        assert!(
+            matches!(app.recall_queued(), Reply::None),
+            "a row already being recalled is not recalled twice"
+        );
+    }
+
+    #[test]
+    fn a_granted_recall_puts_the_words_back_in_the_composer() {
+        let mut app = app_on_memory();
+        app.push_queued("take it back");
+        app.sent_ack("take it back", "arr-1");
+        app.retracted("take it back", "arr-1", true);
+        assert!(app.queued.is_empty());
+        assert_eq!(app.ask.text, "take it back");
+        assert_eq!(app.ask.cursor, app.ask.text.len());
+    }
+
+    #[test]
+    fn a_recall_the_turn_beat_leaves_the_row_where_it_was() {
+        let mut app = app_on_memory();
+        app.push_queued("too late");
+        app.sent_ack("too late", "arr-1");
+        app.recall_queued();
+        app.retracted("too late", "arr-1", false);
+        assert_eq!(
+            app.queued.len(),
+            1,
+            "the row stays; the turn owns the words"
+        );
+        assert!(!app.queued[0].retracting, "and it can be recalled again");
+        assert!(app
+            .flash
+            .as_ref()
+            .is_some_and(|(said, _)| said.contains("Already picked up")));
+        app.retracted("nothing here", "arr-unknown", true);
+        assert_eq!(
+            app.queued.len(),
+            1,
+            "an answer naming no queued row changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_recall_joins_what_the_member_has_since_typed() {
+        let mut app = app_on_memory();
+        app.push_queued("first words");
+        app.sent_ack("first words", "arr-1");
+        app.ask.text = "second words".to_string();
+        app.retracted("first words", "arr-1", true);
+        assert_eq!(app.ask.text, "first words\n\nsecond words");
+    }
+
+    #[test]
+    fn a_send_the_turn_already_holds_settles_exactly_once() {
+        let mut app = app_on_memory();
+        app.push_queued("retried delivery");
+        app.settle_queued("retried delivery");
+        assert!(app.queued.is_empty());
+        assert_eq!(members(&mut app), vec!["retried delivery"]);
+        app.settle_queued("retried delivery");
+        assert_eq!(
+            members(&mut app),
+            vec!["retried delivery"],
+            "a row an absorb already settled stays settled"
+        );
+    }
+
+    #[test]
+    fn an_ended_turn_takes_its_running_call_with_it() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        app.op_started(&asked("exec", "exec", r#"{"argv":["make"]}"#));
+        assert!(app.running_op.is_some());
+        app.end_turn(false);
+        assert!(!app.is_working());
+        assert!(
+            app.running_op.is_none(),
+            "a turn that ended is running nothing"
+        );
+    }
+
+    #[test]
+    fn an_app_paints_into_the_sink_it_was_given() {
+        let mut app = app_on_memory();
+        app.say("hello there");
+        app.begin_turn();
+        assert!(app.is_working(), "a begun turn is working");
+        app.end_turn(false);
+        assert!(!app.is_working(), "an ended turn is not");
+        app.splice_raw("\x1b]52;c;YWJj\x07");
+        let painted = String::from_utf8_lossy(app.screen.written()).into_owned();
+        assert!(
+            painted.contains("\x1b]52;c;YWJj\x07"),
+            "a spliced sequence reaches the given sink, never the process's own terminal"
+        );
+        assert!(
+            painted.contains("\x1b[?1049h"),
+            "the screen entered the alternate buffer of the sink it was handed: {painted:?}"
+        );
     }
 
     #[test]

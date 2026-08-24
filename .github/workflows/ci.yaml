@@ -30,6 +30,7 @@ jobs:
       checks: ${{ github.event_name != 'pull_request' || steps.filter.outputs.not_docs_md == 'true' }}
       control: ${{ github.event_name != 'pull_request' || steps.filter.outputs.control == 'true' }}
       wheel: ${{ github.event_name != 'pull_request' || steps.filter.outputs.wheel == 'true' }}
+      client: ${{ github.event_name != 'pull_request' || steps.filter.outputs.client == 'true' }}
     steps:
       # On pull_request the action reads changed files from the API, so no checkout. On push the
       # outputs above are already true, so the step never runs — and never fails a main build.
@@ -42,6 +43,11 @@ jobs:
               - '!docs/**/*.md'
             control:
               - 'servers/**'
+              - 'testsupport/**'
+              - '.github/**'
+              - '*'
+            client:
+              - 'client/**'
               - 'testsupport/**'
               - '.github/**'
               - '*'
@@ -220,6 +226,15 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The terminal client's lane: its own crate's gates, suite, benches, and release builds. Held in
+  # its own file because the matrix over five targets is long, called from here so the triage above
+  # stays the one place a lane is chosen.
+  client:
+    needs: triage
+    if: needs.triage.outputs.client == 'true'
+    uses: ./.github/workflows/client.yml
+    secrets: inherit
+
   test-shard:
     name: test shard ${{ matrix.shard }}
     needs: [triage, web, sandbox-client]
@@ -337,7 +352,7 @@ jobs:
   # A cancelled gate passes only when GitHub names a newer head; cancelling the current head fails.
   test:
     if: always()
-    needs: [triage, test-shard, control-test, integration, wheel]
+    needs: [triage, test-shard, control-test, integration, wheel, client]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -366,6 +381,8 @@ jobs:
         run: test "${{ needs.integration.result }}" = "${{ github.event_name == 'push' && 'success' || 'skipped' }}"
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
         run: test "${{ needs.wheel.result }}" = "${{ needs.triage.outputs.wheel == 'true' && 'success' || 'skipped' }}"
+      - if: ${{ !contains(needs.*.result, 'cancelled') }}
+        run: test "${{ needs.client.result }}" = "${{ needs.triage.outputs.client == 'true' && 'success' || 'skipped' }}"
 
   # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel suite's
   # :5541, nor `control-test`'s :5549). It CREATEs roles and databases, applies RLS policies, and
