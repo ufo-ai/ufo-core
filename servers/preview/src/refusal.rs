@@ -10,7 +10,6 @@ pub enum Refusal {
     TooLarge(String),
     RenderTimeout(String),
     FetchRefused(String),
-    Busy,
 }
 
 impl Refusal {
@@ -27,11 +26,6 @@ impl Refusal {
             Refusal::TooLarge(d) => (StatusCode::PAYLOAD_TOO_LARGE, "too_large", d.clone()),
             Refusal::RenderTimeout(d) => (StatusCode::GATEWAY_TIMEOUT, "render_timeout", d.clone()),
             Refusal::FetchRefused(d) => (StatusCode::BAD_GATEWAY, "fetch_refused", d.clone()),
-            Refusal::Busy => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "busy",
-                "render capacity exhausted".into(),
-            ),
         }
     }
 }

@@ -7,20 +7,23 @@ const CROP_MARGIN_PX: u32 = 6;
 const CONTENT_CHANNEL_MAX: u8 = 244;
 const CONTENT_ALPHA_MIN: u8 = 8;
 
+pub struct Request<'a> {
+    pub lib: &'a str,
+    pub pdf: &'a str,
+    pub outdir: &'a str,
+    pub max_width: &'a str,
+    pub max_height: &'a str,
+    pub start_page: &'a str,
+    pub pages: &'a str,
+    pub crop: bool,
+}
+
 /// The rasterizing child: everything pdfium touches runs here, in a process the parent can kill.
 /// Prints one metadata JSON line on success; exit 1 on any failure. `crop` == "1" trims each page
 /// to its content box — a spreadsheet renders to a full sheet of paper it does not fill, so the
 /// preview would otherwise be a grid marooned in white.
-pub fn run(
-    lib: &str,
-    pdf: &str,
-    outdir: &str,
-    max_w: &str,
-    max_h: &str,
-    pages: &str,
-    crop: &str,
-) -> i32 {
-    match render(lib, pdf, outdir, max_w, max_h, pages, crop == "1") {
+pub fn run(request: Request<'_>) -> i32 {
+    match render(&request) {
         Ok(meta) => {
             println!("{meta}");
             0
@@ -32,45 +35,55 @@ pub fn run(
     }
 }
 
-fn render(
-    lib: &str,
-    pdf: &str,
-    outdir: &str,
-    max_w: &str,
-    max_h: &str,
-    pages: &str,
-    crop: bool,
-) -> Result<String, String> {
-    let max_w: i32 = max_w.parse().map_err(|_| "bad max-w".to_string())?;
-    let max_h: i32 = max_h.parse().map_err(|_| "bad max-h".to_string())?;
-    let pages: u32 = pages.parse().map_err(|_| "bad pages".to_string())?;
+fn render(request: &Request<'_>) -> Result<String, String> {
+    let max_w: i32 = request
+        .max_width
+        .parse()
+        .map_err(|_| "bad max-w".to_string())?;
+    let max_h: i32 = request
+        .max_height
+        .parse()
+        .map_err(|_| "bad max-h".to_string())?;
+    let start_page: u32 = request
+        .start_page
+        .parse()
+        .map_err(|_| "bad start-page".to_string())?;
+    let pages: u32 = request.pages.parse().map_err(|_| "bad pages".to_string())?;
     let pdfium =
-        Pdfium::new(Pdfium::bind_to_library(lib).map_err(|e| format!("pdfium bind: {e}"))?);
+        Pdfium::new(Pdfium::bind_to_library(request.lib).map_err(|e| format!("pdfium bind: {e}"))?);
     let doc = pdfium
-        .load_pdf_from_file(pdf, None)
+        .load_pdf_from_file(request.pdf, None)
         .map_err(|e| format!("pdf load: {e}"))?;
     let page_count = doc.pages().len() as u32;
-    let take = page_count.min(pages);
+    let start = start_page.max(1).min(page_count.max(1));
+    let take = page_count.saturating_sub(start - 1).min(pages);
     let config = PdfRenderConfig::new()
         .set_target_width(max_w)
         .set_maximum_height(max_h);
     let mut metas = Vec::new();
-    for i in 0..take {
+    for offset in 0..take {
+        let i = start - 1 + offset;
         let page = doc
             .pages()
             .get(i as u16)
             .map_err(|e| format!("page {i}: {e}"))?;
+        let text = page.text().map_err(|e| format!("text {i}: {e}"))?.all();
         let mut img = page
             .render_with_config(&config)
             .map_err(|e| format!("render {i}: {e}"))?
             .as_image();
-        if crop {
+        if request.crop {
             img = crop_to_content(img);
         }
         let (w, h) = (img.width(), img.height());
-        img.save(Path::new(outdir).join(format!("page-{:02}.png", i + 1)))
+        img.save(Path::new(request.outdir).join(format!("page-{:02}.png", offset + 1)))
             .map_err(|e| format!("save {i}: {e}"))?;
-        metas.push(serde_json::json!({"index": i + 1, "width": w, "height": h}));
+        metas.push(serde_json::json!({
+            "index": i + 1,
+            "width": w,
+            "height": h,
+            "text": text,
+        }));
     }
     Ok(serde_json::json!({"page_count": page_count, "pages": metas}).to_string())
 }

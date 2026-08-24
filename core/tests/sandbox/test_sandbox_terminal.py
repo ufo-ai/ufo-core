@@ -4,15 +4,19 @@ every op is asked over it, the test playing the connected terminal."""
 
 import asyncio
 import base64
+import io
 import json
 import os
 import subprocess
 import threading
+import zipfile
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
+from ufo.media.document_renderer import DOCUMENT_INPUT_MAX_BYTES, DocumentRenderer
 from ufo.sandbox import terminal
 from ufo.sandbox.session import (
     WORKSPACE_DIR,
@@ -249,6 +253,62 @@ async def test_create_without_a_public_proxy_fails_closed_on_loopback() -> None:
     terminals.connect(conversation_id, "/p", None)
     handle = await carrier.create(_spec(conversation_id, "/p"))
     assert handle.egress_env["HTTP_PROXY"] == "http://run-token:@127.0.0.1:8080"
+
+
+async def test_a_document_read_relays_bounded_bytes_to_preview() -> None:
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "kind": "xlsx",
+                    "total_pages": 2,
+                    "requested_range": {"start_page": 2, "limit": 1},
+                    "pages": [
+                        {
+                            "number": 2,
+                            "file": "page-01.png",
+                            "width": 800,
+                            "height": 600,
+                            "text": "sheet page two",
+                        }
+                    ],
+                }
+            ),
+        )
+        archive.writestr("page-01.png", b"\x89PNG\r\n\x1a\nrendered")
+
+    async def preview(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=target.getvalue())
+
+    terminals = Terminals()
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    carrier = TerminalCarrier(
+        terminals=terminals,
+        document_renderer=DocumentRenderer(
+            service_url="https://preview.test",
+            token="preview-real",
+            transport=httpx.MockTransport(preview),
+        ),
+    )
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+    running = asyncio.create_task(
+        carrier.file_op(handle, "read", {"path": "/workspace/model.xlsx", "offset": 2, "limit": 1})
+    )
+    op = await _answer(terminals, conversation_id, b"xlsx bytes")
+    assert op.kind == "read"
+    assert op.arg == "/p/model.xlsx"
+    assert _op_params(op) == {
+        "max_bytes": DOCUMENT_INPUT_MAX_BYTES,
+        "workspace": "/p",
+    }
+    result = await running
+    assert result["type"] == "xlsx"
+    assert result["text"] == "sheet page two"
+    assert result["start_page"] == 2
+    assert result["pages_returned"] == 1
 
 
 async def test_attach_answers_only_the_bound_directory() -> None:

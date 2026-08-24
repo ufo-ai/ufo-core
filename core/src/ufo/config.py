@@ -221,7 +221,7 @@ class SandboxConfig(BaseModel):
     preview_service: str | None = None
     """`host:port` of the preview service the proxy relays the preview host to (RFC 0037). Set
     admits that host for every sandbox, whatever its internet policy. Unset, the host is not
-    admitted and a share carries no rendered preview."""
+    admitted, document reads are unavailable, and a share carries no rendered preview."""
 
     @model_validator(mode="after")
     def _ingress_base_is_addressable(self) -> "SandboxConfig":

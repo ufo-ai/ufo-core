@@ -30,6 +30,7 @@ from evals.suites import (
     connector_refs,
     credential_handoff,
     dead_route_repeat,
+    document_read,
     document_visual,
     fanout,
     first_run,
@@ -101,6 +102,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
     capability_task("ufo-app-bench", ufo_app_bench.CASES, judge_model=VISUAL_JUDGE_MODEL),
+    capability_task("document_read", document_read.CASES),
     capability_task(
         "app_home_change",
         app_home_change.CASES,

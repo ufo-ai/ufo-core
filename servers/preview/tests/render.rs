@@ -13,6 +13,9 @@ fn base_map() -> HashMap<String, String> {
         std::env::var("UFO_PREVIEW_PDFIUM_LIB").unwrap_or_else(|_| "/nonexistent".into()),
     );
     m.insert("UFO_PREVIEW_ALLOW_LOCAL".into(), "1".into());
+    if let Ok(bin) = std::env::var("UFO_PREVIEW_SOFFICE_BIN") {
+        m.insert("UFO_PREVIEW_SOFFICE_BIN".into(), bin);
+    }
     m
 }
 
@@ -50,6 +53,27 @@ fn req_json(kind: &str, pages: u32) -> serde_json::Value {
         "kind": kind, "max_width": 800, "max_height": 800, "pages": pages,
         "sink": {"inline": true},
     })
+}
+
+fn bundle_json(kind: &str, start_page: u32, pages: u32) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "max_width": 800,
+        "max_height": 800,
+        "start_page": start_page,
+        "pages": pages,
+        "sink": {"bundle": true},
+    })
+}
+
+fn bundle_parts(body: &[u8]) -> (serde_json::Value, Vec<u8>) {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(body)).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
+    let mut page = archive.by_name("page-01.png").unwrap();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut page, &mut bytes).unwrap();
+    (manifest, bytes)
 }
 
 #[tokio::test]
@@ -104,10 +128,10 @@ async fn kind_magic_mismatch_is_422() {
 }
 
 #[tokio::test]
-async fn held_capacity_answers_busy() {
+async fn held_capacity_queues_the_next_render() {
     let cfg = config(Some(1));
     let render = ufo_preview::render::Render::new(cfg.clone());
-    let _held = render.semaphore().clone().acquire_owned().await.unwrap();
+    let held = render.semaphore().clone().acquire_owned().await.unwrap();
     let base = {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -115,16 +139,85 @@ async fn held_capacity_answers_busy() {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{addr}")
     };
-    // No file part at all: were the busy check to run after parsing, the missing file (and no
-    // source_url) would answer 415, not 503 — a 503 here proves the gate sits before parsing.
-    let resp = reqwest::Client::new()
+    let request = reqwest::Client::new()
         .post(format!("{base}/render"))
         .bearer_auth("test-token")
         .multipart(multipart(req_json("pdf", 1), None))
+        .send();
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut request)
+            .await
+            .is_err()
+    );
+    drop(held);
+    assert_eq!(request.await.unwrap().status(), 415);
+}
+
+#[tokio::test]
+async fn forwarded_sandbox_calls_accept_only_direct_file_capabilities() {
+    let base = serve_app(config(None)).await;
+    let client = reqwest::Client::new();
+    let source_request = serde_json::json!({
+        "kind": "pdf",
+        "source_url": "https://example.com/chosen-data",
+        "max_width": 800,
+        "max_height": 800,
+        "sink": {"bundle": true},
+    });
+    let source = client
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .header("x-ufo-workspace", "workspace")
+        .multipart(multipart(source_request, None))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 503);
+    assert_eq!(source.status(), 401);
+
+    let other_kind = client
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .header("x-ufo-workspace", "workspace")
+        .multipart(multipart(
+            bundle_json("md", 1, 1),
+            Some(("f.md", b"# workspace text".to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_kind.status(), 401);
+
+    let inline = client
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .header("x-ufo-workspace", "workspace")
+        .multipart(multipart(
+            req_json("pdf", 1),
+            Some(("f.pdf", b"%PDF-".to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(inline.status(), 401);
+
+    let share_request = serde_json::json!({
+        "kind": "pdf",
+        "max_width": 800,
+        "max_height": 800,
+        "sink": {"put_url": "https://sink.example/preview.png"},
+    });
+    let share = client
+        .post(format!("{base}/render"))
+        .header("x-ufo-workspace", "workspace")
+        .multipart(multipart(
+            share_request,
+            Some(("f.pdf", b"PK\x03\x04zip".to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(share.status(), 422);
 }
 
 #[tokio::test]
@@ -248,6 +341,124 @@ async fn multi_page_answers_zip() {
     assert_eq!(archive.len(), 2);
     assert!(archive.by_name("page-01.png").is_ok());
     assert!(archive.by_name("page-02.png").is_ok());
+}
+
+#[tokio::test]
+#[ignore]
+async fn document_bundle_contains_manifest_text_dimensions_and_non_first_page() {
+    let base = serve_app(config(None)).await;
+    let pdf = std::fs::read("tests/fixtures/fixture.pdf").unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .header("x-ufo-workspace", "workspace")
+        .multipart(multipart(bundle_json("pdf", 2, 1), Some(("f.pdf", pdf))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["content-type"], "application/zip");
+    let body = resp.bytes().await.unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(body.to_vec())).unwrap();
+    assert_eq!(archive.len(), 2);
+    let manifest: serde_json::Value =
+        serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
+    assert_eq!(manifest["kind"], "pdf");
+    assert_eq!(manifest["total_pages"], 2);
+    assert_eq!(manifest["requested_range"]["start_page"], 2);
+    assert_eq!(manifest["requested_range"]["limit"], 1);
+    assert_eq!(manifest["pages"][0]["number"], 2);
+    assert!(manifest["pages"][0]["width"].as_u64().unwrap() <= 800);
+    assert!(manifest["pages"][0]["height"].as_u64().unwrap() <= 800);
+    assert!(manifest["pages"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Fixture page two"));
+    drop(manifest);
+    let mut page = archive.by_name("page-01.png").unwrap();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut page, &mut bytes).unwrap();
+    assert!(bytes.starts_with(b"\x89PNG"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn all_read_document_kinds_answer_visible_text_and_images() {
+    let base = serve_app(config(None)).await;
+    for (kind, fixture, expected) in [
+        ("pdf", "fixture.pdf", "Fixture page one"),
+        ("pptx", "fixture.pptx", "Fixture"),
+        (
+            "docx",
+            "fixture-layout.docx",
+            "DOCX clipping and overlap layout page one",
+        ),
+        (
+            "xlsx",
+            "fixture-print-layout.xlsx",
+            "XLSX print layout page one",
+        ),
+    ] {
+        let file = std::fs::read(format!("tests/fixtures/{fixture}")).unwrap();
+        let response = reqwest::Client::new()
+            .post(format!("{base}/render"))
+            .bearer_auth("test-token")
+            .multipart(multipart(bundle_json(kind, 1, 1), Some((fixture, file))))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{kind}");
+        let body = response.bytes().await.unwrap();
+        let (manifest, page) = bundle_parts(&body);
+        assert_eq!(manifest["kind"], kind);
+        assert!(
+            manifest["pages"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(expected),
+            "{kind}: {manifest}"
+        );
+        assert!(manifest["pages"][0]["width"].as_u64().unwrap() > 0);
+        assert!(manifest["pages"][0]["height"].as_u64().unwrap() > 0);
+        assert!(page.starts_with(b"\x89PNG"));
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn every_read_document_kind_renders_its_non_first_page() {
+    let base = serve_app(config(None)).await;
+    for (kind, fixture, expected) in [
+        ("pdf", "fixture.pdf", "Fixture page two"),
+        ("pptx", "fixture-read.pptx", "PPTX visual page two"),
+        ("docx", "fixture-layout.docx", "DOCX layout page two"),
+        (
+            "xlsx",
+            "fixture-print-layout.xlsx",
+            "XLSX print layout page two",
+        ),
+    ] {
+        let file = std::fs::read(format!("tests/fixtures/{fixture}")).unwrap();
+        let response = reqwest::Client::new()
+            .post(format!("{base}/render"))
+            .bearer_auth("test-token")
+            .multipart(multipart(bundle_json(kind, 2, 1), Some((fixture, file))))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{kind}");
+        let body = response.bytes().await.unwrap();
+        let (manifest, page) = bundle_parts(&body);
+        assert_eq!(manifest["pages"][0]["number"], 2);
+        assert!(
+            manifest["pages"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(expected),
+            "{kind}: {manifest}"
+        );
+        assert!(page.starts_with(b"\x89PNG"));
+    }
 }
 
 #[tokio::test]

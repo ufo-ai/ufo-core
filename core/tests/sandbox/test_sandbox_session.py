@@ -16,6 +16,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     CA_SANDBOX_PATH,
     DEFAULT_EXEC_TIMEOUT_SECONDS,
+    DOCUMENT_READ_EXEC_TIMEOUT_SECONDS,
     NO_PROXY_HOSTS,
     PROXY_ENV_NAMES,
     SENTINEL_MODEL_KEY,
@@ -31,6 +32,7 @@ from ufo.sandbox.session import (
     SandboxSpec,
     egress_proxy_env,
     host_argv,
+    ufo_fs_file_op,
 )
 from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BashInput, bash_handler
@@ -370,6 +372,26 @@ async def test_a_carrier_that_declares_no_stop_is_never_asked_for_one() -> None:
     await session.stop_commands()
 
     assert not hasattr(session.carrier, "stop_commands")
+
+
+async def test_document_file_ops_outlive_the_preview_request() -> None:
+    carrier = _RecordingCarrier(result=ExecResult(stdout='{"type":"text"}', stderr="", exit_code=0))
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="c")
+
+    await ufo_fs_file_op(
+        carrier,
+        handle,
+        "read",
+        {"path": "/workspace/report.xlsx", "offset": 1, "limit": 20},
+    )
+    await ufo_fs_file_op(
+        carrier,
+        handle,
+        "read",
+        {"path": "/workspace/report.txt", "offset": 1, "limit": 20},
+    )
+
+    assert carrier.timeouts == [DOCUMENT_READ_EXEC_TIMEOUT_SECONDS, DEFAULT_EXEC_TIMEOUT_SECONDS]
 
 
 async def test_bash_timeout_is_milliseconds_capped_and_converted(tmp_path: Path) -> None:

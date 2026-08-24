@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from ufo.ext.manifest import CarrierSpec
 
 from ufo.db import workspace_tx
+from ufo.media.document_renderer import DocumentRenderer
 from ufo.o11y import warn
 from ufo.sandbox.containment import PathNotFound, configured_root, contained_dir
 from ufo.sandbox.session import (
@@ -90,6 +91,7 @@ class ConversationSandbox:
     proxy: ProxyEndpoint
     workspace_root: Path
     terminals: TerminalTransport = field(default_factory=Terminals)
+    document_renderer: DocumentRenderer | None = None
     """The rendezvous a conversation's terminal is reached through — the in-process transport on a
     single node, a cross-pod transport (Redis) on a shared fleet. Whichever the deploy selects can
     serve a terminal, so a `client:` binding is always admissible: the transport, not the process,
@@ -169,7 +171,9 @@ class ConversationSandbox:
             return None
         bound_path = sandbox_handle_id(CLIENT_BACKEND, stored)
         if bound_path is not None:
-            carrier = TerminalCarrier(terminals=self.terminals)
+            carrier = TerminalCarrier(
+                terminals=self.terminals, document_renderer=self.document_renderer
+            )
             handle = await carrier.attach(
                 SandboxSpec(
                     conversation_id=conversation_id,
@@ -323,7 +327,9 @@ class ConversationSandbox:
             bound = self.terminals.workspace(conversation_id)
             bound_path = None if bound is None else bound.cwd
         if bound_path is not None:
-            carrier = TerminalCarrier(terminals=self.terminals)
+            carrier = TerminalCarrier(
+                terminals=self.terminals, document_renderer=self.document_renderer
+            )
             handle = await carrier.create(
                 SandboxSpec(
                     conversation_id=conversation_id,

@@ -1,7 +1,15 @@
 #[cfg(unix)]
+use std::collections::HashSet;
+#[cfg(unix)]
+use std::io::Read as _;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
+use std::time::Duration;
 
 use base64::Engine as _;
+#[cfg(unix)]
+use serde::Deserialize;
 use serde_json::json;
 
 #[cfg(unix)]
@@ -15,9 +23,40 @@ use crate::ops::fileops::text::{failed, guarded, required};
 
 const READ_DEFAULT_LIMIT: f64 = 2000.0;
 pub const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
-const PDF_DEFAULT_MAX_PAGES: i64 = 20;
-const PDF_RENDER_DPI: u32 = 100;
-const PDF_QUALITY_REMINDER: &str = "CRITICAL: Before sharing, carefully examine each page for \
+#[cfg(unix)]
+const DOCUMENT_MAX_PAGES: i64 = 20;
+#[cfg(unix)]
+const DOCUMENT_MAX_INPUT_BYTES: u64 = 100 * 1024 * 1024;
+#[cfg(unix)]
+const DOCUMENT_MAX_BUNDLE_BYTES: u64 = 20 * 1024 * 1024;
+#[cfg(unix)]
+const DOCUMENT_MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+#[cfg(unix)]
+const DOCUMENT_MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+#[cfg(unix)]
+const DOCUMENT_MAX_DECODED_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+#[cfg(unix)]
+const DOCUMENT_MAX_BASE64_BYTES: u64 = DOCUMENT_MAX_DECODED_IMAGE_BYTES.div_ceil(3) * 4;
+#[cfg(unix)]
+const DOCUMENT_RENDER_TIMEOUT: Duration = Duration::from_secs(330);
+#[cfg(unix)]
+const DOCUMENT_RENDER_URL: &str = "https://preview.ufo.internal/render";
+#[cfg(unix)]
+const DOCUMENT_RENDER_HOST: &str = "preview.ufo.internal";
+#[cfg(unix)]
+const DOCUMENT_RENDER_PORT: u16 = 443;
+#[cfg(unix)]
+const DOCUMENT_RENDER_PATH: &str = "/render";
+#[cfg(unix)]
+const DOCUMENT_RENDER_BEARER: &str = "ufo-preview-token-sentinel";
+const DOCUMENT_KINDS: &[(&str, &str)] = &[
+    (".pdf", "pdf"),
+    (".pptx", "pptx"),
+    (".docx", "docx"),
+    (".xlsx", "xlsx"),
+];
+const DOCUMENT_QUALITY_REMINDER: &str =
+    "CRITICAL: Before sharing, carefully examine each page for \
      quality issues (e.g. overlapping text, hidden/cut-off text, text squished together). These \
      are common and must be fixed.";
 
@@ -150,263 +189,220 @@ fn text_result(path: &str, bytes: &[u8], offset: i64, limit: i64) -> serde_json:
     })
 }
 
-/// Whether an executable of this name is on `PATH` — `shutil.which`, for the converters a document
-/// read shells out to. The sandbox image bakes poppler and LibreOffice; a client machine may have
-/// neither, and the read degrades instead of failing.
 #[cfg(unix)]
-fn on_path(program: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|directory| {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(directory.join(program))
-            .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
-    })
-}
-
-/// A directory of its own for one render's output, removed when this value drops: `pdftoppm` writes
-/// one file per page and `soffice` writes beside its input, and neither may land in the workspace.
-#[cfg(unix)]
-struct Scratch(std::path::PathBuf);
-
-#[cfg(unix)]
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+#[derive(Deserialize)]
+struct DocumentManifest {
+    kind: String,
+    total_pages: i64,
+    requested_range: DocumentRange,
+    pages: Vec<DocumentPage>,
 }
 
 #[cfg(unix)]
-impl Scratch {
-    fn new() -> Result<Scratch, OpError> {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut bytes = [0u8; 8];
-        getrandom::fill(&mut bytes).expect("os randomness is available");
-        let tag: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("ufo-fs-render-{tag}"));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .map_err(|error| failed(format!("{}: {error}", path.display())))?;
-        Ok(Scratch(path))
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
+#[derive(Deserialize)]
+struct DocumentRange {
+    start_page: i64,
+    limit: i64,
 }
 
 #[cfg(unix)]
-fn ran(program: &str, args: &[&std::ffi::OsStr]) -> Result<std::process::Output, OpError> {
-    std::process::Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| failed(format!("{program}: {error}")))
+#[derive(Deserialize)]
+struct DocumentPage {
+    number: i64,
+    file: String,
+    width: u32,
+    height: u32,
+    text: String,
 }
 
 #[cfg(unix)]
-fn said(output: &std::process::Output, fallback: String) -> OpError {
-    let complaint = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    refused(if complaint.is_empty() {
-        fallback
-    } else {
-        complaint
-    })
+fn document_result(named: &str, kind: &str, bytes: &[u8], offset: i64, limit: i64) -> OpResult {
+    if bytes.len() as u64 > DOCUMENT_MAX_INPUT_BYTES {
+        return Err(refused(format!(
+            "{named} is {} bytes; over the {DOCUMENT_MAX_INPUT_BYTES}-byte document read cap",
+            bytes.len()
+        )));
+    }
+    let pages = limit.clamp(1, DOCUMENT_MAX_PAGES);
+    let request = json!({
+        "kind": kind,
+        "max_width": 1400,
+        "max_height": 1800,
+        "start_page": offset.max(1),
+        "pages": pages,
+        "sink": {"bundle": true},
+    });
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(|error| failed(format!("multipart boundary: {error}")))?;
+    let boundary = format!(
+        "ufo-document-{}",
+        random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let head = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"document.{kind}\"\r\n\
+         Content-Type: application/octet-stream\r\n\r\n",
+        request
+    );
+    let tail = format!("\r\n--{boundary}--\r\n");
+    let mut body = Vec::with_capacity(head.len() + bytes.len() + tail.len());
+    body.extend_from_slice(head.as_bytes());
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(tail.as_bytes());
+    let request_head = format!(
+        "POST {DOCUMENT_RENDER_PATH} HTTP/1.1\r\n\
+         Host: {DOCUMENT_RENDER_HOST}\r\n\
+         authorization: Bearer {DOCUMENT_RENDER_BEARER}\r\n\
+         content-type: multipart/form-data; boundary={boundary}\r\n\
+         content-length: {}\r\n\
+         connection: close\r\n\r\n",
+        body.len()
+    );
+    let (status, bundle) = crate::egress::post(
+        DOCUMENT_RENDER_URL,
+        DOCUMENT_RENDER_HOST,
+        DOCUMENT_RENDER_PORT,
+        &request_head,
+        &body,
+        DOCUMENT_RENDER_TIMEOUT,
+        DOCUMENT_MAX_BUNDLE_BYTES as usize,
+    )
+    .map_err(|error| refused(format!("document render failed: {error}")))?;
+    if status != 200 {
+        return Err(refused(format!(
+            "document render failed: {DOCUMENT_RENDER_URL} -> {status}: {}",
+            String::from_utf8_lossy(&bundle)
+        )));
+    }
+    document_result_from_bundle(named, kind, offset.max(1), pages, &bundle)
 }
 
 #[cfg(unix)]
-fn pdf_total_pages(path: &Path) -> Result<i64, OpError> {
-    let output = ran("pdfinfo", &[path.as_os_str()])?;
-    if !output.status.success() {
-        return Err(said(
-            &output,
-            format!("pdfinfo exited {}", exit_code(&output.status)),
-        ));
+fn document_result_from_bundle(
+    named: &str,
+    kind: &str,
+    start_page: i64,
+    limit: i64,
+    bundle: &[u8],
+) -> OpResult {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bundle))
+        .map_err(|error| failed(format!("document render bundle: {error}")))?;
+    let manifest_entry = archive
+        .by_name("manifest.json")
+        .map_err(|error| failed(format!("document render manifest: {error}")))?;
+    if manifest_entry.size() > DOCUMENT_MAX_MANIFEST_BYTES {
+        return Err(refused(format!(
+            "document manifest exceeds the {DOCUMENT_MAX_MANIFEST_BYTES}-byte cap"
+        )));
     }
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(count) = line.strip_prefix("Pages:") {
-            if let Ok(total) = count.trim().parse::<i64>() {
-                return Ok(total);
-            }
-        }
-    }
-    Err(refused(format!(
-        "pdfinfo gave no page count for {}",
-        path.display()
-    )))
-}
-
-#[cfg(unix)]
-fn pdf_text(path: &Path, start: i64, end: i64) -> String {
-    if !on_path("pdftotext") {
-        return String::new();
-    }
-    let (first, last) = (start.to_string(), end.to_string());
-    let args = [
-        "-f".as_ref(),
-        first.as_ref(),
-        "-l".as_ref(),
-        last.as_ref(),
-        path.as_os_str(),
-        "-".as_ref(),
-    ];
-    match ran("pdftotext", &args) {
-        Ok(output) if output.status.success() => decode_lossy(&output.stdout),
-        _ => String::new(),
-    }
-}
-
-#[cfg(unix)]
-fn pdf_pages(path: &Path, start: i64, end: i64) -> Result<Vec<serde_json::Value>, OpError> {
-    let scratch = Scratch::new()?;
-    let prefix = scratch.path().join("page");
-    let dpi = PDF_RENDER_DPI.to_string();
-    let (first, last) = (start.to_string(), end.to_string());
-    let args = [
-        "-png".as_ref(),
-        "-r".as_ref(),
-        dpi.as_ref(),
-        "-f".as_ref(),
-        first.as_ref(),
-        "-l".as_ref(),
-        last.as_ref(),
-        path.as_os_str(),
-        prefix.as_os_str(),
-    ];
-    let output = ran("pdftoppm", &args)?;
-    if !output.status.success() {
-        return Err(said(
-            &output,
-            format!("pdftoppm exited {}", exit_code(&output.status)),
-        ));
-    }
-    let mut rendered: Vec<std::path::PathBuf> = std::fs::read_dir(scratch.path())
-        .map_err(|error| failed(format!("{}: {error}", scratch.path().display())))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|entry| {
-            let name = entry.file_name().unwrap_or_default().to_string_lossy();
-            name.starts_with("page") && name.ends_with(".png")
+    let manifest: DocumentManifest = serde_json::from_reader(manifest_entry)
+        .map_err(|error| failed(format!("document render manifest: {error}")))?;
+    if manifest.kind != kind
+        || manifest.total_pages < 1
+        || manifest.requested_range.start_page != start_page
+        || manifest.requested_range.limit != limit
+        || manifest.pages.is_empty()
+        || manifest.pages.len() as i64 > limit
+        || manifest.pages[0].number != start_page.min(manifest.total_pages)
+        || manifest.pages.iter().any(|page| {
+            page.number < 1
+                || page.number > manifest.total_pages
+                || page.width == 0
+                || page.height == 0
         })
-        .collect();
-    rendered.sort();
-    let mut pages = Vec::new();
-    for page in rendered {
-        let data =
-            std::fs::read(&page).map_err(|error| failed(format!("{}: {error}", page.display())))?;
-        if data.len() > IMAGE_MAX_BYTES {
+        || manifest
+            .pages
+            .windows(2)
+            .any(|pages| pages[1].number != pages[0].number + 1)
+    {
+        return Err(failed("document render returned a mismatched manifest"));
+    }
+    let expected = std::iter::once("manifest.json")
+        .chain(manifest.pages.iter().map(|page| page.file.as_str()))
+        .collect::<HashSet<_>>();
+    let actual = archive.file_names().collect::<Vec<_>>();
+    if actual.len() != expected.len() || actual.iter().copied().collect::<HashSet<_>>() != expected
+    {
+        return Err(failed("document render returned unexpected bundle entries"));
+    }
+    let mut decoded = 0u64;
+    let mut encoded = 0u64;
+    let mut images = Vec::with_capacity(manifest.pages.len());
+    let mut text = Vec::with_capacity(manifest.pages.len());
+    for (offset, page) in manifest.pages.iter().enumerate() {
+        if page.file != format!("page-{:02}.png", offset + 1) {
+            return Err(failed("document render returned an invalid page name"));
+        }
+        let mut entry = archive
+            .by_name(&page.file)
+            .map_err(|error| failed(format!("document render page: {error}")))?;
+        if entry.size() > DOCUMENT_MAX_IMAGE_BYTES {
             return Err(refused(format!(
-                "{} page render is {} bytes; over the {IMAGE_MAX_BYTES}-byte image cap. Re-read a \
-                 smaller page range or a lower-DPI export.",
-                path.display(),
-                data.len()
+                "document page {} exceeds the {DOCUMENT_MAX_IMAGE_BYTES}-byte image cap",
+                page.number
             )));
         }
-        pages.push(json!({
+        decoded += entry.size();
+        encoded += entry.size().div_ceil(3) * 4;
+        if decoded > DOCUMENT_MAX_DECODED_IMAGE_BYTES || encoded > DOCUMENT_MAX_BASE64_BYTES {
+            return Err(refused(
+                "document pages exceed the decoded image or base64 cap",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| failed(format!("document render page: {error}")))?;
+        if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err(failed("document render returned a non-png page"));
+        }
+        images.push(json!({
+            "page": page.number,
+            "width": page.width,
+            "height": page.height,
             "media_type": "image/png",
-            "data": base64::engine::general_purpose::STANDARD.encode(&data),
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
         }));
+        if !page.text.trim().is_empty() {
+            text.push(page.text.trim());
+        }
     }
-    Ok(pages)
-}
-
-/// What Python's `returncode` reads for the same run: the exit status, or the negated signal that
-/// ended the process.
-#[cfg(unix)]
-fn exit_code(status: &std::process::ExitStatus) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
-    status
-        .code()
-        .or_else(|| status.signal().map(|signal| -signal))
-        .unwrap_or(-1)
-}
-
-/// A pdf read: page count from `pdfinfo`, text from `pdftotext`, one png per page from `pdftoppm`.
-/// Absent poppler the read still answers, with the text it can get and the pages it cannot render.
-#[cfg(unix)]
-fn read_pdf(named: &str, path: &Path, offset: i64, limit: i64) -> OpResult {
-    if !on_path("pdfinfo") || !on_path("pdftoppm") {
-        return Ok(json!({
-            "path": named,
-            "type": "pdf",
-            "text": pdf_text(path, 1, PDF_DEFAULT_MAX_PAGES),
-            "pages": [],
-            "total_pages": null,
-            "render_unavailable": true,
-            "note": "page rendering requires poppler-utils",
-        }));
-    }
-    let total = pdf_total_pages(path)?;
-    let start = offset.max(1).min(total.max(1));
-    let count = limit.min(PDF_DEFAULT_MAX_PAGES);
-    let end = (start + count - 1).min(total);
-    let pages = pdf_pages(path, start, end)?;
-    let returned = pages.len() as i64;
+    let returned = images.len() as i64;
+    let actual_start = manifest
+        .pages
+        .first()
+        .map(|page| page.number)
+        .unwrap_or(start_page);
+    let next = manifest
+        .pages
+        .last()
+        .map(|page| page.number + 1)
+        .filter(|next| *next <= manifest.total_pages);
     Ok(json!({
         "path": named,
-        "type": "pdf",
-        "text": pdf_text(path, start, end),
-        "total_pages": total,
-        "start_page": start,
+        "type": kind,
+        "text": text.join("\n\n"),
+        "total_pages": manifest.total_pages,
+        "start_page": actual_start,
         "pages_returned": returned,
-        "next_page": if start + returned <= total { json!(start + returned) } else { json!(null) },
-        "pages": pages,
-        "quality_reminder": PDF_QUALITY_REMINDER,
+        "next_page": next,
+        "pages": images,
+        "quality_reminder": DOCUMENT_QUALITY_REMINDER,
     }))
 }
 
-/// A presentation read: LibreOffice converts it to pdf in a scratch directory and the pdf page path
-/// answers it, so slides come back as images — the same shape as a pdf read, relabelled to the deck.
-#[cfg(unix)]
-fn read_pptx(named: &str, path: &Path, offset: i64, limit: i64) -> OpResult {
-    if !on_path("soffice") {
-        return Ok(json!({
-            "path": named,
-            "type": "pptx",
-            "pages": [],
-            "total_pages": null,
-            "render_unavailable": true,
-            "note": "slide rendering requires libreoffice (soffice)",
-        }));
-    }
-    let scratch = Scratch::new()?;
-    let profile = format!(
-        "-env:UserInstallation=file://{}/profile",
-        scratch.path().display()
-    );
-    let args = [
-        "--headless".as_ref(),
-        profile.as_ref(),
-        "--convert-to".as_ref(),
-        "pdf".as_ref(),
-        "--outdir".as_ref(),
-        scratch.path().as_os_str(),
-        path.as_os_str(),
-    ];
-    let output = ran("soffice", &args)?;
-    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-    let pdf = scratch.path().join(format!("{stem}.pdf"));
-    if !output.status.success() || !pdf.exists() {
-        return Err(said(
-            &output,
-            format!("soffice could not render {}", path.display()),
-        ));
-    }
-    let mut result = read_pdf(named, &pdf, offset, limit)?;
-    result["type"] = json!("pptx");
-    Ok(result)
-}
-
 fn unrendered(path: &str, kind: &str) -> Option<OpError> {
-    match kind {
-        ".pdf" => Some(refused(format!(
-            "{path} is a pdf; a pdf read runs on the deploy"
-        ))),
-        ".pptx" => Some(refused(format!(
-            "{path} is a pptx; a pptx read runs on the deploy"
-        ))),
-        _ => None,
-    }
+    DOCUMENT_KINDS
+        .iter()
+        .find(|(extension, _)| *extension == kind)
+        .map(|(_, document)| {
+            refused(format!(
+                "{path} is a {document}; its read runs on the deploy"
+            ))
+        })
 }
 
 fn image_kind(kind: &str) -> bool {
@@ -433,13 +429,18 @@ pub fn run_contained(params: &serde_json::Value, root: &Path) -> OpResult {
         image_cap(&named, entry.size as usize)?;
         return image_result(&named, &guarded(target.read_bytes(entry.size))?);
     }
-    // The converters take a filename, not an fd, so they get the canonical path the descent proved:
-    // every component of it is link-free and the target itself was `lstat`ed as a regular file.
-    if kind == ".pdf" {
-        return read_pdf(&named, target.path(), offset, limit);
-    }
-    if kind == ".pptx" {
-        return read_pptx(&named, target.path(), offset, limit);
+    if let Some((_, document)) = DOCUMENT_KINDS
+        .iter()
+        .find(|(extension, _)| *extension == kind)
+    {
+        if entry.size > DOCUMENT_MAX_INPUT_BYTES {
+            return Err(refused(format!(
+                "{named} is {} bytes; over the {DOCUMENT_MAX_INPUT_BYTES}-byte document read cap",
+                entry.size
+            )));
+        }
+        let bytes = guarded(target.read_bytes(entry.size))?;
+        return document_result(&named, document, &bytes, offset, limit);
     }
     if entry.size == 0 {
         return Ok(empty_result(&named, offset));
@@ -575,125 +576,75 @@ mod tests {
         }
     }
 
-    /// One page, one line of text, hand-written so the render test needs no fixture file.
-    const MINI_PDF: &[u8] = b"%PDF-1.4\n\
-1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n\
-2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n\
-3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>endobj\n\
-4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n\
-5 0 obj<</Length 44>>stream\n\
-BT /F1 24 Tf 20 40 Td (hello pdf) Tj ET\n\
-endstream\n\
-endobj\n\
-trailer<</Root 1 0 R/Size 6>>\n\
-%%EOF\n";
-
-    /// A flat-XML presentation, which LibreOffice converts to a real `.pptx` for the read to answer.
-    const MINI_FODP: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" office:version="1.2" office:mimetype="application/vnd.oasis.opendocument.presentation">
- <office:body>
-  <office:presentation>
-   <draw:page draw:name="page1">
-    <draw:frame svg:width="10cm" svg:height="2cm" svg:x="2cm" svg:y="2cm">
-     <draw:text-box><text:p>hello slide</text:p></draw:text-box>
-    </draw:frame>
-   </draw:page>
-  </office:presentation>
- </office:body>
-</office:document>
-"#;
-
     #[cfg(unix)]
-    fn png_page(result: &serde_json::Value) -> Vec<u8> {
-        let pages = result["pages"]
-            .as_array()
-            .expect("the read names its pages");
-        assert!(!pages.is_empty(), "{result}");
-        assert_eq!(pages[0]["media_type"], "image/png");
-        base64::engine::general_purpose::STANDARD
-            .decode(pages[0]["data"].as_str().unwrap())
-            .expect("a page render is base64")
+    fn document_bundle(kind: &str, start_page: i64, limit: i64, page_file: &str) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("manifest.json", options).unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            serde_json::to_string(&json!({
+                "kind": kind,
+                "total_pages": 3,
+                "requested_range": {"start_page": start_page, "limit": limit},
+                "pages": [{
+                    "number": 2,
+                    "file": page_file,
+                    "width": 640,
+                    "height": 480,
+                    "text": "visible page two",
+                }],
+            }))
+            .unwrap()
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.start_file(page_file, options).unwrap();
+        std::io::Write::write_all(&mut zip, b"\x89PNG\r\n\x1a\nrendered").unwrap();
+        zip.finish().unwrap().into_inner()
     }
 
-    /// `sbxfs`'s pdf read, on the verb: poppler counts the pages, extracts the text and renders one
-    /// png per page. The sandbox image bakes poppler; a machine without it is skipped rather than
-    /// asserted against, because the degraded shape is what that machine answers.
     #[cfg(unix)]
     #[test]
-    fn read_renders_a_pdf_through_poppler() {
-        if !on_path("pdfinfo") || !on_path("pdftoppm") {
-            return;
-        }
-        let root = std::fs::canonicalize(scratch("pdf")).unwrap();
-        let path = root.join("mini.pdf");
-        std::fs::write(&path, MINI_PDF).unwrap();
-        let result = run_contained(&json!({"path": "mini.pdf"}), &root).unwrap();
+    fn a_document_bundle_keeps_the_paginated_text_and_image_shape() {
+        let bundle = document_bundle("pdf", 2, 1, "page-01.png");
+        let result =
+            document_result_from_bundle("/workspace/paper.pdf", "pdf", 2, 1, &bundle).unwrap();
         assert_eq!(result["type"], "pdf");
-        assert_eq!(result["path"], path.to_str().unwrap());
-        assert_eq!(result["total_pages"], 1);
-        assert_eq!(result["start_page"], 1);
+        assert_eq!(result["path"], "/workspace/paper.pdf");
+        assert_eq!(result["text"], "visible page two");
+        assert_eq!(result["total_pages"], 3);
+        assert_eq!(result["start_page"], 2);
         assert_eq!(result["pages_returned"], 1);
-        assert_eq!(result["next_page"], serde_json::Value::Null);
-        assert!(
-            result["text"].as_str().unwrap().contains("hello pdf"),
-            "{result}"
-        );
-        assert_eq!(
-            result["quality_reminder"],
-            "CRITICAL: Before sharing, carefully examine each page for quality issues (e.g. \
-             overlapping text, hidden/cut-off text, text squished together). These are common and \
-             must be fixed."
-        );
-        assert!(png_page(&result).starts_with(&[0x89, 0x50, 0x4e, 0x47]));
+        assert_eq!(result["next_page"], 3);
+        assert_eq!(result["pages"][0]["page"], 2);
+        assert_eq!(result["pages"][0]["width"], 640);
+        assert!(base64::engine::general_purpose::STANDARD
+            .decode(result["pages"][0]["data"].as_str().unwrap())
+            .unwrap()
+            .starts_with(b"\x89PNG"));
     }
 
-    /// `sbxfs`'s pptx read, on the verb: LibreOffice converts the deck to pdf and the pdf path
-    /// answers it, so the result is a pdf read relabelled to the deck's own path and type.
     #[cfg(unix)]
     #[test]
-    fn read_renders_a_pptx_through_libreoffice() {
-        if !on_path("soffice") || !on_path("pdfinfo") || !on_path("pdftoppm") {
-            return;
-        }
-        let root = std::fs::canonicalize(scratch("pptx")).unwrap();
-        std::fs::write(root.join("deck.fodp"), MINI_FODP).unwrap();
-        let converted = std::process::Command::new("soffice")
-            .arg("--headless")
-            .arg(format!(
-                "-env:UserInstallation=file://{}/profile",
-                root.display()
-            ))
-            .args(["--convert-to", "pptx", "--outdir"])
-            .arg(&root)
-            .arg(root.join("deck.fodp"))
-            .output()
-            .expect("soffice runs");
-        let deck = root.join("deck.pptx");
-        assert!(deck.exists(), "{converted:?}");
-        let result = run_contained(&json!({"path": "deck.pptx"}), &root).unwrap();
-        assert_eq!(result["type"], "pptx");
-        assert_eq!(result["path"], deck.to_str().unwrap());
-        assert_eq!(result["total_pages"], 1);
-        assert!(png_page(&result).starts_with(&[0x89, 0x50, 0x4e, 0x47]));
+    fn a_document_bundle_refuses_noncanonical_page_names() {
+        let bundle = document_bundle("pdf", 2, 1, "other.png");
+        let error =
+            document_result_from_bundle("/workspace/paper.pdf", "pdf", 2, 1, &bundle).unwrap_err();
+        assert!(matches!(error, OpError::Failed(_)));
     }
 
-    /// The wire path is unchanged: the host renders a document on the deploy, so the op it drives
-    /// still refuses one rather than shelling out on the user's own machine.
     #[test]
     fn the_wire_path_still_refuses_a_document() {
         let dir = scratch("wire-document");
-        for (name, message) in [
-            ("paper.pdf", "is a pdf; a pdf read runs on the deploy"),
-            ("deck.pptx", "is a pptx; a pptx read runs on the deploy"),
-        ] {
+        for name in ["paper.pdf", "deck.pptx", "letter.docx", "sheet.xlsx"] {
             let path = dir.join(name);
             std::fs::write(&path, b"body").unwrap();
             match run(&json!({"path": path.to_str().unwrap()})) {
-                Err(OpError::Refused(said)) => assert_eq!(
-                    said,
-                    format!("{} {message}", path.to_str().unwrap()),
-                    "{name}"
-                ),
+                Err(OpError::Refused(said)) => {
+                    assert!(said.ends_with("its read runs on the deploy"))
+                }
                 other => panic!("expected refusal for {name}: {other:?}"),
             }
         }

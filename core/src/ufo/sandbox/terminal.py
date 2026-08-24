@@ -28,6 +28,11 @@ from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+from ufo.media.document_renderer import (
+    DOCUMENT_INPUT_MAX_BYTES,
+    DOCUMENT_PAGES_MAX,
+    DocumentRenderer,
+)
 from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     EGRESS_CA_CERT_ENV,
@@ -553,6 +558,7 @@ class TerminalCarrier:
     own shell is not. The container carriers are where `containment` is load-bearing."""
 
     terminals: TerminalTransport
+    document_renderer: DocumentRenderer | None = None
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """The bound terminal as a handle, waiting out the gap between the client's held streams —
@@ -712,6 +718,47 @@ class TerminalCarrier:
             else value
             for key, value in params.items()
         }
+        path = rewritten.get("path")
+        suffix = PurePosixPath(path).suffix.lower() if isinstance(path, str) else ""
+        kind = {
+            ".pdf": "pdf",
+            ".pptx": "pptx",
+            ".docx": "docx",
+            ".xlsx": "xlsx",
+        }.get(suffix)
+        if (
+            op == "read"
+            and isinstance(path, str)
+            and kind is not None
+            and self.document_renderer is not None
+        ):
+            offset = rewritten.get("offset", 1)
+            limit = rewritten.get("limit", DOCUMENT_PAGES_MAX)
+            if not isinstance(offset, int) or isinstance(offset, bool):
+                raise ValueError("offset must be a number")
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise ValueError("limit must be a number")
+            try:
+                content = await self.terminals.send(
+                    handle.conversation_id,
+                    OP_READ,
+                    DEFAULT_EXEC_TIMEOUT_SECONDS,
+                    arg=path,
+                    params=json.dumps(
+                        {
+                            "max_bytes": DOCUMENT_INPUT_MAX_BYTES,
+                            "workspace": root,
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            except TerminalOpFailed as error:
+                raise ValueError(str(error)) from error
+            if len(content) > DOCUMENT_INPUT_MAX_BYTES:
+                raise ValueError(
+                    f"{path} is over the {DOCUMENT_INPUT_MAX_BYTES}-byte document read cap"
+                )
+            return await self.document_renderer.render(path, kind, content, offset, limit)
         if op == "changes":
             targets = rewritten.pop("paths", None)
             if not isinstance(targets, list) or any(

@@ -23,6 +23,15 @@ pub async fn deliver(
         SinkSpec::Inline { inline: false } => {
             Err(Refusal::UnsupportedType("sink inline must be true".into()))
         }
+        SinkSpec::Bundle { bundle: true } => Ok((
+            StatusCode::OK,
+            headers_with_type(headers, rendered.media_type),
+            rendered.bytes,
+        )
+            .into_response()),
+        SinkSpec::Bundle { bundle: false } => {
+            Err(Refusal::UnsupportedType("sink bundle must be true".into()))
+        }
         SinkSpec::PutUrl { put_url } => {
             let body = serde_json::json!({
                 "width": rendered.width,

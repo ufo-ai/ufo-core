@@ -402,9 +402,8 @@ spec:
 %{ endif }
 %{ if preview_enabled }
 ---
-# The preview service (RFC 0037): renders a shared document to a PNG. Share-nothing — no database, no
-# AWS credentials, no state. The sandbox reaches it through the egress proxy (a Service rule); it
-# renders, PUTs the PNG to the caller-supplied presigned URL, and answers only metadata. tini is the
+# The preview service (RFC 0037): renders shared files and document reads. Share-nothing — no
+# database, AWS credentials, or state. The sandbox reaches it through the egress proxy. tini is the
 # image entrypoint, reaping the soffice children a timed-out render leaves behind.
 apiVersion: apps/v1
 kind: Deployment
@@ -433,7 +432,7 @@ spec:
             - {name: http, containerPort: 8930}
           env:
             - {name: UFO_PREVIEW_LISTEN, value: "0.0.0.0:8930"}
-            # Gates only the `inline` sink, which prod never calls; the service requires it at boot.
+            # Gates byte-returning sinks; `put_url` carries its own capability.
             - name: UFO_PREVIEW_TOKEN
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: UFO_PREVIEW_TOKEN}

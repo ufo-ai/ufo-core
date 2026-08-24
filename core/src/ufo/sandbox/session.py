@@ -63,6 +63,8 @@ import it."""
 TOOL_OUTPUT_DIRNAME = ".tool-output"
 TOOL_OUTPUT_DIR = f"{WORKSPACE_DIR}/{TOOL_OUTPUT_DIRNAME}"
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
+DOCUMENT_READ_EXEC_TIMEOUT_SECONDS = 360
+DOCUMENT_READ_SUFFIXES = frozenset((".pdf", ".pptx", ".docx", ".xlsx"))
 SENTINEL_MODEL_KEY = "UFO_SENTINEL_MODEL_KEY"
 SANDBOX_UID = 1000
 SANDBOX_GID = 1000
@@ -464,6 +466,14 @@ async def ufo_fs_file_op(
     """`Carrier.file_op` for a sandbox image: run `ufo fs`, or `sbxfs` when that is the image's
     file command, and read its single JSON object off stdout. Shared by every such carrier, so none
     of them restates the argv, the parse, or which failures the model may recover from."""
+    path = params.get("path")
+    timeout_s = (
+        DOCUMENT_READ_EXEC_TIMEOUT_SECONDS
+        if op == "read"
+        and isinstance(path, str)
+        and PurePosixPath(path).suffix.lower() in DOCUMENT_READ_SUFFIXES
+        else DEFAULT_EXEC_TIMEOUT_SECONDS
+    )
     result = await carrier.exec(
         handle,
         (
@@ -474,7 +484,7 @@ async def ufo_fs_file_op(
             op,
             json.dumps(params, separators=(",", ":")),
         ),
-        timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
+        timeout_s=timeout_s,
     )
     stdout = result.stdout.strip()
     if not stdout:

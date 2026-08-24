@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::admit::Kind;
@@ -14,6 +14,8 @@ use crate::refusal::Refusal;
 const WORKER_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 const WORKER_FILE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
 const WORKER_CPU_SECS: u64 = 30;
+const WORKER_META_MAX_BYTES: usize = 1024 * 1024;
+const BUNDLE_MANIFEST_MAX_BYTES: usize = 1024 * 1024;
 const PNG_MEDIA_TYPE: &str = "image/png";
 const ZIP_MEDIA_TYPE: &str = "application/zip";
 
@@ -26,6 +28,8 @@ pub struct RenderRequest {
     pub max_height: u32,
     #[serde(default = "default_pages")]
     pub pages: u32,
+    #[serde(default = "default_pages")]
+    pub start_page: u32,
     pub sink: SinkSpec,
 }
 
@@ -37,6 +41,7 @@ fn default_pages() -> u32 {
 #[serde(untagged)]
 pub enum SinkSpec {
     Inline { inline: bool },
+    Bundle { bundle: bool },
     PutUrl { put_url: String },
 }
 
@@ -57,8 +62,43 @@ struct WorkerMeta {
 
 #[derive(serde::Deserialize)]
 struct WorkerPage {
+    index: u32,
     width: u32,
     height: u32,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct BundleManifest<'a> {
+    kind: &'a str,
+    total_pages: u32,
+    requested_range: RequestedRange,
+    pages: Vec<BundlePage<'a>>,
+}
+
+#[derive(Serialize)]
+struct RequestedRange {
+    start_page: u32,
+    limit: u32,
+}
+
+#[derive(Serialize)]
+struct BundlePage<'a> {
+    number: u32,
+    file: String,
+    width: u32,
+    height: u32,
+    text: &'a str,
+}
+
+struct RasterRequest<'a> {
+    pdf: &'a Path,
+    workdir: &'a Path,
+    max_width: u32,
+    max_height: u32,
+    start_page: u32,
+    pages: u32,
+    crop: bool,
 }
 
 /// The render workflow: admit → obtain bytes → convert → rasterize → package. One instance
@@ -88,7 +128,13 @@ impl Render {
     ) -> Result<Rendered, Refusal> {
         let kind = Kind::parse(&req.kind)
             .ok_or_else(|| Refusal::UnsupportedType(format!("kind {}", req.kind)))?;
+        if kind.is_video() && matches!(&req.sink, SinkSpec::Bundle { .. }) {
+            return Err(Refusal::UnsupportedType(
+                "bundle sink accepts paginated documents".into(),
+            ));
+        }
         let pages = req.pages.clamp(1, self.cfg.max_pages);
+        let start_page = req.start_page.max(1);
         let max_w = req.max_width.clamp(16, self.cfg.max_box_px);
         let max_h = req.max_height.clamp(16, self.cfg.max_box_px);
         let bytes = self.obtain(req, file).await?;
@@ -105,22 +151,36 @@ impl Render {
             let (width, height) = png_size(&work.path().join("out").join("page-01.png")).await?;
             let meta = WorkerMeta {
                 page_count: 1,
-                pages: vec![WorkerPage { width, height }],
+                pages: vec![WorkerPage {
+                    index: 1,
+                    width,
+                    height,
+                    text: String::new(),
+                }],
             };
-            return self.package(work.path(), 1, meta).await;
+            return self.package(work.path(), kind, 1, 1, meta, false).await;
         }
         let pdf = convert::to_pdf(kind, &input, work.path(), &self.cfg).await?;
         let meta = self
-            .rasterize(
-                &pdf,
-                work.path(),
-                max_w,
-                max_h,
+            .rasterize(RasterRequest {
+                pdf: &pdf,
+                workdir: work.path(),
+                max_width: max_w,
+                max_height: max_h,
+                start_page,
                 pages,
-                kind.is_spreadsheet(),
-            )
+                crop: kind.is_spreadsheet(),
+            })
             .await?;
-        self.package(work.path(), pages, meta).await
+        self.package(
+            work.path(),
+            kind,
+            start_page,
+            pages,
+            meta,
+            matches!(&req.sink, SinkSpec::Bundle { bundle: true }),
+        )
+        .await
     }
 
     async fn obtain(&self, req: &RenderRequest, file: Option<Vec<u8>>) -> Result<Vec<u8>, Refusal> {
@@ -165,29 +225,22 @@ impl Render {
         Ok(())
     }
 
-    async fn rasterize(
-        &self,
-        pdf: &Path,
-        workdir: &Path,
-        max_w: u32,
-        max_h: u32,
-        pages: u32,
-        crop: bool,
-    ) -> Result<WorkerMeta, Refusal> {
-        let out = workdir.join("out");
+    async fn rasterize(&self, request: RasterRequest<'_>) -> Result<WorkerMeta, Refusal> {
+        let out = request.workdir.join("out");
         tokio::fs::create_dir(&out)
             .await
             .map_err(|e| Refusal::RenderTimeout(format!("outdir: {e}")))?;
         let worker = worker_exe().await?;
         let mut cmd = tokio::process::Command::new(worker);
         cmd.arg(&self.cfg.pdfium_lib)
-            .arg(pdf)
+            .arg(request.pdf)
             .arg(&out)
-            .arg(max_w.to_string())
-            .arg(max_h.to_string())
-            .arg(pages.to_string())
-            .arg(if crop { "1" } else { "0" })
-            .current_dir(workdir);
+            .arg(request.max_width.to_string())
+            .arg(request.max_height.to_string())
+            .arg(request.start_page.to_string())
+            .arg(request.pages.to_string())
+            .arg(if request.crop { "1" } else { "0" })
+            .current_dir(request.workdir);
         let limits = Limits {
             deadline: self.cfg.raster_timeout,
             memory_bytes: WORKER_MEMORY_BYTES,
@@ -215,15 +268,46 @@ impl Render {
                 return Err(Refusal::RenderTimeout(format!("worker spawn: {e}")))
             }
         };
-        serde_json::from_slice(&output.stdout)
-            .map_err(|e| Refusal::RenderTimeout(format!("worker meta: {e}")))
+        if output.stdout.len() > WORKER_META_MAX_BYTES {
+            return Err(Refusal::TooLarge(format!(
+                "worker metadata exceeds {WORKER_META_MAX_BYTES} bytes"
+            )));
+        }
+        let meta: WorkerMeta = serde_json::from_slice(&output.stdout)
+            .map_err(|e| Refusal::RenderTimeout(format!("worker meta: {e}")))?;
+        let expected_start = request.start_page.max(1).min(meta.page_count.max(1));
+        if meta.page_count == 0
+            || meta.pages.is_empty()
+            || meta.pages.len() as u32 > request.pages
+            || meta.pages[0].index != expected_start
+            || meta.pages.iter().any(|page| {
+                page.index < 1
+                    || page.index > meta.page_count
+                    || page.width < 1
+                    || page.width > request.max_width
+                    || page.height < 1
+                    || page.height > request.max_height
+            })
+            || meta
+                .pages
+                .windows(2)
+                .any(|pages| pages[1].index != pages[0].index + 1)
+        {
+            return Err(Refusal::RenderTimeout(
+                "worker returned mismatched page metadata".into(),
+            ));
+        }
+        Ok(meta)
     }
 
     async fn package(
         &self,
         workdir: &Path,
+        kind: Kind,
+        start_page: u32,
         requested_pages: u32,
         meta: WorkerMeta,
+        bundle: bool,
     ) -> Result<Rendered, Refusal> {
         let out = workdir.join("out");
         let rendered = meta.pages.len() as u32;
@@ -243,7 +327,40 @@ impl Render {
                 self.cfg.max_output_bytes
             )));
         }
-        let bytes = if requested_pages == 1 {
+        let bytes = if bundle {
+            let manifest = BundleManifest {
+                kind: kind.extension(),
+                total_pages: meta.page_count,
+                requested_range: RequestedRange {
+                    start_page,
+                    limit: requested_pages,
+                },
+                pages: meta
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, page)| BundlePage {
+                        number: page.index,
+                        file: format!("page-{:02}.png", offset + 1),
+                        width: page.width,
+                        height: page.height,
+                        text: &page.text,
+                    })
+                    .collect(),
+            };
+            let manifest = serde_json::to_vec(&manifest)
+                .map_err(|e| Refusal::RenderTimeout(format!("manifest: {e}")))?;
+            if manifest.len() > BUNDLE_MANIFEST_MAX_BYTES {
+                return Err(Refusal::TooLarge(format!(
+                    "manifest exceeds {BUNDLE_MANIFEST_MAX_BYTES} bytes"
+                )));
+            }
+            let out = out.clone();
+            tokio::task::spawn_blocking(move || zip_bundle(&out, rendered, &manifest))
+                .await
+                .map_err(|e| Refusal::RenderTimeout(format!("zip: {e}")))?
+                .map_err(|e| Refusal::RenderTimeout(format!("zip: {e}")))?
+        } else if requested_pages == 1 {
             tokio::fs::read(out.join("page-01.png"))
                 .await
                 .map_err(|e| Refusal::RenderTimeout(format!("read png: {e}")))?
@@ -260,7 +377,7 @@ impl Render {
                 self.cfg.max_output_bytes
             )));
         }
-        let media_type = if requested_pages == 1 {
+        let media_type = if !bundle && requested_pages == 1 {
             PNG_MEDIA_TYPE
         } else {
             ZIP_MEDIA_TYPE
@@ -322,6 +439,20 @@ async fn png_size(path: &Path) -> Result<(u32, u32), Refusal> {
     Ok((w, h))
 }
 
+fn zip_bundle(dir: &Path, count: u32, manifest: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("manifest.json", options)?;
+    std::io::Write::write_all(&mut zip, manifest)?;
+    for i in 1..=count {
+        let name = format!("page-{i:02}.png");
+        zip.start_file(&name, options)?;
+        std::io::copy(&mut std::fs::File::open(dir.join(&name))?, &mut zip)?;
+    }
+    Ok(zip.finish()?.into_inner())
+}
+
 fn zip_pages(dir: &Path, count: u32) -> std::io::Result<Vec<u8>> {
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options =
@@ -354,6 +485,7 @@ mod tests {
             max_width: 800,
             max_height: 800,
             pages: 1,
+            start_page: 1,
             sink: SinkSpec::Inline { inline: true },
         }
     }
@@ -374,6 +506,16 @@ mod tests {
         let render = Render::new(test_config());
         let req = request(None);
         let err = render.obtain(&req, None).await.unwrap_err();
+        assert!(matches!(err, Refusal::UnsupportedType(_)));
+    }
+
+    #[tokio::test]
+    async fn bundle_refuses_a_video() {
+        let render = Render::new(test_config());
+        let mut req = request(None);
+        req.kind = "mp4".into();
+        req.sink = SinkSpec::Bundle { bundle: true };
+        let err = render.handle(&req, Some(vec![1])).await.err().unwrap();
         assert!(matches!(err, Refusal::UnsupportedType(_)));
     }
 

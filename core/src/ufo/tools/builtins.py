@@ -4,9 +4,10 @@ cancel_spawn, message_spawn.
 
 Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
 and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
-`write` run the in-sandbox `ufo fs` CLI, so windowing, ripgrep, and PDF/image render happen in the
-container and only a bounded JSON result crosses back — the host never pulls a whole file over to
-loop on it. `read` records every path it returns so `edit`/`write` can refuse to touch a file the
+`write` run the in-sandbox `ufo fs` CLI, so windowing and ripgrep happen beside the files and only a
+bounded JSON result crosses back. Document reads send bounded bytes to `ufo-preview`; a connected
+terminal relays those bytes through the deploy because it cannot reach the synthetic preview host.
+`read` records every path it returns so `edit`/`write` can refuse to touch a file the
 turn has not read — the guard that keeps a blind string-replace from clobbering content the model
 never saw. `glob` and `grep` run the in-sandbox `ufo fs` matcher and ripgrep, so file discovery and
 content search happen in the container and a bounded result crosses back. `share_file` lands
@@ -442,11 +443,7 @@ def _require_str(value: object, field: str) -> str:
     return value
 
 
-def _pdf_result(result: dict[str, object]) -> ToolResult:
-    """A paginated render as model content — PDF pages or the PPTX slides converted through it: a
-    text block (extracted text, the page window, any render note) then one image block per rendered
-    page or slide. Renders are absent when poppler/libreoffice is unavailable in the sandbox,
-    leaving a text-only result."""
+def _document_result(result: dict[str, object]) -> ToolResult:
     lines: list[str] = []
     text = result.get("text")
     if isinstance(text, str) and text.strip():
@@ -460,8 +457,10 @@ def _pdf_result(result: dict[str, object]) -> ToolResult:
         and isinstance(returned, int)
         and returned > 0
     ):
-        unit = "slides" if result.get("type") == "pptx" else "pages"
-        kind = "pptx" if result.get("type") == "pptx" else "pdf"
+        kind = result.get("type")
+        if kind not in ("pdf", "pptx", "docx", "xlsx"):
+            raise RuntimeError("ufo fs read returned an unknown document type")
+        unit = "slides" if kind == "pptx" else "pages"
         footer = f"[{kind} {unit} {start}-{start + returned - 1} of {total}]"
         next_page = result.get("next_page")
         if isinstance(next_page, int):
@@ -478,7 +477,7 @@ def _pdf_result(result: dict[str, object]) -> ToolResult:
     if isinstance(pages, list):
         for page in pages:
             if not isinstance(page, dict):
-                raise RuntimeError("ufo fs read returned a malformed pdf page")
+                raise RuntimeError("ufo fs read returned a malformed document page")
             blocks.append(
                 ImageContent(
                     media_type=_require_str(page.get("media_type"), "media_type"),
@@ -486,7 +485,7 @@ def _pdf_result(result: dict[str, object]) -> ToolResult:
                 )
             )
     if not blocks:
-        raise RuntimeError("ufo fs read returned an empty pdf result")
+        raise RuntimeError("ufo fs read returned an empty document result")
     return ToolResult(content=tuple(blocks))
 
 
@@ -507,8 +506,8 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
                 ),
             )
         )
-    if result.get("type") in ("pdf", "pptx"):
-        return _pdf_result(result)
+    if result.get("type") in ("pdf", "pptx", "docx", "xlsx"):
+        return _document_result(result)
     if result.get("is_empty"):
         return ToolResult(content=(TextContent(text="(file is empty)"),))
     start = result.get("start_line")

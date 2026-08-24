@@ -29,7 +29,7 @@ from ufo.db import workspace_tx
 from ufo.ext.manifest import CredentialSlot, InjectionTarget
 from ufo.models.catalog import CORE_PRICING
 from ufo.sandbox.cache import CACHE_HOST
-from ufo.sandbox.preview import PREVIEW_HOST
+from ufo.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
 from ufo.sandbox.session import (
     SENTINEL_MODEL_KEY,
     ProbeToken,
@@ -304,7 +304,7 @@ async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_poli
         internet=(InternetRule(),),
         cache_host=CACHE_HOST,
         cache_pkg_hosts=("registry.npmjs.org",),
-        preview_host=PREVIEW_HOST,
+        preview_token="preview-real",
     )
     async with _client(_control(resolver)) as client:
         narrowed = await client.post(
@@ -326,7 +326,14 @@ async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_poli
             },
         )
     preview = {"kind": "service", "host": PREVIEW_HOST, "daemon_prefix": None}
-    assert narrowed.json() == {"rules": [preview]}
+    injection = {
+        "kind": "injection",
+        "host": PREVIEW_HOST,
+        "header": PREVIEW_AUTH_HEADER,
+        "sentinel": PREVIEW_SENTINEL,
+        "real": "preview-real",
+    }
+    assert narrowed.json() == {"rules": [preview, injection]}
     assert unnarrowed.json() == {
         "rules": [
             {"kind": "internet"},
@@ -337,6 +344,7 @@ async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_poli
                 "daemon_prefix": "/pkg/registry.npmjs.org",
             },
             preview,
+            injection,
         ]
     }
 

@@ -569,6 +569,31 @@ async def test_file_op_runs_ufo_fs_through_exec_and_parses_the_json() -> None:
     assert " sh glob " in call.command
 
 
+async def test_document_read_uses_the_same_hosted_ufo_fs_path() -> None:
+    sdk = _Sdk()
+    box = sdk.holds("s1")
+    box.scripts.append(
+        _ExecScript(
+            exit_code=0,
+            result=(
+                '{"type":"docx","text":"page two","total_pages":2,"start_page":2,'
+                '"pages_returned":1,"next_page":null,"pages":[]}'
+            ),
+        )
+    )
+    carrier = _carrier(sdk)
+    parsed = await carrier.file_op(
+        _handle(uuid4(), "s1"),
+        "read",
+        {"path": "/workspace/report.docx", "offset": 2, "limit": 1},
+    )
+    assert parsed["type"] == "docx"
+    assert parsed["start_page"] == 2
+    (call,) = box.execs
+    assert " sh read " in call.command
+    assert "report.docx" in call.command
+
+
 async def test_dial_answers_the_preview_host_token_and_tls() -> None:
     sdk = _Sdk()
     sdk.holds("s1")

@@ -12,6 +12,7 @@ use crate::render::{Render, RenderRequest, SinkSpec};
 use crate::sink;
 
 const MULTIPART_OVERHEAD_BYTES: u64 = 1024 * 1024;
+const FORWARDED_WORKSPACE_HEADER: &str = "x-ufo-workspace";
 
 #[derive(Clone)]
 struct AppState {
@@ -45,23 +46,23 @@ async fn render_route(
     }
 }
 
-/// The route body proper, run under `render_route`'s deadline: the permit is acquired here, so a
-/// caller trickling a body (or any other slow phase) is dropped with it on expiry, freeing the
-/// permit for the next request rather than pinning it forever.
 async fn render_within_deadline(
     state: AppState,
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Response {
-    let _permit = match state.render.semaphore().clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => return Refusal::Busy.into_response(),
-    };
+    let _permit = state
+        .render
+        .semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("render semaphore remains open");
     let (request, file) = match parse_parts(multipart, state.cfg.max_input_bytes).await {
         Ok(p) => p,
         Err(r) => return r.into_response(),
     };
-    if !admits(&request.sink, &headers, &state.cfg.token) {
+    if !admits(&request, &file, &headers, &state.cfg.token) {
         return (StatusCode::UNAUTHORIZED, "bearer token required").into_response();
     }
     match state.render.handle(&request, file).await {
@@ -73,11 +74,25 @@ async fn render_within_deadline(
     }
 }
 
-/// A `put_url` sink is its own capability: the caller-minted presigned PUT is authority to store to
-/// exactly that key, so the service admits that request without a bearer. `inline` returns bytes to
-/// the caller directly and carries no such capability, so it still needs one.
-fn admits(sink: &SinkSpec, headers: &HeaderMap, token: &str) -> bool {
-    matches!(sink, SinkSpec::PutUrl { .. }) || authorized(headers, token)
+fn admits(
+    request: &RenderRequest,
+    file: &Option<Vec<u8>>,
+    headers: &HeaderMap,
+    token: &str,
+) -> bool {
+    if !headers.contains_key(FORWARDED_WORKSPACE_HEADER) {
+        return matches!(&request.sink, SinkSpec::PutUrl { .. }) || authorized(headers, token);
+    }
+    let direct_file = file.is_some() && request.source_url.is_none();
+    match &request.sink {
+        SinkSpec::PutUrl { .. } => direct_file,
+        SinkSpec::Bundle { bundle: true } => {
+            direct_file
+                && authorized(headers, token)
+                && matches!(request.kind.as_str(), "pdf" | "pptx" | "docx" | "xlsx")
+        }
+        SinkSpec::Inline { .. } | SinkSpec::Bundle { .. } => false,
+    }
 }
 
 fn authorized(headers: &HeaderMap, token: &str) -> bool {

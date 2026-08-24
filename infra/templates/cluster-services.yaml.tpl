@@ -105,7 +105,7 @@ spec:
     - {secretKey: UFO_ONBOARD_CONTROL_TOKEN, remoteRef: {key: ${secret_platform}, property: onboard-control-token}}
     # The sandbox cache daemon's callback token (RFC 0032); unused until the cache is enabled.
     - {secretKey: UFO_CACHE_CONTROL_TOKEN, remoteRef: {key: ${secret_platform}, property: ufo-cache-control-token}}
-    # The preview service's bearer (RFC 0037); gates only `inline`, unused until preview is enabled.
+    # The preview service's bearer (RFC 0037); gates byte-returning sinks.
     - {secretKey: UFO_PREVIEW_TOKEN, remoteRef: {key: ${secret_platform}, property: ufo-preview-token}}
 ---
 # The signup Slack Connect bot token. Its own Secret, read by the ufo-gateway pod through an explicit

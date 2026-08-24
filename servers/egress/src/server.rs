@@ -402,6 +402,7 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
     // that would refuse the CONNECT. The cache fronts real origins, so with no cache daemon there is
     // no service path at all and its host dispatches as ordinary egress.
     if let Some(daemon_prefix) = find_service(&rules, &host) {
+        let injections = injections_for(&rules, &host);
         if host == PREVIEW_HOST {
             let daemon = shared.daemons.preview.clone();
             service(
@@ -410,8 +411,8 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
                 host,
                 principal,
                 daemon_prefix,
-                daemon,
-                false,
+                ServiceTarget::Preview(daemon),
+                injections,
             )
             .await;
             return;
@@ -423,8 +424,8 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
                 host,
                 principal,
                 daemon_prefix,
-                Some(daemon),
-                true,
+                ServiceTarget::Cache(daemon),
+                injections,
             )
             .await;
             return;
@@ -829,15 +830,24 @@ async fn forward_broker(
     let _ = client.write_all(&forward_response_bytes(&response)).await;
 }
 
+enum ServiceTarget {
+    Cache(String),
+    Preview(Option<String>),
+}
+
 async fn service(
     shared: &Arc<Shared>,
     stream: TcpStream,
     host: String,
     principal: Principal,
     daemon_prefix: Option<String>,
-    daemon: Option<String>,
-    allow_origin_fallthrough: bool,
+    target: ServiceTarget,
+    injections: Vec<Inj<'_>>,
 ) {
+    let (daemon, allow_origin_fallthrough) = match target {
+        ServiceTarget::Cache(daemon) => (Some(daemon), true),
+        ServiceTarget::Preview(daemon) => (daemon, false),
+    };
     let server_config = match shared.leaves.server_config(&host).await {
         Ok(config) => config,
         Err(_) => return,
@@ -927,7 +937,7 @@ async fn service(
     let mut head = Vec::new();
     head.extend_from_slice(&daemon_line);
     head.extend_from_slice(b"\r\n");
-    head.extend_from_slice(&service_headers(&headers, &principal));
+    head.extend_from_slice(&service_headers(&headers, &principal, &injections));
     head.extend_from_slice(b"\r\n");
     head.extend_from_slice(&leftover);
     if daemon_conn.write_all(&head).await.is_err() {
@@ -1251,16 +1261,13 @@ fn forward_response_bytes(response: &ForwardedResponse) -> Vec<u8> {
     out
 }
 
-fn service_headers(headers: &[Vec<u8>], principal: &Principal) -> Vec<u8> {
-    let mut out = Vec::new();
-    for line in headers {
-        let name = header_name_lower(line);
-        if SERVICE_STRIPPED.contains(&name.as_slice()) {
-            continue;
-        }
-        out.extend_from_slice(line);
-        out.extend_from_slice(b"\r\n");
-    }
+fn service_headers(headers: &[Vec<u8>], principal: &Principal, candidates: &[Inj<'_>]) -> Vec<u8> {
+    let filtered = headers
+        .iter()
+        .filter(|line| !SERVICE_STRIPPED.contains(&header_name_lower(line).as_slice()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut out = inject(&filtered, candidates);
     let member = match principal {
         Principal::Run(t) => t.acting_member_id,
         Principal::Probe(t) => t.acting_member_id,
@@ -1271,7 +1278,7 @@ fn service_headers(headers: &[Vec<u8>], principal: &Principal) -> Vec<u8> {
     out.extend_from_slice(b"x-forwarded-proto: https\r\n");
     out.extend_from_slice(
         format!(
-            "x-ufo-workspace: {}\r\nx-ufo-user: {}\r\nconnection: close\r\n",
+            "x-ufo-workspace: {}\r\nx-ufo-user: {}\r\n",
             principal.workspace_id(),
             member,
         )
@@ -1870,7 +1877,7 @@ mod tests {
             "x-forwarded-proto: forged",
             "accept: */*",
         ]);
-        let text = String::from_utf8(service_headers(&headers, &principal)).unwrap();
+        let text = String::from_utf8(service_headers(&headers, &principal, &[])).unwrap();
         assert!(
             !text.contains("forged"),
             "container identity leaked: {text}"

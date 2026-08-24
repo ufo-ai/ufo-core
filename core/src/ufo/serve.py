@@ -119,6 +119,7 @@ from ufo.loop.delivery import DeliverySweep
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
+from ufo.media.document_renderer import DocumentRenderer
 from ufo.media.preview_renderer import PREVIEW_SERVICE_URL_ENV, PREVIEW_TOKEN_ENV, PreviewRenderer
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.models.catalog_skill import model_catalog_skill
@@ -152,7 +153,7 @@ from ufo.sandbox.cache import (
 )
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import ProbeEnv
-from ufo.sandbox.preview import PREVIEW_HOST, parse_preview_service
+from ufo.sandbox.preview import parse_preview_service
 from ufo.sandbox.select import select_carriers
 from ufo.sandbox.session import (
     EGRESS_CA_CERT_ENV,
@@ -255,6 +256,12 @@ def run() -> None:
     skills = skill_registry(manifests, (model_catalog_skill(registry),))
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
+    preview = _preview_settings(config)
+    document_renderer = (
+        DocumentRenderer(service_url=f"http://{preview[0][0]}:{preview[0][1]}", token=preview[1])
+        if preview is not None
+        else None
+    )
     browser_home = home_surface(manifests)
     billing_url = billing_screen_url(config.connect.public_base_url, browser_home)
     admission = Admission(
@@ -282,6 +289,7 @@ def run() -> None:
             ),
             workspace_root=config.sandbox.workspace_root,
             terminals=_select_terminal_transport(config, manifests, fleet_blob),
+            document_renderer=document_renderer,
         ),
         hub=hub,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
@@ -1195,6 +1203,18 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
                 task.cancel()
 
 
+def _preview_settings(config: Config) -> tuple[tuple[str, int], str] | None:
+    preview_service = parse_preview_service(config.sandbox.preview_service)
+    if preview_service is None:
+        return None
+    preview_token = os.environ.get(PREVIEW_TOKEN_ENV)
+    if not preview_token:
+        raise RuntimeError(
+            f"{PREVIEW_TOKEN_ENV} must be set when the sandbox preview service is enabled"
+        )
+    return preview_service, preview_token
+
+
 def _proxy_endpoint(
     app: FastAPI,
     config: Config,
@@ -1236,7 +1256,7 @@ def _proxy_endpoint(
         ca_cert = os.environ.get(EGRESS_CA_CERT_ENV) or _ephemeral_egress_ca()
         control_token = os.environ.get(EGRESS_CONTROL_TOKEN_ENV) or secrets.token_urlsafe(32)
     cache_daemon = parse_cache_daemon(config.sandbox.cache_daemon)
-    preview_service = parse_preview_service(config.sandbox.preview_service)
+    preview = _preview_settings(config)
     cache_control_token = os.environ.get(CACHE_CONTROL_TOKEN_ENV)
     if cache_daemon is not None and not cache_control_token:
         raise RuntimeError(
@@ -1255,7 +1275,7 @@ def _proxy_endpoint(
         clis=clis,
         cache_host=CACHE_HOST if cache_daemon is not None else None,
         cache_pkg_hosts=CACHE_PKG_HOSTS if cache_daemon is not None else (),
-        preview_host=PREVIEW_HOST if preview_service is not None else None,
+        preview_token=None if preview is None else preview[1],
     )
     control = EgressControl(
         control_token=control_token,

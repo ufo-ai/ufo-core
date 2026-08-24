@@ -496,6 +496,31 @@ def test_proxy_endpoint_fails_loud_when_the_cache_is_on_without_its_token(
         serve._proxy_endpoint(FastAPI(), config, (), None, CORE_PRICING, RUN_TOKENS, _blob())
 
 
+def test_preview_settings_pair_the_service_with_its_real_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///ufo.db"),
+        blob=BlobConfig(backend="filesystem", root=Path("/tmp/blobs")),
+        sandbox=SandboxConfig(
+            backend="local",
+            proxy_port=9443,
+            preview_service="ufo-preview.ufo.svc.cluster.local:8930",
+        ),
+    )
+    monkeypatch.delenv(serve.PREVIEW_TOKEN_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=serve.PREVIEW_TOKEN_ENV):
+        serve._preview_settings(config)
+    monkeypatch.setenv(serve.PREVIEW_TOKEN_ENV, "")
+    with pytest.raises(RuntimeError, match=serve.PREVIEW_TOKEN_ENV):
+        serve._preview_settings(config)
+    monkeypatch.setenv(serve.PREVIEW_TOKEN_ENV, "preview-real")
+    assert serve._preview_settings(config) == (
+        ("ufo-preview.ufo.svc.cluster.local", 8930),
+        "preview-real",
+    )
+
+
 def test_proxy_endpoint_boots_a_local_serve_without_a_shared_ca(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

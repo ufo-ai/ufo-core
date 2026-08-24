@@ -7,17 +7,18 @@ everything in the product that shows a thumbnail or a page preview of a file get
 
 The service is stateless and holds no storage credential. A caller either uploads the file on the
 request or hands over a URL to fetch it from, and asks for the result either in the response body or
-written to a URL the caller supplies. One page comes back as `image/png`; several pages come back as
-a zip of `page-01.png` onward. Nothing is kept after the response.
+written to a URL the caller supplies. Display previews come back as PNGs. Document reads come back
+as a ZIP containing `manifest.json` and `page-01.png` onward; the manifest carries page numbers,
+dimensions, and visible text. Nothing is kept after the response.
 
 Two binaries are built here. `ufo-preview` is the service. `preview-worker` is the short-lived child
 the service starts for each rasterization, so a malformed file can crash a bounded process instead of
 the service. A developer runs the service; the worker is started for you.
 
-Every request needs a bearer token, and the service refuses anything larger, longer, or with more
-pages than its limits allow, rather than working without a bound. `GET /_health` answers `ok`. The
-whole configuration is read once at boot, and a missing required value exits with status 2, because a
-deploy launches it, not a person.
+Byte-returning requests need a bearer token. A `put_url` is its own single-key storage capability
+and needs no bearer. The service refuses anything larger, longer, or with more pages than its limits
+allow. `GET /_health` answers `ok`. Configuration is read once at boot; a missing required value
+exits with status 2.
 
 ## Run it in development
 
@@ -49,10 +50,15 @@ curl -sS -o /tmp/preview.png \
   http://127.0.0.1:8930/render
 ```
 
-`kind` names the format, `max_width` and `max_height` bound the picture, `pages` (default 1) asks for
-more than the first page, and `sink` is either `{"inline":true}` to get the bytes back or
-`{"put_url":"..."}` to have them written to that URL. Instead of uploading a file, `source_url` names
-one to fetch.
+`kind` names the format, `max_width` and `max_height` bound the picture, `start_page` (default 1)
+selects the first page, and `pages` (default 1, maximum 20) selects the range. `sink` is
+`{"inline":true}` for display bytes, `{"bundle":true}` for the document-read ZIP, or
+`{"put_url":"..."}` to write the preview to that URL. Instead of uploading a file, `source_url`
+names one to fetch.
+
+The egress proxy marks sandbox calls with `x-ufo-workspace`. Those calls admit only a direct file:
+`put_url` for sharing, or `bundle` for PDF, PPTX, DOCX, and XLSX reads. `source_url` and `inline`
+remain available only to trusted direct callers.
 
 Fetching from, or writing to, an `http://` or a loopback address is refused unless
 `UFO_PREVIEW_ALLOW_LOCAL=1` is set — which is what a local rig and the tests do, and what a deployment
@@ -61,7 +67,7 @@ never does.
 | Variable | What it does |
 |---|---|
 | `UFO_PREVIEW_LISTEN` | Address the service listens on. Required. The container image serves 8930. |
-| `UFO_PREVIEW_TOKEN` | Bearer token every request must present. Required. |
+| `UFO_PREVIEW_TOKEN` | Bearer token byte-returning requests must present. Required. |
 | `UFO_PREVIEW_PDFIUM_LIB` | Path to the pdfium library used for rasterizing. Required. |
 | `UFO_PREVIEW_SOFFICE_BIN` | LibreOffice command. Defaults to `soffice`. |
 | `UFO_PREVIEW_FFMPEG_BIN` | ffmpeg command. Defaults to `ffmpeg`. |

@@ -1,5 +1,6 @@
 mod clipboard;
 mod config;
+mod egress;
 mod fscli;
 #[cfg(unix)]
 mod guard;

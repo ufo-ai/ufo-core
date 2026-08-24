@@ -633,7 +633,7 @@ async fn a_forward_sentinel_request_executes_through_the_broker() {
 async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
     let (cache, cached) = spawn_daemon("packed refs").await;
     let (preview, rendered) = spawn_daemon("png bytes").await;
-    let rules = r#"[{"kind":"service","host":"cache.ufo.internal","daemon_prefix":null},{"kind":"service","host":"preview.ufo.internal","daemon_prefix":null}]"#;
+    let rules = r#"[{"kind":"service","host":"cache.ufo.internal","daemon_prefix":null},{"kind":"service","host":"preview.ufo.internal","daemon_prefix":null},{"kind":"injection","host":"preview.ufo.internal","header":"authorization","sentinel":"ufo-preview-token-sentinel","real":"preview-real"}]"#;
     let proxy = start_proxy_trusting(
         ControlState::new(rules),
         None,
@@ -651,7 +651,7 @@ async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
         &proxy,
         sock,
         "cache.ufo.internal",
-        b"GET /git/github.com/o/r/info/refs HTTP/1.1\r\nhost: cache.ufo.internal\r\n\r\n",
+        b"GET /git/github.com/o/r/info/refs HTTP/1.1\r\nhost: cache.ufo.internal\r\nauthorization: Bearer ufo-preview-token-sentinel\r\n\r\n",
     )
     .await;
     assert!(answer.contains("packed refs"), "cache answer: {answer}");
@@ -662,7 +662,7 @@ async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
         &proxy,
         sock,
         "preview.ufo.internal",
-        b"POST /render HTTP/1.1\r\nhost: preview.ufo.internal\r\ncontent-length: 0\r\n\r\n",
+        b"POST /render HTTP/1.1\r\nhost: preview.ufo.internal\r\nauthorization: Bearer ufo-preview-token-sentinel\r\ncontent-length: 0\r\n\r\n",
     )
     .await;
     assert!(answer.contains("png bytes"), "preview answer: {answer}");
@@ -674,11 +674,18 @@ async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
         cached[0].starts_with("GET /git/github.com/o/r/info/refs"),
         "cache daemon saw {cached:?}"
     );
+    assert!(cached[0].contains("ufo-preview-token-sentinel"));
+    assert!(!cached[0].contains("preview-real"));
     assert_eq!(rendered.len(), 1, "preview daemon saw {rendered:?}");
     assert!(
         rendered[0].starts_with("POST /render"),
         "preview daemon saw {rendered:?}"
     );
+    assert!(
+        rendered[0].contains("authorization: Bearer preview-real"),
+        "preview daemon saw {rendered:?}"
+    );
+    assert!(!rendered[0].contains("ufo-preview-token-sentinel"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

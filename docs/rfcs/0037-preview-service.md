@@ -11,35 +11,10 @@ date: 2026-08-18
 > never passes through a live sandbox (a composer upload, a re-render after a failed share-time
 > attempt) can never get a preview. This RFC adds `ufo-preview`: a standalone, share-nothing Rust
 > service that turns a document (`pdf docx xlsx pptx csv md svg`) or a video (`mp4 mov webm mkv`,
-> one extracted frame) into PNG page rasters, and swaps it in as the **one** preview producer. Bytes never enter the core process: sources arrive at the
-> service by presigned GET or direct multipart, and the finished PNG leaves by a presigned PUT the
-> caller supplies in the request — one hop each way, no call back into core. The presigned URL is
-> itself the store capability, so a sandbox needs no service credential.
-
-## Current state
-
-The whole renderer is a shell program `share_file` runs in the container while the sandbox is
-still up and the file is still local (`core/src/ufo/tools/builtins.py:94-118`):
-`soffice --headless --convert-to pdf` then `pdftoppm -png -r 100 -f 1 -l 1 -singlefile`, for
-`ARTIFACT_PREVIEW_SUFFIXES = {.docx, .pdf, .pptx, .svg, .xlsx}`. `_shared_preview()`
-(`builtins.py:670`) preflights size and sha256 in-container, uploads through the measured presigned
-PUT (`core/src/ufo/blob.py:294` — `ContentLength` + `ChecksumSHA256` signed, authority to store
-exactly one measured file), and the row insert fills `preview_blob_key / preview_media_type /
-preview_size_bytes` on `shared_artifact`.
-
-The read side is already format-agnostic and stays: the signed `preview=` claim
-(`core/src/ufo/media/artifact_url.py:90`), the raster validator (`core/src/ufo/media/image_previews.py`), the
-`ImagePreview` conversation slot (`core/src/ufo/ext/conversation_slots.py:43`), and the portal card
-(`extensions/web/frontend/src/views/Artifacts.tsx:60` — `preview_url: string | null`).
-
-The gaps:
-
-| Gap | Consequence |
-|---|---|
-| Renderer exists only inside a live sandbox | Composer uploads and post-hoc renders are impossible; `_shared_preview`'s docstring says so outright |
-| Render is inline on the share | Derived state produced on a write, against doctrine; a slow render sits inside the tool call |
-| One page, fixed DPI | Nothing can render page ranges (document verification wants n pages) |
-| `md`, `csv` unrendered | Both are composer-common formats |
+> one extracted frame) into PNG page rasters, and is the one visual renderer for previews and
+> document reads. Share sources arrive by presigned GET or direct multipart and leave by a
+> caller-supplied presigned PUT. Hosted reads return a bounded page bundle directly to the sandbox;
+> connected terminals relay one contained, bounded document through the deploy.
 
 ## Decisions
 
@@ -49,17 +24,18 @@ Settled with the author:
 |---|---|
 | Topology | A standalone Rust service (`servers/preview/` crate, image `ufo-preview`), the `servers/cache/` skeleton: axum 0.8, `Config::from_env` fail-loud, `GET /_health`, graceful shutdown. Stateless — no DB, no AWS credentials, no state beyond the in-flight request. |
 | Converter | LibreOffice baked into the service image, **spawned per request** (no Gotenberg dependency); rasterization by `pdfium-render` in a separate worker binary. The service process itself never parses a document. |
-| Producer swap | This replaces the in-sandbox render. `share_file` calls the service through the egress proxy; the `soffice`/`pdftoppm` recipe and its in-container preflight are torn out. The sandbox image keeps its renderers — the document-production skills use them; only the share-time render leaves. |
-| Bytes and core | Core never holds document or image bytes. It deals in presigned URLs and metadata. |
-| Output | PNG. `pages` arg, default 1, capped; `pages=1` answers `image/png`, `pages>1` answers `application/zip` of `page-01.png…`. |
+| Producers | `share_file` and hosted document reads call the service through the egress proxy. The sandbox image keeps its renderers for document-production skills. |
+| Bytes and core | Share and hosted-read bytes bypass core. A connected terminal relays one contained, bounded read through core because it cannot reach the synthetic service host. |
+| Output | PNG for display previews; a ZIP bundle with `manifest.json` and `page-01.png…` for document reads. Page counts are capped at 20. |
 | S3 | The service holds zero AWS credentials. It writes only through a caller-supplied presigned PUT URL (`put_url`); the URL fixes the key, so the service chooses neither key nor bucket. |
 | Composer preview | The composer sends a member's picked file to the service and shows the picture it returns — the service is the one renderer, not a client-side library. A stateless render, storing nothing: no `inbound_file` table, no persistence. Shipped over the `inline` sink (bytes in → PNG out); the ideal upgrades it to a presigned round-trip that reuses the render in the transcript (see Composer preview below). |
-| Units | One PR (#1987): crate + image + tests + spec line, deploy wiring, producer swap + core integration, composer persistence + card. |
 
 ## Architecture
 
 ```
 sandbox (share_file: one curl) ──▶ ufo-egress ──▶ ufo-preview ──▶ per-request children
+hosted sandbox (read) ────────────▶ ufo-egress ──▶    │
+connected terminal (read) ──▶ core deploy ──────────▶│
 core serve job ──────────────────────────────────▶    │             soffice → PDF
                                                       │             preview-worker (pdfium) → PNG
   source: multipart file part | presigned GET         │
@@ -77,17 +53,22 @@ fetches.
 | `kind` | `pdf\|docx\|xlsx\|pptx\|csv\|md\|svg\|mp4\|mov\|webm\|mkv`; cross-checked against magic bytes, mismatch refused |
 | `source_url` | presigned GET, exclusive with the `file` part |
 | `max_width`, `max_height` | pixel box; pages render to fit, aspect preserved |
-| `pages` | page count from page 1; default 1, capped |
-| `sink` | `{"inline": true}` \| `{"put_url": …}` |
+| `start_page` | first page to render, one-based; default 1 |
+| `pages` | page count from `start_page`; default 1, capped at 20 |
+| `sink` | `{"inline": true}` \| `{"bundle": true}` \| `{"put_url": …}` |
 
 | Sink | Response | Used by |
 |---|---|---|
 | `inline` | `200`, bytes (`image/png` or zip) + metadata headers | tests, ad-hoc callers — never core |
+| `bundle` | `200 application/zip`: `manifest.json` plus `page-01.png…` | document reads |
 | `put_url` | `200 application/json` metadata, after PUT to the caller's URL | `share_file`, the core render job, any caller holding a presigned PUT |
+
+The bundle manifest carries the kind, total page count, requested range, and each returned page's
+original page number, dimensions, filename, and visible text extracted from the converted PDF.
 
 Every response carries `{width, height, page_count, size_bytes, sha256}` (headers on the `inline`
 byte response, JSON body on `put_url`). Refusals are typed JSON: `unsupported_type`, `kind_mismatch`,
-`too_large`, `render_timeout`, `fetch_refused`, `busy`.
+`too_large`, `render_timeout`, `fetch_refused`.
 
 ### Auth — the URL is the capability
 
@@ -96,7 +77,9 @@ There is no service→core call: bytes in, bytes-or-a-store out, one hop each wa
 | Edge | Credential |
 |---|---|
 | `inline` sink | `Authorization: Bearer UFO_PREVIEW_TOKEN` — the bytes come back to the caller, so nothing in the request stands in for authority |
-| `put_url` sink | none — the caller-minted presigned PUT URL *is* the authority to store to exactly that key, so a sandbox reaching `/render` needs no service token |
+| `bundle` sink from a sandbox | Fixed sentinel bearer; the egress proxy replaces it with `UFO_PREVIEW_TOKEN` only for `preview.ufo.internal`. Forwarded calls admit only direct multipart PDF, PPTX, DOCX, or XLSX bytes; no `source_url` or `inline` sink. |
+| `bundle` sink from core | `Authorization: Bearer UFO_PREVIEW_TOKEN` |
+| `put_url` sink | none — the caller-minted presigned PUT URL *is* the authority to store to exactly that key. A forwarded sandbox call must carry the source as a direct file; only trusted direct callers may use `source_url`. |
 
 `put_url` is a **plain** (unmeasured) presigned PUT: core cannot sign the output's size or checksum
 into the URL before the render exists, and it need not — the agent already controls its own preview
@@ -105,8 +88,9 @@ read-time image validator (`core/src/ufo/media/image_previews.py`). Whoever mint
 so a request cannot store anywhere else. The capability gates the *write*, not the compute: the
 render runs before any store, bounded by the request deadline and the concurrency permit cap.
 
-The proxy admits the preview host with the `service` rule kind the cache daemon already uses, and
-relays it to the preview deployment rather than to the cache — each daemon owns the hosts it serves.
+The proxy admits the preview host with the `service` rule kind the cache daemon already uses, pairs
+it with an injection rule for the sentinel bearer, and relays it to the preview deployment rather
+than to the cache — each daemon owns the hosts it serves.
 The rule carries none of the cache's internet condition: the service fronts nothing public, so
 admitting it widens no reach, and an agent narrowed off the internet still shares files. Nothing else
 serves that host either, so an unconfigured or unreachable service has no origin to fall through to
@@ -128,7 +112,8 @@ fill, so `preview-worker` crops those pages to their content box — the grid, n
 white.
 
 `preview-worker` is a second bin target in the crate wrapping `pdfium-render`: reads the PDF,
-renders pages 1..n into the box, crops to content when asked, writes PNGs, exits. A video skips it —
+extracts visible text, renders the requested page range into the box, crops to content when asked,
+writes PNGs, exits. A video skips it —
 `ffmpeg` writes the frame PNG directly. A malformed document kills its child, never the service.
 
 ### Isolation and caps
@@ -137,7 +122,7 @@ renders pages 1..n into the box, crops to content when asked, writes PNGs, exits
   rlimits (address space, CPU, file size, fd count), cleared environment.
 - Caps enforced by the service before and after every child: input bytes before any spawn, output
   pixels and bytes (parity with core's `IMAGE_PREVIEW_MAX_BYTES`), page count, per-phase deadlines,
-  bounded render concurrency answering `busy` beyond it. A whole-request deadline
+  bounded render concurrency with excess requests waiting for the next permit. A whole-request deadline
   (`UFO_PREVIEW_REQUEST_TIMEOUT_SECS`, default 300s, held with the concurrency permit) answers
   `render_timeout` and frees the permit on a caller that never finishes sending its body.
 - `source_url` and `put_url` are SSRF-guarded: https only, no redirects, resolve-then-connect with
@@ -169,14 +154,22 @@ caps), `fetch` (SSRF-guarded GET and PUT), `convert` (the soffice spawn), `worke
   core. Only rows shared within a one-hour window are candidates, so a document the service can
   never render ages out rather than retrying forever; batch-at-interval is the whole retry. S3 only
   — the presigned PUT is an S3 operation. The job registers only where `UFO_PREVIEW_URL` is set.
+- `read` admits PDF, PPTX, DOCX, and XLSX. Hosted carriers send contained, bounded bytes through
+  `preview.ufo.internal` and unpack the bundle inside the sandbox. The connected-terminal carrier
+  requests a contained, byte-capped copy from the terminal client and calls the service directly
+  from the deploy. Both paths return the same text, pagination metadata, and image blocks. XLSX
+  rasters are visual QA; the documents extension owns cell, formula, and recalculation validation.
+  This relay is core because `read` and carrier selection are core boundaries an extension cannot
+  replace.
 
-**Egress:** one `service` rule admitting the preview host for sandbox traffic, relayed to a second
-daemon address the proxy holds beside the cache's (`UFO_EGRESS_PREVIEW_DAEMON`); emitted whatever the
-agent's internet policy, since rendering a file the sandbox already holds reaches nothing public.
+**Egress:** one `service` rule admitting the preview host for sandbox traffic, paired with an
+`injection` rule that recognizes only the fixed sentinel bearer and substitutes
+`UFO_PREVIEW_TOKEN`. Both rules are emitted whatever the agent's internet policy, since rendering a
+file the sandbox already holds reaches nothing public.
 
-**Tests:** Rust integration tests run the real binaries over one checked-in fixture per kind —
-dimensions, byte caps, zip shape, the `put_url` leg against a local listener, SSRF refusals, deadline
-kills. `share_file`'s core half is tested against a real S3 mint with a stubbed sandbox transport;
+**Tests:** Rust integration tests run the real binaries over checked-in PDF, PPTX, DOCX, and XLSX
+fixtures — non-first-page text, dimensions, byte caps, bundle shape, the `put_url` leg against a
+local listener, SSRF refusals, deadline kills. `share_file`'s core half is tested against a real S3 mint with a stubbed sandbox transport;
 the `render_previews` job against a real database and S3 mint with an `httpx.MockTransport` returning
 the service's contractual reply. The full sandbox → proxy → service → S3 loop is integration-tier.
 
@@ -209,7 +202,7 @@ admission (carrying the refs) and transcript rendering (reading them), and lands
 ## Deploy
 
 `ufo-preview` joins `infra/modules/platform/ecr.tf`, a minted `UFO_PREVIEW_TOKEN`
-(`secrets.tf`/`cluster-services.yaml.tpl` — gates only `inline`, unused in prod), the `deploy.yml`
+(`secrets.tf`/`cluster-services.yaml.tpl` — gates byte-returning sinks), the `deploy.yml`
 image build (egress-style, post-apply) and rollout gate, and its own Deployment + ClusterIP Service
 in `hosted.yaml.tpl`, all gated by a per-env `preview_enabled` (testing on, prod off until proven).
 The proxy carries `UFO_EGRESS_PREVIEW_DAEMON` and serve carries `[sandbox] preview_service` (to emit
@@ -232,14 +225,8 @@ row names it beside `ufo-egress`.
 - **Raster drift.** pdfium's rasters differ subtly from `pdftoppm`'s; every consumer asserts only
   PNG + dimensions, none a pixel.
 
-## Open decisions
-
-- **The n-page consumer.** A visual document verifier does not exist (`document-review` is
-  textual). `pages>1` ships proven by the service's own tests; the verifier skill, when built,
-  reaches the service through the same proxied path.
-
 ## Non-goals
 
-No change to the read path — the `preview=` claim, validator, slot, and portal card work
-unchanged. No change to the sandbox image or the document-production skills. Raster images keep
+The sandbox image and document-production skills retain LibreOffice and Poppler. Raster inspection
+does not replace spreadsheet cell, formula, or recalculation validation. Raster images keep
 previewing as themselves; this service renders documents only.
