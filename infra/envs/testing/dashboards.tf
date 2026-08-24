@@ -533,6 +533,49 @@ resource "datadog_dashboard" "turns" {
       }
     }
   }
+
+  # An agent's own report of a workspace it could not repair, from `report_problem`. It sits on this
+  # board because a report is produced inside a turn and read while watching the fleet, and because
+  # nothing else counts one: `tool_call_total{tool:report_problem}` says a call happened, never that
+  # a workspace is broken — a refusal and a landed report are the same count there.
+
+  widget {
+    timeseries_definition {
+      title = "workspaces an agent reported as broken"
+      request {
+        log_query {
+          index        = "*"
+          search_query = "$env service:ufo \"problem.reported\""
+          compute_query {
+            aggregation = "count"
+          }
+        }
+        display_type = "bars"
+      }
+    }
+  }
+
+  # The reports themselves, because the count alone cannot be acted on. Each row carries the
+  # workspace, the broken object, the origin (`fault`, or `member_request` where a member asked us
+  # to be told), the error class, the next action, and a debugger link scoped to the reporting turn
+  # — a click on the row opens them. It carries no columns and no grouping, here or on the count
+  # above: a log widget columns and groups only by a Datadog-side facet, and no terraform resource
+  # creates one, so the board reads the whole fleet's reports as one list rather than depending on a
+  # facet made by hand in the UI and kept alive there.
+  widget {
+    log_stream_definition {
+      title               = "what they reported"
+      query               = "$env service:ufo \"problem.reported\""
+      indexes             = ["*"]
+      show_date_column    = true
+      show_message_column = true
+      message_display     = "expanded-md"
+      sort {
+        column = "time"
+        order  = "desc"
+      }
+    }
+  }
 }
 
 # How well the coding agent executes, as distinct from how fast: the turns board answers throughput

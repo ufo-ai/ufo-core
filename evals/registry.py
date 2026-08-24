@@ -41,6 +41,7 @@ from evals.suites import (
     object_tools,
     onboarding_help,
     pdf_build,
+    problem_report,
     red_after_green,
     report_digest,
     response_formatting,
@@ -78,6 +79,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("skill_routing", skill_routing.CASES),
     capability_task("tool_calling", tool_calling.CASES),
+    capability_task("problem_report", problem_report.CASES),
     capability_task(
         "authority_handoff",
         authority_handoff.CASES,
