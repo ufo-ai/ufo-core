@@ -40,7 +40,7 @@ from ufo.sandbox.ingress_serve import (
     NO_FRAME_ANCESTOR,
     NO_SITE_HERE,
     NOT_FOUND,
-    SESSION_ENDED,
+    SESSION_ENDED_PAGE,
     SHIPPED_ASSET_CACHE,
     SITE_GONE,
     SITE_HAS_NO_SOCKET,
@@ -494,16 +494,17 @@ async def test_an_entry_path_cannot_send_the_viewer_off_this_origin(db, ingress)
     assert "x-evil" not in injected.headers
 
 
-async def test_a_request_without_a_session_is_403_and_says_how_to_get_back_in(db, ingress) -> None:
+async def test_a_request_without_a_session_is_403_with_no_dead_end(db, ingress) -> None:
     """The label is an address, not an authorization: knowing a site's origin gets a viewer nothing
-    until the frame has traded a view token for that origin's session. A bookmark opened after the
-    session ran out lands here too, so the body has to name the way back rather than leave a bare
-    status code on the screen."""
+    until the frame has traded a view token for that origin's session. This origin signals the
+    authorized frame host without exposing a dead-end instruction; a focused host refreshes and
+    mints another view token."""
     _workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
     got = await ingress.get(f"{_origin(conversation_id)}/index.html")
     assert got.status_code == 403
-    assert got.text == SESSION_ENDED
-    assert "chat" in got.text
+    assert got.text == SESSION_ENDED_PAGE
+    assert got.headers["content-type"].startswith("text/html")
+    assert "fresh link" not in got.text
 
 
 async def test_a_session_cookie_cannot_mint_its_own_successor(db, ingress) -> None:
@@ -640,7 +641,7 @@ async def test_bad_sessions_and_view_tokens_are_403(db, ingress) -> None:
             f"{origin}/index.html", headers={"cookie": f"{INGRESS_SESSION_COOKIE}={value}"}
         )
         assert refused.status_code == 403
-        assert refused.text == SESSION_ENDED
+        assert refused.text == SESSION_ENDED_PAGE
 
 
 def test_the_ingress_refuses_to_boot_without_a_base(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1436,14 +1437,14 @@ async def test_a_socket_without_a_session_is_refused_as_the_proxy_refuses_it(
     db, socket_ingress: int, socket_origin: _SocketOrigin
 ) -> None:
     """One gate, one answer. The socket denies its handshake with the response the proxy would have
-    sent — same status, same sentence — so a socket cannot become the weaker of two doors into the
+    sent — same status, same body — so a socket cannot become the weaker of two doors into the
     same bytes, and nothing reaches the site before the cookie is checked."""
     _, conversation_id = await _seed_conversation("stub:sbx-1")
     with pytest.raises(InvalidStatus) as refused:
         async with _socket(socket_ingress, conversation_id, "/hmr"):
             pass
     assert refused.value.response.status_code == 403
-    assert refused.value.response.body == SESSION_ENDED.encode()
+    assert refused.value.response.body == SESSION_ENDED_PAGE.encode()
     assert socket_origin.handshakes == []
 
 
@@ -1987,7 +1988,7 @@ async def test_a_stored_site_still_gates_on_the_session(db, stored_ingress) -> N
     workspace_id, conversation_id = await _seed_conversation(None)
     await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
     got = await client.get(f"{_origin(conversation_id)}/")
-    assert (got.status_code, got.text) == (403, SESSION_ENDED)
+    assert (got.status_code, got.text) == (403, SESSION_ENDED_PAGE)
 
 
 async def test_a_manifest_naming_a_vanished_blob_is_404(db, stored_ingress) -> None:

@@ -1031,6 +1031,9 @@ async def test_a_dm_site_opens_for_its_creator_and_hides_from_another_member(
         'allow-downloads allow-pointer-lock"'
     ) in opened.text
     assert "allow-top-navigation" not in opened.text
+    assert "if(ended)location.reload()" in opened.text
+    assert "addEventListener('focus',refresh)" in opened.text
+    assert opened.text.index("</iframe>") < opened.text.index("const frame=")
     view = verify_ingress_token(
         embedded.rpartition(f"{INGRESS_VIEW_PATH}/")[2], datetime.now(UTC), INGRESS_VIEW_KIND
     )
@@ -2853,6 +2856,9 @@ async def test_a_homepage_frame_follows_the_agent_and_redirects_the_portal_to_in
     assert standalone.status_code == 200
     assert INGRESS_HOST in _embedded(standalone.text)
     assert "if(self!==top)location.replace" in standalone.text
+    assert "if(ended)location.reload()" in standalone.text
+    assert "addEventListener('focus',refresh)" in standalone.text
+    assert standalone.text.index("</iframe>") < standalone.text.index("const frame=")
     dev_portal = await client.get(
         portal_link,
         headers={**_cookie(other_token), "sec-fetch-dest": "iframe", "sec-fetch-site": "same-site"},

@@ -50,6 +50,7 @@ from ufo.sandbox.ingress_host import (
     site_label,
 )
 from ufo.sandbox.ingress_token import (
+    INGRESS_SESSION_ENDED_MESSAGE,
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
     INGRESS_VIEW_PATH,
@@ -207,7 +208,11 @@ INGRESS_SESSION_TTL_SECONDS = 3600
 NO_SITE_HERE = "No site is served at this address."
 WRONG_SITE = "This link opens a different site."
 LINK_NOT_VALID = "This link is expired or not valid. Open the site again to get a new one."
-SESSION_ENDED = "This site needs a fresh link. Open it again in chat."
+SESSION_ENDED_PAGE = (
+    "<script>if(parent!==self){const tell=()=>parent.postMessage("
+    f"{{ufo:'{INGRESS_SESSION_ENDED_MESSAGE}'}},'*');"
+    "tell();setTimeout(tell,250);setTimeout(tell,1000)}</script>"
+)
 SITE_GONE = "This site is no longer hosted. Ask the agent that built it to put it back up."
 SITE_NOT_ANSWERING = "This site is not answering."
 FOREIGN_ORIGIN = "This connection did not come from the site it addresses."
@@ -217,13 +222,13 @@ SITE_HAS_NO_SOCKET = "This site is static and speaks no socket protocol."
 
 @dataclass(frozen=True)
 class SiteRefusal:
-    """Why a connection reaches no site: an HTTP status and the line a viewer reads. The proxy
-    answers with it and the socket denies its handshake with it, so one gate produces both refusals
-    — the same status and the same sentence either way — and neither protocol can admit what the
-    other turns away."""
+    """Why a connection reaches no site: an HTTP status and response body. The proxy answers with
+    it and the socket denies its handshake with it, so one gate produces both refusals — the same
+    status and body either way — and neither protocol can admit what the other turns away."""
 
     status: int
     message: str
+    media_type: str = "text/plain"
 
 
 HOSTED_SITE = sa.table(
@@ -417,7 +422,7 @@ class IngressServe:
                 INGRESS_SESSION_KIND,
             )
         except IngressTokenError:
-            return SiteRefusal(403, SESSION_ENDED)
+            return SiteRefusal(403, SESSION_ENDED_PAGE, "text/html")
         if (claims.conversation_id, claims.port) != site:
             return SiteRefusal(403, WRONG_SITE)
         return claims
@@ -532,7 +537,9 @@ class IngressServe:
         authorized = self._authorized(request)
         if isinstance(authorized, SiteRefusal):
             return Response(
-                authorized.message, status_code=authorized.status, media_type="text/plain"
+                authorized.message,
+                status_code=authorized.status,
+                media_type=authorized.media_type,
             )
         files = await self._stored_manifest(authorized)
         if files is not None:
@@ -543,7 +550,7 @@ class IngressServe:
             return Response(NOT_FOUND, status_code=404, media_type="text/plain")
         dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
-            return Response(dialed.message, status_code=dialed.status, media_type="text/plain")
+            return Response(dialed.message, status_code=dialed.status, media_type=dialed.media_type)
         scheme = "https" if dialed.tls else "http"
         url = self._upstream_url(scheme, dialed.host, path, request.scope["query_string"])
         framed = any(header in request.headers for header in BODY_FRAMING_HEADERS)
@@ -910,10 +917,10 @@ class IngressServe:
     async def _refuse(self, websocket: WebSocket, refusal: SiteRefusal) -> None:
         """Refuse the handshake with the very response the proxy would have sent, through the
         Websocket Denial Response extension. One gate, one answer: an unauthorized viewer reads the
-        same status and the same line whichever protocol it arrived on, where a bare policy close
-        would have said only that something was refused."""
+        same status and response body whichever protocol it arrived on, where a bare policy close
+        would have supplied neither."""
         await websocket.send_denial_response(
-            Response(refusal.message, status_code=refusal.status, media_type="text/plain")
+            Response(refusal.message, status_code=refusal.status, media_type=refusal.media_type)
         )
 
     async def _relay(self, viewer: WebSocket, upstream: ClientConnection) -> None:

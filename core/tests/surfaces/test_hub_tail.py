@@ -97,6 +97,32 @@ async def test_poll_starts_after_the_durable_precheck(
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_cancel_waits_for_the_durable_read_to_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def status(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:
+        started.set()
+        await release.wait()
+        finished.set()
+        raise RuntimeError("the closing read failed")
+
+    monkeypatch.setattr(hub_tail, "turn_status_frame", status)
+    task = asyncio.create_task(_drain(tail_frames(InProcessHub(), uuid4())))
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+
+
 async def test_tail_resumes_from_a_covered_cursor(db: None) -> None:
     hub = InProcessHub()
     turn_id = uuid4()

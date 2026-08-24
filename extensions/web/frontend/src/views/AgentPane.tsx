@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { IconMessage, IconSettings } from "@tabler/icons-react";
 
 import { attachBridge, type BridgeHandle } from "@/lib/bridge";
@@ -36,11 +36,11 @@ const FRAME_SWAP_MS = 200;
 const HOMEPAGE_SANDBOX =
   "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock";
 
-/** One mounted copy of the homepage frame. A redeploy remounts the page at the same URL, and a
- *  frame torn down the instant its successor mounts leaves the member watching the successor's
- *  blank document paint — so the standing copy holds the screen until the arriving one has
- *  loaded, and the two cross-fade. `key` is the url and deploy generation together, the identity
- *  the pane already remounts on. */
+/** One mounted copy of the homepage frame. A redeploy or ended session remounts the page at the
+ *  same URL, and a frame torn down the instant its successor mounts leaves the member watching
+ *  the successor's blank document paint — so the standing copy holds the screen until the
+ *  arriving one has loaded, and the two cross-fade. `key` is the URL, deploy generation, and
+ *  session refresh together, the identity the pane already remounts on. */
 type HeldFrame = { key: string; url: string; loaded: boolean };
 
 export type AgentPaneProps = {
@@ -87,6 +87,13 @@ export function AgentPane({
   onPlace,
 }: AgentPaneProps) {
   const [settles, setSettles] = useState(0);
+  const [frameRefresh, setFrameRefresh] = useState(0);
+  const sessionEnded = useRef(false);
+  const refreshEndedSession = useCallback(() => {
+    if (!sessionEnded.current) return;
+    sessionEnded.current = false;
+    setFrameRefresh((value) => value + 1);
+  }, []);
   const viewer = useViewer();
   const agents = useAgents();
   const target = place.opens?.[0];
@@ -176,6 +183,10 @@ export function AgentPane({
 
   const url = home.state === "set" ? home.url : null;
   const generation = home.state === "set" ? (home.deploy_generation ?? 0) : 0;
+  useEffect(() => {
+    window.addEventListener("focus", refreshEndedSession);
+    return () => window.removeEventListener("focus", refreshEndedSession);
+  }, [refreshEndedSession]);
   // The half stands for a homepage that exists; an app with none draws one column, because a column
   // whose only content is the sentence that it is empty takes half the screen to say what the app
   // having no homepage already says.
@@ -223,7 +234,7 @@ export function AgentPane({
   if (url === null) {
     if (frames.length > 0) setFrames([]);
   } else {
-    const frameKey = url + ":" + generation;
+    const frameKey = url + ":" + generation + ":" + frameRefresh;
     if (frames.at(-1)?.key !== frameKey) {
       setFrames([
         ...frames.filter((frame) => frame.loaded).slice(-1),
@@ -269,13 +280,26 @@ export function AgentPane({
       chatSurface: agent.app === CHAT_SURFACE,
       onCreated: (agentId, conversationId, title) =>
         foundedRef.current(agentId, conversationId, title),
+      onSessionEnded: () => {
+        sessionEnded.current = true;
+        if (document.hasFocus()) refreshEndedSession();
+      },
     });
     bridgeRef.current = handle;
     return () => {
       bridgeRef.current = null;
       handle.detach();
     };
-  }, [member, agents, agent.id, agent.app, url, generation]);
+  }, [
+    member,
+    agents,
+    agent.id,
+    agent.app,
+    url,
+    generation,
+    frameRefresh,
+    refreshEndedSession,
+  ]);
   useEffect(() => {
     bridgeRef.current?.place(framedRef.current);
   }, [framedAt]);

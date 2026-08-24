@@ -50,7 +50,7 @@ async def tail_frames(
     pump = asyncio.ensure_future(_pump(hub, turn_id, start, frames))
     tasks = [pump]
     try:
-        stored = await turn_status_frame(turn_id, billing_url)
+        stored = await _read_status_frame(turn_id, billing_url)
         if stored is not None:
             yield "", stored
             return
@@ -82,13 +82,34 @@ async def _poll_status(
     while True:
         await asyncio.sleep(TERMINAL_POLL_SECONDS)
         try:
-            frame = await turn_status_frame(turn_id, billing_url)
+            frame = await _read_status_frame(turn_id, billing_url)
         except Exception as error:
             log("hub_tail.poll_failed", turn=str(turn_id), error=repr(error))
             continue
         if frame is not None:
             await frames.put(("", frame))
             return
+
+
+async def _read_status_frame(turn_id: UUID, billing_url: str | None) -> LiveFrame | None:
+    read = asyncio.ensure_future(turn_status_frame(turn_id, billing_url))
+    cancelled: asyncio.CancelledError | None = None
+    while not read.done():
+        try:
+            await asyncio.shield(read)
+        except asyncio.CancelledError as cancel:
+            cancelled = cancel
+        except BaseException:
+            break
+    try:
+        frame = read.result()
+    except BaseException:
+        if cancelled is not None:
+            raise cancelled from None
+        raise
+    if cancelled is not None:
+        raise cancelled
+    return frame
 
 
 async def turn_status_frame(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:

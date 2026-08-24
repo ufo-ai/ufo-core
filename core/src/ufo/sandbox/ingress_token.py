@@ -30,6 +30,7 @@ INGRESS_VIEW_KIND: IngressTokenKind = "sandbox-ingress-view"
 INGRESS_SESSION_KIND: IngressTokenKind = "sandbox-ingress-session"
 INGRESS_VIEW_PATH = "/~t"
 INGRESS_VIEW_TTL_SECONDS = 900
+INGRESS_SESSION_ENDED_MESSAGE = "site-session-ended"
 
 
 class IngressTokenError(ValueError):

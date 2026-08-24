@@ -59,7 +59,7 @@ from ufo.sdk.http import (
     Request,
     Response,
 )
-from ufo.sdk.sandbox import serve_port, shipped_anchor
+from ufo.sdk.sandbox import INGRESS_SESSION_ENDED_MESSAGE, serve_port, shipped_anchor
 from ufo.sdk.seats import Seats
 from ufo.sdk.surface_token import mint_surface_token, verify_surface_token
 from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
@@ -103,6 +103,14 @@ NOT_SIGNED_IN_PAGE = (
 IFRAME_SANDBOX = (
     "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads "
     "allow-pointer-lock"
+)
+FOCUS_REFRESH_SCRIPT = (
+    "<script>const frame=document.currentScript.previousElementSibling;let ended=false;"
+    "const refresh=()=>{if(ended)location.reload()};"
+    "addEventListener('message',event=>{"
+    f"if(event.source!==frame.contentWindow||event.data?.ufo!=='{INGRESS_SESSION_ENDED_MESSAGE}')"
+    "return;ended=true;if(document.hasFocus())refresh()});"
+    "addEventListener('focus',refresh)</script>"
 )
 SHARE_CARD_URL = "https://ufo.ai/share/og-site.jpg"
 SHARE_CARD_WIDTH = str(CARD_WIDTH)
@@ -411,7 +419,7 @@ def _homepage_frame_page(title: str, embedded: str | None, share: str) -> str:
             "if(self!==top)location.replace(document.currentScript.dataset.url)</script>"
             f'<iframe src="{escaped_url}" title="{html.escape(title, quote=True)}" '
             f'referrerpolicy=no-referrer sandbox="{IFRAME_SANDBOX}" '
-            'allow="fullscreen"></iframe>'
+            'allow="fullscreen"></iframe>' + FOCUS_REFRESH_SCRIPT
         )
     return _page(
         html.escape(title), _STYLE + _FRAME_STYLE + _HOMEPAGE_FRAME_STYLE, site_view, share
@@ -607,7 +615,7 @@ def _frame_page(
     site_view = (
         f'<iframe src="{html.escape(embedded, quote=True)}" '
         f'title="{html.escape(site.name, quote=True)}" referrerpolicy=no-referrer '
-        f'sandbox="{IFRAME_SANDBOX}" allow="fullscreen"></iframe>'
+        f'sandbox="{IFRAME_SANDBOX}" allow="fullscreen"></iframe>' + FOCUS_REFRESH_SCRIPT
         if embedded is not None
         else f"<main><p>{UNCONFIGURED_BODY}</p></main>"
     )

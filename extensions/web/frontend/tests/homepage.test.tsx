@@ -78,6 +78,39 @@ test("a set homepage frames the bound site beside the conversation", async () =>
   expect(screen.getByRole("button", { name: "Chat with Assistant" })).toBeTruthy();
 });
 
+test("focusing the tab keeps a live homepage frame", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  open({}, SET);
+
+  const first = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
+  fireEvent.load(first);
+  fireEvent.focus(window);
+
+  expect(screen.getAllByTitle("Assistant homepage")).toEqual([first]);
+});
+
+test("focusing the tab refreshes an ended homepage session", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+  open({}, SET);
+
+  const first = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
+  fireEvent.load(first);
+  const ended = new MessageEvent("message", { data: { ufo: "site-session-ended" } });
+  Object.defineProperty(ended, "source", { value: first.contentWindow });
+  fireEvent(window, ended);
+  expect(screen.getAllByTitle("Assistant homepage")).toEqual([first]);
+
+  fireEvent.focus(window);
+
+  const frames = screen.getAllByTitle("Assistant homepage");
+  expect(frames.length).toBe(2);
+  expect(frames[0]).toBe(first);
+  expect(frames[1].getAttribute("src")).toBe(HOMEPAGE_URL);
+  expect(frames[1].className).toContain("opacity-0");
+  hasFocus.mockRestore();
+});
+
 /** A redeploy remounts the page at the same URL, and the swap must never show the arriving copy's
  *  blank document: the standing frame holds the screen until the fresh one has loaded, the two
  *  cross-fade, and the replaced copy leaves once the fade is over. The bridge is the arriving

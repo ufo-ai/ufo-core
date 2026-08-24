@@ -79,6 +79,7 @@ const STREAM_CAP = 8;
 
 type BridgeMessage =
   | { ufo: "ready" }
+  | { ufo: "site-session-ended" }
   | {
       ufo: "call";
       id: string;
@@ -130,6 +131,7 @@ export type BridgeConfig = {
    *  without waiting for its next read. The page could only have founded it through this bridge's
    *  own chat call, so the report claims nothing the shell did not broker. */
   onCreated?: (agentId: string, conversationId: string, title: string) => void;
+  onSessionEnded?: () => void;
   /** Whether this frame is the chat surface — the one page whose job is speaking. Only it may
    *  post the chat admit: a send runs a model turn with the viewer's whole authority, and every
    *  other app's page has the shell-owned right-side chat for talking, so its frame gets no voice
@@ -214,6 +216,7 @@ export function attachBridge({
   place,
   crumb,
   onCreated,
+  onSessionEnded,
   chatSurface = false,
 }: BridgeConfig): BridgeHandle {
   const streams = new Map<string, AbortController>();
@@ -272,6 +275,9 @@ export function attachBridge({
     const reply = (payload: unknown) => source.postMessage(payload, { targetOrigin: "*" });
 
     switch (message.ufo) {
+      case "site-session-ended":
+        onSessionEnded?.();
+        return;
       case "ready":
         reply({
           ufo: "init",

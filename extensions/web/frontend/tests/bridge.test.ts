@@ -133,6 +133,17 @@ test("init carries the addressed step the page stands at, and a place change doe
   expect(posted[1]).toEqual({ ufo: "place", place: PLACE });
 });
 
+test("the framed ingress page reports an ended site session", () => {
+  const ended = vi.fn();
+  const { iframe } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID, onSessionEnded: ended });
+
+  deliver({ ufo: "site-session-ended" }, {});
+  expect(ended).not.toHaveBeenCalled();
+  deliver({ ufo: "site-session-ended" }, iframe.contentWindow);
+  expect(ended).toHaveBeenCalledOnce();
+});
+
 test("a tabled GET is forwarded and its payload returned", async () => {
   const chats = { chats: [{ conversation_id: CONVERSATION_ID }] };
   const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(chats));
