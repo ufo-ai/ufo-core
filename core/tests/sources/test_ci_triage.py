@@ -99,10 +99,18 @@ def test_required_contexts_come_from_an_unfiltered_pull_request_trigger() -> Non
         assert "name" not in jobs[context], context
 
 
-def test_gate_asserts_every_need_including_triage_itself() -> None:
+def test_gate_rejects_current_head_cancellation_and_asserts_every_need() -> None:
     gate = _jobs()["test"]
     assert gate["if"] == "always()"
-    script = "\n".join(step["run"] for step in gate["steps"])
+    assert gate["permissions"] == {"contents": "read", "pull-requests": "read"}
+    cancelled, *assertions = gate["steps"]
+    assert cancelled["if"] == "${{ contains(needs.*.result, 'cancelled') }}"
+    assert cancelled["env"]["RUN_SHA"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert 'gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha' in cancelled["run"]
+    assert 'gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME"' in cancelled["run"]
+    assert 'test "$CURRENT_SHA" != "$RUN_SHA"' in cancelled["run"]
+    assert all(step["if"] == "${{ !contains(needs.*.result, 'cancelled') }}" for step in assertions)
+    script = "\n".join(step["run"] for step in assertions)
     for need in gate["needs"]:
         assert f"needs.{need}.result" in script, need
     assert 'test "${{ needs.triage.result }}" = success' in script

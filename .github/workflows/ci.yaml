@@ -334,16 +334,38 @@ jobs:
   # run that skips anyway — a broken `if:`, a dropped need — goes red here instead of merging
   # green. The triage assertion is first and unconditional: a failed triage leaves its outputs
   # empty, every expectation would collapse to skipped, and the gate would pass with no coverage.
+  # A cancelled gate passes only when GitHub names a newer head; cancelling the current head fails.
   test:
     if: always()
     needs: [triage, test-shard, control-test, integration, wheel]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
-      - run: test "${{ needs.triage.result }}" = success
-      - run: test "${{ needs.test-shard.result }}" = "${{ needs.triage.outputs.checks == 'true' && 'success' || 'skipped' }}"
-      - run: test "${{ needs.control-test.result }}" = "${{ needs.triage.outputs.control == 'true' && 'success' || 'skipped' }}"
-      - run: test "${{ needs.integration.result }}" = "${{ github.event_name == 'push' && 'success' || 'skipped' }}"
-      - run: test "${{ needs.wheel.result }}" = "${{ needs.triage.outputs.wheel == 'true' && 'success' || 'skipped' }}"
+      - name: Require a newer head after cancellation
+        if: ${{ contains(needs.*.result, 'cancelled') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            CURRENT_SHA=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          else
+            CURRENT_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
+          fi
+          test "$CURRENT_SHA" != "$RUN_SHA"
+      - if: ${{ !contains(needs.*.result, 'cancelled') }}
+        run: test "${{ needs.triage.result }}" = success
+      - if: ${{ !contains(needs.*.result, 'cancelled') }}
+        run: test "${{ needs.test-shard.result }}" = "${{ needs.triage.outputs.checks == 'true' && 'success' || 'skipped' }}"
+      - if: ${{ !contains(needs.*.result, 'cancelled') }}
+        run: test "${{ needs.control-test.result }}" = "${{ needs.triage.outputs.control == 'true' && 'success' || 'skipped' }}"
+      - if: ${{ !contains(needs.*.result, 'cancelled') }}
+        run: test "${{ needs.integration.result }}" = "${{ github.event_name == 'push' && 'success' || 'skipped' }}"
+      - if: ${{ !contains(needs.*.result, 'cancelled') }}
+        run: test "${{ needs.wheel.result }}" = "${{ needs.triage.outputs.wheel == 'true' && 'success' || 'skipped' }}"
 
   # The workspace RLS proof uses its own SUPERUSER Postgres on :5544 (never the parallel suite's
   # :5541, nor `control-test`'s :5549). It CREATEs roles and databases, applies RLS policies, and
