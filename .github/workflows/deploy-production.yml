@@ -359,7 +359,7 @@ jobs:
             --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
           NAMESPACE="$(terraform -chdir="$TF_DIR" show -json "$RUNNER_TEMP/production.tfplan" \
             | jq -er '.planned_values.outputs.system_namespace.value')"
-          python infra/production_secret_sync.py \
+          python infra/secret_sync.py \
             "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Terraform apply

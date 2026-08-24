@@ -634,6 +634,7 @@ def test_testing_deploy_writes_provider_credentials_before_apply() -> None:
         "name": "Write testing runtime secrets",
         "if": "github.event_name != 'pull_request'",
         "env": {
+            "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
             "DAYTONA_API_KEY": "${{ secrets.DAYTONA_API_KEY }}",
             "PERPLEXITY_API_KEY": "${{ secrets.PERPLEXITY_API_KEY }}",
             "SPECTRUM_PROJECT_ID": "${{ secrets.TESTING_SPECTRUM_PROJECT_ID }}",
@@ -648,6 +649,29 @@ def test_testing_deploy_writes_provider_credentials_before_apply() -> None:
     assert set(SECRET_INPUTS.values()) <= set(write["env"])
     assert names.index("Terraform init") < names.index("Write testing runtime secrets")
     assert names.index("Write testing runtime secrets") < names.index("Terraform apply")
+
+    refresh = _step("rollout", "Refresh testing runtime secrets")
+    assert refresh == {
+        "name": "Refresh testing runtime secrets",
+        "if": "github.event_name != 'pull_request'",
+        "run": (
+            "aws eks update-kubeconfig \\\n"
+            '  --region "$AWS_REGION" \\\n'
+            '  --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"\n'
+            'NAMESPACE="$(terraform -chdir="$TF_DIR" show -json '
+            '"$RUNNER_TEMP/testing.tfplan" \\\n'
+            "  | jq -er '.planned_values.outputs.system_namespace.value')\"\n"
+            "python infra/secret_sync.py \\\n"
+            '  "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"\n'
+        ),
+    }
+    # The write publishes a new Secrets Manager version; the projection carries the previous one
+    # until the controller republishes it. Force the sync and compare bytes before the apply rolls
+    # pods, or they read the superseded value (outage 0002).
+    assert names.index("Write testing runtime secrets") < names.index(
+        "Refresh testing runtime secrets"
+    )
+    assert names.index("Refresh testing runtime secrets") < names.index("Terraform apply")
 
 
 _ADDITIVE_AUTH_DIFF = (
@@ -1052,12 +1076,14 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     )
     assert "production_review" not in jobs
     assert "production_deploy" not in jobs
-    assert not any(
-        isinstance(job, dict) and job.get("environment") == "production" for job in jobs.values()
-    )
+    # No job here declares an environment, so every `secrets.*` this workflow reads resolves to the
+    # repository value — testing's. `ANTHROPIC_API_KEY` is one name holding two credentials: the
+    # repository secret keys the testing fleet and the nightly evals, and the `production`
+    # environment secret shadows it for the production deploy alone. An environment declared on any
+    # job here would hand production's key to the testing fleet.
+    assert not any(isinstance(job, dict) and "environment" in job for job in jobs.values())
     source = (WORKFLOWS / "deploy.yml").read_text()
     for secret in (
-        "ANTHROPIC_API_KEY",
         "BROWSERBASE_API_KEY",
         "TURBOPUFFER_API_KEY",
     ):
@@ -3098,7 +3124,7 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         'NAMESPACE="$(terraform -chdir="$TF_DIR" show -json '
         '"$RUNNER_TEMP/production.tfplan" \\\n'
         "  | jq -er '.planned_values.outputs.system_namespace.value')\"\n"
-        "python infra/production_secret_sync.py \\\n"
+        "python infra/secret_sync.py \\\n"
         '  "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"\n'
     )
     assert all(
@@ -3177,9 +3203,7 @@ def test_production_refresh_reads_the_planned_namespace(tmp_path: Path) -> None:
     assert aws_call.read_text().strip() == (
         "eks update-kubeconfig --region us-east-1 --name prod-cluster"
     )
-    assert python_call.read_text().strip() == (
-        "infra/production_secret_sync.py ufo-system 30774596746-2"
-    )
+    assert python_call.read_text().strip() == ("infra/secret_sync.py ufo-system 30774596746-2")
 
 
 @pytest.mark.parametrize(

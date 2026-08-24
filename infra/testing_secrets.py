@@ -12,19 +12,19 @@ AWS_REGION = "us-east-1"
 DEPLOYMENT_ID_ENV = "TESTING_DEPLOYMENT_ID"
 SECRET_ID_ENV = "TESTING_API_KEYS_SECRET_ID"
 SECRET_INPUTS = {
+    "anthropic-api-key": "ANTHROPIC_API_KEY",
     "daytona-api-key": "DAYTONA_API_KEY",
     "perplexity-api-key": "PERPLEXITY_API_KEY",
     "spectrum-project-id": "SPECTRUM_PROJECT_ID",
     "spectrum-project-secret": "SPECTRUM_PROJECT_SECRET",
 }
 # The properties the testing fleet's own configuration selects, each with one provider and no
-# fallback: `[sandbox] backend`, the model catalog's key, `[browser] cdp_provider`, the collector's
-# only export credential, and `[memory] index_backend` (infra/envs/testing/ufo.tf). The e2b key is
-# the one a pod refuses to boot without, so it decides the deploy either here or 10 minutes into the
-# apply. Every other property the document carries belongs to a path testing does not exercise, so
-# an empty one costs nothing until someone turns that path on.
+# fallback: `[sandbox] backend`, `[browser] cdp_provider`, the collector's only export credential,
+# and `[memory] index_backend` (infra/envs/testing/ufo.tf). The e2b key is the one a pod refuses to
+# boot without, so it decides the deploy either here or 10 minutes into the apply. Every other
+# property the document carries belongs to a path testing does not exercise, so an empty one costs
+# nothing until someone turns that path on.
 REQUIRED_PROPERTIES = frozenset(SECRET_INPUTS) | {
-    "anthropic-api-key",
     "browserbase-api-key",
     "datadog-api-key",
     "e2b-api-key",

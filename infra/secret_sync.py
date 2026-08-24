@@ -136,7 +136,7 @@ def _verify(namespace: str, items: Sequence[dict]) -> None:
 
 def main(arguments: Sequence[str] = ()) -> None:
     if len(arguments) != 2:
-        raise RuntimeError("usage: production_secret_sync.py NAMESPACE DEPLOYMENT_ID")
+        raise RuntimeError("usage: secret_sync.py NAMESPACE DEPLOYMENT_ID")
     namespace, deployment_id = arguments
     items = _external_secrets(namespace)
     previous = _states(items)
@@ -161,7 +161,7 @@ def main(arguments: Sequence[str] = ()) -> None:
             _verify(namespace, items)
             return
         if time.monotonic() >= deadline:
-            raise TimeoutError("production ExternalSecrets did not publish new ready versions")
+            raise TimeoutError("ExternalSecrets did not publish new ready versions")
         time.sleep(POLL_SECONDS)
 
 

@@ -461,6 +461,7 @@ jobs:
       - name: Write testing runtime secrets
         if: github.event_name != 'pull_request'
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           SPECTRUM_PROJECT_ID: ${{ secrets.TESTING_SPECTRUM_PROJECT_ID }}
@@ -486,6 +487,17 @@ jobs:
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}
         run: terraform show -json "$RUNNER_TEMP/testing.tfplan" | python "$GITHUB_WORKSPACE/.github/scripts/terraform_plan_guard.py"
+
+      - name: Refresh testing runtime secrets
+        if: github.event_name != 'pull_request'
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$(terraform -chdir="$TF_DIR" output -raw cluster_name)"
+          NAMESPACE="$(terraform -chdir="$TF_DIR" show -json "$RUNNER_TEMP/testing.tfplan" \
+            | jq -er '.planned_values.outputs.system_namespace.value')"
+          python infra/secret_sync.py \
+            "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Terraform apply
         if: github.event_name != 'pull_request'

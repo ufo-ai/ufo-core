@@ -56,7 +56,7 @@ needs an operator.
 **Amplifier 2.** Nothing between the empty document and a crash-looping pod could see the value.
 The rollout step waits for `externalsecret/ufo-platform-secrets` to be `Ready`, and Ready says the
 controller published something, never that a value is non-empty — the same lesson
-`infra/production_secret_sync.py` already records for `ufo-egress-ca`. The apply's own error names
+`infra/secret_sync.py` already records for `ufo-egress-ca`. The apply's own error names
 `kubectl_manifest.ufo[...ufo-serve]` and no credential.
 
 ## Detection gap
@@ -93,7 +93,3 @@ without its cause. Nothing at all watches the api-keys document for an emptied p
   credential that pushed this branch may not write.
 - A Datadog monitor on a pod raising on a missing credential at boot, so the next occurrence pages
   in a minute rather than surfacing as a 10-minute apply timeout.
-- The testing rollout force-syncs the ExternalSecrets and verifies each projected value against
-  Secrets Manager byte for byte, as `infra/production_secret_sync.py` does for production. Testing
-  rolled pods against a stale projection for three minutes in this incident, which is what let run
-  32525448466 pass on values the document no longer held.

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import infra.production_secret_sync as production_secret_sync
-from infra.production_secret_sync import main
+import infra.secret_sync as secret_sync
+from infra.secret_sync import main
 
 KUBECTL_STUB = """#!/usr/bin/env python3
 import base64
@@ -98,7 +98,7 @@ def _environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path,
     monkeypatch.setenv("AWS_CALLS", str(aws_calls))
     monkeypatch.setenv("KUBECTL_STATE", str(tmp_path / "state"))
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
-    monkeypatch.setattr(production_secret_sync.time, "sleep", lambda _: None)
+    monkeypatch.setattr(secret_sync.time, "sleep", lambda _: None)
     return calls, aws_calls
 
 
@@ -145,7 +145,7 @@ def test_sync_requires_a_new_ready_version(
     _environment(monkeypatch, tmp_path)
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setattr(production_secret_sync, "TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(secret_sync, "TIMEOUT_SECONDS", 0)
 
     with pytest.raises(TimeoutError, match="did not publish new ready versions"):
         main(("ufo-system", "run-1"))
@@ -237,7 +237,7 @@ def test_sync_rejects_a_data_from_projection_it_cannot_compare(
 
 
 def test_sync_rejects_unknown_arguments() -> None:
-    with pytest.raises(RuntimeError, match=r"usage: production_secret_sync\.py"):
+    with pytest.raises(RuntimeError, match=r"usage: secret_sync\.py"):
         main(("ufo-system",))
 
 
