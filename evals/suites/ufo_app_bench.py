@@ -13,8 +13,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
-from html import unescape
-from html.parser import HTMLParser
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -73,6 +71,8 @@ HOUSE_STYLE_SKILL = "ufo-style"
 SITE_SKILL = "website-building"
 AUDIT_CONTENT = Path(__file__).with_name("ufo_app_bench_audit.cjs").read_bytes()
 COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read_bytes()
+AUDIT_DIGEST = sha256(AUDIT_CONTENT).hexdigest()
+COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()
 PROBE_OUTPUT = ".eval-output"
 PROBE_PORT = 8137
 PROBE_TIMEOUT_SECONDS = 120
@@ -373,78 +373,26 @@ class _ConnectedAppSeed:
                 )
 
 
-class _VisibleText(HTMLParser):
-    BOUNDARY_TAGS = frozenset(
-        {
-            "address",
-            "article",
-            "aside",
-            "blockquote",
-            "br",
-            "div",
-            "dl",
-            "fieldset",
-            "figcaption",
-            "figure",
-            "footer",
-            "form",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "header",
-            "hr",
-            "li",
-            "main",
-            "nav",
-            "ol",
-            "p",
-            "pre",
-            "section",
-            "table",
-            "tr",
-            "ul",
-        }
+def _rendered_parts(output: CapabilityOutput) -> tuple[str, tuple[str, ...]] | None:
+    reports = tuple(
+        artifact for artifact in output.artifacts if artifact.name.endswith("-audit.json")
     )
-    HIDDEN_TAGS = frozenset({"noscript", "script", "style", "template"})
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.hidden = 0
-        self.parts: list[str] = []
-        self.pending_space = False
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in self.HIDDEN_TAGS:
-            self.hidden += 1
-        if tag in self.BOUNDARY_TAGS:
-            self.pending_space = bool(self.parts)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in self.HIDDEN_TAGS and self.hidden:
-            self.hidden -= 1
-        if tag in self.BOUNDARY_TAGS:
-            self.pending_space = bool(self.parts)
-
-    def handle_data(self, data: str) -> None:
-        if self.hidden:
-            return
-        data = unescape(data)
-        text = " ".join(data.split())
-        if not text:
-            self.pending_space = self.pending_space or bool(data)
-            return
-        prefix = " " if self.parts and (self.pending_space or data[0].isspace()) else ""
-        self.parts.append(f"{prefix}{text}")
-        self.pending_space = data[-1].isspace()
-
-
-def _visible_parts(content: bytes) -> tuple[str, ...]:
-    parser = _VisibleText()
-    parser.feed(content.decode(errors="replace"))
-    return tuple(parser.parts)
+    if len(reports) != 1:
+        return None
+    try:
+        views = json.loads(reports[0].content)["views"]
+        view = next(
+            item
+            for item in views
+            if item["scheme"] == "light" and int(item["width"]) == DESKTOP_WIDTH
+        )
+        text = view["renderedText"]
+        parts = tuple(view["renderedParts"])
+    except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(text, str) or not all(isinstance(part, str) for part in parts):
+        return None
+    return text, parts
 
 
 def _source_copy(
@@ -492,19 +440,17 @@ def _requirement_scorer(spec: _ConnectedApp) -> Grader:
     )
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        pages = tuple(
-            artifact for artifact in output.artifacts if artifact.name.endswith("-static.html")
-        )
-        if len(pages) != 1:
+        rendered = _rendered_parts(output)
+        if rendered is None:
             return CapabilityVerdict(
                 False,
-                f"captured {len(pages)} static app pages",
+                "app audit report has no rendered desktop text",
                 _score_evidence("appSource", 0, total),
             )
-        parts = _visible_parts(pages[0].content)
-        text = "".join(parts).casefold()
+        rendered_text, parts = rendered
+        text = rendered_text.casefold()
         passages = tuple(
-            "".join(parts[start : start + width])
+            " ".join(parts[start : start + width])
             for start in range(len(parts))
             for width in range(1, SOURCE_COPY_WINDOW_PARTS + 1)
             if start + width <= len(parts)
@@ -548,9 +494,9 @@ def _requirement_scorer(spec: _ConnectedApp) -> Grader:
             )
             passed += len(requirement.visible_any) - len(missing_any)
             if missing_any:
-                rendered = tuple(" or ".join(items) for items in missing_any[:4])
+                labels = tuple(" or ".join(items) for items in missing_any[:4])
                 failures.append(
-                    f"{requirement.prompt} lacks rendered facts: {', '.join(rendered)}",
+                    f"{requirement.prompt} lacks rendered facts: {', '.join(labels)}",
                 )
             copied = tuple(item for item in requirement.absent if item.casefold() in text)
             if copied:
@@ -656,15 +602,13 @@ def _copy_scorer(spec: _ConnectedApp) -> Grader:
         raise ValueError(f"copy case {spec.name!r} has no rewrite source")
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        pages = tuple(
-            artifact for artifact in output.artifacts if artifact.name.endswith("-static.html")
-        )
-        if len(pages) != 1:
-            return CapabilityVerdict(False, f"captured {len(pages)} static app pages")
-        parts = _visible_parts(pages[0].content)
-        text = "".join(parts).casefold()
+        rendered = _rendered_parts(output)
+        if rendered is None:
+            return CapabilityVerdict(False, "app audit report has no rendered desktop text")
+        rendered_text, parts = rendered
+        text = rendered_text.casefold()
         passages = tuple(
-            "".join(parts[start : start + width])
+            " ".join(parts[start : start + width])
             for start in range(len(parts))
             for width in range(1, SOURCE_COPY_WINDOW_PARTS + 1)
             if start + width <= len(parts)
@@ -708,9 +652,9 @@ def _copy_scorer(spec: _ConnectedApp) -> Grader:
                 if not any(item.casefold() in text for item in alternatives)
             )
             if missing_any:
-                rendered = tuple(" or ".join(items) for items in missing_any[:4])
+                labels = tuple(" or ".join(items) for items in missing_any[:4])
                 failures.append(
-                    f"{requirement.prompt} lacks rendered source facts: {', '.join(rendered)}"
+                    f"{requirement.prompt} lacks rendered source facts: {', '.join(labels)}"
                 )
             copied = tuple(item for item in requirement.absent if item.casefold() in text)
             if copied:
@@ -878,11 +822,20 @@ class _AppCopyProbe:
         if result.exit_code != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "no command output"
             return ArtifactProbeResult(error=f"app copy probe failed: {detail[:500]}")
-        path = directory / f"{self.name}-static.html"
-        if not path.is_file():
-            return ArtifactProbeResult(error=f"app copy probe produced no {path.name}")
-        content = await asyncio.to_thread(path.read_bytes)
-        return ArtifactProbeResult(artifacts=(SharedArtifact(path.name, content),))
+        paths = (
+            directory / f"{self.name}-static.html",
+            directory / f"{self.name}-audit.json",
+        )
+        missing = [path.name for path in paths if not path.is_file()]
+        if missing:
+            return ArtifactProbeResult(error=f"app copy probe produced no {', '.join(missing)}")
+        contents = await asyncio.gather(*(asyncio.to_thread(path.read_bytes) for path in paths))
+        return ArtifactProbeResult(
+            artifacts=tuple(
+                SharedArtifact(path.name, content)
+                for path, content in zip(paths, contents, strict=True)
+            )
+        )
 
     def _command(self) -> str:
         directory = f"/workspace/{PROBE_OUTPUT}/{self.name}"
@@ -929,7 +882,7 @@ PY"""
             f"{readiness}\n"
             "node /tmp/ufo-app-copy-capture.cjs "
             f'http://localhost:{PROBE_PORT}/$(basename "$page") '
-            f'"$capture/{self.name}-static.html"'
+            f'"$capture/{self.name}-static.html" "$capture/{self.name}-audit.json"'
         )
 
 
@@ -1448,7 +1401,7 @@ def _screen(
         digest_tag=(
             f"ufo-app-bench:{name}:interactive-homepage:qa-total-{MAX_BROWSER_QA_CALLS}:"
             "redeploy-1:"
-            f"wait-{WORKFLOW_WAIT_SECONDS:g}{data_digest}"
+            f"wait-{WORKFLOW_WAIT_SECONDS:g}:audit-{AUDIT_DIGEST[:12]}{data_digest}"
         ),
         artifact_probe=_AppBenchProbe(name),
         seed=seed,
@@ -1512,7 +1465,8 @@ COPY_CASES = tuple(
         ),
         digest_tag=(
             f"ufo-app-copy:{spec.name}:source-use-and-reader-copy:"
-            f"wait-{WORKFLOW_WAIT_SECONDS:g}:data-{APP_DATA_DIGEST[:12]}"
+            f"wait-{WORKFLOW_WAIT_SECONDS:g}:capture-{COPY_CAPTURE_DIGEST[:12]}:"
+            f"data-{APP_DATA_DIGEST[:12]}"
         ),
         artifact_probe=_AppCopyProbe(spec.name),
         seed=_ConnectedAppSeed(spec),

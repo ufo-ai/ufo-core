@@ -8,9 +8,9 @@ const { chromium } = (() => {
 const fs = require('fs');
 
 (async () => {
-  const [url, staticPath] = process.argv.slice(2);
-  if (!url || !staticPath) {
-    console.error('usage: node app-copy-capture.cjs <url> <static.html>');
+  const [url, staticPath, reportPath] = process.argv.slice(2);
+  if (!url || !staticPath || !reportPath) {
+    console.error('usage: node app-copy-capture.cjs <url> <static.html> <audit.json>');
     process.exit(2);
   }
   const browser = await chromium.launch();
@@ -18,6 +18,17 @@ const fs = require('fs');
   const page = await context.newPage();
   await page.goto(url, { waitUntil: 'load' });
   await page.waitForTimeout(700);
+  const rendered = await page.evaluate(() => {
+    const raw = document.body.innerText.slice(0, 40000);
+    return {
+      renderedText: raw.replace(/\s+/g, ' ').trim(),
+      renderedParts: raw.split(/\n+/)
+        .map((part) => part.replace(/\s+/g, ' ').trim()).filter(Boolean),
+    };
+  });
+  fs.writeFileSync(reportPath, JSON.stringify({
+    views: [{ scheme: 'light', width: 1440, ...rendered }],
+  }, null, 2));
   const styles = await page.evaluate(() =>
     Array.from(document.styleSheets)
       .flatMap((sheet) => {

@@ -53,13 +53,29 @@ function measure(floor) {
     const second = luminance(other);
     return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
   };
-  const visuallyHidden = (element, style, box) =>
-    element.closest('[aria-hidden="true"]') !== null ||
+  const visuallyHidden = (style, box) =>
     (style.position === 'absolute' &&
       style.overflow === 'hidden' &&
       box.width <= 2 &&
       box.height <= 2 &&
       (style.clip !== 'auto' || style.clipPath !== 'none'));
+  const visible = (element, box) => {
+    if (box.width === 0 || box.height === 0 || element.closest('[aria-hidden="true"]')) return false;
+    const closedDetails = element.closest('details:not([open])');
+    if (closedDetails) {
+      const summary = element.closest('summary');
+      if (!summary || summary.parentElement !== closedDetails) return false;
+    }
+    for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+      const style = getComputedStyle(ancestor);
+      const ancestorBox = ancestor.getBoundingClientRect();
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+      if (style.contentVisibility === 'hidden') return false;
+      if (parseFloat(style.opacity) < 0.15) return false;
+      if (visuallyHidden(style, ancestorBox)) return false;
+    }
+    return true;
+  };
   // The first opaque backdrop behind the element: every translucent background on the way up is
   // composited, so a label on a tinted chip is measured against what the eye actually sees.
   const backdrop = (element) => {
@@ -87,11 +103,8 @@ function measure(floor) {
     const words = (element.textContent || '').trim();
     if (!words) continue;
     const box = element.getBoundingClientRect();
-    if (box.width === 0 || box.height === 0) continue;
     const style = getComputedStyle(element);
-    if (style.visibility === 'hidden' || style.display === 'none') continue;
-    if (visuallyHidden(element, style, box)) continue;
-    if (parseFloat(style.opacity) < 0.15) continue;
+    if (!visible(element, box)) continue;
     const foreground = parse(style.color);
     if (!foreground) continue;
     const behind = backdrop(element);
@@ -119,62 +132,58 @@ function measure(floor) {
     });
   }
 
-  const visibleAboveFold = (element, box) => {
-    if (
-      box.width === 0 ||
-      box.height === 0 ||
-      box.bottom <= 0 ||
-      box.top >= window.innerHeight ||
-      box.right <= 0 ||
-      box.left >= window.innerWidth
-    ) {
-      return false;
-    }
-    const closedDetails = element.closest('details:not([open])');
-    if (closedDetails) {
-      const summary = element.closest('summary');
-      if (!summary || summary.parentElement !== closedDetails) return false;
-    }
-    for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
-      const style = getComputedStyle(ancestor);
-      const ancestorBox = ancestor.getBoundingClientRect();
-      if (style.visibility === 'hidden' || style.display === 'none') return false;
-      if (style.contentVisibility === 'hidden') return false;
-      if (parseFloat(style.opacity) < 0.15) return false;
-      if (visuallyHidden(ancestor, style, ancestorBox)) return false;
-      if (
-        style.overflowX !== 'visible' &&
-        (box.right <= ancestorBox.left || box.left >= ancestorBox.right)
-      ) {
-        return false;
-      }
-      if (
-        style.overflowY !== 'visible' &&
-        (box.bottom <= ancestorBox.top || box.top >= ancestorBox.bottom)
-      ) {
-        return false;
-      }
-    }
-    return true;
+  const paintedAboveFold = (node, rect) => {
+    const left = Math.max(0, rect.left);
+    const right = Math.min(window.innerWidth, rect.right);
+    const top = Math.max(0, rect.top);
+    const bottom = Math.min(window.innerHeight, rect.bottom);
+    if (left >= right || top >= bottom) return false;
+    const points = [0.2, 0.5, 0.8];
+    return points.some((part) => {
+      const x = left + (right - left) * part;
+      const y = top + (bottom - top) / 2;
+      const range = document.caretRangeFromPoint(x, y);
+      return (range && range.startContainer === node) ||
+        document.elementsFromPoint(x, y).some(
+          (element) => element === node.parentElement || node.parentElement.contains(element)
+        );
+    });
   };
 
-  const hiddenText = [];
+  const rawRenderedText = document.body.innerText.slice(0, 40000);
+  const renderedText = rawRenderedText.replace(/\s+/g, ' ').trim();
+  const renderedParts = rawRenderedText.split(/\n+/)
+    .map((part) => part.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const foldedRenderedText = renderedText.toLocaleLowerCase();
+  const visibleRanges = [];
+  let renderedCursor = 0;
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const element = node.parentElement;
-    if (!element) continue;
+    if (!element || ['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(element.tagName)) continue;
+    const words = node.data.replace(/\s+/g, ' ').trim();
+    if (!words) continue;
     const range = document.createRange();
     range.selectNodeContents(node);
+    const rects = Array.from(range.getClientRects());
     const box = range.getBoundingClientRect();
-    if (!visibleAboveFold(element, box)) hiddenText.push([node, node.data]);
+    if (!visible(element, box)) continue;
+    const start = foldedRenderedText.indexOf(words.toLocaleLowerCase(), renderedCursor);
+    if (start < 0) continue;
+    const end = start + words.length;
+    renderedCursor = end;
+    if (rects.some((rect) => paintedAboveFold(node, rect))) {
+      visibleRanges.push([start, end]);
+    }
   }
-  for (const [node] of hiddenText) node.data = '';
-  let aboveFoldText;
-  try {
-    aboveFoldText = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 40000);
-  } finally {
-    for (const [node, value] of hiddenText) node.data = value;
+  let aboveFoldText = '';
+  let priorEnd = 0;
+  for (const [start, end] of visibleRanges) {
+    if (aboveFoldText && start > priorEnd) aboveFoldText += ' ';
+    aboveFoldText += renderedText.slice(start, end);
+    priorEnd = end;
   }
+  aboveFoldText = aboveFoldText.replace(/\s+/g, ' ').trim().slice(0, 40000);
 
   const wider = [];
   const clipped = [];
@@ -182,7 +191,7 @@ function measure(floor) {
     const box = element.getBoundingClientRect();
     if (box.width === 0 || box.height === 0) continue;
     const style = getComputedStyle(element);
-    if (visuallyHidden(element, style, box)) continue;
+    if (!visible(element, box)) continue;
     const name =
       element.tagName.toLowerCase() +
       (element.className ? '.' + String(element.className).trim().split(/\s+/)[0] : '');
@@ -203,6 +212,8 @@ function measure(floor) {
     textChecked: checked,
     textUnderFloor: underFloor,
     text,
+    renderedText,
+    renderedParts,
     aboveFoldText,
     pastViewport: wider.slice(0, 12),
     clipped: clipped.slice(0, 8),

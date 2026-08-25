@@ -1,6 +1,7 @@
 """Deterministic artifact graders inspect delivered bytes, not filenames or claims."""
 
 import asyncio
+import subprocess
 import sys
 from dataclasses import replace
 from gzip import compress
@@ -65,10 +66,12 @@ from evals.suites.ufo_app_bench import (
     APP_UNIVERSE_EVENTS,
     APP_UNIVERSE_TOOLS,
     AUDIT_CONTENT,
+    AUDIT_DIGEST,
     CONNECTED_APPS,
     CONNECTED_CASES,
     CONTROL_CASES,
     COPY_CAPTURE_CONTENT,
+    COPY_CAPTURE_DIGEST,
     COPY_CASES,
     DESKTOP_HEIGHT,
     DESKTOP_WIDTH,
@@ -99,7 +102,6 @@ from evals.suites.ufo_app_bench import (
     _rewrite_source_call,
     _score_app_report,
     _source_copy,
-    _visible_parts,
 )
 from evals.suites.ufo_app_bench import CASES as BENCH_CASES
 from evals.suites.ufo_app_bench import (
@@ -249,9 +251,8 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     source = AUDIT_CONTENT.decode()
 
     assert "document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)" in source
-    assert "box.right <= 0" in source
-    assert "style.overflowX !== 'visible'" in source
-    assert "document.body.innerText.replace(/\\s+/g, ' ').trim()" in source
+    assert "document.caretRangeFromPoint" in source
+    assert "renderedParts" in source
     assert "script.setAttribute('src', await asDataUrl(resource))" in source
     assert "link.replaceWith(style)" in source
     assert "image.setAttribute('src', await asDataUrl(resource))" in source
@@ -264,27 +265,83 @@ def test_app_copy_capture_renders_one_static_dom_without_screenshots() -> None:
 
     assert "await page.goto(url, { waitUntil: 'load' })" in source
     assert "fs.writeFileSync(staticPath, await page.content())" in source
+    assert "renderedText" in source
     assert "page.screenshot" not in source
     assert "interactionAudit" not in source
 
 
-def test_visible_parts_preserve_inline_tokens_and_collapse_source_space() -> None:
-    content = b"""
+@pytest.mark.docker
+def test_app_bench_audit_reads_the_page_chromium_paints(
+    sandbox_container: tuple[str, Path],
+) -> None:
+    container, workspace = sandbox_container
+    (workspace / "app-audit.cjs").write_bytes(AUDIT_CONTENT)
+    (workspace / "fixture.html").write_text(
+        """
+        <style>
+          body { overflow-x: hidden }
+          .flex { display: flex }
+          .clip { overflow: hidden; width: 100px; height: 20px }
+          .off { display: inline-block; transform: translateX(200px) }
+          .fixed { position: fixed; bottom: 20px; left: 20px }
+          .below { margin-top: 1000px }
+          .card { position: relative }
+          .overlay { position: absolute; inset: 0 }
+        </style>
         <main>
           <p>$<span>48,000</span> and <strong>78</strong>% at <code>2.4</code>x.</p>
-          <button>Review in <b>chat</b></button>
-          <div>Product design
-            sync</div>
-          <script>hidden fact</script>
+          <div class="flex"><span>2</span><span>open</span></div>
+          <table><tr><td>Product design</td><td>sync</td></tr></table>
+          <div class="clip"><span class="off">off-canvas fact</span></div>
+          <div class="clip"><span class="fixed">fixed bar fact</span></div>
+          <div class="card"><span>covered fact</span><a class="overlay" href="#"></a></div>
+          <span style="display: none">responsive fact</span><span>responsive fact</span>
+          <details><summary>More</summary><p>closed fact</p></details>
+          <p class="below">below-fold fact</p>
         </main>
-    """
+        """
+    )
+    command = """
+python3 -m http.server 8765 --bind 127.0.0.1 --directory /workspace >/tmp/audit-http.log 2>&1 &
+server=$!
+trap 'kill "$server"' EXIT
+for attempt in $(seq 1 50); do
+  curl -fsS http://127.0.0.1:8765/fixture.html >/dev/null && break
+done
+node /workspace/app-audit.cjs http://127.0.0.1:8765/fixture.html \
+  /workspace/report.json /workspace/light.png /workspace/dark.png \
+  /workspace/interactive.html /workspace/static.html
+"""
 
-    assert "".join(_visible_parts(content)) == (
-        "$48,000 and 78% at 2.4x. Review in chat Product design sync"
+    subprocess.run(
+        ("docker", "exec", container, "bash", "-lc", command),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    report = loads((workspace / "report.json").read_bytes())
+    view = next(
+        item
+        for item in report["views"]
+        if item["scheme"] == "light" and item["width"] == DESKTOP_WIDTH
     )
 
+    assert "$48,000 and 78% at 2.4x." in view["renderedText"]
+    assert "2 open" in view["renderedText"]
+    assert "Product design sync" in view["renderedText"]
+    assert "$48,000 and 78% at 2.4x." in view["aboveFoldText"]
+    assert "2 open" in view["aboveFoldText"]
+    assert "Product design sync" in view["aboveFoldText"]
+    assert "fixed bar fact" in view["aboveFoldText"]
+    assert "covered fact" in view["aboveFoldText"]
+    assert "responsive fact" in view["aboveFoldText"]
+    assert "off-canvas fact" not in view["aboveFoldText"]
+    assert "closed fact" not in view["aboveFoldText"]
+    assert "below-fold fact" not in view["aboveFoldText"]
 
-async def test_app_copy_probe_returns_only_the_browser_rendered_dom(tmp_path: Path) -> None:
+
+async def test_app_copy_probe_returns_the_browser_rendered_dom_and_text(tmp_path: Path) -> None:
     class Probe:
         async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
             assert "ufo-app-copy-capture.cjs" in command
@@ -292,6 +349,7 @@ async def test_app_copy_probe_returns_only_the_browser_rendered_dom(tmp_path: Pa
             directory = tmp_path / ".eval-output" / "meeting-tasks"
             directory.mkdir(parents=True)
             (directory / "meeting-tasks-static.html").write_bytes(b"<main>Rendered</main>")
+            (directory / "meeting-tasks-audit.json").write_bytes(b'{"views": []}')
             return ProbeCommandResult(0, "", "")
 
     result = await _AppCopyProbe("meeting-tasks")(
@@ -301,6 +359,7 @@ async def test_app_copy_probe_returns_only_the_browser_rendered_dom(tmp_path: Pa
     assert result.error == ""
     assert result.artifacts == (
         SharedArtifact("meeting-tasks-static.html", b"<main>Rendered</main>"),
+        SharedArtifact("meeting-tasks-audit.json", b'{"views": []}'),
     )
 
 
@@ -631,6 +690,8 @@ def _measured(**overrides: object) -> bytes:
             "textChecked": 40,
             "textUnderFloor": 0,
             "text": [],
+            "renderedText": "",
+            "renderedParts": [],
             "aboveFoldText": "",
             "pastViewport": [],
             "clipped": [],
@@ -1069,6 +1130,7 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in case.digest_tag
         assert "interactive-homepage" in case.digest_tag
         assert f"qa-total-{MAX_BROWSER_QA_CALLS}:redeploy-1" in case.digest_tag
+        assert AUDIT_DIGEST[:12] in case.digest_tag
         shots = {f"{case.name}-{scheme}.png": _png() for scheme in SCHEMES}
         report = {f"{case.name}-audit.json": _measured()}
         pages = {
@@ -1196,6 +1258,48 @@ def test_copy_cases_reuse_connected_prompts_fixtures_and_browser_rendering() -> 
         assert copy_case.artifact_rubric == ()
         assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in copy_case.digest_tag
         assert APP_DATA_DIGEST[:12] in copy_case.digest_tag
+        assert COPY_CAPTURE_DIGEST[:12] in copy_case.digest_tag
+
+
+def _rendered_artifacts(name: str, text: str) -> tuple[SharedArtifact, ...]:
+    report = loads(_measured(renderedText=text, renderedParts=[text]))
+    return (
+        SharedArtifact(f"{name}-static.html", f"<main>{text}</main>".encode()),
+        SharedArtifact(f"{name}-audit.json", dumps(report).encode()),
+    )
+
+
+def _replace_rendered_text(output: CapabilityOutput, old: bytes, new: bytes) -> CapabilityOutput:
+    artifacts = []
+    for artifact in output.artifacts:
+        if artifact.name.endswith("-static.html"):
+            artifacts.append(replace(artifact, content=artifact.content.replace(old, new)))
+            continue
+        report = loads(artifact.content)
+        for view in report["views"]:
+            if view["scheme"] == "light" and view["width"] == DESKTOP_WIDTH:
+                view["renderedText"] = view["renderedText"].replace(old.decode(), new.decode())
+                view["renderedParts"] = [
+                    part.replace(old.decode(), new.decode()) for part in view["renderedParts"]
+                ]
+        artifacts.append(replace(artifact, content=dumps(report).encode()))
+    return replace(output, artifacts=tuple(artifacts))
+
+
+def _append_rendered_text(output: CapabilityOutput, text: str) -> CapabilityOutput:
+    artifacts = []
+    for artifact in output.artifacts:
+        if artifact.name.endswith("-static.html"):
+            content = artifact.content.replace(b"</main>", f" {text}</main>".encode())
+            artifacts.append(replace(artifact, content=content))
+            continue
+        report = loads(artifact.content)
+        for view in report["views"]:
+            if view["scheme"] == "light" and view["width"] == DESKTOP_WIDTH:
+                view["renderedText"] = f"{view['renderedText']} {text}"
+                view["renderedParts"].append(text)
+        artifacts.append(replace(artifact, content=dumps(report).encode()))
+    return replace(output, artifacts=tuple(artifacts))
 
 
 def _copy_output(
@@ -1237,11 +1341,7 @@ def _copy_output(
     return CapabilityOutput(
         "Built app",
         tuple(calls),
-        artifacts=(
-            SharedArtifact(
-                f"{spec.name}-static.html", f"<main>{visible} {content}</main>".encode()
-            ),
-        ),
+        artifacts=_rendered_artifacts(spec.name, f"{visible} {content}"),
     )
 
 
@@ -1315,7 +1415,7 @@ def _connected_requirement_output(
     return CapabilityOutput(
         "Built app",
         tuple(calls),
-        artifacts=(SharedArtifact(f"{spec.name}-static.html", f"<main>{visible}</main>".encode()),),
+        artifacts=_rendered_artifacts(spec.name, visible),
     )
 
 
@@ -1413,17 +1513,10 @@ def test_every_copy_source_fails_and_every_reader_rewrite_passes() -> None:
 async def test_connected_app_requirement_grader_rejects_a_light_source_edit() -> None:
     spec = CONNECTED_APPS[0]
     output = _connected_requirement_output(spec)
-    page = output.artifacts[0]
-    edited = (
-        page.content
-        + b"<p>Please leverage cross functional alignment to support the renewal motion.</p>"
-    )
-
     verdict = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(SharedArtifact(page.name, edited),),
+        _append_rendered_text(
+            output,
+            "Please leverage cross functional alignment to support the renewal motion.",
         )
     )
 
@@ -1434,31 +1527,16 @@ async def test_connected_app_requirement_grader_rejects_a_light_source_edit() ->
 async def test_connected_app_requirement_grader_accepts_one_visible_format() -> None:
     spec = CONNECTED_APPS[0]
     output = _connected_requirement_output(spec)
-    page = output.artifacts[0]
-    content = page.content.replace(b"12 August", b"Aug 12").replace(b"21 August", b"Aug 21")
+    content = _replace_rendered_text(output, b"12 August", b"Aug 12")
+    content = _replace_rendered_text(content, b"21 August", b"Aug 21")
 
-    verdict = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(SharedArtifact(page.name, content),),
-        )
-    )
+    verdict = await _requirement_scorer(spec)(content)
 
     assert verdict.passed, verdict.reason
 
-    missing = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(
-                SharedArtifact(
-                    page.name,
-                    page.content.replace(b"12 August", b"").replace(b"21 August", b""),
-                ),
-            ),
-        )
-    )
+    missing_output = _replace_rendered_text(output, b"12 August", b"")
+    missing_output = _replace_rendered_text(missing_output, b"21 August", b"")
+    missing = await _requirement_scorer(spec)(missing_output)
     assert not missing.passed
     assert "12 August or Aug 12" in missing.reason
 
@@ -1466,15 +1544,8 @@ async def test_connected_app_requirement_grader_accepts_one_visible_format() -> 
 async def test_code_review_requirement_accepts_reader_safe_thread_count_copy() -> None:
     spec = next(item for item in CONNECTED_APPS if item.name == "code-review-queue")
     output = _connected_requirement_output(spec)
-    page = output.artifacts[0]
-    content = page.content.replace(b"2 unresolved", b"2 open threads")
-
     verdict = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(SharedArtifact(page.name, content),),
-        )
+        _replace_rendered_text(output, b"2 unresolved", b"2 open threads")
     )
 
     assert verdict.passed, verdict.reason
@@ -1483,18 +1554,12 @@ async def test_code_review_requirement_accepts_reader_safe_thread_count_copy() -
 async def test_code_review_requirement_accepts_failed_check_and_labeled_thread_count() -> None:
     spec = next(item for item in CONNECTED_APPS if item.name == "code-review-queue")
     output = _connected_requirement_output(spec)
-    page = output.artifacts[0]
-    content = page.content.replace(b"failing", b"Failed").replace(
-        b"2 unresolved", b"Threads \xc2\xb7 Issue 2 \xc2\xb7 #602"
+    content = _replace_rendered_text(output, b"failing", b"Failed")
+    content = _replace_rendered_text(
+        content, b"2 unresolved", b"Threads \xc2\xb7 Issue 2 \xc2\xb7 #602"
     )
 
-    verdict = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(SharedArtifact(page.name, content),),
-        )
-    )
+    verdict = await _requirement_scorer(spec)(content)
 
     assert verdict.passed, verdict.reason
 
@@ -1502,18 +1567,10 @@ async def test_code_review_requirement_accepts_failed_check_and_labeled_thread_c
 async def test_issue_planner_requirement_accepts_reader_safe_intent_copy() -> None:
     spec = next(item for item in CONNECTED_APPS if item.name == "issue-planner")
     output = _connected_requirement_output(spec)
-    page = output.artifacts[0]
-    content = page.content.replace(b"Needs product", b"Product Decisions").replace(
-        b"Review plan in chat", b"Prepare Chat Intent"
-    )
+    content = _replace_rendered_text(output, b"Needs product", b"Product Decisions")
+    content = _replace_rendered_text(content, b"Review plan in chat", b"Prepare Chat Intent")
 
-    verdict = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(SharedArtifact(page.name, content),),
-        )
-    )
+    verdict = await _requirement_scorer(spec)(content)
 
     assert verdict.passed, verdict.reason
 
@@ -1521,16 +1578,10 @@ async def test_issue_planner_requirement_accepts_reader_safe_intent_copy() -> No
 async def test_startup_metrics_requirement_accepts_stated_customer_churn() -> None:
     spec = next(item for item in CONNECTED_APPS if item.name == "startup-metrics")
     output = _connected_requirement_output(spec)
-    page = output.artifacts[0]
-    content = page.content.replace(b"16%", b"25.0%").replace(b"4 subscriptions", b"4 total")
+    content = _replace_rendered_text(output, b"16%", b"25.0%")
+    content = _replace_rendered_text(content, b"4 subscriptions", b"4 total")
 
-    verdict = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(SharedArtifact(page.name, content),),
-        )
-    )
+    verdict = await _requirement_scorer(spec)(content)
 
     assert verdict.passed, verdict.reason
 
@@ -1538,16 +1589,7 @@ async def test_startup_metrics_requirement_accepts_stated_customer_churn() -> No
 async def test_engineering_metrics_requirement_accepts_compact_hour_copy() -> None:
     spec = next(item for item in CONNECTED_APPS if item.name == "engineering-metrics")
     output = _connected_requirement_output(spec)
-    page = output.artifacts[0]
-    content = page.content.replace(b"10 hours", b"10h")
-
-    verdict = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(SharedArtifact(page.name, content),),
-        )
-    )
+    verdict = await _requirement_scorer(spec)(_replace_rendered_text(output, b"10 hours", b"10h"))
 
     assert verdict.passed, verdict.reason
 
@@ -1555,18 +1597,10 @@ async def test_engineering_metrics_requirement_accepts_compact_hour_copy() -> No
 async def test_account_health_requirement_accepts_direct_action_copy() -> None:
     spec = next(item for item in CONNECTED_APPS if item.name == "account-health")
     output = _connected_requirement_output(spec)
-    page = output.artifacts[0]
-    content = page.content.replace(b"Resolve invoice export", b"Own the invoice mismatch").replace(
-        b"Contact Dana", b"Call Dana"
-    )
+    content = _replace_rendered_text(output, b"Resolve invoice export", b"Own the invoice mismatch")
+    content = _replace_rendered_text(content, b"Contact Dana", b"Call Dana")
 
-    verdict = await _requirement_scorer(spec)(
-        CapabilityOutput(
-            output.response,
-            output.calls,
-            artifacts=(SharedArtifact(page.name, content),),
-        )
-    )
+    verdict = await _requirement_scorer(spec)(content)
 
     assert verdict.passed, verdict.reason
 

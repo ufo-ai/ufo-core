@@ -9,7 +9,7 @@ creation flow. A phase passes only when its gate has recorded evidence. The stat
 | Phase | Goal | Status | Gate evidence |
 |---|---|---|---|
 | 1. House system | Give pages of ours one exact visual system. | Passed | `ufo-style` tokens, dependent skills, routing checks, and theme tests. |
-| 2. App bench | Keep three presentation controls, one rework control, and a connected data-backed app set. | Active | Run `357d81f3` records the final ten-app boundary: 0/10 binary, 0.807 product, 0.733 process, and one Google provider failure. Exact source coverage, first-screen density, interaction, visual taste, and process now report separately. |
+| 2. App bench | Keep three presentation controls, one rework control, and a connected data-backed app set. | Active | Run `357d81f3` records one ten-app comparison identity: 0/10 binary, 0.807 product, 0.733 process, and one Google provider failure. Exact source coverage, first-screen density, interaction, visual taste, and process report separately. |
 | 3. Instructions | Add only skill or tool text that the bench proves useful. | Passed | Run `159d6126` keeps the compact build contract at 0.954 product versus 0.846. The QA sentence and component guidance are rejected. |
 | 4. App agents | Test dedicated profiles and models on matched work. | Passed | The model screens record cost, quality, and process behavior. They do not change the main agent or prescribe the build topology. |
 | 5. Build pipeline | Split independent build work behind explicit artifacts. | Queued | Application source, build ownership, and acceptance are separate typed boundaries. |
@@ -371,7 +371,7 @@ status hues still fail the house palette. Deterministic AA failures remain hard 
 
 ### Final frontier
 
-Run `357d81f3` has 0.900 delivery, 0.820 source coverage, 0.685 above-fold density, 0.775 page
+For its stored comparison identity, run `357d81f3` has 0.900 delivery, 0.820 source coverage, 0.685 above-fold density, 0.775 page
 audit, 0.800 interaction, and 0.864 visual taste. Four cases use valid browser QA. The main defects
 are missing or buried facts, copied source prose, custom accent text below AA, one clipboard page
 error, and one-batch browser proof. The Google provider rejects startup metrics before its first
