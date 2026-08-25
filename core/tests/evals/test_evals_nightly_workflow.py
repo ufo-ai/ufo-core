@@ -66,6 +66,13 @@ def test_every_shard_runs_its_suites_under_a_pack_that_accepts_them(planner) -> 
             assert shard.pack in bound.get(suite, (shard.pack,)), (shard.label, suite)
 
 
+def test_an_agent_specific_suite_runs_in_its_own_shard(planner) -> None:
+    shard = next(shard for shard in planner.plan(smoke=False) if "code_review" in shard.suites)
+
+    assert shard.agent == "code-review"
+    assert shard.suites == ("code_review",)
+
+
 def test_a_suite_bound_to_no_planned_pack_fails_the_plan(planner, monkeypatch) -> None:
     stranded = tuple(
         dataclasses.replace(task, packs=("no_such_pack",)) if task.name == "basics" else task
@@ -109,6 +116,13 @@ def test_a_written_shard_is_input_the_stack_accepts(planner, tmp_path: Path) -> 
         assert config["pack"]["name"] == shard.pack
         assert [spec.label for spec in matrix.run] == [shard.label]
         assert matrix.run[0].args[-len(shard.suites) :] == shard.suites
+        if shard.agent is not None:
+            assert matrix.run[0].args[:4] == (
+                "--concurrency",
+                str(planner.CONCURRENCY),
+                "--agent",
+                shard.agent,
+            )
 
 
 def test_the_workflow_fans_out_over_the_planned_shards(workflow) -> None:

@@ -60,6 +60,7 @@ ARMS = (
 class Shard:
     label: str
     pack: str
+    agent: str | None
     suites: tuple[str, ...]
 
 
@@ -75,16 +76,20 @@ def plan(smoke: bool) -> tuple[Shard, ...]:
     probe = next(task for task in TASKS if task.name == SMOKE_PROBE)
     shards: list[Shard] = []
     for arm in ARMS:
-        carried = tuple(task for task in tasks if _arm_of(task) is arm)
-        if smoke and probe not in carried:
-            carried = (probe, *carried)
-        if not carried:
-            continue
-        stem = f"nightly-{arm.pack.replace('_', '-')}"
-        groups = _balance(carried)
-        for index, group in enumerate(groups, start=1):
-            label = stem if len(groups) == 1 else f"{stem}-{index}"
-            shards.append(Shard(label, arm.pack, tuple(task.name for task in group)))
+        agents = (None, *sorted({task.agent for task in tasks if task.agent is not None}))
+        for agent in agents:
+            carried = tuple(task for task in tasks if _arm_of(task) is arm and task.agent == agent)
+            if smoke and agent is None and probe not in carried:
+                carried = (probe, *carried)
+            if not carried:
+                continue
+            stem = f"nightly-{arm.pack.replace('_', '-')}"
+            if agent is not None:
+                stem += f"-{agent.replace('_', '-')}"
+            groups = _balance(carried)
+            for index, group in enumerate(groups, start=1):
+                label = stem if len(groups) == 1 else f"{stem}-{index}"
+                shards.append(Shard(label, arm.pack, agent, tuple(task.name for task in group)))
     return tuple(shards)
 
 
@@ -139,7 +144,13 @@ def write(shard: Shard, directory: Path) -> None:
                     {
                         "label": shard.label,
                         "config": str(config),
-                        "args": ["--concurrency", str(CONCURRENCY), "--only", *shard.suites],
+                        "args": [
+                            "--concurrency",
+                            str(CONCURRENCY),
+                            *(["--agent", shard.agent] if shard.agent is not None else []),
+                            "--only",
+                            *shard.suites,
+                        ],
                     }
                 ]
             }

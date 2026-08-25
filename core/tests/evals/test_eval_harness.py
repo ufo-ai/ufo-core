@@ -265,6 +265,20 @@ def test_onboarding_help_refuses_to_run_outside_the_hosted_pack(
     )
 
 
+def test_code_review_refuses_to_run_as_the_default_agent(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "evals.__main__.load_config",
+        lambda: SimpleNamespace(pack=SimpleNamespace(name="assistant_eval")),
+    )
+
+    with pytest.raises(SystemExit):
+        eval_main(["--only", "code_review", "--out", str(tmp_path)])
+
+    assert "code_review requires --agent 'code-review'" in capsys.readouterr().err
+
+
 def test_first_run_refuses_to_run_outside_a_pack_that_carries_the_skill(
     tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -453,6 +467,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "skill_authoring",
         "skill_loading_member",
         "skill_gtm",
+        "code_review",
     }
 
 
@@ -7559,6 +7574,89 @@ async def test_capability_merge_appends_child_calls_and_errors(db: None, tmp_pat
         "read_page",
     ]
     assert "upstream 503 from the page" in result.output.tool_errors
+
+
+async def test_capability_merge_waits_for_requested_background_children(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    parent_turn_id = uuid4()
+    child_conversation_id = uuid4()
+    child_turn_id = uuid4()
+    child_messages = (
+        Message(role="user", content="inspect"),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="b1", name="bash", input={"command": "git diff"}),),
+        ),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="b1", content="ok"),)),
+        Message(role="assistant", content="done"),
+    )
+
+    class CompletingOutcome:
+        calls = 0
+
+        async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory:
+            self.calls += 1
+            await Transcript(blob=blob, conversation_id=conversation_id).write(
+                Conversation(seq=1, messages=child_messages)
+            )
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="done",
+                        terminal={"status": "done", "text": "done", "model": MODEL},
+                        updated_at=sa.func.now(),
+                    )
+                    .where(tables.turn.c.id == turn_id)
+                )
+            return Trajectory(
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                agent_prompt=PROMPT,
+                agent_prompt_digest=prompt_digest(PROMPT),
+                messages=child_messages,
+            )
+
+    outcome = CompletingOutcome()
+    worker = StubWorker(blob, workspace_id, ())
+    target = replace(_delegating_target(blob, worker, agent_id, workspace_id), outcome=outcome)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=child_conversation_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    surface="eval",
+                    queue_key=uuid4().hex,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=child_turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=child_conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="running",
+                    inbound="inspect",
+                    parent_turn_id=parent_turn_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        merged, descendant_ids, failure = await target._merge_descendants(
+            parent_turn_id, CapabilityOutput("", ()), wait_for_background=True
+        )
+
+    assert failure == ""
+    assert descendant_ids == (child_turn_id,)
+    assert outcome.calls == 1
+    assert [call.name for call in merged.calls] == ["bash"]
 
 
 async def test_capability_merge_reads_a_followed_up_child_conversation_once(

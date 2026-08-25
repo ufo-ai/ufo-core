@@ -357,6 +357,7 @@ class CapabilityCase:
     prepare: WorkspacePrepare | None = None
     artifact_probe: ArtifactProbe | None = None
     judge_on_deterministic_failure: bool = False
+    wait_for_background: bool = False
 
     def __post_init__(self) -> None:
         paths = tuple(reference.path for reference in self.references)
@@ -378,6 +379,8 @@ class CapabilityCase:
         }
         if self.visual_rubric:
             payload["visualRubric"] = list(self.visual_rubric)
+        if self.wait_for_background:
+            payload["waitForBackground"] = True
         if self.judge_on_deterministic_failure:
             payload["judgeOnDeterministicFailure"] = True
         if self.artifact_rubric:

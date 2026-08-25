@@ -693,6 +693,8 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(
                 f"{task.name} requires [pack] name in {task.packs}, found {config.pack.name!r}"
             )
+        if task.agent is not None and task.agent != args.agent:
+            parser.error(f"{task.name} requires --agent {task.agent!r}, found {args.agent!r}")
     workspace_id = args.workspace
     recall_workspace_id = (
         memory_run.readiness.workspace_id

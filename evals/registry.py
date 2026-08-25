@@ -26,6 +26,7 @@ from evals.suites import (
     basics,
     browser_nav,
     closing_message,
+    code_review,
     coding_subagent,
     connector_connections,
     connector_refs,
@@ -106,6 +107,13 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
+    capability_task(
+        "code_review",
+        code_review.CASES,
+        serial=True,
+        packs=("assistant", "assistant_eval", "assistant_hosted"),
+        agent="code-review",
+    ),
     rewrapped(
         capability_task("ufo-app-bench", ufo_app_bench.CASES, judge_model=VISUAL_JUDGE_MODEL),
         ufo_app_bench._scored_task,

@@ -257,7 +257,12 @@ class InProcessTarget:
             )
         except Exception as error:
             return _invoke_failure(conversation_id, error)
-        settled = await self._settled(conversation_id, turn_id, case.message)
+        settled = await self._settled(
+            conversation_id,
+            turn_id,
+            case.message,
+            wait_for_background=case.wait_for_background,
+        )
         wall_ms = round((perf_counter() - started) * 1_000)
         result = settled.result
         turn_ids = (turn_id, *settled.descendant_ids)
@@ -369,7 +374,13 @@ class InProcessTarget:
             return _invoke_failure(conversation_id, error)
         return (await self._settled(conversation_id, turn_id, message)).result
 
-    async def _settled(self, conversation_id: UUID, turn_id: UUID, inbound: str) -> _Settled:
+    async def _settled(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+        inbound: str,
+        wait_for_background: bool = False,
+    ) -> _Settled:
         trajectory = await self.outcome.settle(conversation_id, turn_id)
         if trajectory is None:
             steps = () if self.turn_steps is None else await self.turn_steps.steps(turn_id)
@@ -411,7 +422,9 @@ class InProcessTarget:
         )
         status = await self._turn_status(turn_id)
         snapshot = trajectory_snapshot(conversation_id, turn_id, status, trajectory.messages)
-        output, descendant_ids, missing_child = await self._merge_descendants(turn_id, output)
+        output, descendant_ids, missing_child = await self._merge_descendants(
+            turn_id, output, wait_for_background
+        )
         tokens, cost_micro_usd = await self._turn_resources((turn_id, *descendant_ids))
         output = replace(output, tokens=tokens, cost_micro_usd=cost_micro_usd)
         if missing_child:
@@ -461,7 +474,10 @@ class InProcessTarget:
         return int(rows[0]), int(rows[1])
 
     async def _merge_descendants(
-        self, turn_id: UUID, output: CapabilityOutput
+        self,
+        turn_id: UUID,
+        output: CapabilityOutput,
+        wait_for_background: bool = False,
     ) -> tuple[CapabilityOutput, tuple[UUID, ...], str]:
         """Append every terminal child conversation's calls and tool errors to the scored output —
         a delegated capability (browser_task, wide_browse, spawn) proves itself by the
@@ -487,6 +503,27 @@ class InProcessTarget:
                     .order_by(tables.turn.c.created_at)
                 )
             ).all()
+        if wait_for_background:
+            pending = tuple(row for row in rows if row.status not in TERMINAL_CHILD_STATUSES)
+            if pending:
+                background_trajectories = await asyncio.gather(
+                    *(self.outcome.settle(row.conversation_id, row.id) for row in pending)
+                )
+                if any(trajectory is None for trajectory in background_trajectories):
+                    return output, tuple(row.id for row in rows), "background child did not finish"
+                async with workspace_tx() as connection:
+                    rows = (
+                        await connection.execute(
+                            sa.select(
+                                tables.turn.c.id,
+                                tables.turn.c.conversation_id,
+                                tables.turn.c.status,
+                                tables.turn.c.terminal,
+                            )
+                            .where(tables.turn.c.parent_turn_id == turn_id)
+                            .order_by(tables.turn.c.created_at)
+                        )
+                    ).all()
         conversations: dict[UUID, list[sa.Row]] = {}
         for row in rows:
             conversations.setdefault(row.conversation_id, []).append(row)
@@ -518,7 +555,9 @@ class InProcessTarget:
                 )
             )
             for turn in turns:
-                child, sub_ids, failure = await self._merge_descendants(turn.id, child)
+                child, sub_ids, failure = await self._merge_descendants(
+                    turn.id, child, wait_for_background
+                )
                 descendant_ids.extend(sub_ids)
                 if failure:
                     return output, tuple(descendant_ids), failure
