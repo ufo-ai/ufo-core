@@ -137,6 +137,53 @@ test("the page draws no shell around the step", async () => {
   expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
 });
 
+test("the head counts the three certain steps, and no connector leaves them three", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  const progress = await screen.findByRole("progressbar", { name: "Step" });
+  expect(progress.getAttribute("aria-valuenow")).toBe("1");
+  expect(progress.getAttribute("aria-valuemax")).toBe("3");
+  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(3);
+
+  await chooseGoal();
+  expect(progress.getAttribute("aria-valuenow")).toBe("2");
+  expect(progress.getAttribute("aria-valuemax")).toBe("3");
+
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { name: "Invite your team" });
+  expect(progress.getAttribute("aria-valuenow")).toBe("3");
+  expect(progress.getAttribute("aria-valuemax")).toBe("3");
+  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(3);
+});
+
+/** The head never states the run finished while a step it is certain to draw is still ahead. The
+ *  team step always comes, so it is counted from the first screen rather than appearing once the
+ *  tools are recorded. */
+test("the run never counts itself complete before its last step", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  const progress = await screen.findByRole("progressbar", { name: "Step" });
+  await chooseGoal();
+
+  expect(Number(progress.getAttribute("aria-valuenow"))).toBeLessThan(
+    Number(progress.getAttribute("aria-valuemax")),
+  );
+});
+
+test("both connectors reveal a five-step run", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Slack", "GitHub");
+
+  const progress = screen.getByRole("progressbar", { name: "Step" });
+  expect(progress.getAttribute("aria-valuenow")).toBe("3");
+  expect(progress.getAttribute("aria-valuemax")).toBe("5");
+  expect(progress.querySelectorAll('[aria-hidden="true"]')).toHaveLength(5);
+});
+
 test("the goal is the whole first step", async () => {
   open();
 
@@ -147,12 +194,43 @@ test("the goal is the whole first step", async () => {
     "Automate ops",
     "Find PMF",
   ]);
-  expect(choices[0].parentElement?.className).toContain("grid-cols-2");
+  expect(choices.every((choice) => choice.getAttribute("aria-checked") === "false")).toBe(true);
   expect(screen.getByLabelText("Add context")).toBeTruthy();
   expect(commit().disabled).toBe(true);
   expect(screen.queryByRole("button", { name: "Slack" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "The app answers in Slack" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "Invite your team" })).toBeNull();
+});
+
+/** One goal is held at a time, and picking another releases the one before it. The assertion reads
+ *  the spoken state rather than the check drawn beside it: every row carries the glyph and the pick
+ *  only reveals it, so what a member sees is a paint this environment computes no styles for. */
+test("the goal picked releases the one before it", async () => {
+  open();
+
+  const choices = await screen.findAllByRole("radio");
+  expect(choices.map((choice) => choice.getAttribute("aria-checked"))).toEqual([
+    "false",
+    "false",
+    "false",
+    "false",
+  ]);
+
+  await userEvent.click(choices[0]);
+  expect(choices.map((choice) => choice.getAttribute("aria-checked"))).toEqual([
+    "true",
+    "false",
+    "false",
+    "false",
+  ]);
+
+  await userEvent.click(choices[2]);
+  expect(choices.map((choice) => choice.getAttribute("aria-checked"))).toEqual([
+    "false",
+    "false",
+    "true",
+    "false",
+  ]);
 });
 
 test("free text can state another goal", async () => {
@@ -669,7 +747,10 @@ test("free text becomes the initial prompt", async () => {
     },
   });
 
-  await userEvent.type(await screen.findByLabelText("Add context"), "Reduce support response time.");
+  const context = await screen.findByLabelText("Add context");
+  expect(context).toBeInstanceOf(HTMLInputElement);
+  expect(context.getAttribute("placeholder")).toBe("More information");
+  await userEvent.type(context, "Reduce support response time.");
   await userEvent.click(commit());
   await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Invite your team" });

@@ -3,8 +3,9 @@ import type { ComponentProps, ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
 
-/** The one field surface. `Select` draws its trigger with this too, so a button that stands in for
- *  a field is the same object to the eye as the fields beside it. */
+/** The bordered field surface. `Select` draws its trigger with this too, so a button that stands in
+ *  for a field is the same object to the eye as the fields beside it. An answer beneath filled
+ *  choices uses their surface so the choices and field read as one column. */
 export const CONTROL = cn(
   "rounded-panel border border-edge bg-field text-field-ink px-lg py-md font-sans",
   "text-subtitle narrow:text-ui placeholder:text-ink-faint",
@@ -62,12 +63,29 @@ export function FieldGroup({
   );
 }
 
-export function Input({ className, type = "text", ...props }: ComponentProps<"input">) {
+const INPUT_SURFACES = {
+  control: cn(CONTROL, "w-full max-w-control"),
+  answer: cn(
+    "h-10 w-full rounded-(--radius-answer) border border-transparent bg-fill px-2xl py-0",
+    "font-sans text-label text-field-ink placeholder:text-ink-soft",
+    "transition-[background-color] duration-100 ease-control hover:bg-fill-strong",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
+    "user-invalid:border-ink user-invalid:border-dashed",
+    "disabled:cursor-not-allowed disabled:opacity-(--disabled) disabled:hover:bg-fill",
+  ),
+} as const;
+
+export function Input({
+  className,
+  surface = "control",
+  type = "text",
+  ...props
+}: ComponentProps<"input"> & { surface?: keyof typeof INPUT_SURFACES }) {
   return (
     <input
       data-slot="input"
       type={type}
-      className={cn(CONTROL, "w-full max-w-control", className)}
+      className={cn(INPUT_SURFACES[surface], className)}
       {...props}
     />
   );

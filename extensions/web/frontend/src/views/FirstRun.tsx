@@ -1,8 +1,8 @@
-import { IconArrowRight, IconCheck, IconPlus } from "@tabler/icons-react";
+import { IconCheck, IconMessages, IconPlugConnected, IconPlus } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Input, Textarea } from "@/components/ui/field";
+import { Input } from "@/components/ui/field";
 import { ToggleGroup, ToggleGroupItem, ToggleGroupOne } from "@/components/ui/toggle-group";
 import {
   Notice,
@@ -15,7 +15,7 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
-import logo from "@/assets/ufo-logo.svg";
+import mark from "@brand/ufo-mark.svg";
 import { postIntent } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
@@ -84,14 +84,19 @@ export const CONNECT_VERB: Record<string, string> = {
  *  naming the act twice: the button under it already says Connect, so a heading that said it too
  *  would ask the member to press a word they have just read. What they are deciding is whether they
  *  want the agent in that product at all, so that is what the step says. */
-const CONNECT_COPY: Record<string, { title: string; note: string }> = {
+const CONNECT_COPY: Record<
+  string,
+  { title: string; note: string; icon: typeof IconMessages }
+> = {
   slack: {
     title: "The app answers in Slack",
     note: "Mention it in a channel or send it a direct message, and it replies where your team already works.",
+    icon: IconMessages,
   },
   github: {
     title: "The app works in your repositories",
     note: "It reads the code and pushes to the repositories the installation grants. You pick which ones.",
+    icon: IconPlugConnected,
   },
 };
 
@@ -125,46 +130,65 @@ const STEP_COPY: Record<string, { title: string; note: string }> = {
   ...CONNECT_COPY,
 };
 
-/** The page the first run is read on, and the only screen in the portal that draws no navigation:
- *  a member who has not set the workspace up has nowhere to navigate to yet, and a bar offering
- *  four destinations invites them to leave the one thing they are here to finish. The mark and the
- *  step's acts share that line instead, at the two edges of the page — so the acts stand where the
- *  bar's own do, and the step below is only its question and the answer being given to it.
- *
- *  The question is centred over that answer, which is what makes it a question rather than the
- *  heading of a screen: nothing is aligned to it, because there is nothing else on the line. */
+/** The page the first run is read on, with the workspace mark, progress, and the current step's
+ *  acts in its head. It has no navigation because an unset workspace has nowhere else to go, and
+ *  offering destinations would pull the member away from finishing setup. The rest of the
+ *  viewport centres the step's question and answer together, under whatever mark leads it. */
 function Frame({
   title,
   note,
+  lead,
   actions,
+  at,
+  steps,
   children,
 }: {
   title?: string;
   note?: string;
+  lead?: ReactNode;
   actions?: ReactNode;
+  at?: number;
+  steps?: number;
   children: ReactNode;
 }) {
   return (
-    <main
-      className={cn(
-        "grid h-dvh grid-rows-[auto_1fr] gap-6xl overflow-y-auto",
-        "px-(--size-page-gutter) py-(--size-page-top) max-narrow:px-2xl",
-      )}
-    >
-      <div className="flex items-center gap-sm">
+    <main className="grid h-dvh grid-rows-[auto_1fr] overflow-y-auto">
+      <div className="grid h-8xl grid-cols-3 items-center px-7xl max-narrow:px-2xl">
         <span
           role="img"
           aria-label="ufo"
-          className="block h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current"
-          style={{ mask: `url(${logo}) center / contain no-repeat` }}
+          className="block size-(--size-glyph) shrink-0 bg-current"
+          style={{ mask: `url(${mark}) center / contain no-repeat` }}
         />
-        <div className="ml-auto flex items-center gap-sm">{actions}</div>
+        {at !== undefined && steps !== undefined ? (
+          <div
+            role="progressbar"
+            aria-label="Step"
+            aria-valuemin={1}
+            aria-valuemax={steps}
+            aria-valuenow={at + 1}
+            className="flex items-center gap-2xs justify-self-center"
+          >
+            {Array.from({ length: steps }, (_, index) => (
+              <span
+                key={index}
+                aria-hidden
+                className={cn(
+                  "h-2xs rounded-full",
+                  index === at ? "w-(--size-step-on) bg-ink" : "w-(--size-step-off) bg-edge",
+                )}
+              />
+            ))}
+          </div>
+        ) : null}
+        <div className="flex items-center justify-self-end gap-sm">{actions}</div>
       </div>
-      <div className="mx-auto flex w-full max-w-section flex-col justify-center gap-6xl">
+      <div className="mx-auto flex min-h-0 w-full max-w-section flex-col items-center justify-center gap-6xl px-2xl py-6xl">
+        {lead}
         {title ? (
-          <div className="flex flex-col gap-2xs text-center">
-            <h1 className="m-0 text-title font-medium">{title}</h1>
-            {note ? <p className="m-0 mx-auto max-w-form text-body text-ink-soft">{note}</p> : null}
+          <div className="flex max-w-form flex-col gap-2xl text-center">
+            <h1 className="m-0 text-subtitle font-medium text-ink">{title}</h1>
+            {note ? <p className="m-0 text-label text-ink-soft">{note}</p> : null}
           </div>
         ) : null}
         {children}
@@ -237,12 +261,17 @@ export function FirstRun({
     >
       {(payload) => {
         const chosen = payload.connectors.filter((row) => (recorded ?? []).includes(row.name));
+        /** The run the member is on. Three steps are certain from the start — the goal, the tools,
+         *  and the team — so the head states three until the tools are recorded, and a connector
+         *  picked there lengthens the run by its own step. Holding the team back until then would
+         *  have the head announce the run finished while a step it always draws is still to come. */
         const revealed =
           recorded === null
-            ? [GOAL_STEP, TOOLS_STEP]
+            ? [GOAL_STEP, TOOLS_STEP, TEAM_STEP]
             : [GOAL_STEP, TOOLS_STEP, ...chosen.map((row) => row.name), TEAM_STEP];
         const step = revealed[at];
         const connector = chosen.filter((row) => row.name === step)[0];
+        const ConnectIcon = connector ? CONNECT_COPY[connector.name].icon : null;
         const held = connector ? connector.installed || connected.includes(step) : false;
         const finish = () => {
           setPendingAsk(
@@ -286,15 +315,28 @@ export function FirstRun({
           <Frame
             title={STEP_COPY[step].title}
             note={STEP_COPY[step].note}
+            lead={
+              ConnectIcon ? (
+                <span className="flex size-(--size-badge) items-center justify-center rounded-full bg-ink">
+                  <ConnectIcon
+                    className="size-(--size-badge-glyph) text-surface"
+                    stroke={1.5}
+                    aria-hidden
+                  />
+                </span>
+              ) : undefined
+            }
+            at={at}
+            steps={revealed.length}
             actions={
               <>
                 {at > 0 ? (
-                  <Button size="bar" onClick={() => setAt(at - 1)}>
+                  <Button size="bar" className="h-10" onClick={() => setAt(at - 1)}>
                     Back
                   </Button>
                 ) : null}
                 {step === GOAL_STEP || step === TOOLS_STEP ? null : (
-                  <Button size="bar" onClick={advance}>
+                  <Button size="bar" className="h-10" onClick={advance}>
                     Skip
                   </Button>
                 )}
@@ -313,6 +355,7 @@ export function FirstRun({
                   <Button
                     variant="send"
                     size="bar"
+                    className="h-10 w-32"
                     busy={busy}
                     disabled={
                       (step === GOAL_STEP && !goal && !detail.trim()) ||
@@ -328,9 +371,9 @@ export function FirstRun({
           >
             <OutcomeNotice state={notice} />
             {step === GOAL_STEP ? (
-              <div className="mx-auto flex w-full max-w-form flex-col gap-xl">
+              <div className="flex w-(--container-answer) max-w-full flex-col gap-6xl">
                 <ToggleGroupOne
-                  className="grid grid-cols-2 gap-lg"
+                  className="flex flex-col gap-2xs"
                   value={goal}
                   onValueChange={(value) => setGoal(value as Goal | "")}
                 >
@@ -339,20 +382,28 @@ export function FirstRun({
                       key={option.name}
                       value={option.name}
                       className={cn(
-                        "min-h-(--size-touch) rounded-panel border border-edge px-xl py-lg",
-                        "text-start text-ui hover:bg-fill data-[state=on]:border-ink data-[state=on]:bg-fill",
+                        "group flex h-10 w-full items-center justify-between rounded-(--radius-answer)",
+                        "border-0 bg-fill px-2xl text-start text-label text-ink hover:bg-fill-strong",
+                        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
                       )}
                     >
                       {option.label}
+                      <IconCheck
+                        className={cn(
+                          "size-(--size-glyph) shrink-0 text-ink-soft opacity-0",
+                          "group-data-[state=on]:opacity-100",
+                        )}
+                        aria-hidden
+                      />
                     </ToggleGroupItem>
                   ))}
                 </ToggleGroupOne>
-                <Textarea
+                <Input
+                  surface="answer"
                   aria-label="Add context"
-                  placeholder="Add context or another goal"
+                  placeholder="More information"
                   value={detail}
                   onChange={(event) => setDetail(event.target.value)}
-                  className="min-h-24 max-w-none font-sans text-subtitle"
                 />
               </div>
             ) : null}
@@ -509,21 +560,25 @@ function Connect({
   }
 
   return (
-    <div className="flex flex-col items-center gap-2xl">
+    <div className="flex w-full max-w-(--container-connect) flex-col items-center gap-sm px-2xl">
       {held ? (
-        <span className={cn(buttonVariants({ variant: "outline" }), "text-ink-soft")}>
+        <span
+          className={cn(
+            buttonVariants({ variant: "outline", size: "bar" }),
+            "h-10 w-full text-ink-soft",
+          )}
+        >
           <BrandMark provider={row.name} className="size-(--size-glyph)" />
           {row.label + " connected"}
           <IconCheck className="size-icon text-ink" aria-hidden />
         </span>
       ) : admin ? (
-        <Button variant="send" busy={busy} onClick={connect}>
+        <Button variant="send" size="bar" className="h-10 w-full" busy={busy} onClick={connect}>
           <BrandMark provider={row.name} onInk className="size-(--size-glyph)" />
           {"Connect " + row.label}
-          <IconArrowRight className="size-icon" aria-hidden />
         </Button>
       ) : (
-        <span className="text-label text-ink-soft">
+        <span className="flex h-10 w-full items-center justify-center text-center text-label text-ink-soft">
           {"A workspace admin connects " + row.label + "."}
         </span>
       )}
@@ -568,14 +623,14 @@ function Invite({
     return <p className="m-0 text-center text-label text-ink-soft">A workspace admin adds members.</p>;
   }
   return (
-    <div className="mx-auto flex w-full max-w-form flex-col gap-2xl">
-      <form id={INVITE_FORM} onSubmit={onSubmit} className="flex flex-col gap-sm">
+    <div className="flex w-(--container-answer) max-w-full flex-col gap-2xl">
+      <form id={INVITE_FORM} onSubmit={onSubmit} className="flex flex-col gap-2xs">
         {rows.map((value, index) => (
           <Input
             key={index}
+            surface="answer"
             ref={index === 0 ? first : undefined}
             type="email"
-            className="max-w-none"
             aria-label={"Email " + (index + 1)}
             placeholder="email@work.com"
             value={value}
@@ -586,7 +641,7 @@ function Invite({
         ))}
       </form>
       <div>
-        <Button variant="row" onClick={() => onRows([...rows, ""])}>
+        <Button variant="outline" size="bar" onClick={() => onRows([...rows, ""])}>
           <IconPlus className="size-icon" aria-hidden />
           Add another
         </Button>

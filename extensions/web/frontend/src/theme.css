@@ -186,6 +186,8 @@
      and the apps index are read down one column, so both name the radius here instead of each
      carrying its own literal and drifting apart. */
   --radius-row: calc(infinity * 1px);
+  /* An answer keeps short of a capsule at its 40px pitch, so the choices still read as rows. */
+  --radius-answer: 16px;
   --radius-panel: var(--radius);
   --radius-bubble: var(--radius);
   --radius-menu: var(--radius);
@@ -214,6 +216,13 @@
   --breakpoint-narrow: 720px;
 
   --container-sidebar: 240px;
+  /* The first-run answers are read down one narrow column, set by the longest one-line choice
+     rather than the question above it. */
+  --container-answer: 280px;
+  /* The column a connect step's acts stand in, padded by a `2xl` so the act itself lands short of
+     it. A connector is granted or it is not, so the column holds one act per provider and is sized
+     for the longest of their names rather than for the sentence above it. */
+  --container-connect: 300px;
   /* The sidebar collapsed to its glyph column: wide enough for one control and its focus ring. */
   --container-rail: 48px;
   /* The slot an app's own list of things is read down, beside whatever that list opens: enough for
@@ -261,6 +270,16 @@
   --size-digest-picture: 96px;
   --size-avatar: 24px;
   --size-band: 128px;
+  /* The step being answered carries the bar's full mark, large enough to hold its place beside the
+     compact steps on either side. */
+  --size-step-on: 24px;
+  /* An unanswered step stays a third of the active mark, distinct without competing with it. */
+  --size-step-off: 8px;
+  /* The filled disc a connect step leads with, and the drawn glyph inside it. It is the only mark
+     on the first run laid on ink rather than drawn in it, so it is sized to be read as the subject
+     of the screen instead of as an icon annotating one. */
+  --size-badge: 48px;
+  --size-badge-glyph: 22.857px;
   /* A band's document fingerprint: the page renders at reading width and scales to the edge of
      legibility, so the width is the scale's reciprocal — the two move together or the fingerprint
      misfits its band. */
