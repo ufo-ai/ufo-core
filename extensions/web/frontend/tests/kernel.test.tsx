@@ -72,6 +72,30 @@ test("a file sheet owns the shared title, metadata, preview, and download", () =
   );
 });
 
+test("a file sheet renders a markdown document instead of its image preview", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("# Findings\n\nThe number moved.")));
+
+  render(
+    <FileSheet
+      file={{
+        filename: "report.md",
+        subject: "Quarterly report",
+        media_type: "text/markdown",
+        size_bytes: 32,
+        url: "/files/report.md",
+        preview_url: "/previews/report.png",
+      }}
+      onClose={() => {}}
+    />,
+  );
+
+  const sheet = screen.getByRole("dialog", { name: "report.md" });
+  const heading = await within(sheet).findByRole("heading", { name: "Findings" });
+  expect(within(sheet).getByText("The number moved.")).toBeTruthy();
+  expect(heading.closest("[data-artifact-document]")?.className).not.toContain("max-h-24");
+  expect(within(sheet).queryByRole("img")).toBeNull();
+});
+
 type Row = { name: string };
 
 function Listing({ path }: { path: string }) {

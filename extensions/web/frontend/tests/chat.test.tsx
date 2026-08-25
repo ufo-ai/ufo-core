@@ -1089,6 +1089,7 @@ test("an artifact slot file opens the shared file sheet", async () => {
 
 test("a markdown artifact opens as the full document in the shared file sheet", async () => {
   const notes = "https://ufo.example/artifacts/notes.md?token=signed";
+  const preview = "https://ufo.example/artifacts/preview/notes.png?token=signed";
   let bodyReads = 0;
   wire({
     ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
@@ -1102,7 +1103,11 @@ test("a markdown artifact opens as the full document in the shared file sheet", 
             size_bytes: 24,
             created_at: "2026-08-06T12:00:00Z",
             url: notes,
-            preview: null,
+            preview: {
+              filename: "notes.png",
+              media_type: "image/png",
+              url: preview,
+            },
           },
           {
             filename: "deck.pdf",
@@ -1143,6 +1148,8 @@ test("a markdown artifact opens as the full document in the shared file sheet", 
   expect(screen.queryByText(/# Findings/)).toBeNull();
   const document = heading.closest("[data-artifact-document]");
   expect(document?.className).not.toContain("max-h-24");
+  expect(screen.queryByRole("img", { name: "The written summary" })).toBeNull();
+  expect(document?.querySelector('img[src="' + preview + '"]')).toBeNull();
   expect(screen.getByRole("link", { name: "Download" }).getAttribute("href")).toBe(notes);
 });
 

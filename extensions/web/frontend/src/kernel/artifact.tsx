@@ -78,18 +78,19 @@ export type SharedFile = {
  *  and the member's answer is to read the listing again. */
 function FileBody({ file }: { file: SharedFile }) {
   const [failed, setFailed] = useState(false);
-  const pictured = file.preview_url ?? (file.media_type.startsWith("image/") ? file.url : null);
-  if (pictured === null) {
-    return isTextMedia(file.media_type) ? (
+  if (isTextMedia(file.media_type)) {
+    return (
       <ArtifactText
         url={file.url}
         name={file.filename}
         mediaType={file.media_type}
         display="inline"
       />
-    ) : (
-      <FileNote>No preview for this file type. Download it to open it.</FileNote>
     );
+  }
+  const pictured = file.preview_url ?? (file.media_type.startsWith("image/") ? file.url : null);
+  if (pictured === null) {
+    return <FileNote>No preview for this file type. Download it to open it.</FileNote>;
   }
   if (failed) {
     return <FileNote>The image did not load. Its link may have expired — reload the page.</FileNote>;
