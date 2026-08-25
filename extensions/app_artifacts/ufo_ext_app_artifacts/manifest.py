@@ -20,10 +20,14 @@ ARTIFACTS_APP_PROMPT = (
     "`app-artifacts-home` and follow it — keep the shelf's controls and viewer working."
 )
 
+ARTIFACTS_APP_PURPOSE = (
+    "Shelves every file and site this workspace has made, newest first, with search and a viewer."
+)
 ARTIFACTS_APP_AGENT = AgentProvision(
     name=ARTIFACTS_APP_AGENT_NAME,
     spec=AgentSpec(
         prompt=ARTIFACTS_APP_PROMPT,
+        purpose=ARTIFACTS_APP_PURPOSE,
         model="auto",
         reasoning="medium",
         internet_access_allowed=False,

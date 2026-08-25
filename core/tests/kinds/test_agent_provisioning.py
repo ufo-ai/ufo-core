@@ -15,7 +15,12 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
-from ufo_ext_sample import PROVISIONED_AGENT_NAME, PROVISIONED_AGENT_PROMPT
+from ufo_ext_sample import (
+    CONNECTOR_PROVIDER,
+    PROVISIONED_AGENT_NAME,
+    PROVISIONED_AGENT_PROMPT,
+    PROVISIONED_AGENT_PURPOSE,
+)
 
 from ufo.access.credentials import CredentialStore
 from ufo.config import BlobConfig, Config, DatabaseConfig
@@ -52,19 +57,24 @@ MEMBER_PROMPT = "A prompt this workspace wrote for itself."
 
 
 def _provision(
-    name: str = PROVISIONED_AGENT_NAME, icon: str | None = None, **overrides: object
+    name: str = PROVISIONED_AGENT_NAME,
+    icon: str | None = None,
+    setup: AgentSetup | None = None,
+    **overrides: object,
 ) -> AgentProvision:
     spec = AgentSpec(
         model="auto",
         reasoning="auto",
         internet_access_allowed=False,
         prompt=PROVISIONED_AGENT_PROMPT,
+        purpose=PROVISIONED_AGENT_PURPOSE,
     )
     return AgentProvision(
         name=name,
         spec=spec.model_copy(update=overrides),
         tools=("sample_echo", *SETUP_TOOLS),
         icon=icon,
+        setup=setup if setup is not None else AgentSetup(),
     )
 
 
@@ -92,6 +102,17 @@ async def _row(workspace_id: UUID, name: str) -> sa.Row | None:
             return (
                 await connection.execute(sa.select(tables.agent).where(tables.agent.c.name == name))
             ).one_or_none()
+
+
+async def _clear_purpose(workspace_id: UUID) -> None:
+    """The shipped row as a release that declared no purpose left it."""
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .where(tables.agent.c.name == PROVISIONED_AGENT_NAME)
+                .values(purpose=None)
+            )
 
 
 async def _insert_agent(workspace_id: UUID, name: str, **values: object) -> None:
@@ -372,6 +393,94 @@ async def test_a_later_version_never_rewrites_the_row_it_already_shipped(
         "private",
         "1.0.0",
     )
+
+
+async def test_a_live_row_takes_a_purpose_it_never_had(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shipped row is written once, so a purpose added to a provision after a workspace already
+    holds the row would reach new workspaces only — and every live workspace would meet an app
+    whose page could not say what it is for. It fills where the row has none, on the next pass."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(workspace_id)
+    # The row as a release that shipped no purpose left it.
+    await _clear_purpose(workspace_id)
+
+    outcomes = await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(
+        workspace_id
+    )
+    assert [outcome.result for outcome in outcomes] == [PRESENT]
+    assert (await _row(workspace_id, PROVISIONED_AGENT_NAME)).purpose == PROVISIONED_AGENT_PURPOSE
+
+
+async def test_the_recorded_version_names_the_declaration_the_row_carries(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorded version is what tells an operator which declaration a workspace actually runs.
+    A pass that carries a new setup onto a live row moves it; a pass that changes nothing leaves it
+    where it is, so the version never claims a release whose declaration this row never took."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision(), version="1.0.0"),)).apply(
+        workspace_id
+    )
+    assert (await _row(workspace_id, PROVISIONED_AGENT_NAME)).provisioned_version == "1.0.0"
+
+    quiet = _manifest(OTHER_EXTENSION, _provision(), version="1.1.0")
+    await AgentProvisioning((quiet,)).apply(workspace_id)
+    assert (await _row(workspace_id, PROVISIONED_AGENT_NAME)).provisioned_version == "1.0.0"
+
+    widened = _manifest(
+        OTHER_EXTENSION,
+        _provision(setup=AgentSetup(connectors=(CONNECTOR_PROVIDER,))),
+        version="1.2.0",
+    )
+    await AgentProvisioning((widened,)).apply(workspace_id)
+    row = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert row.provisioned_version == "1.2.0"
+    assert row.setup["connectors"] == [CONNECTOR_PROVIDER]
+
+
+async def test_the_purpose_a_member_wrote_stands(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same fill. A purpose is a sentence a member may replace — they say
+    what their app is for, in their own words — so the extension's own never lands on top of it."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(workspace_id)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .where(tables.agent.c.name == PROVISIONED_AGENT_NAME)
+                .values(purpose="Ours reads the night shift's log.")
+            )
+
+    await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(workspace_id)
+    row = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert row.purpose == "Ours reads the night shift's log."
+
+
+async def test_a_new_account_a_feature_needs_reaches_a_workspace_that_already_holds_the_app(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`setup` is the extension's declaration whole and a member never writes it, so unlike the
+    purpose it is rewritten every pass. A release that gives an app a feature needing a second
+    account would otherwise state that need to new workspaces only, and every workspace already
+    holding the app would read a setup list missing the account its app now needs."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(workspace_id)
+
+    widened = _provision(
+        setup=AgentSetup(connectors=(CONNECTOR_PROVIDER, "googledocs"), instructions="Ask first.")
+    )
+    await AgentProvisioning((_manifest(OTHER_EXTENSION, widened),)).apply(workspace_id)
+    row = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert row.setup["connectors"] == [CONNECTOR_PROVIDER, "googledocs"]
+    assert row.setup["instructions"] == "Ask first."
 
 
 async def test_a_workspace_that_predates_the_extension_gets_the_agent_on_its_next_turn(
@@ -732,7 +841,13 @@ def test_a_provision_refuses_an_allowlist_that_cannot_obtain_its_own_grants() ->
     """The skill tells an agent to call `connect_account` and `object_apply`, and an allowlist
     holds nothing it does not name — so a provision declaring both is a shipped agent that could
     read its own instructions and follow none of them. It is refused where it is written."""
-    spec = AgentSpec(model="auto", reasoning="auto", internet_access_allowed=False, prompt="probe")
+    spec = AgentSpec(
+        model="auto",
+        reasoning="auto",
+        internet_access_allowed=False,
+        prompt="probe",
+        purpose="probe what the workspace recorded",
+    )
     with pytest.raises(ValueError, match="allowlist omits"):
         AgentProvision(
             name="short-handed",
@@ -745,7 +860,13 @@ def test_a_provision_refuses_an_allowlist_that_cannot_obtain_its_own_grants() ->
 def test_a_provision_that_declares_no_setup_keeps_a_bare_allowlist() -> None:
     """The verbs are required by the setup slot, not by shipping an agent, so an agent that asks
     for nothing still holds exactly what it declares."""
-    spec = AgentSpec(model="auto", reasoning="auto", internet_access_allowed=False, prompt="probe")
+    spec = AgentSpec(
+        model="auto",
+        reasoning="auto",
+        internet_access_allowed=False,
+        prompt="probe",
+        purpose="probe what the workspace recorded",
+    )
     provision = AgentProvision(name="self-contained", spec=spec, tools=("sample_echo",))
     assert provision.tools == ("sample_echo",)
 

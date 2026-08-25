@@ -20,10 +20,12 @@ RADAR_APP_PROMPT = (
     "keep the feed, the story view, and the rebuild control working."
 )
 
+RADAR_APP_PURPOSE = "Shows what your scheduled work found, each run opening into its full story."
 RADAR_APP_AGENT = AgentProvision(
     name=RADAR_APP_AGENT_NAME,
     spec=AgentSpec(
         prompt=RADAR_APP_PROMPT,
+        purpose=RADAR_APP_PURPOSE,
         model="auto",
         reasoning="medium",
         internet_access_allowed=False,

@@ -1037,6 +1037,30 @@ test("the applications flyout opens the agent's page, and the sidebar starts the
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
+test("resting on an app's row states what it is for, over what it is doing", async () => {
+  /** The first question a member has about an app they did not install is what it is for, and the
+   *  row itself has no space for the answer — it holds the name and the activity line. So the fact
+   *  the pointer opens carries both, the purpose over the state. */
+  location.hash = "#/";
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/api/agents/status": () =>
+      json({ statuses: [{ agent_id: AGENT_ID, turn: null, last_failed: false }] }),
+  });
+  const purposeful = { ...AGENT, purpose: "Answers from what this workspace has recorded." };
+  render(<App agents={[purposeful]} member={MEMBER} onAgents={() => {}} />);
+  await screen.findByRole("main");
+
+  await userEvent.click(screen.getByRole("button", { name: "Applications" }));
+  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
+  await userEvent.hover(await index.findByRole("button", { name: /^Assistant/ }));
+  const fact = await screen.findByText("Answers from what this workspace has recorded.");
+  const state = await screen.findByText("Idle");
+  // The purpose stands first: it is the question asked before the app is opened at all.
+  expect(fact.compareDocumentPosition(state) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
 test("the conversations rail stands in the sidebar whatever the destination", async () => {
   wire({
     ...chatsOnWire([CHAT_ROW]),

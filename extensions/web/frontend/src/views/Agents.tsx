@@ -212,7 +212,8 @@ function AgentRow({
        the control. The row is worn by the same tooltip whether or not it has a fact to hold,
        because an app gains and loses one as it works and a row swapped for another element takes
        the member's focus down with it. A row with nothing to say draws no content and so opens
-       nothing. */
+       nothing — which now takes an app with no purpose and nothing to report, because a shipped
+       app always states what it is for. */
     <Tooltip>
       <TooltipTrigger asChild>
         <li
@@ -242,7 +243,17 @@ function AgentRow({
           </button>
         </li>
       </TooltipTrigger>
-      {line ? <TooltipContent>{line}</TooltipContent> : null}
+      {agent.purpose || line ? (
+        <TooltipContent>
+          {/* What the app is for, over what it is doing. A member meeting an app they did not
+              install asks the first question before the second, and the row itself has room for
+              neither — the name and the activity line are what it holds. */}
+          <span className="flex max-w-hint flex-col gap-2xs">
+            {agent.purpose ? <span>{agent.purpose}</span> : null}
+            {line ? <span className="text-ink-soft">{line}</span> : null}
+          </span>
+        </TooltipContent>
+      ) : null}
     </Tooltip>
   );
 }

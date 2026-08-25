@@ -20,10 +20,15 @@ TASKS_APP_PROMPT = (
     "listings, the record panel, and its edit and delete acts."
 )
 
+TASKS_APP_PURPOSE = (
+    "Lists the work that runs on a clock and the work a feed wakes, and lets you edit or "
+    "pause any of it."
+)
 TASKS_APP_AGENT = AgentProvision(
     name=TASKS_APP_AGENT_NAME,
     spec=AgentSpec(
         prompt=TASKS_APP_PROMPT,
+        purpose=TASKS_APP_PURPOSE,
         model="auto",
         reasoning="medium",
         internet_access_allowed=False,

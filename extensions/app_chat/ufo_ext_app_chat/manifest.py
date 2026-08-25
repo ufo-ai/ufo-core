@@ -20,10 +20,12 @@ CHAT_APP_PROMPT = (
     "and the starters working."
 )
 
+CHAT_APP_PURPOSE = "Holds every conversation in this workspace, and opens a new one."
 CHAT_APP_AGENT = AgentProvision(
     name=CHAT_APP_AGENT_NAME,
     spec=AgentSpec(
         prompt=CHAT_APP_PROMPT,
+        purpose=CHAT_APP_PURPOSE,
         model="auto",
         reasoning="medium",
         internet_access_allowed=False,

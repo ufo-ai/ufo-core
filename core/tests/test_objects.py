@@ -946,6 +946,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
             "visibility": "workspace",
             "icon": "propylon",
             "prompt": "be brief",
+            "purpose": None,
             "input_schema": None,
             "output_schema": None,
         }

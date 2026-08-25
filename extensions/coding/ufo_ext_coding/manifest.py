@@ -201,10 +201,15 @@ CODE_REVIEW_SETUP = (
     "admin that link once for the whole workspace."
 )
 
+CODE_REVIEW_PURPOSE = (
+    "Reviews each pull request as it changes, and says what would break and what is missing."
+)
+
 CODE_REVIEW_AGENT = AgentProvision(
     name=CODE_REVIEW_AGENT_NAME,
     spec=AgentSpec(
         prompt=CODE_REVIEW_PROMPT,
+        purpose=CODE_REVIEW_PURPOSE,
         model="auto",
         reasoning="high",
         internet_access_allowed=False,

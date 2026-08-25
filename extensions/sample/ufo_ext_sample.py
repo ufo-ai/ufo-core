@@ -137,6 +137,7 @@ ONBOARDING_NAME = "sample_setup"
 SUBAGENT_NAME = "sample_probe"
 PROVISIONED_AGENT_NAME = "sample-probe-agent"
 PROVISIONED_AGENT_PROMPT = "Probe agent: answer from the workspace's own records."
+PROVISIONED_AGENT_PURPOSE = "Answers questions about what this workspace has recorded."
 PROVISIONED_AGENT_SETUP = "Connect the sample account, then add its source for this agent."
 API_SLOT = "sample_api"
 UNDECLARED_SLOT = "sample_unset"
@@ -1219,6 +1220,7 @@ def manifest() -> Manifest:
                     reasoning="auto",
                     internet_access_allowed=False,
                     prompt=PROVISIONED_AGENT_PROMPT,
+                    purpose=PROVISIONED_AGENT_PURPOSE,
                 ),
                 tools=(TOOL_NAME, *SETUP_TOOLS),
                 setup=AgentSetup(

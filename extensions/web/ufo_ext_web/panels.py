@@ -1026,11 +1026,12 @@ async def submit_intent(
 
 
 def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
-    """The settings form's field source: the writable spec schema minus `prompt` and `icon`. The
-    settings page renders each in a control the schema cannot describe — a multiline editor for
-    the prompt, a grid of drawn icons for the icon — and takes its current value from `spec`."""
+    """The settings form's field source: the writable spec schema minus the fields the page renders
+    itself. The settings page draws each in a control the schema cannot describe — a multiline
+    editor for the prompt, a grid of drawn icons for the icon, the purpose as the line under the
+    app's own name — and takes its current value from `spec`."""
     schema = AgentSpec.model_json_schema()
-    hidden = {"input_schema", "output_schema", "prompt", "icon"} | (
+    hidden = {"input_schema", "output_schema", "prompt", "icon", "purpose"} | (
         set() if sandbox_sizes else {"sandbox_size"}
     )
     schema["properties"] = {
@@ -1078,7 +1079,9 @@ async def agent_settings(
                 icon=detail.icon,
             ).model_dump(
                 mode="json",
-                exclude={"prompt"} if ctx.sandbox_sizes else {"prompt", "sandbox_size"},
+                exclude={"prompt", "purpose"}
+                if ctx.sandbox_sizes
+                else {"prompt", "purpose", "sandbox_size"},
             ),
             "spec_schema": _update_schema(ctx.sandbox_sizes),
             "audience": audience,

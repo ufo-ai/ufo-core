@@ -973,6 +973,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "main": agent.main,
                     "model": agent.model,
                     "icon": agent.icon,
+                    "purpose": agent.purpose,
                     "app": shipped_app_slug(agent.provisioned_by),
                     "homepage": homepages[agent.id],
                     **(

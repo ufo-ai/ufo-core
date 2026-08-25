@@ -22,10 +22,15 @@ WIKI_APP_PROMPT = (
     "act."
 )
 
+WIKI_APP_PURPOSE = (
+    "Writes what this workspace knows — how the team works, what it decided, who is here — "
+    "into one page you can read."
+)
 WIKI_APP_AGENT = AgentProvision(
     name=WIKI_APP_AGENT_NAME,
     spec=AgentSpec(
         prompt=WIKI_APP_PROMPT,
+        purpose=WIKI_APP_PURPOSE,
         model="auto",
         reasoning="medium",
         internet_access_allowed=False,

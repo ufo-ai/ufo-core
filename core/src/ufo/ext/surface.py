@@ -750,6 +750,9 @@ class AgentSummary(BaseModel):
     internet_access_allowed: bool
     visibility: AgentVisibility
     icon: TablerIcon
+    purpose: str | None = None
+    """The one sentence the agent states about what it is for, or None for a row written before
+    it had one. A surface states it wherever a member meets the agent before opening it."""
     owner_member_id: UUID | None = None
     provisioned_by: str | None = None
 
@@ -2603,6 +2606,7 @@ class SurfaceContext:
                         tables.agent.c.internet_access_allowed,
                         tables.agent.c.visibility,
                         tables.agent.c.icon,
+                        tables.agent.c.purpose,
                         tables.agent.c.owner_member_id,
                         tables.agent.c.provisioned_by,
                     )
@@ -2622,6 +2626,7 @@ class SurfaceContext:
                 internet_access_allowed=row.internet_access_allowed,
                 visibility=row.visibility,
                 icon=row.icon,
+                purpose=row.purpose,
                 owner_member_id=row.owner_member_id,
                 provisioned_by=row.provisioned_by,
             )

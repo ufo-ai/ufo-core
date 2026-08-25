@@ -18,6 +18,10 @@ export type Agent = {
   /** The mark this app is drawn with. `AGENT_ICONS` is the ordered set the picker offers and the
    *  bundle carries; any other name a tabler outline mark answers still draws. */
   icon: string;
+  /** One sentence saying what this app is for. Every shipped app states one; an app a member built
+   *  before it could states none, and every screen that reads it draws nothing rather than a
+   *  placeholder. */
+  purpose?: string | null;
   /** The slug the `app_*` extension shipped this agent under (`app_radar` → `"radar"`), or
    *  absent for every other agent. The slug is the app's identity — section addresses, the chat
    *  surface, the default pins — where the name is a member-visible string provisioning may

@@ -536,7 +536,9 @@ class AgentProvision:
     `setup` names the grants a member must still make for the agent to work, and what the
     main agent should do to obtain them.
     `icon` names the portal mark the created row draws — a tabler outline slug or one of the
-    portal's own pack, never a URL or markup; unset, the row is dealt one from the pack."""
+    portal's own pack, never a URL or markup; unset, the row is dealt one from the pack.
+    `spec.purpose` is required here and nowhere else: an agent a member built has its author to
+    ask, and a shipped one has nobody."""
 
     name: str
     spec: AgentSpec
@@ -553,6 +555,11 @@ class AgentProvision:
             raise ValueError(f"agent provision {self.name!r} icon {self.icon!r} names no mark")
         if not (self.spec.prompt or "").strip():
             raise ValueError(f"agent provision {self.name!r} has no prompt")
+        if not (self.spec.purpose or "").strip():
+            raise ValueError(
+                f"agent provision {self.name!r} has no purpose — a member meets a shipped agent "
+                "with nobody to ask what it is for, so the one sentence that says it ships with it"
+            )
         if not self.setup.connectors or self.tools is None:
             return
         if missing := [name for name in SETUP_TOOLS if name not in self.tools]:

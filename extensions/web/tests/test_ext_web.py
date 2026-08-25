@@ -2264,6 +2264,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
                 "main": True,
                 "model": "claude-opus-4-8",
                 "icon": "compass",
+                "purpose": None,
                 "app": None,
                 "homepage": {"state": "none"},
             }
@@ -2344,6 +2345,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "main": True,
             "model": "claude-opus-4-8",
             "icon": "compass",
+            "purpose": None,
             "app": None,
             "homepage": {"state": "none"},
             "web_audience": [],
@@ -2354,6 +2356,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "main": False,
             "model": "claude-sonnet-5",
             "icon": "telescope",
+            "purpose": None,
             "app": None,
             "homepage": {"state": "none"},
             "web_audience": ["member@example.com"],
@@ -9931,6 +9934,7 @@ APP_NOTES = Manifest(
             name="notes",
             spec=AgentSpec(
                 prompt="You are the Notes app for this workspace.",
+                purpose="Keeps the workspace's notes.",
                 model="auto",
                 reasoning="medium",
                 internet_access_allowed=False,

@@ -139,6 +139,14 @@ class AgentSpec(BaseModel):
             "change takes effect on the next turn."
         ),
     )
+    purpose: str | None = Field(
+        default=None,
+        description=(
+            "One sentence saying what this agent is for, in the member's own terms — what it "
+            "does for them, not how it works. The portal reads it wherever a member meets the "
+            "agent before opening it. Omit it on an update to keep the current one."
+        ),
+    )
     input_schema: dict[str, JsonValue] | None = Field(
         default=None,
         description=(
@@ -276,6 +284,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
             visibility=row.visibility,
             icon=row.icon,
             prompt=row.prompt,
+            purpose=row.purpose,
             input_schema=row.input_schema,
             output_schema=row.output_schema,
         )
@@ -333,6 +342,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
         _known_model(ctx, spec.model, spec.reasoning)
         next_prompt = row.prompt if spec.prompt is None else spec.prompt
         prompt_changed = next_prompt != row.prompt
+        next_purpose = row.purpose if spec.purpose is None else spec.purpose
         next_icon = row.icon if spec.icon is None else spec.icon
         next_sandbox_size = (
             spec.sandbox_size if "sandbox_size" in spec.model_fields_set else row.sandbox_size
@@ -363,6 +373,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
             next_sandbox_size,
             next_visibility,
             next_icon,
+            next_purpose,
             next_input_schema,
             next_output_schema,
         ) != (
@@ -373,6 +384,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
             row.sandbox_size,
             row.visibility,
             row.icon,
+            row.purpose,
             row.input_schema,
             row.output_schema,
         )
@@ -392,6 +404,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
                     sandbox_size=next_sandbox_size,
                     visibility=next_visibility,
                     icon=next_icon,
+                    purpose=next_purpose,
                     input_schema=next_input_schema,
                     output_schema=next_output_schema,
                     updated_at=sa.func.now(),
@@ -431,6 +444,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
                         workspace_id=ws_current().workspace_id,
                         name=name,
                         prompt=spec.prompt,
+                        purpose=spec.purpose,
                         model=spec.model,
                         is_main=False,
                         internet_access_allowed=spec.internet_access_allowed,
@@ -498,6 +512,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
                 await connection.execute(
                     sa.select(
                         tables.agent.c.prompt,
+                        tables.agent.c.purpose,
                         tables.agent.c.id,
                         tables.agent.c.name,
                         tables.agent.c.model,

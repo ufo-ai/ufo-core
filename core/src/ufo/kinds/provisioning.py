@@ -3,9 +3,12 @@
 An active extension declares `AgentProvision`s; this turns each into an ordinary `agent` row and
 then stops owning it. The workspace's copy is the live configuration from that moment.
 
-A shipped row is created once and never written again. A later version of the extension reaches new
-workspaces only: the row records the extension version that made it, so an operator reads which
-spec a workspace actually runs, and the member's own edits are never overwritten.
+A shipped row is created once and never written again, with one exception: the two fields that are
+the extension's own statement rather than the member's — the setup it declares, and the purpose
+where the row has none — are carried forward on every pass, or a workspace that already holds the
+row would never meet either again. Such a write moves the recorded version with it, so the version
+always names the declaration the row carries. Everything else a later version of the extension
+changes reaches new workspaces only, and the member's own edits are never overwritten.
 
 A shipped agent is identified by the extension that ships it and the name that extension declared,
 never by the row's own name. A name already in use — by a member's agent or by a second extension's
@@ -63,7 +66,12 @@ class AgentProvisioning:
         async with workspace_tx() as connection:
             shipped = (
                 await connection.execute(
-                    sa.select(member_name.label("name")).where(
+                    sa.select(
+                        tables.agent.c.id,
+                        member_name.label("name"),
+                        tables.agent.c.purpose,
+                        tables.agent.c.setup,
+                    ).where(
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.provisioned_by == extension,
                         tables.agent.c.provisioned_name == provision.name,
@@ -71,6 +79,7 @@ class AgentProvisioning:
                 )
             ).one_or_none()
             if shipped is not None:
+                await self._fill(connection, shipped, manifest, provision)
                 return ProvisionOutcome(extension, shipped.name, PRESENT)
 
             standing = (
@@ -84,6 +93,7 @@ class AgentProvisioning:
                         tables.agent.c.sandbox_size,
                         tables.agent.c.visibility,
                         tables.agent.c.tools,
+                        tables.agent.c.purpose,
                     ).where(
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.name == provision.name,
@@ -100,6 +110,7 @@ class AgentProvisioning:
                         provisioned_name=provision.name,
                         provisioned_version=manifest.version,
                         setup=provision.setup.model_dump(mode="json"),
+                        purpose=standing.purpose or provision.spec.purpose,
                         updated_at=sa.func.now(),
                     )
                     .where(tables.agent.c.id == standing.id)
@@ -109,6 +120,48 @@ class AgentProvisioning:
             name = await self._free_name(connection, workspace_id, extension, provision.name)
             await self._create(connection, workspace_id, manifest, provision, name)
         return ProvisionOutcome(extension, name, CREATED)
+
+    async def _fill(
+        self,
+        connection: AsyncConnection,
+        shipped: sa.Row,
+        manifest: Manifest,
+        provision: AgentProvision,
+    ) -> None:
+        """What a live shipped row takes from a later declaration: its purpose where it has none,
+        and its setup every time.
+
+        A shipped row is written once and then belongs to the workspace, which is what keeps a
+        member's edits. But two of its fields are the extension's own statement rather than the
+        member's, and a workspace that already holds the row would never see either of them again —
+        so a purpose added to a provision, or an account a new feature needs, would reach new
+        workspaces only.
+
+        The two are filled differently because they are owned differently. `setup` is the
+        extension's declaration whole and a member never writes it, so it is rewritten. `purpose`
+        is a sentence a member may replace — they say what their app is for, and it stands — so it
+        is filled only where the row has none.
+
+        A write moves `provisioned_version` with it. The recorded version is what tells an operator
+        which declaration a workspace actually runs, so a row carrying this release's setup has to
+        name this release — it would otherwise state the release that created the row while running
+        a later one's.
+
+        A pass that would change neither writes nothing: this runs on the first turn a process takes
+        for a workspace, and an update per shipped agent per pass would lock rows a member's turn is
+        about to read for no change at all — and would move the version on a release that declared
+        nothing new."""
+        declared = provision.setup.model_dump(mode="json")
+        values: dict[str, object] = {} if shipped.setup == declared else {"setup": declared}
+        if shipped.purpose is None:
+            values["purpose"] = provision.spec.purpose
+        if not values:
+            return
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(**values, provisioned_version=manifest.version, updated_at=sa.func.now())
+            .where(tables.agent.c.id == shipped.id)
+        )
 
     async def _free_name(
         self, connection: AsyncConnection, workspace_id: UUID, extension: str, declared: str
@@ -178,6 +231,7 @@ class AgentProvisioning:
                 name=name,
                 icon=icon,
                 prompt=spec.prompt,
+                purpose=spec.purpose,
                 model=spec.model,
                 reasoning=spec.reasoning,
                 is_main=False,

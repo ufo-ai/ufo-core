@@ -118,6 +118,7 @@ agent = sa.Table(
     sa.Column("name", sa.Text, nullable=False),
     sa.Column("icon", sa.Text, nullable=False, server_default=sa.text(f"'{DEFAULT_AGENT_ICON}'")),
     sa.Column("prompt", sa.Text, nullable=False),
+    sa.Column("purpose", sa.Text, nullable=True),
     sa.Column("model", sa.Text, nullable=False),
     sa.Column("reasoning", sa.Text, nullable=False, server_default=sa.text("'auto'")),
     sa.Column("is_main", sa.Boolean, nullable=False, server_default=sa.false()),
