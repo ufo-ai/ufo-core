@@ -936,7 +936,20 @@ async def _run(
                                 )
                             )
                         ).scalar_one()
-                    waiting = await setup_skill(agent_id, main_agent, True)
+                        # The skill is read for the member who would speak the case, which in an
+                        # eval stack is the one this workspace was seeded with.
+                        speaker = (
+                            (
+                                await connection.execute(
+                                    sa.select(tables.member.c.id).order_by(
+                                        tables.member.c.seated_at
+                                    )
+                                )
+                            )
+                            .scalars()
+                            .first()
+                        )
+                    waiting = await setup_skill(agent_id, main_agent, speaker)
                     if waiting is not None:
                         loadable_skills |= frozenset((waiting.name,))
                 compaction: CompactionTarget | None = None

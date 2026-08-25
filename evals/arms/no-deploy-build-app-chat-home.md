@@ -21,6 +21,10 @@ To change it:
 4. `set_homepage` with the site name from the deploy result, the first time only; the binding stays
    across later redeploys of the same site.
 
+A redeploy takes the platform kit as it stands today, not the one the page was first built against.
+So a rebuild is how a page picks up what the kit has since gained — and a page you never rebuild
+keeps drawing against the kit of the day it was built.
+
 To change a page this workspace has already changed, start from its own source rather than from
 this skill: `object_get` the site — `object_list` kind `site` with filter `homepage_agent` set to
 `mine` names it — and edit the `app.tsx` under `src` in the directory its status names, then deploy

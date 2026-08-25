@@ -43,6 +43,7 @@ from ufo.sdk.manifest import (
     InjectionTarget,
     Manifest,
     RouteSpec,
+    SetupCredential,
     SkillSpec,
     SubagentProfile,
 )
@@ -81,9 +82,7 @@ FABLE_ESCALATION_MODEL = "anthropic/claude-fable-5"
 FABLE_ESCALATION_PROMPT = (
     Path(__file__).parent / "prompts" / "subagent_fable_escalation.md"
 ).read_text()
-CODE_REVIEW_AGENT_NAME = "code-review"
 GITHUB_CONNECTOR = "github"
-CODE_REVIEW_PROMPT = (Path(__file__).parent / "prompts" / "agent_code_review.md").read_text()
 
 
 class CodingInput(BaseModel):
@@ -191,6 +190,9 @@ FABLE_ESCALATION_PROFILE = SubagentProfile(
     model=FABLE_ESCALATION_MODEL,
 )
 
+CODE_REVIEW_AGENT_NAME = "code-review"
+CODE_REVIEW_PROMPT = (Path(__file__).parent / "prompts" / "agent_code_review.md").read_text()
+
 CODE_REVIEW_SETUP = (
     "Connect the GitHub account this workspace reviews under. A connection binds to the agent "
     "whose conversation it is made in, so make it here, with you. Then ask the member to "
@@ -218,13 +220,26 @@ CODE_REVIEW_AGENT = AgentProvision(
     setup=AgentSetup(connectors=(GITHUB_CONNECTOR,), instructions=CODE_REVIEW_SETUP),
 )
 
+UFO_GITHUB_APP = SetupCredential(
+    label="ufo GitHub App",
+    slots=(GIT_INSTALLATION_SLOT, GIT_SLOT),
+    provider=GITHUB_CONNECTOR,
+)
+"""The GitHub authority an app declares it cannot work without, named once by the extension that
+owns the slots.
+
+Two slots answer it, because a workspace has two ways in: the ufo GitHub App's installation, and a
+fine-grained token for a repository in no organization that installed it. An app naming only the
+first would report itself unready for a workspace that chose the second, and one naming only the
+second would ask an admin who already installed the App to go and mint a token."""
+
 
 def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        subagents=(CODING_PROFILE, FABLE_ESCALATION_PROFILE),
         agents=(CODE_REVIEW_AGENT,),
+        subagents=(CODING_PROFILE, FABLE_ESCALATION_PROFILE),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
         credentials=(GIT_INSTALLATION, GIT_CREDENTIAL, GITHUB_API_CREDENTIAL),
         tools=(

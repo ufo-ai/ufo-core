@@ -67,7 +67,7 @@ import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
-import { pageCrumb, pageTitle, type Crumb } from "@/lib/title";
+import { SETUP, pageCrumb, pageTitle, type Crumb } from "@/lib/title";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -868,7 +868,7 @@ function RoutedPane({
       if (!app) return <PaneNote>No such app.</PaneNote>;
       return (
         <Pane className={COLUMN}>
-          <Header crumb={crumb} title={agentName(app.name)} />
+          <Header crumb={crumb} title={SETUP} lede={app.purpose ?? undefined} />
           <div className="flex-1 overflow-y-auto p-2xl">
             <AgentSetup agent={app} admin={member.admin} />
           </div>

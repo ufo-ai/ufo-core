@@ -68,6 +68,8 @@ export function SectionApp({
   view,
   init,
 }: {
+  /** This page's one pane view, by name. Where the name is also a section the address codec reads,
+   *  the page claims links to it; the rest are reached as their app and claim none. */
   tab: string;
   view: PaneView;
   init: AppInit;

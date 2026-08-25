@@ -24,5 +24,9 @@ To change it:
 4. `set_homepage` with the site name from the deploy result, the first time only; the binding stays
    across later redeploys of the same site.
 
+A redeploy takes the platform kit as it stands today, not the one the page was first built against.
+So a rebuild is how a page picks up what the kit has since gained — and a page you never rebuild
+keeps drawing against the kit of the day it was built.
+
 Copying this skill's `app.tsx` over the project's `src/app.tsx` is how the page resets to the
 screen the deploy ships.

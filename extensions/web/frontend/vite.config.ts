@@ -46,7 +46,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./tests/setup.ts"],
-    // An app page's whole dependency surface, resolved for the suite that imports the five real
+    // An app page's whole dependency surface, resolved for the suite that imports the real
     // pages as modules. Only `vite.apps.config.ts` and the SDK build carry it otherwise; the
     // portal's own bundle names neither.
     alias: {

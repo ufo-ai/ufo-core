@@ -6301,15 +6301,24 @@ def test_a_deploy_that_built_no_app_pages_holds_no_bundle(tmp_path: Path) -> Non
     assert web_surface.load_apps(tmp_path / "empty") is None
 
 
-def test_the_shipped_apps_tree_is_five_pages_and_the_chunks_they_name() -> None:
-    """The five built-in apps as this deploy ships them: each slug one directory holding the page
+def test_the_shipped_apps_tree_is_a_page_per_app_and_the_chunks_they_name() -> None:
+    """The built-in apps as this deploy ships them: each slug one directory holding the page
     the frame origin serves at `/`, every chunk that page names present under `assets/`, and nothing
     else anywhere in the tree — the fork project is assembled by the site kind out of the app
     extension's own source and the SDK the sites extension ships, so a byte a browser never fetches
     does not ride this digest."""
     apps = web_surface.APPS
     assert apps is not None, f"the app pages are not built — run `{PORTAL_BUILD}`"
-    assert apps.slugs == {"artifacts", "chat", "radar", "tasks", "wiki"}
+    assert apps.slugs == {
+        "artifacts",
+        "chat",
+        "issues",
+        "meetings",
+        "metrics",
+        "radar",
+        "tasks",
+        "wiki",
+    }
     for slug in sorted(apps.slugs):
         page = apps.files[f"{slug}/index.html"].decode()
         named = re.findall(r'(?:src|href)="(/assets/[^"]+)"', page)
@@ -11230,10 +11239,14 @@ once for the workspace, and the standing order that gives it an occasion to run.
 
 
 async def _seed_account(
-    workspace_id: UUID, agent_id: UUID, owner_member_id: UUID, provider: str
+    workspace_id: UUID,
+    agent_id: UUID,
+    owner_member_id: UUID,
+    provider: str,
+    shared: bool = True,
 ) -> UUID:
-    """One connection of a provider, held by the workspace and granted to nobody — the state a
-    second app's account leaves behind for every other app that names the same provider."""
+    """One connection of a provider, held by its owner and granted to nobody. `shared` is whether
+    the workspace may work from it or only the member who made it."""
     conversation_id, connection_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -11252,11 +11265,11 @@ async def _seed_account(
                 id=connection_id,
                 workspace_id=workspace_id,
                 provider=provider,
-                account_id=f"{provider}-account",
+                account_id=f"{provider}-{connection_id.hex[:8]}",
                 host="api.example.test",
                 owner_member_id=owner_member_id,
                 conversation_id=conversation_id,
-                shared=True,
+                shared=shared,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -11311,10 +11324,10 @@ async def _declare_setup(agent_id: UUID, setup: AgentSetup = SHIPPED_SETUP) -> N
 async def test_the_setup_read_states_the_whole_declaration_and_what_is_outstanding(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The band a member reads asks what the app runs on, not only what is missing — so the read
-    states the whole declaration, settled and outstanding together, and `ready` is the one word
-    for whether the app can actually run. Nothing here is member data: a declaration, the presence
-    of a grant, the existence of a standing order, never whose account or whose schedule."""
+    """The screen a member reads asks what the app runs on, not only what is missing — so the read
+    states the whole declaration, settled and outstanding together, each row carrying its own
+    settled bit. Whose is never stated: an account is there or it is not, a standing order exists
+    or it does not."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "reader@example.com")
     await _declare_setup(agent_id)
@@ -11324,35 +11337,42 @@ async def test_the_setup_read_states_the_whole_declaration_and_what_is_outstandi
             headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
     ).json()
-    assert state["connectors"] == [{"provider": "acme", "granted": False, "connected": False}]
+    assert state["connectors"] == [{"provider": "acme", "granted": False}]
     assert state["credentials"] == [{"label": "ACME install", "filled": False, "provider": None}]
     assert state["standing"] == [{"kind": "scheduled_task", "armed": False}]
     assert state["schedule"]["name"] == "acme-sweep"
     assert state["schedule"]["cadences"][0] == {"hour": None, "minute": 0, "weekdays": []}
     assert state["instructions"] == "Connect the ACME account."
-    assert state["ready"] is False
 
 
-async def test_an_account_the_workspace_holds_for_another_app_is_a_different_offer(
+async def test_a_private_account_is_connected_only_for_the_member_who_made_it(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """Connected-to-another-app and not-connected are two states, because they take two different
-    acts: one attaches an account that is already there, the other sends the member through the
-    provider's consent. The row this agent holds itself is `granted`, and only that settles it."""
+    """A grant over a private connection is usable by its owner and by nobody else. A read that
+    counted every grant told the second member their app was connected and then refused every call
+    it made — the worst of both, and with nothing on the screen to press about it."""
     client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "grantee@example.com")
+    owner_id, owner_token = await _seed_member(workspace_id, "owner@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
     await _declare_setup(agent_id)
-    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    private_id = await _seed_account(workspace_id, agent_id, owner_id, "acme", shared=False)
+    await _grant_account(workspace_id, agent_id, private_id)
 
-    connection_id = await _seed_account(workspace_id, agent_id, member_id, "acme")
-    held = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
-    assert held["connectors"] == [{"provider": "acme", "granted": False, "connected": True}]
+    async def connectors(token: str) -> list[dict[str, object]]:
+        read = await client.get(
+            f"/surface/web/agents/{agent_id}/setup",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+        return read.json()["connectors"]
 
-    await _grant_account(workspace_id, agent_id, connection_id)
-    granted = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
-    assert granted["connectors"] == [{"provider": "acme", "granted": True, "connected": True}]
-    # The credential and the standing order are still outstanding, so the app still cannot run.
-    assert granted["ready"] is False
+    assert await connectors(owner_token) == [{"provider": "acme", "granted": True}]
+    assert await connectors(other_token) == [{"provider": "acme", "granted": False}]
+
+    # Shared is the workspace's own: every member reads the one account, because every member's
+    # turns work from it.
+    shared_id = await _seed_account(workspace_id, agent_id, owner_id, "acme", shared=True)
+    await _grant_account(workspace_id, agent_id, shared_id)
+    assert await connectors(other_token) == [{"provider": "acme", "granted": True}]
 
 
 async def test_a_credential_is_filled_by_any_slot_that_answers_it(
@@ -11395,12 +11415,12 @@ async def test_a_credential_the_deploy_supplies_reads_as_filled(
     assert [row["filled"] for row in supplied.json()["credentials"]] == [True]
 
 
-async def test_an_app_with_every_account_and_no_standing_order_is_not_ready(
+async def test_an_app_with_every_account_and_no_standing_order_still_owes_one(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """An account is half of what a shipped app arrives without. Connected and unarmed it holds the
     authority to work and no occasion to, and a setup read that stopped at the account would call
-    that done — so the standing order is declared, read, and counted in `ready`."""
+    that done — so the standing order is declared and read beside the accounts."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "arming@example.com", admin=True)
     await _declare_setup(agent_id)
@@ -11410,7 +11430,6 @@ async def test_an_app_with_every_account_and_no_standing_order_is_not_ready(
     await _fill_slot(workspace_id, "acme_api_key")
     unarmed = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
     assert unarmed["standing"] == [{"kind": "scheduled_task", "armed": False}]
-    assert unarmed["ready"] is False
 
     applied = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
@@ -11425,7 +11444,6 @@ async def test_an_app_with_every_account_and_no_standing_order_is_not_ready(
     assert applied.status_code == 200, applied.text
     armed = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
     assert armed["standing"] == [{"kind": "scheduled_task", "armed": True}]
-    assert armed["ready"] is True
     # The offer stands after the arming: the band says what the app runs on, not only what is
     # missing, and a member who wants a different hour picks again against the same schedule.
     assert armed["schedule"]["name"] == "acme-sweep"
@@ -11462,7 +11480,6 @@ async def test_a_second_feature_armed_does_not_arm_the_one_the_app_arrived_holdi
     assert other.status_code == 200, other.text
     state = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
     assert state["standing"] == [{"kind": "scheduled_task", "armed": False}]
-    assert state["ready"] is False
     assert state["schedule"]["name"] == "acme-sweep"
 
     # The app's own task is what arms it.
@@ -11479,7 +11496,6 @@ async def test_a_second_feature_armed_does_not_arm_the_one_the_app_arrived_holdi
     assert armed.status_code == 200, armed.text
     settled = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
     assert settled["standing"] == [{"kind": "scheduled_task", "armed": True}]
-    assert settled["ready"] is True
 
 
 async def test_the_app_reads_armed_with_its_own_task_behind_a_page_of_others(
@@ -11513,7 +11529,6 @@ async def test_the_app_reads_armed_with_its_own_task_behind_a_page_of_others(
 
     state = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
     assert state["standing"] == [{"kind": "scheduled_task", "armed": True}]
-    assert state["ready"] is True
 
 
 async def _crowd_the_listing(agent_id: UUID, held: str, count: int) -> None:
@@ -11580,7 +11595,7 @@ async def test_the_setup_read_says_whether_this_workspace_has_its_own_page(
     assert (await client.get(path, headers=cookie)).json()["own_page"] is True
 
 
-async def test_an_agent_no_extension_shipped_declares_nothing_and_is_ready(
+async def test_an_agent_no_extension_shipped_declares_nothing_at_all(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """An agent a member built has no shipped declaration at all, so the read has nothing to state
@@ -11599,7 +11614,6 @@ async def test_an_agent_no_extension_shipped_declares_nothing_and_is_ready(
         "standing": [],
         "schedule": None,
         "instructions": "",
-        "ready": True,
         "own_page": False,
     }
 
@@ -11617,6 +11631,10 @@ def test_an_app_that_a_clock_wakes_offers_the_cadences_that_arm_it() -> None:
         standing=(SCHEDULE_KIND,),
         schedule=SetupSchedule(name="s", prompt="p", cadences=(SetupCadence(hour=9),)),
     ).standing == (SCHEDULE_KIND,)
+    # And the other way: the row stating the need is what carries the offer, so cadences with no
+    # row are cadences no screen draws a control for.
+    with pytest.raises(ValidationError, match=f"declares no {SCHEDULE_KIND!r} need"):
+        AgentSetup(schedule=SetupSchedule(name="s", prompt="p", cadences=(SetupCadence(),)))
 
 
 def test_an_hourly_cadence_names_no_weekday() -> None:

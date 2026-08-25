@@ -109,9 +109,9 @@ class AgentSetup(BaseModel):
 
     connectors: tuple[str, ...] = ()
     credentials: tuple[SetupCredential, ...] = ()
-    """Workspace credentials the agent cannot work without. Declared so the read can say the app is
-    not ready while one is missing: an app that reported itself wired and then failed every run
-    against an uninstalled App is the worst of both."""
+    """Workspace credentials the agent cannot work without. Declared so the screen can carry the
+    row while one is missing: an app that reported itself wired and then failed every run against
+    an uninstalled App is the worst of both."""
 
     standing: tuple[str, ...] = ()
     """The object kinds this agent needs one of before it does anything on its own — a
@@ -145,18 +145,25 @@ class AgentSetup(BaseModel):
                 "clock wakes states what it would run and how often it could, or the member is "
                 "asked to compose the app's own job for it"
             )
+        if self.schedule is not None and SCHEDULE_KIND not in self.standing:
+            raise ValueError(
+                f"a setup offering cadences declares no {SCHEDULE_KIND!r} need — the offer is "
+                "carried by the row stating the need, so an offer with no row is a cadence "
+                "nothing on the screen can be armed with"
+            )
         return self
 
 
 class SetupConnector(BaseModel):
-    """One declared provider against what this workspace has done about it. `granted` is this
-    agent's own edge; `connected` says the workspace holds an account of that provider for some
-    other app, which is a different offer — one press attaches what is already there rather than
-    sending the member through consent again."""
+    """One declared provider against an account this agent can actually work from: a connection
+    granted to it that the reading member may use — the workspace's own, or theirs.
+
+    A grant made privately is usable by the member who made it and by nobody else, so a read that
+    counted every grant would tell the second member their app was connected and then refuse every
+    call it made. The account itself stays behind `list_agent_connections`; this is the one bit."""
 
     provider: str
     granted: bool
-    connected: bool
 
 
 class SetupCredentialState(BaseModel):
@@ -177,12 +184,13 @@ class SetupStanding(BaseModel):
 
 class SetupState(BaseModel):
     """What one agent still needs, read by a surface rather than by a turn. The three lists are the
-    whole declaration — settled and outstanding together — because a member reading a setup band is
-    asking what the app runs on, not only what is missing, and a list that emptied as the work
+    whole declaration — settled and outstanding together — because a member reading a setup screen
+    is asking what the app runs on, not only what is missing, and a list that emptied as the work
     landed would leave the finished app saying nothing about itself.
 
-    `ready` is true when nothing in any of them is outstanding; an agent no extension shipped
-    declares nothing and is ready."""
+    Each row carries its own settled bit and the act that settles it, which is what the screen
+    draws. Nothing rolls them into one word: a member acts on the row that is outstanding, never on
+    a summary of all of them."""
 
     connectors: tuple[SetupConnector, ...] = ()
     credentials: tuple[SetupCredentialState, ...] = ()
@@ -193,7 +201,6 @@ class SetupState(BaseModel):
     settled connectors are: the band says what the app runs on, not only what is missing."""
 
     instructions: str = ""
-    ready: bool = True
 
 
 Armed = Callable[[str, str | None], Awaitable[bool]]
@@ -224,12 +231,16 @@ async def _armed(kind: str, wanted: AgentSetup, armed: Armed) -> bool:
     return await armed(kind, None)
 
 
-async def setup_state(agent_id: UUID, *, armed: Armed) -> SetupState:
+async def setup_state(agent_id: UUID, member_id: UUID, *, armed: Armed) -> SetupState:
     """One agent's declared setup against what this workspace has done about it.
 
     Derived from the row, the grants, the credentials and the standing orders on every read, so it
     answers the same after a revoke or a deleted schedule as it did before the first one — the
-    offer is never a flag to clear."""
+    offer is never a flag to clear.
+
+    Declaration and installs are workspace shape; the accounts are read for `member_id`, because
+    that is the only reading of a grant that predicts what the app will do for them. Whose account
+    it is stays out: the answer is that they have one, never which."""
     async with workspace_tx() as connection:
         declared = (
             await connection.execute(
@@ -243,7 +254,7 @@ async def setup_state(agent_id: UUID, *, armed: Armed) -> SetupState:
             return SetupState()
         wanted = AgentSetup.model_validate(declared.setup)
         if not (wanted.connectors or wanted.credentials or wanted.standing):
-            return SetupState(instructions=wanted.instructions, schedule=wanted.schedule)
+            return SetupState(instructions=wanted.instructions)
         granted = set(
             (
                 await connection.execute(
@@ -252,17 +263,12 @@ async def setup_state(agent_id: UUID, *, armed: Armed) -> SetupState:
                         tables.connector_grant,
                         tables.connector_grant.c.connection_id == tables.connection.c.id,
                     )
-                    .where(tables.connector_grant.c.agent_id == agent_id)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        workspace_held = set(
-            (
-                await connection.execute(
-                    sa.select(tables.connection.c.provider).where(
-                        tables.connection.c.workspace_id == ws_current().workspace_id
+                    .where(
+                        tables.connector_grant.c.agent_id == agent_id,
+                        sa.or_(
+                            tables.connection.c.shared,
+                            tables.connection.c.owner_member_id == member_id,
+                        ),
                     )
                 )
             )
@@ -287,9 +293,7 @@ async def setup_state(agent_id: UUID, *, armed: Armed) -> SetupState:
             )
         )
     connectors = tuple(
-        SetupConnector(
-            provider=provider, granted=provider in granted, connected=provider in workspace_held
-        )
+        SetupConnector(provider=provider, granted=provider in granted)
         for provider in wanted.connectors
     )
     # A slot the deploy supplies from its own environment is filled: `WorkspaceScope.credential`
@@ -318,17 +322,19 @@ async def setup_state(agent_id: UUID, *, armed: Armed) -> SetupState:
         standing=standing,
         schedule=wanted.schedule,
         instructions=wanted.instructions,
-        ready=all(connector.granted for connector in connectors)
-        and all(credential.filled for credential in credentials)
-        and all(order.armed for order in standing),
     )
 
 
-async def pending_setup() -> tuple[tuple[UUID, str, AgentSetup], ...]:
-    """Every shipped agent in this workspace a member has not finished wiring, with the grants it
-    is still missing. The agent that needs a grant is the one that must ask for it: every grant
-    binds to the agent whose conversation it is made in, so this is read to tell that agent what is
-    outstanding.
+async def pending_setup(member_id: UUID) -> tuple[tuple[UUID, str, AgentSetup], ...]:
+    """Every shipped agent this member has not finished wiring, with the grants it is still
+    missing. The agent that needs a grant is the one that must ask for it: every grant binds to the
+    agent whose conversation it is made in, so this is read to tell that agent what is outstanding.
+
+    Read for `member_id`, on the same terms `setup_state` reads accounts and the proxy forwards
+    them: a private grant works for the member who made it and for nobody else. Counting every
+    grant told the second member nothing was outstanding and left their every call refused, with
+    the one skill that would have asked for an account of their own saying there was nothing to
+    ask for.
 
     An archived app is absent: it admits no turn, so it can neither be asked for a grant nor use
     one, and the line would stand unmet for as long as the row is archived.
@@ -356,7 +362,13 @@ async def pending_setup() -> tuple[tuple[UUID, str, AgentSetup], ...]:
                 tables.connection,
                 tables.connector_grant.c.connection_id == tables.connection.c.id,
             )
-            .where(tables.connector_grant.c.agent_id.in_(held))
+            .where(
+                tables.connector_grant.c.agent_id.in_(held),
+                sa.or_(
+                    tables.connection.c.shared,
+                    tables.connection.c.owner_member_id == member_id,
+                ),
+            )
         ):
             held[granted.agent_id].add(granted.provider)
     pending = []
@@ -393,7 +405,9 @@ ROSTER_HEADER = (
 )
 
 
-async def setup_skill(agent_id: UUID, is_main: bool, has_speaker: bool) -> RuntimeSkill | None:
+async def setup_skill(
+    agent_id: UUID, is_main: bool, speaker_member_id: UUID | None
+) -> RuntimeSkill | None:
     """The loadable skill telling an agent what it still needs, or None when it needs nothing
     or the turn cannot act on it.
 
@@ -408,13 +422,15 @@ async def setup_skill(agent_id: UUID, is_main: bool, has_speaker: bool) -> Runti
     It reaches only a turn a member is speaking on, because every act it names is speaker-gated:
     `connect_account` refuses without one. A turn nobody speaks on — a spawn, a schedule, a source
     arrival — would be handed instructions it cannot follow and a member it cannot ask, and would
-    keep reporting the same grant on every later turn.
+    keep reporting the same grant on every later turn. The speaker is also who the grants are read
+    for: they are the one who would make the missing one, and the one an account already made
+    privately by somebody else does nothing for.
 
     Derived from the grants on every turn, so it erases itself as they land rather than needing a
     flag that a later revoke would leave stale."""
-    if not has_speaker:
+    if speaker_member_id is None:
         return None
-    pending = await pending_setup()
+    pending = await pending_setup(speaker_member_id)
     mine = next((entry for entry in pending if entry[0] == agent_id), None)
     if mine is None:
         others = [entry for entry in pending if entry[0] != agent_id]

@@ -1241,7 +1241,7 @@ def manifest() -> Manifest:
                     credentials=(
                         SetupCredential(label=API_CREDENTIAL_LABEL, slots=(API_SLOT,)),
                         # The second half of the seam: a credential a workspace install fills, so
-                        # the setup screen's install press has a declaration to read here.
+                        # the read a setup screen draws from has one to answer with here.
                         SetupCredential(
                             label=INSTALL_CREDENTIAL_LABEL,
                             slots=(INSTALL_SLOT,),

@@ -686,7 +686,8 @@ async def test_list_agents_orders_main_first_then_name(db: None, tmp_path) -> No
 
 
 async def test_agent_projections_carry_the_icon(db: None, tmp_path) -> None:
-    workspace_id, agent_id, _ = await _seed()
+    workspace_id, agent_id, member_id = await _seed(member_email="reader@example.com")
+    assert member_id is not None
     second = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -704,7 +705,7 @@ async def test_agent_projections_carry_the_icon(db: None, tmp_path) -> None:
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     with ws(workspace_id):
         listed = await context.list_agents()
-        detail = await context.agent_detail(second)
+        detail = await context.agent_detail(second, member_id)
     assert [(agent.name, agent.icon) for agent in listed] == [
         ("assistant", MAIN_AGENT_ICON),
         ("helpdesk", "headset"),

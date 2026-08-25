@@ -1237,6 +1237,8 @@ test("Start setup lands the member on the app's new conversation, founding nothi
   expect(StreamFake.opened).toEqual([]);
 });
 
+const PURPOSE = "Briefs every meeting before it starts.";
+
 test("an app the workspace has never built stands on its setup screen", async () => {
   /** Built is the line, not wired: an app builds a thinner page from fewer sources, and a member
    *  who wants to see it before every todo is settled gets to. */
@@ -1249,22 +1251,29 @@ test("an app the workspace has never built stands on its setup screen", async ()
     "/setup": () =>
       json({
         own_page: false,
-        ready: false,
         credentials: [],
-        connectors: [{ provider: "googlecalendar", granted: false, connected: false }],
+        connectors: [{ provider: "googlecalendar", granted: false }],
         standing: [],
       }),
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(
-    <App agents={[{ ...AGENT, main: false, app: "meetings" }]} member={MEMBER} onAgents={() => {}} />,
+    <App
+      agents={[{ ...AGENT, main: false, app: "meetings", purpose: PURPOSE }]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
   );
 
   await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
+  // The band names this screen and the app above it, and states the app's one sentence under both
+  // — the member arrived at an app somebody else installed, and reads what it is for first.
+  await screen.findByText("Setup");
+  await screen.findByText(PURPOSE);
 });
 
 test("a shipped app that declares no setup stands on its page", async () => {
-  /** The five apps this repository already ships declare none, and their page is the deploy's own.
+  /** Chat, radar, tasks, wiki and artifacts declare none, and their page is the deploy's own.
    *  A gate that read "no forked page" as "not set up" stranded them on a screen with no account
    *  row, no schedule row, and nothing to press. */
   wire({
@@ -1274,7 +1283,7 @@ test("a shipped app that declares no setup stands on its page", async () => {
     "/homepage": () =>
       json({ state: "set", url: "https://wiki.example.test", deploy_generation: 1 }),
     "/setup": () =>
-      json({ own_page: false, ready: true, connectors: [], credentials: [], standing: [] }),
+      json({ own_page: false, connectors: [], credentials: [], standing: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(
@@ -1303,8 +1312,7 @@ test("the move to setup replaces, so Back steps past the app", async () => {
     "/setup": () =>
       json({
         own_page: false,
-        ready: false,
-        connectors: [{ provider: "googlecalendar", granted: false, connected: false }],
+        connectors: [{ provider: "googlecalendar", granted: false }],
         credentials: [],
         standing: [],
       }),
@@ -1327,7 +1335,7 @@ test("an agent no extension shipped keeps its conversation column, however unbui
     "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
     "/homepage": () => json({ state: "none" }),
-    "/setup": () => json({ own_page: false, ready: true, credentials: [], connectors: [] }),
+    "/setup": () => json({ own_page: false, credentials: [], connectors: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -1350,9 +1358,8 @@ test("an app that has been built once stands on its page, and the setup screen i
     "/setup": () =>
       json({
         own_page: true,
-        ready: false,
         credentials: [],
-        connectors: [{ provider: "googlecalendar", granted: false, connected: false }],
+        connectors: [{ provider: "googlecalendar", granted: false }],
         standing: [],
       }),
   });

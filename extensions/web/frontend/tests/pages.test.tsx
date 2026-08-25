@@ -211,6 +211,29 @@ test("the artifacts page mounts and draws the empty shelf with its search", asyn
   expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
 });
 
+/** A page that ships filled in still has to mount: its placeholder is the shape the app rebuilds
+ *  against, so a page that throws on mount is a page the app forks a broken copy of. Each of the
+ *  three draws its own bands and the conversation list the kit hands it. */
+test("the meetings page mounts and draws its bands over its own placeholder", async () => {
+  await runPage("meetings", { "/objects/conversation": () => json({ objects: [] }) });
+  expect(await screen.findByRole("heading", { name: "Meetings" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Next meetings" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Follow-ups" })).toBeTruthy();
+});
+
+test("the issues page mounts and draws both of its bands", async () => {
+  await runPage("issues", { "/objects/conversation": () => json({ objects: [] }) });
+  expect(await screen.findByRole("heading", { name: "Issues" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Approved to implement" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Triaged" })).toBeTruthy();
+});
+
+test("the metrics page mounts and states which measure sets are not on", async () => {
+  await runPage("metrics", { "/objects/conversation": () => json({ objects: [] }) });
+  expect(await screen.findByRole("heading", { name: "Metrics" })).toBeTruthy();
+  expect((await screen.findAllByRole("button", { name: "Turn on" })).length).toBeGreaterThan(0);
+});
+
 test("the chat page mounts and draws the empty conversation list", async () => {
   await runPage("chat", {
     "/objects/conversation": () => json({ objects: [] }),

@@ -41,3 +41,8 @@ name = "no-first-time"
 name = "no-install-ban"
 [arm.files]
 "extensions/app_chat/ufo_ext_app_chat/skills/app-chat-home/SKILL.md" = "arms/no-install-ban-app-chat-home.md"
+
+[[arm]]
+name = "no-kit-drift"
+[arm.files]
+"extensions/app_chat/ufo_ext_app_chat/skills/app-chat-home/SKILL.md" = "arms/no-kit-drift-app-chat-home.md"

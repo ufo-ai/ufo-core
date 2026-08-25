@@ -2681,10 +2681,13 @@ class SurfaceContext:
             ).scalars()
         return frozenset(rows)
 
-    async def agent_detail(self, agent_id: UUID) -> AgentDetail | None:
+    async def agent_detail(self, agent_id: UUID, member_id: UUID) -> AgentDetail | None:
         """One agent's configuration for a portal settings read — the row beside its prompt digest
         and bound surfaces, or None when no such agent exists in this workspace. The surface's own
-        audience authority gates who may read it, exactly as `list_agents`."""
+        audience authority gates who may read it, exactly as `list_agents`.
+
+        The outstanding setup is read for `member_id`: an account granted privately by somebody
+        else is one this member's turns cannot use, so it settles nothing for them."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -2735,9 +2738,9 @@ class SurfaceContext:
             prompt=row.prompt,
             prompt_digest=prompt_digest(row.prompt),
             surfaces=tuple(surfaces),
-            setup=dict((agent, missing) for agent, _name, missing in await pending_setup()).get(
-                agent_id
-            ),
+            setup=dict(
+                (agent, missing) for agent, _name, missing in await pending_setup(member_id)
+            ).get(agent_id),
             updated_at=row.updated_at,
         )
 
@@ -3304,9 +3307,11 @@ class SurfaceContext:
         filled, whether it holds the standing order that gives it an occasion to run, and what to
         do about the rest.
 
-        Workspace shape rather than member data — a declaration, the presence of a grant, the
-        existence of a standing order, never whose account or whose schedule — so it answers the
-        agent's whole audience, and the account itself stays behind `list_agent_connections`.
+        Declaration, installs and standing orders are workspace shape — the presence of an
+        order, never whose. The accounts are read for `member_id`, because a grant made privately
+        works for the member who made it and for nobody else: a workspace-wide count told the
+        second member their app was connected and then refused every call it made. Which account
+        it is still stays behind `list_agent_connections`.
 
         The standing half reads through the object registry rather than off a core table, because
         the kinds that arm an agent are extensions': `member_id` names the reader the registry's
@@ -3330,7 +3335,7 @@ class SurfaceContext:
             return page is not None and bool(page.rows)
 
         with ws(self.workspace_id):
-            return await setup_state(agent_id, armed=armed)
+            return await setup_state(agent_id, member_id, armed=armed)
 
     async def list_member_objects(
         self,

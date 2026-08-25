@@ -481,7 +481,7 @@ class IngressServe:
         file inside the claim's own slug subdir answers a root-relative request — so
         `apps/<digest>/<slug>/index.html` is `/` — while a file outside it answers at its own path,
         so `apps/<digest>/assets/<chunk>.js` is `/assets/<chunk>.js` and the one set of hashed
-        chunks the five pages share serves every app. None when the digest names no published tree
+        chunks the pages share serves every app. None when the digest names no published tree
         — a race against a redeploy that retired it — answering 404 for the refresh to heal.
 
         The etag is the digest itself: the tree is content-addressed, so a byte change anywhere is a

@@ -440,10 +440,15 @@ export function routeIs<Kind extends RouteKind>(
 }
 
 /** Whether the shell sends the member where a framed app page asks: a conversation permalink, a new
- *  conversation, an app, or a built-in section. Everything else — home, administration, a workspace
- *  tab, an external URL that parses to `home` — is refused, so a frame cannot bounce the member into
- *  an arbitrary place (RFC 0039's navigation fence, and the whole of it: the shell acts on a frame's
- *  request under the viewer's own session).
+ *  conversation, an app, an app's setup screen, or a built-in section. Everything else — home,
+ *  administration, a workspace tab, an external URL that parses to `home` — is refused, so a frame
+ *  cannot bounce the member into an arbitrary place (RFC 0039's navigation fence, and the whole of
+ *  it: the shell acts on a frame's request under the viewer's own session).
+ *
+ *  A page reaches its own setup screen because that screen is the only place an account is
+ *  reconnected or a schedule re-armed, and a built page whose account was revoked is exactly the
+ *  page that has to say so. The screen is forced on nobody: an app stands there of its own accord
+ *  only until the workspace has built it a page once.
  *
  *  It is a column of the table rather than a second list of kinds held beside it. The record is typed
  *  over every kind the table declares, so a route the table gains states here whether a frame may
@@ -460,7 +465,7 @@ const FRAMED: { [Kind in RouteKind]: boolean } = {
   "conversation-slot": false,
   "new-chat": true,
   agent: true,
-  "agent-setup": false,
+  "agent-setup": true,
   workspace: false,
   section: true,
   "bad-link": false,

@@ -963,7 +963,7 @@ async def submit_intent(
         and submitted.spec is not None
         and not AGENT_SPEC_REQUIRED <= submitted_fields
     ):
-        detail = await ctx.agent_detail(agent_id)
+        detail = await ctx.agent_detail(agent_id, member_id)
         if detail is None or detail.name != submitted.name:
             return JSONResponse({"applied": False, "message": "No such app."})
         submitted = submitted.model_copy(
@@ -1072,14 +1072,14 @@ def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]:
 
 
 async def agent_settings(
-    ctx: SurfaceContext, agent_id: UUID, *, admin: bool, archivable: bool
+    ctx: SurfaceContext, agent_id: UUID, member_id: UUID, *, admin: bool, archivable: bool
 ) -> Response:
     """The settings projection: the agent's configuration and prompt digest, the deploy's public
     internet capability as the ceiling the agent setting narrows, the deploy's model ids for the
     model choice, the writable spec's own schema (the form renders its fields from it, never a
     parallel description), what an extension-shipped agent still needs granted, and — for an admin —
     the web audience this extension grants."""
-    detail = await ctx.agent_detail(agent_id)
+    detail = await ctx.agent_detail(agent_id, member_id)
     if detail is None:
         return Response("no such agent", status_code=404)
     audience: list[str] | None = None

@@ -163,6 +163,13 @@ def test_app_bundle_gate_flags_a_slug_the_homepage_read_cannot_key() -> None:
     assert any("app_code_review" in failure and "lowercase" in failure for failure in failures)
 
 
+def test_app_rebuild_gate_passes_for_the_home_skills_this_repo_ships() -> None:
+    """Every app's home skill says what a rebuild takes. A member's page is built against the kit of
+    the day it was built, and the skill is the only place the agent doing the rebuild reads that —
+    so a page nobody rebuilds silently keeps the kit it started on."""
+    assert gates._app_rebuild_failures() == []
+
+
 def test_app_bundle_gate_flags_a_page_the_typecheck_never_reads() -> None:
     """A page left off the typecheck's file list is built and shipped having never been checked:
     the bundle transpiles without types, so a prop the kit does not declare is dropped in silence

@@ -22,13 +22,16 @@ export type SetupCadence = { hour: number | null; minute: number; weekdays: numb
 
 export type SetupSchedule = { name: string; prompt: string; cadences: SetupCadence[] };
 
+/** The setup read, as it arrives. Every field is optional here because nothing crosses the wire
+ *  checked: a screen that indexed a list the answer did not carry would blank itself over a payload
+ *  that merely declared nothing. `own_page` is whether this workspace has built the app its page. */
 export type SetupState = {
-  connectors: { provider: string; granted: boolean; connected: boolean }[];
-  credentials: { label: string; filled: boolean; provider: string | null }[];
-  standing: { kind: string; armed: boolean }[];
-  schedule: SetupSchedule | null;
-  instructions: string;
-  ready: boolean;
+  connectors?: { provider: string; granted: boolean }[];
+  credentials?: { label: string; filled: boolean; provider: string | null }[];
+  standing?: { kind: string; armed: boolean }[];
+  schedule?: SetupSchedule | null;
+  instructions?: string;
+  own_page?: boolean;
 };
 
 const SCHEDULE_KIND = "scheduled_task";
@@ -40,7 +43,6 @@ const RUNS = "Runs";
 const CONNECT = "Connect";
 const CONNECTING = "Connecting";
 const CONNECTED = "Connected";
-const ELSEWHERE = "Connected to another app";
 const OUTSTANDING = "Not connected";
 const INSTALL = "Install";
 const INSTALLED = "Installed";
@@ -61,9 +63,9 @@ const BUILD_NOTE =
   "The app reads what it is connected to and builds its own page. It runs in a conversation you "
   + "can watch, and you can ask for changes there.";
 
-/** What the press types on the member's behalf. It names the skill and stops: the steps live in the
- *  skill, and an ask repeating them would be a second copy of the procedure that drifts the first
- *  time either changes. */
+/** What the press types on the member's behalf, into the composer they send it from. It names the
+ *  skill and stops: the steps live in the skill, and an ask repeating them would be a second copy
+ *  of the procedure that drifts the first time either changes. */
 const BUILD_ASK = "Build this workspace its own version of your page. Load your homepage skill and "
   + "follow it.";
 
@@ -119,7 +121,7 @@ export function labelOf(cadence: SetupCadence): string {
   const days =
     cadence.weekdays.length === 0
       ? EVERY_DAY
-      : cadence.weekdays.join(",") === WORKING_WEEK.join(",")
+      : [...cadence.weekdays].sort().join(",") === WORKING_WEEK.join(",")
         ? EVERY_WEEKDAY
         : cadence.weekdays
             .map((day) =>
@@ -133,11 +135,6 @@ export function labelOf(cadence: SetupCadence): string {
  *  line on the screen written for the machine. */
 function noun(kind: string): string {
   return kind.replace(/_/g, " ");
-}
-
-function stateOf(connector: SetupState["connectors"][number]): string {
-  if (connector.granted) return CONNECTED;
-  return connector.connected ? ELSEWHERE : OUTSTANDING;
 }
 
 /** Wiring one app: the accounts it works from, the workspace installs it needs, and the standing
@@ -238,7 +235,7 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
     /* The link is kept only for a member whose browser refused the window, so one press is the
        whole act for everybody else. */
     setLink(opened ? null : (outcome.url ?? null));
-    setNotice(outcome.url ? QUIET : { text: outcome.message, refused: true });
+    setNotice(outcome.url ? QUIET : { text: outcome.message, refused: !outcome.applied });
     setReloads((count) => count + 1);
   }
 
@@ -249,10 +246,11 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
    *  It is offered whether or not they are settled — an app builds a thinner page from fewer
    *  sources, and a member who wants to see it now is not told to come back later.
    *
-   *  The press starts the work. The ask rides to the app's own new chat and the composer standing
-   *  there sends it, so the build runs in a conversation the member can watch and correct. */
+   *  The press opens the work rather than spending it: the ask rides to the app's own new chat and
+   *  stands in the composer, so the member reads what they are about to ask for and sends it. The
+   *  build then runs in a conversation they can watch and correct. */
   function buildApp() {
-    setPendingAsk(agent.id, BUILD_ASK, true);
+    setPendingAsk(agent.id, BUILD_ASK, false);
     navigate(newChatHash(agent.id));
   }
 
@@ -287,17 +285,11 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
   return (
     <Panel state={state} shape="form">
       {(payload) => {
-        /* Read defensively rather than trusting the shape: every list defaults empty on the wire,
-           and a screen that indexed a missing one would blank itself over a payload that merely
-           declared nothing. */
         const connectors = payload.connectors ?? [];
         const credentials = payload.credentials ?? [];
         const standing = payload.standing ?? [];
         return (
           <div className="flex flex-col gap-2xl">
-          {agent.purpose ? (
-            <p className="m-0 max-w-hint text-label text-ink-soft">{agent.purpose}</p>
-          ) : null}
           {connectors.length ? (
             <Group title={ACCOUNTS}>
               <Facts
@@ -307,7 +299,7 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
                     CONNECTED
                   ) : (
                     <span className="flex items-center justify-end gap-lg">
-                      <span>{stateOf(connector)}</span>
+                      <span>{OUTSTANDING}</span>
                       <Button
                         variant="outline"
                         size="bar"
@@ -338,7 +330,7 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
               <Facts
                 rows={standing.map((order) => ({
                   label: noun(order.kind),
-                  value: standingValue(order, payload.schedule),
+                  value: standingValue(order, payload.schedule ?? null),
                 }))}
               />
             </Group>
@@ -368,7 +360,7 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
    *  the press that hands an admin the link; where it does not, or where the member is not an
    *  admin, the row states what is true and offers nothing — which is honest, because there is
    *  nothing they can press. */
-  function installValue(credential: SetupState["credentials"][number]) {
+  function installValue(credential: NonNullable<SetupState["credentials"]>[number]) {
     if (credential.filled) return INSTALLED;
     const verb = credential.provider === null ? undefined : INSTALL_VERB[credential.provider];
     if (verb === undefined) return NOT_INSTALLED;
@@ -397,7 +389,10 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
     );
   }
 
-  function standingValue(order: SetupState["standing"][number], schedule: SetupSchedule | null) {
+  function standingValue(
+    order: NonNullable<SetupState["standing"]>[number],
+    schedule: SetupSchedule | null,
+  ) {
     if (order.armed) return ARMED;
     /* A kind the app offers no cadence for is settled in chat, because settling it is more than one
        answer: a feed trigger takes a registered source, shared, and a trigger naming it. So the row
@@ -427,7 +422,10 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             {schedule.cadences.map((cadence) => (
-              <DropdownMenuItem key={labelOf(cadence)} onSelect={() => void arm(schedule, cadence)}>
+              <DropdownMenuItem
+                key={cronFor(cadence, 0)}
+                onSelect={() => void arm(schedule, cadence)}
+              >
                 {labelOf(cadence)}
               </DropdownMenuItem>
             ))}

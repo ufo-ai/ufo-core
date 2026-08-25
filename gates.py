@@ -46,6 +46,8 @@ APP_EXTENSION = re.compile(r"app_(?P<slug>[a-z0-9]+)$")
 APP_HOME_SKILL = "app-{slug}-home"
 APPS_CONFIG = PORTAL_SOURCE.parent / "vite.apps.config.ts"
 APPS_TYPECHECK = PORTAL_SOURCE.parent / "tsconfig.apps.json"
+APP_HOME_SKILL_FILE = "SKILL.md"
+APP_REBUILD_LINE = "takes the platform kit as it stands today"
 APPS_LIST = re.compile(r"const APPS = \[(?P<apps>[^\]]*)\]")
 PORTAL_ENTRIES = frozenset({PORTAL_SOURCE / "main.tsx", PORTAL_SOURCE / "apps" / "kit.ts"})
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
@@ -1629,6 +1631,24 @@ def _app_slug_failures(
     return failures
 
 
+def _app_rebuild_failures() -> list[str]:
+    """Every app's home skill says what a rebuild takes.
+
+    A member's page is built against the kit of the day it was built, and a redeploy takes the kit
+    as it stands then — so a rebuild is how a page gains what the kit has since gained, and a page
+    nobody rebuilds silently keeps the old one. The skill is the only place an agent reads that,
+    because the agent doing the rebuild is following the skill and nothing else."""
+    skills = sorted(ROOT.glob(f"extensions/app_*/ufo_ext_app_*/skills/*/{APP_HOME_SKILL_FILE}"))
+    if not skills:
+        return ["extensions/app_*: no app home skills found — the gate lost its subjects"]
+    return [
+        f"{path.relative_to(ROOT)}: does not say a rebuild {APP_REBUILD_LINE!r} — an agent "
+        "following this skill would rebuild a page onto the kit it was first built against"
+        for path in skills
+        if APP_REBUILD_LINE not in path.read_text()
+    ]
+
+
 def _app_entry(slug: str) -> Path:
     return PORTAL_SOURCE.parent / "apps" / slug / "index.html"
 
@@ -1843,6 +1863,7 @@ def main() -> int:
     failures.extend(_portal_style_failures())
     failures.extend(_waiting_line_failures())
     failures.extend(_app_bundle_failures())
+    failures.extend(_app_rebuild_failures())
     terraform = _env_terraform()
     if not terraform:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")

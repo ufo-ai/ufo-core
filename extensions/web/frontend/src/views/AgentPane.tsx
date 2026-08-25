@@ -11,6 +11,7 @@ import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import type { ChatRow } from "@/lib/rail";
+import type { SetupState } from "@/views/AgentSetup";
 import { Chat } from "@/views/Chat";
 import {
   ConversationDetail,
@@ -49,15 +50,6 @@ const HOMEPAGE_POLL_MS = 30_000;
 
 const HOMEPAGE_SANDBOX =
   "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock";
-
-/** What the pane needs from the setup read: whether the app declares anything to settle, and
- *  whether this workspace has built it a page. */
-type SetupGate = {
-  own_page?: boolean;
-  connectors?: unknown[];
-  credentials?: unknown[];
-  standing?: unknown[];
-};
 
 /** One mounted copy of the homepage frame. A redeploy or ended session remounts the page at the
  *  same URL, and a frame torn down the instant its successor mounts leaves the member watching
@@ -149,13 +141,13 @@ export function AgentPane({
   // And only an answer that says so in as many words sends the member away: a read that failed, or
   // one whose payload states nothing, leaves them on the page they asked for.
   const shipped = Boolean(agent.app);
-  const setup = usePanelRead<SetupGate>(
+  const setup = usePanelRead<SetupState>(
     shipped ? "/agents/" + agent.id + "/setup" : null,
     settles,
   );
   // An app is sent to its setup screen only while it has setup to do: it declares something, and
   // the workspace has not built it a page yet. An app that declares nothing has nothing that screen
-  // could list — the five this repository already ships declare none — so it stands on its page.
+  // could list — chat, radar, tasks, wiki and artifacts declare none — so it stands on its page.
   //
   // The move replaces rather than pushes. A pushed entry sends Back to the app address, which
   // mounts the pane, reads the same answer and pushes the setup screen over it again, so the member

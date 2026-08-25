@@ -7,9 +7,9 @@ research (the research tools over the Perplexity search backend), brokered conne
 injected at the egress proxy) and MCP,
 the sandbox browser/computer-use tools with Chrome driven inside each conversation's sandbox (the
 sandbox-chrome cdp provider), website building and the code REPL, document generation,
-todos, durable objectives, scheduled tasks, member-authored skills, the five member apps (chat,
-radar, tasks, wiki, artifacts — each a shipped agent with an editable homepage), the member web
-portal, the
+todos, durable objectives, scheduled tasks, member-authored skills, the member apps (chat,
+radar, tasks, wiki, artifacts, meetings, issues, metrics — each a shipped agent with an editable
+homepage), the member web portal, the
 operator session debugger (and, riding the memory extension, the memory explorer), an extra
 OpenRouter model provider, and the coding subagent. It runs on core's own local carrier and index
 with no managed infrastructure
@@ -26,6 +26,9 @@ VERSION = "0.1.0"
 EXTENSIONS = (
     "app_artifacts",
     "app_chat",
+    "app_issues",
+    "app_meetings",
+    "app_metrics",
     "app_radar",
     "app_tasks",
     "app_wiki",

@@ -383,8 +383,9 @@ def load_apps(directory: Path) -> AppsBundle | None:
     file, first 16 hex: content derived, so it is identical on every pod, names the fleet key
     prefix `apps/<digest>/`, and folds to the `deploy_generation` the homepage read reports.
     Hashing the tree per portal page load would stall the loop on the same megabytes every time.
-    Every file is carried whatever its suffix. The tree is the served bytes — five documents and
-    the hashed `assets/` they name — and the ingress that serves it at a frame origin's root holds
+    Every file is carried whatever its suffix. The tree is the served bytes — one document per
+    app and the hashed `assets/` they name — and the ingress that serves it at a frame origin's
+    root holds
     the one media-type table over them, so nothing here decides what a page may name (`.html`, the
     suffix every page's own entry carries, is not in this module's table at all). A slug is a
     top-level directory other than the shared `assets/`.
@@ -842,10 +843,10 @@ async def _member_chat(
 
     A room the portal opened for this member is theirs to read, and theirs to speak in where the app
     answers there. It carries no chat row — that row is the (agent, member) binding a chat is
-    founded with, and a room is opened by a press instead — so the durable audience is what says
-    whose it is: `conversation_for` names exactly this member, and nothing else can widen it
-    afterwards. Without it a member who pressed Build app, or armed a schedule, was handed a link to
-    the room their own press opened and met a 404 on it.
+    founded with, and a room is opened without one — so the durable audience is what says whose it
+    is: `conversation_for` names exactly this member, and nothing else can widen it afterwards.
+    Without it a member whose page the homepage sweep built, or who armed a schedule, was handed a
+    link to the room the work ran in and met a 404 on it.
 
     The prepared-intent lane is not covered, by its key. An intent turn dispatches its one tool call
     and runs no model round, so it claims no arrivals — a message folded onto a live one is a
@@ -4347,12 +4348,14 @@ async def settings(ctx: SurfaceContext, request: Request) -> Response:
     member_id, _email, audience, agent_id = gated
     summary = next(agent for agent in audience.agents if agent.id == agent_id)
     archivable = not summary.main and (audience.admin or summary.owner_member_id == member_id)
-    return await agent_settings(ctx, agent_id, admin=audience.admin, archivable=archivable)
+    return await agent_settings(
+        ctx, agent_id, member_id, admin=audience.admin, archivable=archivable
+    )
 
 
 async def agent_setup(ctx: SurfaceContext, request: Request) -> Response:
     """What the selected app needs before it works: the accounts its provision declared, which of
-    them this workspace already holds, the workspace credentials it cannot run without, and whether
+    them this member can work from, the workspace credentials it cannot run without, and whether
     it holds the standing order that gives it an occasion to run.
 
     It answers the agent's whole web audience, like the settings read beside it — what an app runs

@@ -48,7 +48,7 @@ const kitImports = (source: string): string[] =>
       .filter((name) => name.length > 0),
   );
 
-test("the served tree is the five pages and the chunks they name, and nothing else", () => {
+test("the served tree is every page and the chunks they name, and nothing else", () => {
   const held = readdirSync(TREE, { withFileTypes: true });
   expect(held.filter((entry) => entry.isFile())).toEqual([]);
   expect(

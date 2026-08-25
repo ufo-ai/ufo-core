@@ -34,7 +34,7 @@ beforeEach(() => {
  *  install fills, and the standing order that gives it an occasion to run. */
 function owed(over: Record<string, unknown> = {}) {
   return {
-    connectors: [{ provider: "googlecalendar", granted: false, connected: false }],
+    connectors: [{ provider: "googlecalendar", granted: false }],
     credentials: [{ label: "ufo GitHub App", filled: false, provider: "github" }],
     standing: [{ kind: "scheduled_task", armed: false }],
     schedule: {
@@ -46,7 +46,6 @@ function owed(over: Record<string, unknown> = {}) {
       ],
     },
     instructions: "Connect the calendar.",
-    ready: false,
     ...over,
   };
 }
@@ -98,7 +97,6 @@ test("the screen states every need the app declares, with the act that settles i
   expect(await screen.findByRole("button", { name: "Install" })).toBeTruthy();
   expect(await screen.findByRole("button", { name: "Choose a cadence" })).toBeTruthy();
   expect(await screen.findByText("Connect the calendar.")).toBeTruthy();
-  expect(await screen.findByText("Briefs every meeting before it starts.")).toBeTruthy();
 });
 
 test("a workspace install is one press, and its link opens the provider's own page", async () => {
@@ -135,13 +133,14 @@ test("a need the app offers no cadence for still carries an act", async () => {
   expect(location.hash).toBe("#/new/" + AGENT_ID);
 });
 
-test("Build app stands below the todos and fires the build off", async () => {
+test("Build app stands below the todos and hands the ask over unsent", async () => {
   /** The todos are what the app needs before it can read anything; this is the act that turns a
    *  wired app into its screen, so it stands under them.
    *
-   *  The press starts the work rather than handing the member words to send: the ask rides to the
-   *  app's own new chat and the composer standing there sends it, so the build runs in a
-   *  conversation they can watch and correct. */
+   *  The ask is handed over rather than spent: it forks a site and binds a homepage, and a press
+   *  that starts that before the member has read what it asks for is a surprise. It rides to the
+   *  app's own new chat and stands in the composer, so the build runs in a conversation they
+   *  opened, can watch, and can correct. */
   wire({ [SETUP]: () => json(owed()) });
   mount();
 
@@ -149,7 +148,7 @@ test("Build app stands below the todos and fires the build off", async () => {
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   const handed = takePendingAsk(AGENT_ID);
-  expect(handed?.send).toBe(true);
+  expect(handed?.send).toBe(false);
   expect(handed?.text).toContain("Load your homepage skill");
   // The ask names the skill and stops: the steps live in the skill, and repeating them here would
   // be a second copy of the procedure that drifts the first time either changes.

@@ -582,9 +582,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     turn.speaker_member_id,
                 )
             )
-            waiting = await setup_skill(
-                turn.agent_id, agent.is_main, turn.speaker_member_id is not None
-            )
+            waiting = await setup_skill(turn.agent_id, agent.is_main, turn.speaker_member_id)
             if waiting is not None:
                 skills = skills.merged_with((waiting,))
             cards = tuple(skills.member_cards.values())

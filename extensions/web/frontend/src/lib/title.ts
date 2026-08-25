@@ -12,7 +12,7 @@ const FIRST_RUN = "Set up this workspace";
 const WORKSPACE = "Workspace";
 const APPS = "Apps";
 const ADMINISTRATION = "Administration";
-const SETUP = "Setup";
+export const SETUP = "Setup";
 const INVALID_LINK = "Invalid link";
 
 /** One step of where the member is: what a surface is called, and the address it stands at where

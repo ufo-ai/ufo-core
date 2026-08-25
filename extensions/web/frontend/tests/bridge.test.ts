@@ -90,6 +90,9 @@ test("navigation admits conversations, apps, new chats, and sections, and refuse
   expect(framedNavigation("#/c/" + CONVERSATION_ID)).toBe(true);
   expect(framedNavigation("#/new/" + AGENT_ID)).toBe(true);
   expect(framedNavigation("#/agents/" + AGENT_ID)).toBe(true);
+  // A page reaches its own setup screen: it is the one place an account is reconnected or a
+  // schedule re-armed, and a built page whose account was revoked is the page that has to say so.
+  expect(framedNavigation("#/agents/" + AGENT_ID + "/setup")).toBe(true);
   expect(framedNavigation("#/connectors")).toBe(true);
   expect(framedNavigation("#/wiki?open=run%2Fabc")).toBe(true);
   expect(framedNavigation("#/workspace/connectors")).toBe(true);

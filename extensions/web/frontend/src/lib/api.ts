@@ -66,6 +66,13 @@ export async function postIntent(agentId: string, envelope: unknown): Promise<In
   } catch {
     return { applied: false, message: "Network error — try again." };
   }
+  // A session that ended is not a refusal to read: signing in again is the only act left, so the
+  // member goes to the one door rather than reading that the door is shut. It is the boot read's
+  // own answer to a 401, taken here because a press is where a session is usually found to be over.
+  if (res.status === 401) {
+    window.location.assign(SIGN_IN_PATH);
+    return { applied: false, message: "" };
+  }
   const answered = await res.text().catch(() => "");
   let outcome: Partial<IntentOutcome> | null = null;
   try {
@@ -73,10 +80,14 @@ export async function postIntent(agentId: string, envelope: unknown): Promise<In
   } catch {
     // A fence refuses in its own words and in plain text — the bridge's endpoint and verb tables
     // answer before the lane is reached at all. Reading those words is the difference between a
-    // member being told why an act is not available here and being told "Error 400".
+    // member being told why an act is not available here and being told "Error 400". It is read
+    // on the same two terms `refusal` reads a failed GET on: marked as written for the member,
+    // and short enough to be a sentence — an upstream error page is neither.
+    const said = answered.trim();
+    const marked = Boolean(res.headers.get(REFUSAL_HEADER)) && said.length <= REFUSAL_MAX_CHARS;
     return {
       applied: false,
-      message: answered.trim() || "Error " + res.status + " — try again.",
+      message: marked && said ? said : "Error " + res.status + " — try again.",
     };
   }
   if (!outcome) return { applied: false, message: "Error " + res.status + " — try again." };

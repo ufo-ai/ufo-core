@@ -685,9 +685,27 @@ async def _grant_connection(workspace_id: UUID, agent_id: UUID, provider: str) -
     return connection_id
 
 
+async def _member(workspace_id: UUID) -> UUID:
+    """The workspace's own member — who the grants are read for, and who `_grant_connection` makes
+    them as."""
+    async with workspace_tx() as connection:
+        return (
+            (
+                await connection.execute(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+
 async def _unmet(workspace_id: UUID, name: str) -> AgentSetup | None:
     with ws(workspace_id):
-        return {name: missing for _, name, missing in await pending_setup()}.get(name)
+        pending = await pending_setup(await _member(workspace_id))
+    return {name: missing for _, name, missing in pending}.get(name)
 
 
 async def test_the_shipped_agent_records_every_grant_it_still_needs(
@@ -730,8 +748,9 @@ async def test_an_archived_app_drops_off_the_setup_roster(
             )
             .where(tables.agent.c.id == created.id)
         )
+    speaker = await _member(workspace_id)
     with ws(workspace_id):
-        roster = await pending_setup()
+        roster = await pending_setup(speaker)
 
     assert roster == ()
 
@@ -784,8 +803,9 @@ async def test_an_agent_that_is_not_set_up_is_told_so_in_its_own_conversation(
     workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert created is not None
+    speaker = await _member(workspace_id)
     with ws(workspace_id):
-        skill = await setup_skill(created.id, is_main=False, has_speaker=True)
+        skill = await setup_skill(created.id, False, speaker)
     assert skill is not None
     assert skill.name == SETUP_SKILL_NAME
     assert "You are installed but not set up" in skill.instructions
@@ -803,11 +823,13 @@ async def test_the_setup_slot_empties_as_the_grants_land(
     workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert created is not None
+    speaker = await _member(workspace_id)
     with ws(workspace_id):
-        assert await setup_skill(created.id, is_main=False, has_speaker=True) is not None
+        assert await setup_skill(created.id, False, speaker) is not None
     await _grant_connection(workspace_id, created.id, sample.CONNECTOR_PROVIDER)
+    speaker = await _member(workspace_id)
     with ws(workspace_id):
-        assert await setup_skill(created.id, is_main=False, has_speaker=True) is None
+        assert await setup_skill(created.id, False, speaker) is None
 
 
 async def test_a_workspace_with_nothing_shipped_carries_no_setup_slot(
@@ -817,8 +839,9 @@ async def test_a_workspace_with_nothing_shipped_carries_no_setup_slot(
     workspace_id = await _workspace(database_url, tmp_path, ())
     main = await _row(workspace_id, DEFAULT_AGENT_NAME)
     assert main is not None
+    speaker = await _member(workspace_id)
     with ws(workspace_id):
-        assert await setup_skill(main.id, is_main=True, has_speaker=True) is None
+        assert await setup_skill(main.id, True, speaker) is None
 
 
 async def test_an_agent_with_nothing_outstanding_is_told_nothing(
@@ -831,9 +854,10 @@ async def test_an_agent_with_nothing_outstanding_is_told_nothing(
     main = await _row(workspace_id, DEFAULT_AGENT_NAME)
     shipped = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert main is not None and shipped is not None
+    speaker = await _member(workspace_id)
     with ws(workspace_id):
-        assert await setup_skill(main.id, is_main=False, has_speaker=True) is None
-        assert await setup_skill(shipped.id, is_main=False, has_speaker=True) is not None
+        assert await setup_skill(main.id, False, speaker) is None
+        assert await setup_skill(shipped.id, False, speaker) is not None
 
 
 def test_a_provision_refuses_an_allowlist_that_cannot_obtain_its_own_grants() -> None:
@@ -880,9 +904,10 @@ async def test_the_main_agent_is_told_which_agents_it_can_connect_an_account_for
     workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
     main = await _row(workspace_id, DEFAULT_AGENT_NAME)
     assert main is not None
+    speaker = await _member(workspace_id)
     with ws(workspace_id):
-        roster = await setup_skill(main.id, is_main=True, has_speaker=True)
-        assert await setup_skill(main.id, is_main=False, has_speaker=True) is None
+        roster = await setup_skill(main.id, True, speaker)
+        assert await setup_skill(main.id, False, speaker) is None
     assert roster is not None
     assert f"- {PROVISIONED_AGENT_NAME} — still needs" in roster.instructions
     assert "`connect_account` with `agent` set to" in roster.instructions
@@ -899,7 +924,8 @@ async def test_a_turn_nobody_speaks_on_is_not_told_to_ask(
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     main = await _row(workspace_id, DEFAULT_AGENT_NAME)
     assert created is not None and main is not None
+    speaker = await _member(workspace_id)
     with ws(workspace_id):
-        assert await setup_skill(created.id, is_main=False, has_speaker=True) is not None
-        assert await setup_skill(created.id, is_main=False, has_speaker=False) is None
-        assert await setup_skill(main.id, is_main=True, has_speaker=False) is None
+        assert await setup_skill(created.id, False, speaker) is not None
+        assert await setup_skill(created.id, False, None) is None
+        assert await setup_skill(main.id, True, None) is None

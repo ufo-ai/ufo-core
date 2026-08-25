@@ -546,7 +546,7 @@ allocation, delivery registration, and enqueue recovery remain one implementatio
 | Surface | Home | Delivery | Identity | Conversation key |
 |---|---|---|---|---|
 | Terminal | `extensions/ufo` | live (held directive stream) | member token | session (private) |
-| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email/hex (private; a member opens any number of conversations per agent, each behind `conversation=new`; conversations that predate the rail keep bare agent/email keys, reachable by id) + intent/agent/email (the member's prepared-intent lane to that agent, named `Portal actions`, which also holds the runs its acts armed — a scheduled task reports into the conversation that created it, and a second durable lane would be a second partition over one member's acts on one object) + homepage/agent/member (the room a page build is asked for in, shared with the homepage sweep's own; the one portal room a member may also speak in, since its turns run model rounds and claim what a member folds into them) |
+| Web | `extensions/web` | live (hub tail) | web session → member (adopted from CLI) | agent/email/hex (private; a member opens any number of conversations per agent, each behind `conversation=new`; conversations that predate the rail keep bare agent/email keys, reachable by id) + intent/agent/email (the member's prepared-intent lane to that agent, named `Portal actions`, which also holds the runs its acts armed — a scheduled task reports into the conversation that created it, and a second durable lane would be a second partition over one member's acts on one object) + homepage/agent/member (the room the homepage sweep builds an agent's page in; the one portal room a member may also speak in, since its turns run model rounds and claim what a member folds into them, so the page is corrected where it was made) |
 | Slackbot | `extensions/slack` | durable (writeback) | Slack user → member (linked; a Slack-confirmed same-domain email joins as new) | channel:thread_ts; public = shared, private channel/MPIM = room, DM = member, Slack Connect = foreign. `surface_label` is `#name` off the `conversations.info` the audience decision already fetched (never a call of its own, and never an MPIM's member-naming name), `Direct message` for a DM, else null |
 | iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member, fleet-wide (half-hour per-claim `UFO <code>` requested in signed-in chat and completed by one direct provider message) | provider conversation id; DM = member, group = room |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
@@ -603,9 +603,10 @@ every one of the app's conversations stands in an index lane
 beside it, and pressing one opens it. The homepage read has three states, so the page a
 member is waiting for is not the page that is not there: `building` while the seed run that builds
 an agent's first homepage is still working, drawn as the shape a page takes; `set` once one is
-bound; and `none`, where the pane draws the conversation column alone. Five applications are pages
-the deploy carries: the chat, radar, tasks, artifacts, and wiki extensions ship one page source
-each, and the portal's build compiles the five into one static tree of shared hashed chunks,
+bound; and `none`, where the pane draws the conversation column alone. Eight applications are pages
+the deploy carries: the chat, radar, tasks, artifacts, wiki, meetings, issues, and metrics
+extensions ship one page source each, and the portal's build compiles them into one static tree of
+shared hashed chunks,
 published under the digest of its own bytes. The versioned document and hashed assets are public
 immutable responses at the frame's workspace-specific origin; every data read and mutation still
 crosses the portal's authenticated bridge. Such a page needs no workspace row, no sandbox, and no

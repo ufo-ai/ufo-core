@@ -165,12 +165,16 @@ export type BridgeHandle = {
   place: (place: WorkspacePlace) => void;
 };
 
+/** A path as the endpoint table reads it: query dropped, leading slashes dropped, split on the
+ *  separator. Every reader of a path goes through this, so a fence over one of its segments is
+ *  reading the segment the table matched rather than one it derived a second way. */
+function segmentsOf(path: string): string[] {
+  return path.split("?")[0].replace(/^\/+/, "").split("/");
+}
+
 /** The endpoint row a method and path resolve to, or null where the table admits neither. */
 export function endpointFor(method: string, path: string): Endpoint | null {
-  const segments = path
-    .split("?")[0]
-    .replace(/^\/+/, "")
-    .split("/");
+  const segments = segmentsOf(path);
   return (
     ENDPOINTS.find(
       (endpoint) =>
@@ -381,7 +385,7 @@ export function attachBridge({
           // It is `connect` alone. The other verbs a page may post name the agent that owns the
           // record they act on — the main agent for a rebuild, an object's own agent on a record
           // sheet — and each is gated by the kind it names.
-          const named = message.path.replace(/^\//, "").split("?")[0].split("/")[1];
+          const named = segmentsOf(message.path)[1];
           if (verb === "connect" && named !== agentId) {
             refuse("An app page connects an account to its own app.");
             return;
