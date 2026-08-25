@@ -566,6 +566,7 @@ async def _second_agent(workspace_id: UUID, name: str) -> UUID:
                 name=name,
                 prompt="p",
                 model="claude-opus-4-8",
+                visibility="workspace",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

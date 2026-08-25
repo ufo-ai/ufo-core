@@ -43,13 +43,11 @@ from ufo.ext.context import ExtensionContext, JsonValue, context_for
 from ufo.ext.loader import load_manifests, turn_tools, validate_ext_tools
 from ufo.ext.manifest import Manifest
 from ufo.kinds.agents import (
-    AGENT_ARCHIVE_GATE,
     AGENT_CREATE_GATE,
     AGENT_EDIT_GATE,
     AGENT_KIND,
     AGENT_OBJECT,
     AGENT_PROMPT_REQUIRED,
-    AGENT_RESTORE_GATE,
     MAIN_AGENT_UNARCHIVABLE,
     RESTORE_APPLICATION_TOOL_DEF,
     AgentObjects,
@@ -622,6 +620,7 @@ def test_member_owned_kinds_gate_through_the_shared_base() -> None:
     member-owned kind that reimplements the gate instead of subclassing fails here."""
     assert isinstance(CONNECTION_OBJECT.store, MemberOwnedObjects)
     assert isinstance(CONNECTOR_GRANT_OBJECT.store, MemberOwnedObjects)
+    assert isinstance(AGENT_OBJECT.store, MemberOwnedObjects)
     assert isinstance(SOURCE_OBJECT.store, MemberOwnedObjects)
     assert isinstance(SCHEDULED_TASK_OBJECT.store, MemberOwnedObjects)
 
@@ -1086,15 +1085,21 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
     tools = _object_tools()
     with ws(workspace_id):
         owner = await _member(workspace_id, ADMIN_CREATED_AT)
+        member = await _member(workspace_id, JOINER_CREATED_AT)
         main = await _agent_row(workspace_id, name="ufo", is_main=True)
         await _agent_row(workspace_id, name="research")
         ctx = _tool_context(workspace_id, speaker_member_id=owner, agent_id=main)
         ctx = replace(ctx, turn=ctx.turn.model_copy(update={"admission_source": "intent"}))
+        member_ctx = _tool_context(workspace_id, speaker_member_id=member, agent_id=main)
 
         fetched = yaml.safe_load(
             await _text(tools, "object_get", ctx, kind=AGENT_KIND, name="research")
         )
         assert fetched["spec"]["visibility"] == "private"
+        private_listing = json.loads(await _text(tools, "object_list", member_ctx, kind=AGENT_KIND))
+        assert [row["name"] for row in private_listing["objects"]] == ["ufo"]
+        with pytest.raises(UnknownObject):
+            await _text(tools, "object_get", member_ctx, kind=AGENT_KIND, name="research")
         widen = yaml.safe_dump(
             {
                 "kind": AGENT_KIND,
@@ -1117,6 +1122,12 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
                 )
             )
         assert stored == "workspace"
+        shared_listing = json.loads(await _text(tools, "object_list", member_ctx, kind=AGENT_KIND))
+        assert [row["name"] for row in shared_listing["objects"]] == ["research", "ufo"]
+        shared = yaml.safe_load(
+            await _text(tools, "object_get", member_ctx, kind=AGENT_KIND, name="research")
+        )
+        assert shared["spec"]["visibility"] == "workspace"
 
         apply_tool = tools["object_apply"]
         narrow_main = apply_tool.input_model.model_validate(
@@ -1529,9 +1540,8 @@ async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: N
                 "user_description": OBJECT_NARRATION,
             }
         )
-        with pytest.raises(AdminRequired) as ownerless_refusal:
+        with pytest.raises(UnknownObject):
             await apply_tool.handler(member_ctx, unauthorized)
-        assert str(ownerless_refusal.value) == AGENT_EDIT_GATE
 
         owned = {
             "model": "m2",
@@ -1580,7 +1590,7 @@ async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: N
             speaker_member_id=await _member(workspace_id, JOINER_CREATED_AT),
             agent_id=main,
         )
-        with pytest.raises(AdminRequired) as stranger_refusal:
+        with pytest.raises(UnknownObject):
             await apply_tool.handler(
                 stranger_ctx,
                 apply_tool.input_model.model_validate(
@@ -1596,8 +1606,6 @@ async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: N
                     }
                 ),
             )
-        assert str(stranger_refusal.value) == AGENT_EDIT_GATE
-
         with pytest.raises(AdminRequired) as main_refusal:
             await apply_tool.handler(
                 member_ctx,
@@ -2610,6 +2618,12 @@ async def test_main_targets_child_conversations_and_artifacts_with_the_requester
         bob = await _member(workspace_id, JOINER_CREATED_AT)
         main_agent = await _agent_row(workspace_id, name="assistant", is_main=True)
         child_agent = await _agent_row(workspace_id, name="research")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .where(tables.agent.c.id == child_agent)
+                .values(visibility="workspace")
+            )
         alice_private = await _turn_row(
             workspace_id,
             agent_id=child_agent,
@@ -4018,9 +4032,8 @@ async def test_archive_keeps_the_main_app_and_other_members_apps_out_of_reach(db
         with pytest.raises(VerbNotSupported) as main_refusal:
             await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="ufo")
         assert str(main_refusal.value) == MAIN_AGENT_UNARCHIVABLE
-        with pytest.raises(AdminRequired) as shipped_refusal:
+        with pytest.raises(UnknownObject):
             await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="briefer")
-        assert str(shipped_refusal.value) == AGENT_ARCHIVE_GATE
         await _text(tools, "object_delete", admin_ctx, kind=AGENT_KIND, name="briefer")
         await RESTORE_APPLICATION_TOOL_DEF.handler(
             admin_ctx,
@@ -4032,14 +4045,13 @@ async def test_archive_keeps_the_main_app_and_other_members_apps_out_of_reach(db
                 }
             ),
         )
-        with pytest.raises(AdminRequired) as stranger_refusal:
+        with pytest.raises(UnknownObject):
             await _text(
                 tools, "object_delete", stranger_ctx, kind=AGENT_KIND, name="invoice-intake"
             )
-        assert str(stranger_refusal.value) == AGENT_ARCHIVE_GATE
 
         await _text(tools, "object_delete", owner_ctx, kind=AGENT_KIND, name="invoice-intake")
-        with pytest.raises(AdminRequired) as restore_refusal:
+        with pytest.raises(UnknownObject):
             await RESTORE_APPLICATION_TOOL_DEF.handler(
                 stranger_ctx,
                 RESTORE_APPLICATION_TOOL_DEF.input_model.model_validate(
@@ -4050,4 +4062,3 @@ async def test_archive_keeps_the_main_app_and_other_members_apps_out_of_reach(db
                     }
                 ),
             )
-        assert str(restore_refusal.value) == AGENT_RESTORE_GATE

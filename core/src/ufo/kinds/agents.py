@@ -13,6 +13,7 @@ app's conversations, spend and grants as the record of what it did. `restore_app
 the same row back by id. The main agent answers every member, so it is not archivable."""
 
 from dataclasses import dataclass, replace
+from typing import ClassVar
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -26,12 +27,15 @@ from ufo.models.interface import AUTO_MODEL
 from ufo.object_name import ObjectRef, validate_object_name
 from ufo.objects import (
     AdminRequired,
+    MemberOwnedObjects,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
     ObjectListQuery,
+    ObjectOwner,
     ObjectPage,
     ObjectRow,
+    OwnedRow,
     UnknownObject,
     VerbNotSupported,
     object_page,
@@ -189,50 +193,77 @@ def _agent_summary(ctx: ToolContext, row: sa.Row) -> str:
 
 
 @dataclass(frozen=True)
-class AgentObjects:
-    """Owner-gated handlers over the complete `agent` row: the owner or an admin writes, and an
-    ownerless row (main, provisioned) answers to admins alone."""
+class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
+    """The complete agent row behind the shared member-ownership gate."""
+
+    kind_name: ClassVar[str] = AGENT_KIND
+    mutate_gate: ClassVar[str] = AGENT_EDIT_GATE
+    delete_gate: ClassVar[str] = AGENT_ARCHIVE_GATE
+    mutate_requires_speaker: ClassVar[bool] = True
+    delete_requires_speaker: ClassVar[bool] = True
+
+    def _admin_can_apply(self, old: AgentSpec, spec: AgentSpec) -> bool:
+        return True
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         """The workspace's live agents, and its archived ones for a caller that asks for them by
         filter. Archived rows carry the stable `id` a restore addresses."""
         if "archived" not in query.filters:
             query = replace(query, filters={**query.filters, "archived": False})
-        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(
-                        tables.agent.c.id,
-                        member_name.label("name"),
-                        tables.agent.c.model,
-                        tables.agent.c.is_main,
-                        tables.agent.c.internet_access_allowed,
-                        tables.agent.c.archived_at,
-                    )
-                    .where(tables.agent.c.workspace_id == ws_current().workspace_id)
-                    .order_by(member_name)
-                )
-            ).all()
+        is_admin = await ctx.speaker_is_admin()
+        rows = tuple(
+            ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
+            for row in await self._agent_rows(ctx, live_only=False)
+            if self._visible(row.owner, ctx.acting_member_id, is_admin)
+        )
         return object_page(
-            rows=tuple(
-                ObjectRow(
-                    name=row.name,
-                    summary=_agent_summary(ctx, row),
-                    fields={
-                        "id": str(row.id),
-                        "archived": row.archived_at is not None,
-                        "archived_at": (
-                            None if row.archived_at is None else row.archived_at.isoformat()
-                        ),
-                    },
-                )
-                for row in rows
-            ),
+            rows=rows,
             query=query,
         )
 
-    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[AgentSpec] | None:
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
+        return await self._agent_rows(ctx, live_only=True)
+
+    async def _agent_rows(
+        self, ctx: ToolContext, *, live_only: bool
+    ) -> tuple[OwnedRow[ObjectOwner], ...]:
+        member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
+        selection = sa.select(
+            tables.agent.c.id,
+            member_name.label("name"),
+            tables.agent.c.model,
+            tables.agent.c.is_main,
+            tables.agent.c.internet_access_allowed,
+            tables.agent.c.archived_at,
+            tables.agent.c.owner_member_id,
+            tables.agent.c.visibility,
+        ).where(tables.agent.c.workspace_id == ws_current().workspace_id)
+        if live_only:
+            selection = selection.where(tables.agent.c.archived_at.is_(None))
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(selection.order_by(member_name))).all()
+        return tuple(
+            OwnedRow(
+                name=row.name,
+                summary=_agent_summary(ctx, row),
+                owner=ObjectOwner(
+                    member_id=row.owner_member_id,
+                    shared=row.visibility == "workspace",
+                ),
+                fields={
+                    "id": str(row.id),
+                    "archived": row.archived_at is not None,
+                    "archived_at": (
+                        None if row.archived_at is None else row.archived_at.isoformat()
+                    ),
+                },
+            )
+            for row in rows
+        )
+
+    async def _detail(
+        self, ctx: ToolContext, name: str, owner: ObjectOwner
+    ) -> ObjectDetail[AgentSpec] | None:
         row = await self._row(name)
         if row is None:
             return None
@@ -264,12 +295,11 @@ class AgentObjects:
             ),
         )
 
-    async def status(
+    async def _status(
         self,
         ctx: ToolContext,
         name: str,
-        *,
-        expected_generation: UUID | None,
+        owner: ObjectOwner,
     ) -> dict[str, JsonValue] | None:
         row = await self._row(name)
         if row is None:
@@ -283,24 +313,23 @@ class AgentObjects:
             "provisioned_version": row.provisioned_version,
         }
 
-    async def apply(
+    async def _apply_owned(
         self,
         ctx: ToolContext,
         name: str,
         spec: AgentSpec,
         old: AgentSpec | None,
-        *,
-        expected_generation: UUID | None,
+        owner: ObjectOwner | None,
     ) -> None:
         if old is None:
             await self._create(ctx, name, spec)
             return
+        await self._mutate(ctx, name, spec)
+
+    async def _mutate(self, ctx: ToolContext, name: str, spec: AgentSpec) -> None:
         row = await self._row(name)
         if row is None:
             raise UnknownObject(f"no agent object named {name!r}")
-        owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
-        if not owned and not await ctx.speaker_is_admin():
-            raise AdminRequired(AGENT_EDIT_GATE)
         _known_model(ctx, spec.model, spec.reasoning)
         next_prompt = row.prompt if spec.prompt is None else spec.prompt
         prompt_changed = next_prompt != row.prompt
@@ -427,6 +456,17 @@ class AgentObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
+        row = await self._row(name)
+        if row is not None and row.is_main:
+            raise VerbNotSupported(MAIN_AGENT_UNARCHIVABLE)
+        await super().delete(ctx, name, expected_generation=expected_generation)
+
+    async def _delete_owned(
+        self,
+        ctx: ToolContext,
+        name: str,
+        owner: ObjectOwner,
+    ) -> None:
         """Archive the app: it admits no further turn, leaves the portal, and releases its name.
         What it did stays — its conversations, spend and grants are the record, and a restore
         reaches all of it. A turn already running finishes; nothing new founds one."""
@@ -435,9 +475,6 @@ class AgentObjects:
             raise UnknownObject(f"no agent object named {name!r}")
         if row.is_main:
             raise VerbNotSupported(MAIN_AGENT_UNARCHIVABLE)
-        owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
-        if not owned and not await ctx.speaker_is_admin():
-            raise AdminRequired(AGENT_ARCHIVE_GATE)
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.agent)
@@ -539,7 +576,7 @@ class RestoreApplication:
             raise UnknownObject(f"no archived app with id {args.app_id!r}")
         owned = row.owner_member_id is not None and ctx.speaker_member_id == row.owner_member_id
         if not owned and not await ctx.speaker_is_admin():
-            raise AdminRequired(AGENT_RESTORE_GATE)
+            raise UnknownObject(f"no archived app with id {args.app_id!r}")
         async with workspace_tx() as connection:
             try:
                 restored = (
@@ -588,9 +625,9 @@ AGENT_OBJECT = ObjectKind(
     description=(
         "A workspace agent: its prompt, model, reasoning effort, public-internet policy, "
         "workspace-skill use, portal visibility, icon, and the I/O contract a spawn of it "
-        "validates against — readable by all members, creatable by any member, updatable by "
-        "its owner or a workspace admin. Delete archives it: the app stops, its record stays, "
-        "and its name becomes available."
+        "validates against — creatable by any member and updatable by its owner or a workspace "
+        "admin. Delete archives it: the app stops, its record stays, and its name becomes "
+        "available."
     ),
     guidance=(
         "A workspace agent as an object. Any member may create one and owns what they created; "

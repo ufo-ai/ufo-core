@@ -117,6 +117,7 @@ async def _workspace() -> UUID:
                 prompt="p",
                 model="claude-opus-4-8",
                 is_main=True,
+                visibility="workspace",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -149,6 +150,7 @@ async def _agent(workspace_id: UUID) -> UUID:
                 name=agent_id.hex[:8],
                 prompt="p",
                 model="claude-opus-4-8",
+                visibility="workspace",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )

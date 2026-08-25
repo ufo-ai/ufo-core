@@ -334,6 +334,7 @@ async def _second_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
                 name=f"second-{agent_id.hex[:8]}",
                 prompt="be brief",
                 model="claude-opus-4-8",
+                visibility="workspace",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2964,6 +2965,58 @@ async def test_cross_agent_object_target_requires_main_live_member_authority(db:
             with pytest.raises(ValueError, match="rejects an agent target"):
                 await _dispatch(listing, main_ctx, kind="agent", agent=child_name)
     assert "agent" not in self_listing
+
+
+async def test_cross_agent_target_hides_a_private_app_from_other_members(db: None) -> None:
+    workspace_id, main_agent, main_conversation = await _seed()
+    private_agent, _ = await _second_agent(workspace_id)
+    owner = await _member(workspace_id)
+    stranger = await _member(workspace_id)
+    admin = await _member(workspace_id, is_admin=True)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).where(tables.agent.c.id == main_agent).values(is_main=True)
+        )
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == private_agent)
+            .values(visibility="private", owner_member_id=owner)
+        )
+        private_name = (
+            await connection.execute(
+                sa.select(tables.agent.c.name).where(tables.agent.c.id == private_agent)
+            )
+        ).scalar_one()
+    ctx = _tool_ctx(workspace_id, main_conversation, main_agent)
+    listing = _object_tool("object_list")
+
+    with ws(workspace_id), agent(main_agent):
+        owned = json.loads(
+            await _dispatch(
+                listing,
+                replace(ctx, speaker_member_id=owner),
+                kind=SCHEDULED_TASK_KIND,
+                agent=private_name,
+            )
+        )
+        managed = json.loads(
+            await _dispatch(
+                listing,
+                replace(ctx, speaker_member_id=admin),
+                kind=SCHEDULED_TASK_KIND,
+                agent=private_name,
+            )
+        )
+        with pytest.raises(ValueError, match="no agent named"):
+            await _dispatch(
+                listing,
+                replace(ctx, speaker_member_id=stranger),
+                kind=SCHEDULED_TASK_KIND,
+                agent=private_name,
+            )
+
+    assert owned["agent"] == private_name
+    assert managed["agent"] == private_name
 
 
 async def test_main_cross_agent_task_create_is_not_supported(

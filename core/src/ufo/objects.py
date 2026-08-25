@@ -46,6 +46,7 @@ from ufo.object_name import (
 )
 from ufo.object_scope import ObjectAgent, object_agent
 from ufo.schema import tables
+from ufo.seats import member_is_admin
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
 
@@ -1182,12 +1183,25 @@ class ObjectVerbs:
                 raise ValueError(
                     "targeting another agent requires an exact live member-requested call"
                 )
+            is_admin = await member_is_admin(
+                connection, ctx.turn.workspace_id, ctx.speaker_member_id
+            )
             target = (
                 await connection.execute(
                     sa.select(tables.agent.c.id, tables.agent.c.name).where(
                         tables.agent.c.workspace_id == ctx.turn.workspace_id,
                         tables.agent.c.name == name,
                         tables.agent.c.archived_at.is_(None),
+                        *(
+                            ()
+                            if is_admin
+                            else (
+                                sa.or_(
+                                    tables.agent.c.visibility == "workspace",
+                                    tables.agent.c.owner_member_id == ctx.speaker_member_id,
+                                ),
+                            )
+                        ),
                     )
                 )
             ).one_or_none()
