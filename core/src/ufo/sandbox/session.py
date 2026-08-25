@@ -85,16 +85,33 @@ PLAYWRIGHT_CHROMIUM_REVISION = "1234"
 UFO_HOME_ENV = "UFO_HOME"
 SANDBOX_UFO_HOME = "/home/user/.ufo"
 SYSTEM_SKILLS_ROOT = f"{SANDBOX_UFO_HOME}/skills"
+SANDBOX_TMPDIR = "/var/tmp"
 SANDBOX_ENV: dict[str, str] = {
     "NODE_PATH": NODE_GLOBAL_MODULES,
     "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
     UFO_HOME_ENV: SANDBOX_UFO_HOME,
+    "TMPDIR": SANDBOX_TMPDIR,
 }
 """Runtime env the sandbox image needs beyond its base: NODE_PATH so node resolves the globally
 installed skill modules from any cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked
-at build time, and UFO_HOME so the baked client reads the same skill-cache path as a terminal. The
-image bakes it as ENV; a carrier whose exec does not inherit image ENV merges it into every
-command's env instead."""
+at build time, UFO_HOME so the baked client reads the same skill-cache path as a terminal, and
+TMPDIR so scratch lands on the disk. The guest mounts `/tmp` as a tmpfs sized to half its memory,
+so a byte written there is a resident page — one whole-suite run of a python repository costs 2.5 GB
+of scratch, which does not fit that ceiling below the largest tier and does fit the 27 GB root many
+times over. Every caller that resolves temp the standard way moves with the one variable: python
+`tempfile`, node `os.tmpdir()`, rust `env::temp_dir()`, `mktemp` with no explicit template.
+
+It is `/var/tmp` itself and not a directory under it, because this env reaches boxes the image did
+not build. A carrier merges it into every exec of a *resumed* container too, whose filesystem is
+whatever template published it, so a path needing creation would be absent there — and creating it
+on open would not close the gap either, since preparing a resumed box is allowed to defer.
+`/var/tmp` is sticky and world-writable on the base, so it is already on every container this
+reaches. Callers who resolve temp through it hard-fail on a missing directory rather than fall back:
+the client's lock directory is made one level deep, not with the parents.
+
+The image bakes it as ENV; a carrier whose exec does not inherit image ENV merges it into every
+command's env instead — and that difference is the point, because a shell that exports TMPDIR
+itself moves only its own descendants, leaving every other exec on the tmpfs."""
 
 
 def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:

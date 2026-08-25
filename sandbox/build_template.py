@@ -47,6 +47,7 @@ from ufo.sdk.sandbox import (
     PLAYWRIGHT_VERSION,
     SANDBOX_ENV,
     SANDBOX_SIZES,
+    SANDBOX_TMPDIR,
     SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
 )
@@ -209,6 +210,8 @@ command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
 command -v soffice >/dev/null
 command -v gh >/dev/null
+test "$(TMPDIR={SANDBOX_TMPDIR} python3 -c 'import tempfile; print(tempfile.gettempdir())')" \\
+  = "{SANDBOX_TMPDIR}"
 test -f "{SYSTEM_SKILLS_ROOT}/current"
 browser="$(command -v chromium || command -v chromium-browser \\
   || command -v google-chrome || command -v google-chrome-stable || true)"

@@ -29,6 +29,7 @@ from sandbox.build_template import (
     SANDBOX_MODULES,
     SANDBOX_TEMPLATE_READY_COMMAND,
     SANDBOX_TIERS,
+    SANDBOX_TMPDIR,
     SYSTEM_SKILLS_STAGE_PATH,
     Sizing,
     build_definition_digest,
@@ -174,6 +175,26 @@ def test_ready_probe_checks_every_baked_entrypoint() -> None:
     ):
         assert f"command -v {tool}" in SANDBOX_TEMPLATE_READY_COMMAND
     assert "chromium" in SANDBOX_TEMPLATE_READY_COMMAND
+
+
+def test_scratch_resolves_onto_the_disk_not_the_memory_backed_tmpfs() -> None:
+    """The guest mounts `/tmp` as a tmpfs sized to half its memory, so scratch there is spent RAM.
+    `tempfile.gettempdir()` walks past an unusable TMPDIR to `/tmp` without saying so, which would
+    put every scratch byte back in memory silently — so the probe asserts what temp resolves to
+    rather than that a directory exists, and a template whose tmpdir is unusable never goes READY.
+    """
+    assert SANDBOX_ENV["TMPDIR"] == SANDBOX_TMPDIR
+    assert not SANDBOX_TMPDIR.startswith("/tmp")
+    assert f"TMPDIR={SANDBOX_TMPDIR} python3 -c" in SANDBOX_TEMPLATE_READY_COMMAND
+
+
+def test_the_scratch_dir_is_one_no_container_has_to_be_built_with() -> None:
+    """This env reaches resumed containers built by an earlier template, and a carrier may defer
+    preparing one, so a scratch path some layer had to create would be absent on exactly those
+    boxes — where the client's one-level lock directory create fails, and `write` and `edit` fail
+    with it. `/var/tmp` is on the base already, so no layer makes it and no open has to."""
+    assert SANDBOX_TMPDIR == "/var/tmp"
+    assert f"mkdir -p {SANDBOX_TMPDIR}" not in pod_dockerfile()
 
 
 def test_the_baked_in_sandbox_cli_is_the_compiled_client() -> None:

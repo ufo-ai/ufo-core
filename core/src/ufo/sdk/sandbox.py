@@ -27,6 +27,7 @@ from ufo.sandbox.session import SANDBOX_ENV as SANDBOX_ENV
 from ufo.sandbox.session import SANDBOX_MODULE_BOOTSTRAP as SANDBOX_MODULE_BOOTSTRAP
 from ufo.sandbox.session import SANDBOX_PYTHON_FLAG as SANDBOX_PYTHON_FLAG
 from ufo.sandbox.session import SANDBOX_SIZES as SANDBOX_SIZES
+from ufo.sandbox.session import SANDBOX_TMPDIR as SANDBOX_TMPDIR
 from ufo.sandbox.session import SENTINEL_MODEL_KEY as SENTINEL_MODEL_KEY
 from ufo.sandbox.session import SYSTEM_CA_BUNDLE as SYSTEM_CA_BUNDLE
 from ufo.sandbox.session import SYSTEM_SKILLS_ROOT as SYSTEM_SKILLS_ROOT
