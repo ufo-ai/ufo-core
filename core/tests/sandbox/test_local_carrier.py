@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
@@ -526,6 +527,16 @@ async def test_file_tools_run_through_ufo_fs_locally(tmp_path: Path, sandbox_cli
 
     read = await session.run_ufo_fs("read", {"path": "notes.txt"})
     assert "alpha" in json.dumps(read)
+
+
+def test_every_carrier_in_a_process_shares_one_scratch() -> None:
+    first = LocalCarrier()._scratch
+    settled = set(Path(tempfile.gettempdir()).glob("ufo-local-*"))
+
+    carriers = [LocalCarrier() for _ in range(3)]
+
+    assert {carrier._scratch for carrier in carriers} == {first}
+    assert set(Path(tempfile.gettempdir()).glob("ufo-local-*")) == settled
 
 
 async def test_file_op_runs_in_a_resumed_sandbox(tmp_path: Path) -> None:

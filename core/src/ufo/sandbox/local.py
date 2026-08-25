@@ -26,6 +26,7 @@ import sys
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from functools import cache
 from io import BufferedReader
 from pathlib import Path, PurePosixPath
 from signal import SIGKILL
@@ -54,12 +55,14 @@ EXEC_TIMEOUT_CODE = 124
 READ_CHUNK_BYTES = 1024 * 1024
 
 
+@cache
 def _provision_scratch() -> Path:
     """A process-lifetime scratch dir holding the command PATH's `ufo` client and a home for tools
-    that write under `$HOME` — created once per carrier, off the event loop at construction. The
-    binary is copied rather than linked, so every command of a running process runs the one build
-    resolved here. The workspace itself is never here: it is the durable bind-mount, kept clear of
-    scaffolding.
+    that write under `$HOME` — created once per process, off the event loop at the first carrier's
+    construction. The binary is copied rather than linked, so every command of a running process
+    runs the one build resolved here, and nothing deletes the copy: one dir per construction would
+    leak the binary's size per carrier. The workspace itself is never here: it is the durable
+    bind-mount, kept clear of scaffolding.
 
     A checkout holding no build of the client warns and carries on. The carrier is still the shell,
     the reads and the writes every other seam needs, and only the file tools and `ufo llm` want the
