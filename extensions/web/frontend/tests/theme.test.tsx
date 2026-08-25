@@ -423,6 +423,16 @@ test("the scrollbar thumb is drawn by scrolling and by nothing else", () => {
   );
 });
 
+test("the composer says it has the cursor with the caret, and nothing else keeps a ring", () => {
+  // The box in a field card draws no surface of its own, so it takes no outline and the card takes
+  // none for it. That is a decision about one selector, not a licence to drop the ring: the bare
+  // `:focus-visible` rule every other focusable thing answers to has to survive beside it.
+  const css = packedStyles();
+  expect(css.includes(":focus-visible{outline:2pxsolidvar(--ring)")).toBe(true);
+  expect(css.includes("[data-field-card]textarea:focus-visible{outline:none")).toBe(true);
+  expect(css.includes("[data-field-card]:has(textarea:focus-visible)")).toBe(false);
+});
+
 test("the transcript's own hush outranks the scroll mark while it scrolls itself", () => {
   const css = builtStyles();
   const order = [...css.matchAll(LAYERS)].map((hit) => hit[1]);
@@ -479,7 +489,7 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   expect(mineSaid.closest("[data-role=me]")!.className).toContain("bg-fill");
   for (const said of [agentSaid, mineSaid]) expect(said.className).toContain("wrap-anywhere");
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "go");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("message", { text: "streaming now" });

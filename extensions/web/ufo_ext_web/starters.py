@@ -35,7 +35,7 @@ MEMORY_LIMIT = 60
 MEMORY_TEXT_CHARS = 400
 RANKED_MAX = 8
 TITLE_CHARS = 20
-BODY_CHARS = 68
+LINE_CHARS = 64
 ASK_CHARS = 320
 SLATE_MAX_TOKENS = 4096
 SLATE_TOOL = "record_slate"
@@ -54,12 +54,12 @@ already does. Rank six to eight, best first. The screen draws only a few of \
 them and drops any whose accounts are missing, so a short list leaves it with nothing to show.
 
 For each ranked row write:
-- title: the application's name in the member's own words. Sentence case, at most \
-{TITLE_CHARS} characters.
-- body: what it does for this team, in one sentence of at most {BODY_CHARS} characters. State \
-the work, not the accounts it reads. Name what is actually theirs — their product, their customer, \
-their repository, the thing itself. A body that would read the same for any company is too \
-general to be worth a row.
+- title: the row's identity. It is not drawn. Name the application in the member's own words. \
+Sentence case, at most {TITLE_CHARS} characters.
+- line: one clear sentence stating what the application does for this member, at most \
+{LINE_CHARS} characters. It must read whole on its own. State the work, not the accounts it reads. \
+Name what is actually theirs — their product, their customer, their repository, the thing itself. \
+A line that would read the same for any company is too general to be worth a row.
 - ask: the sentence the member says by pressing the row, first person, asking for the application. \
 Name the work concretely. Do not mention connecting an account: the assistant asks for what it \
 needs once the work is agreed.
@@ -84,13 +84,13 @@ is true or what the row does, and nothing else.
 class RankedUnlock(BaseModel):
     unlock: str
     title: str = Field(min_length=1, max_length=TITLE_CHARS)
-    body: str = Field(min_length=1, max_length=BODY_CHARS)
+    line: str = Field(min_length=1, max_length=LINE_CHARS)
     ask: str = Field(min_length=1, max_length=ASK_CHARS)
 
 
 class CheckIn(BaseModel):
     title: str = Field(min_length=1, max_length=TITLE_CHARS)
-    body: str = Field(min_length=1, max_length=BODY_CHARS)
+    line: str = Field(min_length=1, max_length=LINE_CHARS)
     ask: str = Field(min_length=1, max_length=ASK_CHARS)
 
 

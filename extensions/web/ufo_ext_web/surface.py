@@ -3372,20 +3372,21 @@ class StarterRow(BaseModel):
 
     kind: Literal["app", "check_in", "unlock"]
     mark: str | None
-    title: str
-    body: str
+    line: str
     ask: str
     providers: tuple[MissingTile, ...] = ()
 
 
 class UnlockRow(BaseModel):
     """The start screen's fourth row: an application this member is one or two accounts short of,
-    stated as the accounts it would take. `providers` is what is still missing, in catalog order,
-    and pressing the row says the same build ask an owned row says — the agent asks for the
-    accounts it finds it does not hold, and its reply carries the connect control."""
+    stated as the work it does and the accounts it would take. `providers` is what is still
+    missing, in catalog order, and pressing the row says the same build ask an owned row says — the
+    agent asks for the accounts it finds it does not hold, and its reply carries the connect
+    control. This is the one row that states a price, so it is the one row drawn as a line and a
+    note; the rows above it say their sentence and nothing else."""
 
     mark: str
-    title: str
+    line: str
     ask: str
     providers: tuple[MissingTile, ...]
 
@@ -3404,12 +3405,6 @@ async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) 
     return frozenset(held)
 
 
-def _named_tiles(providers: "tuple[MissingTile, ...]") -> str:
-    """The accounts a row still needs, said the way a person says them."""
-    labels = [tile.label for tile in providers]
-    return labels[0] if len(labels) < 2 else ", ".join(labels[:-1]) + " and " + labels[-1]
-
-
 def fill_starters(
     slate: Slate, held: frozenset[str], taken: frozenset[str]
 ) -> tuple[tuple[StarterRow, ...], UnlockRow | None]:
@@ -3424,8 +3419,10 @@ def fill_starters(
 
     Where fewer than two applications are ready, the remaining slots take unlocks instead of
     standing empty. A workspace that has connected nothing has no ready application by definition,
-    and the rows it would otherwise fall back to need accounts just the same while saying nothing
-    about which — so it reads as named work and its price rather than as generic filler."""
+    and the rows it would otherwise fall back to need accounts just the same — so it reads as named
+    work rather than as generic filler. A spare standing in an application's slot says its work and
+    nothing about its accounts: the row closing the list is the one that states a price, and the
+    ranking instructions already hold that an account is asked for once the work is agreed."""
     apps: list[StarterRow] = []
     short: list[UnlockRow] = []
     for entry in slate.ranked:
@@ -3439,8 +3436,7 @@ def fill_starters(
                     StarterRow(
                         kind="app",
                         mark=row.mark,
-                        title=entry.title,
-                        body=entry.body,
+                        line=entry.line,
                         ask=entry.ask,
                     )
                 )
@@ -3448,7 +3444,7 @@ def fill_starters(
             short.append(
                 UnlockRow(
                     mark=row.mark,
-                    title=entry.title,
+                    line=entry.line,
                     ask=entry.ask,
                     providers=tuple(
                         MissingTile(name=name, label=PROVIDER_LABELS[name]) for name in missing
@@ -3463,8 +3459,7 @@ def fill_starters(
             StarterRow(
                 kind="unlock",
                 mark=spare.mark,
-                title=spare.title,
-                body="Connect " + _named_tiles(spare.providers) + ".",
+                line=spare.line,
                 ask=spare.ask,
                 providers=spare.providers,
             )
@@ -3474,8 +3469,7 @@ def fill_starters(
             StarterRow(
                 kind="check_in",
                 mark=None,
-                title=slate.check_in.title,
-                body=slate.check_in.body,
+                line=slate.check_in.line,
                 ask=slate.check_in.ask,
             )
         )

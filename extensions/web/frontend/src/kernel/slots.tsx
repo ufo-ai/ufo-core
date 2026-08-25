@@ -1,4 +1,4 @@
-import { IconArticle, IconLayoutSidebarRight, IconList } from "@tabler/icons-react";
+import { IconArticle, IconList } from "@tabler/icons-react";
 import {
   createContext,
   useCallback,
@@ -138,10 +138,14 @@ const FULL =
 
 const FULL_NOTE = "This screen holds " + TRACK_MAX_SLOTS + " slots. Close one to open another.";
 
-const GLYPHS: Record<SlotKind, typeof IconList> = {
+/** The mark a lane wears before its title. An index and a reading stand for a body of something, so
+ *  a track holding several says which each one is; a panel stands for nothing but itself and its
+ *  title is the whole of its head. Every kind states its answer here, so a kind added later cannot
+ *  reach the band unmarked by saying nothing. */
+const GLYPHS: Record<SlotKind, typeof IconList | null> = {
   index: IconList,
   reading: IconArticle,
-  panel: IconLayoutSidebarRight,
+  panel: null,
 };
 
 /** The lanes an address of `opens` stands, in the order it stands them. A lane it names stands
@@ -341,9 +345,11 @@ function SlotHost({
  *  A lane that can be shut is one the member opened: it takes focus as it lands, answers Escape by
  *  shutting, and hands focus back to the act that raised it — but only if it still holds it, since
  *  a lane opened over another may unmount a commit after its replacement has already focused
- *  itself. Escape is taken only where nothing else has claimed it: a select open inside the form
- *  answers that key first, and a lane that shut on it would take the whole form away when the
- *  member meant to close a menu.
+ *  itself. It lands on itself only where what it holds has claimed nothing: a lane whose content
+ *  opens on a field the member is meant to type in — a composer — is entered at that field, and
+ *  Escape still reaches the lane from inside it. Escape is taken only where nothing else has
+ *  claimed it: a select open inside the form answers that key first, and a lane that shut on it
+ *  would take the whole form away when the member meant to close a menu.
  *
  *  Landing there is the whole of what a member who cannot see the lane is handed, so `describes`
  *  points at the line inside it that says what it does. A panel that states what it will do with
@@ -384,7 +390,7 @@ export function useSlot(
     if (!takes) return;
     const before = document.activeElement;
     const panel = held.current;
-    panel?.focus();
+    if (!panel?.contains(document.activeElement)) panel?.focus();
     return () => {
       if (!(before instanceof HTMLElement) || !document.body.contains(before)) return;
       const active = document.activeElement;
@@ -430,7 +436,7 @@ export function useSlot(
         <Header
           pinned
           heading={2}
-          glyph={<Glyph aria-hidden />}
+          {...(Glyph ? { glyph: <Glyph aria-hidden /> } : {})}
           crumb={crumb}
           title={title}
           acts={

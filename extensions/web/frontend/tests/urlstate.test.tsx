@@ -495,7 +495,7 @@ test("an address the portal cannot read reports a bad link, whichever part is ma
   const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("This link is not valid.")).toBeTruthy();
-  expect(screen.queryByLabelText("Message the app")).toBeNull();
+  expect(screen.queryByLabelText("Ask anything")).toBeNull();
   view.unmount();
 
   history.replaceState(null, "", "#/connectors?open=a~~b");

@@ -231,10 +231,11 @@ test("the conversation beside a page is headed by the lane it stands in", async 
   expect(conversation.querySelector('[data-slot="header"]')).toBeNull();
 });
 
-/** An app has one editing conversation — the chat the member directs it in — so the right-side
- *  chat's band carries no act to start another and no menu to switch: the toggle opens the one
- *  there is, and the sidebar is the list of the rest. */
-test("the right-side chat carries no New act and no conversation menu", async () => {
+/** The band carries the one act the member cannot reach from the page — starting another
+ *  conversation with this app — and no menu to switch between them: the toggle opens the one there
+ *  is, and the sidebar is the list of the rest. The act is the band's own, so the full-width chat's
+ *  own New pill is not drawn beside it. */
+test("the right-side chat's band starts another conversation, and carries no menu", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   open(
     {
@@ -250,8 +251,40 @@ test("the right-side chat carries no New act and no conversation menu", async ()
   await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
   expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "New conversation with Assistant" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "New" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Conversations with Assistant" })).toBeNull();
+});
+
+/** The toggle states the act it will perform. Shut, it is the word and the mark of a chat; open, it
+ *  is the mark of the lane it would close, and the label goes — a control that says "Chat" while
+ *  the chat stands open names the thing rather than the act. It stays one control across both, so
+ *  the press that opened the lane keeps the focus that opened it.
+ *
+ *  The band's own act founds another conversation, and is spent where the lane already stands on
+ *  one nobody has spoken in: a second empty conversation is not a thing the member can want. */
+test("the chat toggle states the act it will perform, and the band's act is spent when it is new", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  open({}, SET);
+
+  await screen.findByTitle("Assistant homepage");
+  const shut = screen.getByRole("button", { name: "Chat with Assistant" });
+  expect(shut.textContent).toContain("Chat");
+  expect(shut.getAttribute("aria-pressed")).toBe("false");
+
+  await userEvent.click(shut);
+
+  const open_ = await screen.findByRole("button", { name: "Close chat with Assistant" });
+  expect(open_.textContent).not.toContain("Chat");
+  expect(open_.getAttribute("aria-pressed")).toBe("true");
+  expect(screen.queryByRole("button", { name: "Chat with Assistant" })).toBeNull();
+
+  // The lane stands on a conversation nobody has spoken in, so there is nothing to start.
+  const founds = screen.getByRole("button", { name: "New conversation with Assistant" });
+  expect(founds.hasAttribute("disabled")).toBe(true);
+
+  await userEvent.click(open_);
+  expect(screen.getByRole("button", { name: "Chat with Assistant" })).toBeTruthy();
 });
 
 /** The toggle opens the editing conversation: the newest the rail carries for this app, whatever
@@ -294,7 +327,7 @@ test("the chat toggle opens the composer when no directive conversation exists",
   await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
-  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
 });
 
 /** An app whose page has not been built yet has none, and the pane draws its conversation — never a

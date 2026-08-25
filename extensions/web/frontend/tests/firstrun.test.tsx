@@ -115,7 +115,7 @@ test("the card's query lands on the first run's own address", async () => {
   await screen.findByRole("heading", {
     name: "What do you want an agent to do for you today?",
   });
-  expect(screen.queryByPlaceholderText("Message the app…")).toBeNull();
+  expect(screen.queryByPlaceholderText("Ask anything…")).toBeNull();
 });
 
 test("the address opens the first run on its own, with no query at all", async () => {
@@ -472,7 +472,7 @@ test("connecting mints the link on the intent lane, never through the chat", asy
   expect(link.getAttribute("href")).toBe(SLACK_LINK);
   expect(intents(posted.calls).at(-1)).toEqual({ verb: "connect_slack" });
   expect(location.hash).toBe("#/first-run");
-  expect(screen.queryByPlaceholderText("Message the app…")).toBeNull();
+  expect(screen.queryByPlaceholderText("Ask anything…")).toBeNull();
 });
 
 test("a link minted on one connector's step is not shown on the next one's", async () => {
@@ -601,7 +601,7 @@ test("a refused invite states the refusal and adds nobody", async () => {
   await screen.findByText("only a workspace admin can add members");
   expect((screen.getByLabelText("Email 1") as HTMLInputElement).value).toBe("teammate@work.com");
   // The refusal stops the run where it happened rather than handing the member on.
-  expect(screen.queryByPlaceholderText("Message the app…")).toBeNull();
+  expect(screen.queryByPlaceholderText("Ask anything…")).toBeNull();
 });
 
 test("the last act says the picks and the question into the agent's new chat", async () => {
@@ -630,7 +630,7 @@ test("the last act says the picks and the question into the agent's new chat", a
       "I want to find product-market fit, and we use Gmail, Notion. " +
       "More context: Help us recruit the right interviewees.",
   );
-  const box = await screen.findByPlaceholderText("Message the app…");
+  const box = await screen.findByPlaceholderText("Ask anything…");
   expect((box as HTMLTextAreaElement).value).toBe("");
   // The page creates no agent: creating one takes a speaking member, and the page never speaks.
   expect(intents(posted.calls)).toEqual([toolingIntent("notion", "gmail")]);

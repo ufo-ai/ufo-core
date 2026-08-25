@@ -40,8 +40,11 @@ function useAttached(): Held {
 const GLYPH = "size-(--size-glyph)";
 
 /** The message box: one card holding what the member is writing, the files they attached to it, and
- *  the acts that send it. A file reaches the card three ways — the attach control, a drop onto the
- *  card, a paste into the box — because a member who has a file in hand does whichever of those
+ *  the acts that send it. Its contents keep the same inset on every edge, and the words stand clear
+ *  of the controls under them. It is a surface rather than an outline — the fill is what separates it
+ *  from the pane, and a stroke around a box the member is already looking into says nothing the
+ *  fill has not. A file reaches the card three ways — the attach control, a drop onto
+ *  the card, a paste into the box — because a member who has a file in hand does whichever of those
  *  their hands are already doing, and each names the same list. The card holds what it was given
  *  until the send says it took it: a press the composer cannot answer yet — a conversation still
  *  opening, a message with neither words nor files — leaves the attachments where the member put
@@ -88,7 +91,7 @@ export function PromptInput({
           held.attach(event.dataTransfer.files);
         }}
         data-field-card
-        className={cn(CONTROL, "flex flex-col gap-sm px-lg py-md", className)}
+        className={cn(CONTROL, "flex flex-col gap-2xl border-0 p-lg", className)}
       >
         <input
           ref={picker}
@@ -103,6 +106,47 @@ export function PromptInput({
         {children}
       </form>
     </HELD.Provider>
+  );
+}
+
+/** The application the message addresses, drawn as a distinct band across the card's top edge so it
+ *  qualifies the words without becoming part of their field. It wears the mark the sidebar draws
+ *  that app under, so the name in the composer and the row the member opened it from read as one
+ *  thing. A stand-in agent the portal holds no mark for is named without one rather than under a
+ *  hole.
+ *
+ *  The band is a child of the card, so it undoes the card to reach the card's edges: it pulls out
+ *  by the inset on three sides and hands back most of the row the card sets between its children,
+ *  leaving the words one inset under it rather than a whole row. Its own right inset is the
+ *  difference between that inset and the padding the dismiss control already carries, so the glyph
+ *  lands on the same edge the words on the other side start from. */
+export function PromptInputEyebrow({
+  glyph,
+  label,
+  onDismiss,
+}: {
+  glyph?: ReactNode;
+  label: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="-mx-lg -mt-lg -mb-2xs flex h-(--size-row) items-center justify-between rounded-t-panel bg-fill-strong pl-2xl pr-2xs text-label text-ink-soft">
+      <span className="flex min-w-0 items-center gap-xs">
+        {glyph}
+        <span className="truncate">{label}</span>
+      </span>
+      <Button variant="quiet" aria-label={"Stop addressing " + label} onClick={onDismiss}>
+        <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
+          <path
+            d="m4.5 4.5 7 7m0-7-7 7"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          />
+        </svg>
+      </Button>
+    </div>
   );
 }
 

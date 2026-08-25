@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { expect, test } from "vitest";
 
 import { SlotTrack, appended, beside, closed, opened, useSlot, type SlotKind } from "@/kernel/slots";
@@ -360,6 +360,65 @@ test("a lane says what it does to the member focus lands on", async () => {
   await open("Detail");
 
   expect(slotFor("Detail").hasAttribute("aria-describedby")).toBe(false);
+});
+
+/** A lane is headed by what it is called. The kinds that stand for a body of something — an index,
+ *  a reading — wear a glyph that says which, because a track holding several says what each one is
+ *  before it says what is in it. A panel stands for nothing but itself, so its title is the whole
+ *  of its head and a glyph beside it would only restate the word. */
+test("a panel lane is headed by its title alone, where the other kinds wear a glyph", async () => {
+  render(
+    <SlotTrack>
+      <Opener name="Detail" kind="panel" />
+      <Opener name="Index" kind="index" />
+      <Opener name="Reading" kind="reading" />
+    </SlotTrack>,
+  );
+
+  await open("Detail");
+  await open("Index");
+  await open("Reading");
+
+  const glyphs = (name: string) =>
+    within(slotFor(name)).getByRole("heading").parentElement!.querySelectorAll("svg").length;
+
+  expect(glyphs("Index")).toBeGreaterThan(0);
+  expect(glyphs("Reading")).toBeGreaterThan(0);
+  expect(glyphs("Detail")).toBe(0);
+});
+
+/** The lane lands on itself so a member who cannot see it is told what it is. Content that opens on
+ *  a field the member is meant to type in has already answered that question, and taking the lane's
+ *  own focus after it would drop the cursor out of the words they came to write. Escape still
+ *  reaches the lane from inside the field. */
+function Composer() {
+  const box = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => box.current?.focus(), []);
+  return <textarea ref={box} aria-label="Message" />;
+}
+
+function ComposingPane() {
+  const [standing, setStanding] = useState(true);
+  return useSlot(standing ? <Composer /> : null, {
+    id: "Compose",
+    kind: "panel",
+    title: "Compose",
+    onClose: () => setStanding(false),
+  });
+}
+
+test("a lane leaves focus where its content has already put it", async () => {
+  render(
+    <SlotTrack>
+      <ComposingPane />
+    </SlotTrack>,
+  );
+
+  expect(document.activeElement).toBe(screen.getByLabelText("Message"));
+
+  await userEvent.keyboard("{Escape}");
+
+  expect(screen.queryByLabelText("Message")).toBeNull();
 });
 
 test("Escape leaves a slot, and focus goes back where it came from", async () => {

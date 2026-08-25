@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { IconArrowRight, IconCheck, IconMessage, IconPlug } from "@tabler/icons-react";
+import { IconCheck, IconChevronRight, IconMessage, IconPlug } from "@tabler/icons-react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import {
@@ -26,6 +26,7 @@ import {
   PromptInput,
   PromptInputAttach,
   PromptInputAttachments,
+  PromptInputEyebrow,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputToolbar,
@@ -38,10 +39,11 @@ import {
   TranscriptScroll,
   useTakeMeToTheFoot,
 } from "@/kernel/messages";
-import { PressRow, PRESS_ROW, PRESS_ROW_ARROW } from "@/components/ui/pressrow";
+import { PressRow, PRESS_ROW, PRESS_ROW_CHEVRON } from "@/components/ui/pressrow";
 import { COLUMN } from "@/kernel/pane";
 import { Empty, usePanelRead } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
+import { agentName } from "@/lib/agentName";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
@@ -69,7 +71,7 @@ import type { ChatQuestion, Member, QuestionEntry, QuestionOption } from "@/lib/
 /** Who a chat is addressed to. A conversation another surface holds names its agent on the rail
  *  row alone, without the boot read listing it, so a chat asks for the facts such a row carries
  *  and never for the whole record. */
-export type ChatAgent = { id: string; name: string; model: string };
+export type ChatAgent = { id: string; name: string; model: string; icon?: string };
 
 export type ChatProps = {
   agent: ChatAgent;
@@ -151,9 +153,9 @@ export function Chat({
   const messages = state.messages;
   const settled = !state.busy && !state.live;
   /** A conversation nobody has said anything in yet. The transcript is the whole screen once one
-   *  exists, so until then the box stands in the middle of the pane, with the agent that would hold
-   *  it picked in the box's own toolbar. A message still loading counts as unsaid, or the first
-   *  paint would draw the log's layout and the composer would jump on the frame after it. */
+   *  exists, so until then the suggestions stand directly over the box at the foot of the pane. A
+   *  message still loading counts as unsaid, or the first paint would draw the log's layout and the
+   *  composer would jump on the frame after it. */
   const starting = conversationId === null && settled && !messages?.length;
   const showEmpty = messages !== null && !messages.length && settled;
   const stalled = messages === null ? state.fault : null;
@@ -218,7 +220,14 @@ export function Chat({
           </MessageLog>
         </TranscriptPane>
       )}
-      <Composer target={target} draftKey={draftKey} input={composer} starting={starting} />
+      <Composer
+        target={target}
+        draftKey={draftKey}
+        input={composer}
+        starting={starting}
+        eyebrow={agentName(agent.name)}
+        eyebrowIcon={agent.icon}
+      />
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
@@ -557,6 +566,12 @@ async function deliver(
   await answerQuestions(target, question.turn_id, given);
 }
 
+const COMPOSER_LABEL = "Ask anything";
+const COMPOSER_PLACEHOLDER = COMPOSER_LABEL + "…";
+/** What the start screen says before the member has said anything. The screen is otherwise empty,
+ *  and a pane that opens on nothing states nothing about what it is for. */
+const START_INTRO = "What can I help you with?";
+
 /** The message box holds as many lines as the member writes. Enter sends it and Shift+Enter opens
  *  a line, which is the pairing every chat composer ships and the only one a member arrives
  *  already knowing; a composition in flight (an IME candidate) takes its own Enter, so the guard
@@ -566,11 +581,15 @@ function Composer({
   draftKey,
   input,
   starting,
+  eyebrow,
+  eyebrowIcon,
 }: {
   target: ChatTarget;
   draftKey: string;
   input: RefObject<HTMLTextAreaElement | null>;
   starting: boolean;
+  eyebrow: string;
+  eyebrowIcon?: string;
 }) {
   const state = useChat(target.key);
   const toTheFoot = useTakeMeToTheFoot();
@@ -589,6 +608,7 @@ function Composer({
     return handed?.text ?? readDraft(draftKey);
   });
   const [stopping, setStopping] = useState(false);
+  const [showsEyebrow, setShowsEyebrow] = useState(true);
   // The turn the page is tailing, and so the one a stop can name. A send holds the chat busy before
   // admission answers with a turn id, and a stop of a turn nobody has named yet reaches nothing.
   const running = state.turn;
@@ -670,6 +690,17 @@ function Composer({
 
   const box = (
     <PromptInput onSend={send}>
+      {showsEyebrow ? (
+        <PromptInputEyebrow
+          glyph={
+            eyebrowIcon ? (
+              <AgentIcon name={eyebrowIcon} className="size-(--size-glyph) shrink-0" />
+            ) : null
+          }
+          label={eyebrow}
+          onDismiss={() => setShowsEyebrow(false)}
+        />
+      ) : null}
       <PromptInputAttachments />
       <PromptInputTextarea
         ref={input}
@@ -684,8 +715,8 @@ function Composer({
           event.currentTarget.form?.requestSubmit();
         }}
         autoComplete="off"
-        placeholder="Message the app…"
-        aria-label="Message the app"
+        placeholder={COMPOSER_PLACEHOLDER}
+        aria-label={COMPOSER_LABEL}
       />
       <PromptInputToolbar>
         <PromptInputAttach />
@@ -703,10 +734,11 @@ function Composer({
       </PromptInputToolbar>
     </PromptInput>
   );
-  // On the start screen the box stands alone: nothing else is on that screen, so a press in the
-  // empty space around the card is a press on the words the member came to write, and it lands the
-  // cursor in them rather than on nothing. A press on the card itself is the card's own — the box
-  // places its cursor where the member pressed, and the controls beside it take their own presses.
+  // On the start screen the suggestions and box stand at the foot: nothing else is on that screen,
+  // so a press in the empty space around the card is a press on the words the member came to write,
+  // and it lands the cursor in them rather than on nothing. A press on the card itself is the
+  // card's own — the box places its cursor where the member pressed, and the controls beside it
+  // take their own presses.
   //
   // Both screens are the same two elements around the box, holding the whole start screen off the
   // card in the outer one. Two shapes would rebuild the box on the send that opens the
@@ -714,7 +746,7 @@ function Composer({
   return (
     <div
       data-testid={starting ? "start" : undefined}
-      className={starting ? "flex flex-1 flex-col justify-center overflow-y-auto p-2xl" : undefined}
+      className={starting ? "flex flex-1 flex-col justify-between overflow-y-auto" : undefined}
       onMouseDown={
         starting
           ? (event) => {
@@ -725,16 +757,19 @@ function Composer({
           : undefined
       }
     >
+      {starting ? (
+        <div className={cn(COLUMN, "px-2xl pt-lg")}>
+          <p className="m-0 text-ui text-ink-soft">{START_INTRO}</p>
+        </div>
+      ) : null}
       <div
         className={cn(
           COLUMN,
-          starting
-            ? undefined
-            : "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]",
+          "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]",
         )}
       >
-        {box}
         {starting ? <Starters agentId={target.agentId} /> : null}
+        {box}
       </div>
     </div>
   );
@@ -743,13 +778,12 @@ function Composer({
 type StarterRow = {
   kind: "app" | "check_in" | "unlock";
   mark: string | null;
-  title: string;
-  body: string;
+  line: string;
   ask: string;
   providers?: MissingTile[];
 };
 type MissingTile = { name: string; label: string };
-type UnlockRow = { title: string; ask: string; providers: MissingTile[] };
+type UnlockRow = { line: string; ask: string; providers: MissingTile[] };
 type StartersPayload = { starters: StarterRow[]; unlock: UnlockRow | null };
 
 const STARTERS_READ = "/workspace/starters";
@@ -767,23 +801,20 @@ const STARTERS_EVERY_MS = 300_000;
  *  fails, and in a workspace whose memory has yet to name any work of its own. A member is never
  *  shown an empty screen or a spinner where their own work will stand: the rows are one height, so
  *  what lands replaces words and moves nothing. */
-const STARTERS: { mark: string; title: string; body: string; ask: string }[] = [
+const STARTERS: { mark: string; line: string; ask: string }[] = [
   {
     mark: "gnomon",
-    title: "PR babysitter",
-    body: "Reports what each open pull request waits on: age, reviewer, checks.",
+    line: "Report what every open pull request is waiting on.",
     ask: "I want an application that watches our open pull requests and reports what each one waits on — age, reviewer, checks, conflicts — ordered by what it blocks.",
   },
   {
     mark: "wedjat",
-    title: "Competitive intel",
-    body: "Tracks the competitors you name, with a source for every claim.",
+    line: "Track the competitors you name, with a source for every claim.",
     ask: "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
   },
   {
     mark: "ostrakon",
-    title: "What we've learned",
-    body: "Writes down what the team learned this week, and what not to repeat.",
+    line: "Write down what the team learned this week.",
     ask: "I want an application that reads our work each week and writes down what we learned: what worked, what did not, and what we should not repeat.",
   },
 ];
@@ -793,16 +824,15 @@ const STARTERS: { mark: string; title: string; body: string; ask: string }[] = [
  *  sentence commits nothing but itself — what it asks for is decided later, in the conversation it
  *  opens.
  *
- *  They stack under the box, a row each. A rule leads every row and none closes the last, so the
- *  three read as one list standing on the screen rather than three cards set into it, and the name
- *  carries the scan while the sentence beside it stays out of the way. A row is one line: what the
- *  measure cannot hold is cut, never wrapped, so three starters cost three lines whatever they
- *  say.
+ *  They stack over the box, a row each, at the height the sidebar's own rows keep, so the list
+ *  reads as destinations rather than as cards set into the screen. A row says one sentence and is
+ *  one line: what the measure cannot hold is cut, never wrapped, so three starters cost three
+ *  lines whatever they say.
  *
- *  An application row wears the avatar an app wears everywhere else, because that is what a press
- *  founds: the row states the shape of the thing, not a category glyph standing in for it. A
- *  check-in founds no app — it asks after work already under way — so it wears a glyph in the width
- *  an avatar takes, and every row's words still start on one edge.
+ *  An application row wears the mark the sidebar draws that app under, at the size the sidebar
+ *  draws it, because that is what a press founds: the row states the shape of the thing, not a
+ *  category glyph standing in for it. A check-in founds no app — it asks after work already under
+ *  way — so it wears a glyph of the same width, and every row's words still start on one edge.
  *
  *  The connectors row closes the stack. Where the read names an unlock it is an ask like the three
  *  above it: the member says what they want built, and the agent asks for the accounts it turns out
@@ -827,28 +857,17 @@ function namedTiles(providers: MissingTile[]): string {
 
 function StarterMark({ row }: { row: StarterRow }) {
   // An unlock drawn in an application's slot wears the brand of the account it still needs, the
-  // way the connector row does — what the row costs is the first thing to read about it.
+  // way the connector row does. The row says its work and not its price, so the mark is the whole
+  // of what states the account before the conversation opens.
   if (row.kind === "unlock" && row.providers?.length) {
     return (
-      <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
-        <BrandMark provider={row.providers[0].name} className="size-(--size-glyph)" />
-      </span>
+      <BrandMark provider={row.providers[0].name} className="size-(--size-glyph) shrink-0" />
     );
   }
   if (row.kind === "check_in" || !row.mark) {
-    return (
-      <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
-        <IconMessage className="size-(--size-glyph) text-ink-soft" aria-hidden />
-      </span>
-    );
+    return <IconMessage className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />;
   }
-  return (
-    <Avatar>
-      <AvatarFallback>
-        <AgentIcon name={row.mark} />
-      </AvatarFallback>
-    </Avatar>
-  );
+  return <AgentIcon name={row.mark} className="size-(--size-glyph) shrink-0" />;
 }
 
 /** A row is one line, and the sentence it holds is the member's own work said back to them, so a
@@ -863,36 +882,34 @@ function Starters({ agentId }: { agentId: string }) {
   const rows = answered?.starters?.length ? answered.starters : FALLBACK_ROWS;
   const unlock = answered?.unlock?.providers?.length ? answered.unlock : null;
   return (
-    <div className="mt-2xl flex flex-col">
+    <div className="mb-2xl flex flex-col">
       {rows.map((row) => (
         <PressRow
-          key={row.title}
+          key={row.ask}
           glyph={<StarterMark row={row} />}
-          title={row.title}
-          body={row.body}
+          line={row.line}
           onPress={() => setPendingAsk(agentId, row.ask, true)}
         />
       ))}
       {unlock ? (
         <PressRow
           glyph={
-            <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
-              <BrandMark provider={unlock.providers[0].name} className="size-(--size-glyph)" />
-            </span>
+            <BrandMark
+              provider={unlock.providers[0].name}
+              className="size-(--size-glyph) shrink-0"
+            />
           }
-          title={unlock.title}
-          body={"Connect " + namedTiles(unlock.providers) + "."}
+          line={unlock.line}
+          note={"Connect " + namedTiles(unlock.providers) + "."}
           onPress={() => setPendingAsk(agentId, unlock.ask, true)}
         />
       ) : (
         <a href={sectionHash("connectors")} className={PRESS_ROW}>
-          <span className="flex size-(--size-avatar) shrink-0 items-center justify-center">
-            <IconPlug className="size-(--size-glyph) text-ink-soft" aria-hidden />
-          </span>
+          <IconPlug className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />
           <span className="min-w-0 flex-1 truncate text-ink-soft">
             Connect more accounts for better suggestions.
           </span>
-          <IconArrowRight className={PRESS_ROW_ARROW} aria-hidden />
+          <IconChevronRight className={PRESS_ROW_CHEVRON} aria-hidden />
         </a>
       )}
     </div>

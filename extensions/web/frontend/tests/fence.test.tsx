@@ -61,13 +61,13 @@ test("leaving a view discards the read left behind rather than painting it", asy
   await userEvent.keyboard("{Escape}");
   const sidebar = within(screen.getByRole("navigation", { name: "Workspace" }));
   await userEvent.click(sidebar.getByRole("button", { name: "New conversation" }));
-  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
 
   releaseConnectors!(json({ connections: [STALE_CONNECTION] }));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(screen.queryByText("stale-provider")).toBeNull();
-  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
 });
 
 test("a slow read for a filter the member left never paints over the filter they chose", async () => {

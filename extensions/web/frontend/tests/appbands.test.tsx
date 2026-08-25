@@ -35,8 +35,9 @@ test("the work band draws the newest conversations, and says where there are mor
       />
     </TooltipProvider>,
   );
-  expect(await screen.findByText("Brief 0")).toBeTruthy();
-  expect(screen.queryByText("Brief 8")).toBeNull();
+  // The row says its summary and, in the same breath, where the conversation came in and when.
+  expect(await screen.findByText("Brief 0 Portal · Aug 24 2026")).toBeTruthy();
+  expect(screen.queryByText(/Brief 8/)).toBeNull();
   expect(
     screen.getByText("The newest few. The conversations screen holds the rest."),
   ).toBeTruthy();

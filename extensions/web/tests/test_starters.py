@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from pydantic import ValidationError
 from ufo_ext_web.panels import FIRST_RUN_PROVIDER_NAMES, UNLOCKS, UNLOCKS_BY_NAME, Unlock
 from ufo_ext_web.starters import (
-    BODY_CHARS,
+    LINE_CHARS,
     SLATE_DIGEST,
     SLATE_SYSTEM,
     SLATE_TOOL,
@@ -63,7 +63,11 @@ def _slate(**kw: object) -> Slate:
 
 
 def _ranked(unlock: str, title: str) -> RankedUnlock:
-    return RankedUnlock(unlock=unlock, title=title, body="Does the job.", ask="Build me the thing.")
+    """One ranked row. Its line names its own title, so an assertion on what a row says states
+    which row said it — a fixture whose rows share one sentence cannot tell them apart."""
+    return RankedUnlock(
+        unlock=unlock, title=title, line=f"Does {title}.", ask="Build me the thing."
+    )
 
 
 def _reply(*blocks: TextBlock | ToolUseBlock) -> Message:
@@ -120,7 +124,7 @@ def test_the_slate_is_stored_under_the_members_own_subject() -> None:
 
 def test_the_prompt_states_the_character_budget_the_schema_enforces() -> None:
     stated = [int(cap) for cap in re.findall(r"at most (\d+) characters", SLATE_SYSTEM)]
-    assert stated == [TITLE_CHARS, BODY_CHARS]
+    assert stated == [TITLE_CHARS, LINE_CHARS]
 
 
 def test_a_reply_recording_no_call_raises_rather_than_settling_an_empty_slate() -> None:
@@ -133,9 +137,9 @@ def test_one_unusable_entry_drops_without_taking_the_slate_with_it() -> None:
         _reply(
             _call(
                 ranked=[
-                    {"unlock": "pr-babysitter", "title": "PR watch", "body": "b", "ask": "a"},
-                    {"unlock": "pr-babysitter", "title": "", "body": "b", "ask": "a"},
-                    {"unlock": "runway-report", "title": "Runway", "body": "b", "ask": "a"},
+                    {"unlock": "pr-babysitter", "title": "PR watch", "line": "b", "ask": "a"},
+                    {"unlock": "pr-babysitter", "title": "", "line": "b", "ask": "a"},
+                    {"unlock": "runway-report", "title": "Runway", "line": "b", "ask": "a"},
                 ]
             )
         ),
@@ -149,8 +153,8 @@ def test_an_entry_naming_no_catalog_row_drops() -> None:
         _reply(
             _call(
                 ranked=[
-                    {"unlock": "invented", "title": "Invented", "body": "b", "ask": "a"},
-                    {"unlock": "inbox-triage", "title": "Inbox", "body": "b", "ask": "a"},
+                    {"unlock": "invented", "title": "Invented", "line": "b", "ask": "a"},
+                    {"unlock": "inbox-triage", "title": "Inbox", "line": "b", "ask": "a"},
                 ]
             )
         ),
@@ -164,8 +168,8 @@ def test_a_row_ranked_twice_is_taken_once() -> None:
         _reply(
             _call(
                 ranked=[
-                    {"unlock": "inbox-triage", "title": "Inbox", "body": "b", "ask": "a"},
-                    {"unlock": "inbox-triage", "title": "Mail", "body": "b", "ask": "a"},
+                    {"unlock": "inbox-triage", "title": "Inbox", "line": "b", "ask": "a"},
+                    {"unlock": "inbox-triage", "title": "Mail", "line": "b", "ask": "a"},
                 ]
             )
         ),
@@ -184,9 +188,9 @@ def test_a_held_row_is_an_application_and_a_short_row_is_the_unlock() -> None:
         ranked=(_ranked("pr-babysitter", "PR watch"), _ranked("runway-report", "Runway")),
     )
     rows, unlock = fill_starters(slate, frozenset({"github"}), frozenset())
-    assert [row.title for row in rows] == ["PR watch"]
+    assert [row.line for row in rows] == ["Does PR watch."]
     assert unlock is not None
-    assert unlock.title == "Runway"
+    assert unlock.line == "Does Runway."
     assert [tile.name for tile in unlock.providers] == ["stripe", "quickbooks"]
 
 
@@ -198,13 +202,14 @@ def test_a_connected_provider_is_never_offered_as_an_unlock() -> None:
 
     rows, none_left = fill_starters(slate, frozenset({"stripe", "quickbooks"}), frozenset())
     assert none_left is None
-    assert [row.title for row in rows] == ["Runway"]
+    assert [row.line for row in rows] == ["Does Runway."]
 
 
 def test_unlocks_take_the_slots_no_ready_application_filled() -> None:
     """A workspace that has connected nothing has no ready application by definition. The screen
-    reads as named work and its price rather than falling through to rows that need accounts just
-    the same while saying nothing about which."""
+    fills with named work rather than standing empty. A row standing in an application's slot says
+    its work and nothing about its accounts — it carries `providers` so the row can wear the brand
+    of what it needs, and the row closing the list is the one that states a price."""
     slate = _slate(
         ranked=(
             _ranked("pr-babysitter", "PR watch"),
@@ -213,9 +218,12 @@ def test_unlocks_take_the_slots_no_ready_application_filled() -> None:
         )
     )
     rows, unlock = fill_starters(slate, frozenset(), frozenset())
-    assert unlock is not None and unlock.title == "PR watch"
-    assert [(r.kind, r.title) for r in rows] == [("unlock", "Runway"), ("unlock", "Release notes")]
-    assert rows[0].body == "Connect Stripe and QuickBooks."
+    assert unlock is not None and unlock.line == "Does PR watch."
+    assert [(r.kind, r.line) for r in rows] == [
+        ("unlock", "Does Runway."),
+        ("unlock", "Does Release notes."),
+    ]
+    assert rows[0].line == "Does Runway."
     assert [t.name for t in rows[0].providers] == ["stripe", "quickbooks"]
 
 
@@ -241,8 +249,8 @@ def test_a_row_short_of_accounts_is_never_drawn_twice() -> None:
     that offered one row in two places would spend a slot saying the same thing."""
     slate = _slate(ranked=(_ranked("runway-report", "Runway"), _ranked("inbox-triage", "Inbox")))
     rows, unlock = fill_starters(slate, frozenset({"gmail"}), frozenset())
-    assert unlock is not None and unlock.title == "Runway"
-    assert [(r.kind, r.title) for r in rows] == [("app", "Inbox")]
+    assert unlock is not None and unlock.line == "Does Runway."
+    assert [(r.kind, r.line) for r in rows] == [("app", "Does Inbox.")]
 
 
 def test_two_ready_applications_leave_no_slot_to_promote_into() -> None:
@@ -255,7 +263,7 @@ def test_two_ready_applications_leave_no_slot_to_promote_into() -> None:
     )
     rows, unlock = fill_starters(slate, frozenset({"gmail", "slack"}), frozenset())
     assert [r.kind for r in rows] == ["app", "app"]
-    assert unlock is not None and unlock.title == "Runway"
+    assert unlock is not None and unlock.line == "Does Runway."
 
 
 def test_a_row_more_than_two_accounts_short_is_passed_over() -> None:
@@ -282,7 +290,7 @@ def test_an_application_the_workspace_already_has_is_never_offered_again() -> No
     rows, _unlock = fill_starters(
         slate, frozenset({"github", "gmail"}), frozenset({"pr-babysitter"})
     )
-    assert [row.title for row in rows] == ["Inbox"]
+    assert [row.line for row in rows] == ["Does Inbox."]
 
 
 def test_a_title_an_application_already_carries_is_never_offered_again() -> None:
@@ -305,7 +313,7 @@ def test_the_screen_takes_no_more_applications_than_it_draws() -> None:
 def test_the_check_in_closes_the_list_and_founds_no_application() -> None:
     slate = _slate(
         ranked=(_ranked("competitor-watch", "Rivals"),),
-        check_in=CheckIn(title="Acme renewal", body="Waiting on legal.", ask="Where did it land?"),
+        check_in=CheckIn(title="Acme renewal", line="Waiting on legal.", ask="Where did it land?"),
     )
     rows, _unlock = fill_starters(slate, frozenset(), frozenset())
     assert [(row.kind, row.mark) for row in rows] == [("app", "wedjat"), ("check_in", None)]
@@ -352,7 +360,7 @@ RANKED_ARGUMENTS = json.dumps(
             {
                 "unlock": "pr-babysitter",
                 "title": "PR watch",
-                "body": "Reports what each pull request waits on.",
+                "line": "Reports what each pull request waits on.",
                 "ask": "Build me a pull request watcher.",
             }
         ],

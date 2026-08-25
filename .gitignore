@@ -39,3 +39,5 @@ servers/control/clientbin/*
 !servers/control/clientbin/.gitkeep
 sandbox/artifacts/
 target/
+
+.pnpm-store/

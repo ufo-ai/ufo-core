@@ -148,7 +148,7 @@ test("New application opens the wizard speaking in the pane, and the flyout keep
   expect(sent[0].url).toBe("/surface/web/agents/" + AGENT_ID + "/chat?conversation=new");
   expect(sent[0].body).toBe(OPENING);
   expect(within(wizard).getByText(OPENING)).toBeTruthy();
-  expect(within(wizard).getByLabelText("Message the app")).toBeTruthy();
+  expect(within(wizard).getByLabelText("Ask anything")).toBeTruthy();
   expect(within(await raisedIndex()).getByText("Assistant")).toBeTruthy();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -245,7 +245,7 @@ test("a compose screen without a shipped page opens the portal composer without 
   location.hash = "#/agents/" + SECOND_ID + "?open=compose";
   render(<Portal />);
 
-  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
   expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/homepage"))).toBe(false);
   expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
 });
@@ -272,7 +272,7 @@ test("a conversation the composer founds after a failed opening send is still th
   const wizard = await openWizard();
   expect(await within(wizard).findByText("Error 503 — try again.")).toBeTruthy();
 
-  await userEvent.type(within(wizard).getByLabelText("Message the app"), "A finances dashboard.");
+  await userEvent.type(within(wizard).getByLabelText("Ask anything"), "A finances dashboard.");
   await userEvent.click(within(wizard).getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -644,7 +644,7 @@ test("a founding send from the chat screen never blocks the wizard's own", async
   });
   render(<Portal />);
 
-  await userEvent.type(await screen.findByLabelText("Message the app"), "About our numbers.");
+  await userEvent.type(await screen.findByLabelText("Ask anything"), "About our numbers.");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(sent).toEqual(["About our numbers."]));
 
@@ -1232,7 +1232,7 @@ test("Start setup lands the member on the app's new conversation, founding nothi
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(screen.queryByRole("dialog")).toBeNull();
-  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
   expect(calls.filter((url) => url.includes("/chat?conversation="))).toEqual([]);
   expect(StreamFake.opened).toEqual([]);
 });
@@ -1340,7 +1340,7 @@ test("an agent no extension shipped keeps its conversation column, however unbui
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
   // It does not even ask: the read is for apps an extension shipped.
   expect(calls.filter((url) => url.includes("/setup"))).toEqual([]);
@@ -1399,7 +1399,7 @@ test("the app pane's header starts a chat with the app it shows, standing with t
   await userEvent.click(act);
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID + "?open=new");
-  await userEvent.type(await pane.findByLabelText("Message the app"), "hello");
+  await userEvent.type(await pane.findByLabelText("Ask anything"), "hello");
   await userEvent.click(pane.getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(sent.length).toBe(1));

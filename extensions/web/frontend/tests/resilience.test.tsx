@@ -33,7 +33,7 @@ async function streaming(routes: Record<string, () => Response> = {}) {
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "go");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   return StreamFake.last();
@@ -92,7 +92,7 @@ test("a reattach the backoff still holds opens nothing behind the source that re
 
   // Sending again attaches now rather than waiting the backoff out. The reattach it overtook has to
   // be cancelled, not merely forgotten: firing later, it would open a source behind the live one.
-  await userEvent.type(screen.getByLabelText("Message the app"), "again");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
 
@@ -126,7 +126,7 @@ test("a send during the backoff rebuilds the reply from the replay it reattached
   // The fold joins the turn whose tail just dropped, so the send reattaches now rather than waiting
   // the backoff out — and the source it opens replays the turn from its first frame. What that
   // rebuilds is the reply, not a second copy of it behind the text the dropped source drew.
-  await userEvent.type(screen.getByLabelText("Message the app"), "and again");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "and again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
 
@@ -246,20 +246,20 @@ test("a draft survives leaving the chat and is cleared by sending", async () => 
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "half a thought");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "half a thought");
   window.dispatchEvent(new Event("pagehide"));
   await userEvent.click(screen.getByRole("button", { name: /The other thread/ }));
   await screen.findByText("No messages in this conversation yet.");
   await userEvent.click(screen.getByRole("button", { name: /Pick one thread/ }));
 
-  const input = screen.getByLabelText("Message the app") as HTMLInputElement;
+  const input = screen.getByLabelText("Ask anything") as HTMLInputElement;
   expect(input.value).toBe("half a thought");
 
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   window.dispatchEvent(new Event("pagehide"));
   await userEvent.click(screen.getByRole("button", { name: /The other thread/ }));
   await userEvent.click(screen.getByRole("button", { name: /Pick one thread/ }));
-  expect((screen.getByLabelText("Message the app") as HTMLInputElement).value).toBe("");
+  expect((screen.getByLabelText("Ask anything") as HTMLInputElement).value).toBe("");
 });
 
 test("the terminal's full text overrides a gap-truncated replay", async () => {
@@ -326,7 +326,7 @@ test("a transcript fetched before a send never erases the exchange", async () =>
 
   window.dispatchEvent(new Event("focus"));
   await waitFor(() => expect(serves).toBe(2));
-  await userEvent.type(screen.getByLabelText("Message the app"), "just sent");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "just sent");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await screen.findByText("just sent");
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -405,7 +405,7 @@ test("a draft never crosses members on a shared browser", async () => {
   wire({ ...chatsOnWire(RAIL.chats), "/transcript": () => json({ messages: [] }) });
   const first = render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "private thought");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "private thought");
   window.dispatchEvent(new Event("pagehide"));
   first.unmount();
 
@@ -413,12 +413,12 @@ test("a draft never crosses members on a shared browser", async () => {
     <App agents={[AGENT, SECOND]} member={{ ...MEMBER, id: "m2", email: "other@example.com" }} onAgents={() => {}} />,
   );
   await screen.findByText("No messages in this conversation yet.");
-  expect((screen.getByLabelText("Message the app") as HTMLInputElement).value).toBe("");
+  expect((screen.getByLabelText("Ask anything") as HTMLInputElement).value).toBe("");
   other.unmount();
 
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
-  expect((screen.getByLabelText("Message the app") as HTMLInputElement).value).toBe(
+  expect((screen.getByLabelText("Ask anything") as HTMLInputElement).value).toBe(
     "private thought",
   );
 });

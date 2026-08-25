@@ -56,7 +56,7 @@ async function sendingMidTurn(chat: Route): Promise<void> {
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  await userEvent.type(screen.getByLabelText("Message the app"), "and again");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "and again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("and again")).toBeTruthy();
 }
@@ -70,7 +70,7 @@ test("an empty conversation states it, and the composer sends a message and stre
 
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "hello");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hello");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -100,13 +100,13 @@ test("the one control carries the act the member has, and stops the turn once", 
 
   await screen.findByText("No messages in this conversation yet.");
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
-  await userEvent.type(screen.getByLabelText("Message the app"), "hello");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hello");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(screen.getByRole("button", { name: "Stop" }).getAttribute("aria-disabled")).toBe(null);
-  await userEvent.type(screen.getByLabelText("Message the app"), "and this too");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "and this too");
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
-  await userEvent.clear(screen.getByLabelText("Message the app"));
+  await userEvent.clear(screen.getByLabelText("Ask anything"));
 
   await userEvent.click(screen.getByRole("button", { name: "Stop" }));
   const stops = () =>
@@ -407,7 +407,7 @@ test("a message that opens a turn stands above the reply it is waiting for", asy
   open();
 
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "write a poem");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "write a poem");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   // Nothing was running when this was sent, so it is the prompt a turn answers rather than a
@@ -439,7 +439,7 @@ test("a queued message stays under the answer streaming above it, and never move
   // waiting on it stands after that answer — under the reply it delivered and over the composer,
   // which is where the drain will leave it. Drawn above, it would state an order the turn
   // contradicts, and every bubble would shift the moment the fold landed.
-  await userEvent.type(screen.getByLabelText("Message the app"), "4+4=");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "4+4=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("4+4=")).toBeTruthy();
   await waitFor(() => expect(order("Ducks glide at dusk.", "4+4=")).toBe(true));
@@ -474,7 +474,7 @@ test("a message sent mid-turn joins the running turn, waits to be taken up, and 
   // Admission opened no run for the follow-up, so its frames come up the tail already open on that
   // turn — a second attach would leave two EventSources writing one live turn, every chunk doubled
   // and the reply recorded twice.
-  await userEvent.type(screen.getByLabelText("Message the app"), "and again");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "and again");
   const send = screen.getByRole("button", { name: "Send" });
   expect((send as HTMLButtonElement).disabled).toBe(false);
   await userEvent.click(send);
@@ -511,7 +511,7 @@ test("a reply the turn delivered before the fold stands ahead of the message it 
   StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
   expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "1+1=");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "1+1=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(waiting("1+1=")).toBe(true));
 
@@ -577,7 +577,7 @@ test("a drain that beats the response leaves the reply above the message", async
   StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
   expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "1+1=");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "1+1=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("1+1=")).toBeTruthy();
 
@@ -617,7 +617,7 @@ test("each fold clears its own message, and the replies between them keep their 
   // landed yet, and it consumes one marker per row it names. A marker left behind would clear the
   // next message's wait instead of this one's, and a reply delivered after a fold stands under the
   // message it answers.
-  await userEvent.type(screen.getByLabelText("Message the app"), "1+1=");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "1+1=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("1+1=")).toBeTruthy();
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
@@ -626,7 +626,7 @@ test("each fold clears its own message, and the replies between them keep their 
   responses[0]({ ...FOLDED, arrival_id: ARRIVAL_ID });
   await waitFor(() => expect(waiting("1+1=")).toBe(false));
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "2+2=");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "2+2=");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("2+2=")).toBeTruthy();
   StreamFake.last().emit("absorbed", { arrivals: [SECOND_ARRIVAL] });
@@ -755,7 +755,7 @@ test("a refusal states itself alone, never glued to the reply the page stopped t
   StreamFake.last().emit("message", { text: "reading it" });
   expect(await screen.findByText(saying("reading it"))).toBeTruthy();
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "and again");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "and again");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   // The refused message founds a turn of its own, so the page leaves the running turn's tail for
@@ -1410,7 +1410,7 @@ test("slot counts poll when a turn settles", async () => {
   open();
 
   await screen.findByRole("button", { name: "Changes" });
-  await userEvent.type(screen.getByLabelText("Message the app"), "edit it");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "edit it");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   StreamFake.last().emit("terminal", {
@@ -1453,7 +1453,7 @@ test("Shift+Enter opens a line in the message and Enter sends the whole of it", 
   open();
   await screen.findByText("No messages in this conversation yet.");
 
-  const box = screen.getByLabelText("Message the app") as HTMLTextAreaElement;
+  const box = screen.getByLabelText("Ask anything") as HTMLTextAreaElement;
   await userEvent.type(box, "first{Shift>}{Enter}{/Shift}second");
   expect(box.value).toBe("first\nsecond");
   expect(posted).toEqual([]);
@@ -1469,7 +1469,7 @@ test("the message box is as tall as the message and stops growing at the fold", 
   open();
   await screen.findByText("No messages in this conversation yet.");
 
-  const box = screen.getByLabelText("Message the app") as HTMLTextAreaElement;
+  const box = screen.getByLabelText("Ask anything") as HTMLTextAreaElement;
   const mirror = box.previousElementSibling!;
   expect(mirror.textContent).toBe(" ");
 
@@ -1499,7 +1499,7 @@ test("the composer is dead until the conversation loads, and open through the tu
   await screen.findByText("No messages in this conversation yet.");
   expect((send as HTMLButtonElement).disabled).toBe(false);
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(send);
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect((send as HTMLButtonElement).disabled).toBe(false);
@@ -1520,7 +1520,7 @@ test("a failed post states the error instead of opening a stream", async () => {
   });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(await screen.findByText("Error 500 — try again.")).toBeTruthy();
@@ -1582,7 +1582,7 @@ test("a posted message reports the browser's timezone", async () => {
   open();
 
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hello");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hello");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(posts.length).toBe(1));
@@ -1826,7 +1826,7 @@ test("a settled turn names each shared file once, with its size", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -1944,7 +1944,7 @@ test("a file the running turn shares stands under the log before the turn ends",
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -1994,7 +1994,7 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
   });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "share it");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "share it");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2026,7 +2026,7 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
   expect(await screen.findByRole("button", { name: "report.csv" })).toBeTruthy();
   expect(screen.getByRole("img", { name: "portrait.jpg" })).toBeTruthy();
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "and another");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "and another");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(await screen.findByText(saying("and another"))).toBeTruthy();
@@ -2094,7 +2094,7 @@ test("an application the turn created stands on the reply that made it, and open
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "build me a digest");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "build me a digest");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2175,7 +2175,7 @@ test("an image the turn shares stands inline in the answer and opens the artifac
   });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "find a headshot");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "find a headshot");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2248,7 +2248,7 @@ test("every file the turn shares opens in the attachment sheet instead of downlo
   });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "write the notes");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "write the notes");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2343,7 +2343,7 @@ test("a streamed chunk never steals focus from where the member put it", async (
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2586,7 +2586,7 @@ test("streaming keeps the log pinned at the bottom but never yanks a reader back
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2646,7 +2646,7 @@ test("a send the composer cannot answer leaves the attachment where the member p
   wire({ ...transcript(), "/chat": () => new Promise<Response>(() => {}) });
   location.hash = "#/";
   open();
-  await screen.findByLabelText("Message the app");
+  await screen.findByLabelText("Ask anything");
 
   const composer = document.querySelector("form[data-field-card]")!;
   const chips = () => within(composer as HTMLElement).queryAllByRole("listitem");
@@ -2661,7 +2661,7 @@ test("a send the composer cannot answer leaves the attachment where the member p
   fireEvent.drop(composer, {
     dataTransfer: { types: ["Files"], files: [new File(["body"], "second.txt")] },
   });
-  await userEvent.type(screen.getByLabelText("Message the app"), "{Enter}");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "{Enter}");
   expect(chips().length).toBe(1);
 });
 
@@ -2764,19 +2764,19 @@ test("a file pasted into the message box is attached rather than typed", async (
   open();
   await screen.findByText("No messages in this conversation yet.");
 
-  fireEvent.paste(screen.getByLabelText("Message the app"), {
+  fireEvent.paste(screen.getByLabelText("Ask anything"), {
     clipboardData: { files: [new File(["body"], "pasted.txt", { type: "text/plain" })] },
   });
 
   expect(await screen.findByText("pasted.txt")).toBeTruthy();
-  expect((screen.getByLabelText("Message the app") as HTMLTextAreaElement).value).toBe("");
+  expect((screen.getByLabelText("Ask anything") as HTMLTextAreaElement).value).toBe("");
 });
 
 test("a member who scrolls up while a reply streams stays where they scrolled", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2795,7 +2795,7 @@ test("the log follows a line that lands after the render that asked for it", asy
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2819,7 +2819,7 @@ test("sending while scrolled up re-pins the log to the bottom", async () => {
   log.scrollTop = 100;
   fireEvent.scroll(log);
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "back to now");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "back to now");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await screen.findByText("back to now");
   expect(log.scrollTop).toBe(FOOT);
@@ -2870,12 +2870,12 @@ test("switching conversations remounts the log so scroll state never leaks acros
 
   await userEvent.click(screen.getByRole("button", { name: /The second thread/ }));
   await screen.findByText("No messages in this conversation yet.");
-  expect(document.activeElement).toBe(screen.getByLabelText("Message the app"));
+  expect(document.activeElement).toBe(screen.getByLabelText("Ask anything"));
   const fresh = screen.getByTestId("log");
   expect(fresh).not.toBe(first);
 
   laidLog(fresh);
-  await userEvent.type(screen.getByLabelText("Message the app"), "hello there");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hello there");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await screen.findByText("hello there");
   expect(fresh.scrollTop).toBe(FOOT);
@@ -2902,7 +2902,7 @@ test("a reader inside the tolerance band still counts as at the bottom", async (
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "hi");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -2926,7 +2926,7 @@ test("sending returns focus to the composer instead of stranding it on the page"
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  const input = screen.getByLabelText("Message the app");
+  const input = screen.getByLabelText("Ask anything");
   await userEvent.type(input, "hi");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -2942,7 +2942,7 @@ test("answering a question returns focus to the composer", async () => {
   await userEvent.click(await screen.findByRole("radio", { name: "left" }));
   await userEvent.click(screen.getByRole("button", { name: "Continue" }));
   await waitFor(() =>
-    expect(document.activeElement).toBe(screen.getByLabelText("Message the app")),
+    expect(document.activeElement).toBe(screen.getByLabelText("Ask anything")),
   );
 });
 
@@ -2997,7 +2997,7 @@ test("agent markdown renders as elements while the member's text stays literal",
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "**hi**");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "**hi**");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
 
@@ -3027,7 +3027,7 @@ test("an address a member sent is a link in the member's own bubble", async () =
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Message the app"), "read https://example.com/d");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "read https://example.com/d");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   const link = await screen.findByRole("link", { name: "https://example.com/d" });
@@ -3062,13 +3062,13 @@ test("a new conversation's composer offers no way to switch app", async () => {
   location.hash = "#/";
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Message the app");
+  await screen.findByLabelText("Ask anything");
   expect(screen.queryByTestId("log")).toBeNull();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
   expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
   expect(screen.getByRole("button", { name: "Attach files" })).toBeTruthy();
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "hello");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hello");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -3083,14 +3083,14 @@ test("a route renaming the start screen keeps the same box, and the place in its
   location.hash = "#/";
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  const box = (await screen.findByLabelText("Message the app")) as HTMLTextAreaElement;
+  const box = (await screen.findByLabelText("Ask anything")) as HTMLTextAreaElement;
   await userEvent.type(box, "draft this");
   box.setSelectionRange(6, 6);
 
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
-  const after = screen.getByLabelText("Message the app") as HTMLTextAreaElement;
+  const after = screen.getByLabelText("Ask anything") as HTMLTextAreaElement;
   expect(after).toBe(box);
   expect(after.value).toBe("draft this");
   expect(after.selectionStart).toBe(6);
@@ -3107,7 +3107,7 @@ test("a route that renames the start screen's agent reads that agent's own draft
   location.hash = "#/new/" + SECOND_ID;
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  const box = (await screen.findByLabelText("Message the app")) as HTMLTextAreaElement;
+  const box = (await screen.findByLabelText("Ask anything")) as HTMLTextAreaElement;
   await userEvent.type(box, "words for the second");
 
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
@@ -3123,7 +3123,7 @@ test("the start screen's empty space is the box's: a press in it lands the curso
   location.hash = "#/";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const box = (await screen.findByLabelText("Message the app")) as HTMLTextAreaElement;
+  const box = (await screen.findByLabelText("Ask anything")) as HTMLTextAreaElement;
   await userEvent.type(box, "draft this");
   box.setSelectionRange(4, 4);
   box.blur();
@@ -3152,16 +3152,38 @@ test("a starter says its sentence on the press, and leaves with the start screen
   location.hash = "#/";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Message the app");
-  await userEvent.click(screen.getByRole("button", { name: /PR babysitter/ }));
+  await screen.findByLabelText("Ask anything");
+  await userEvent.click(screen.getByRole("button", { name: /open pull request/ }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(said).toEqual([
     "I want an application that watches our open pull requests and reports what each one waits on — age, reviewer, checks, conflicts — ordered by what it blocks.",
   ]);
-  expect((screen.getByLabelText("Message the app") as HTMLTextAreaElement).value).toBe("");
-  expect(document.activeElement).toBe(screen.getByLabelText("Message the app"));
-  expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
+  expect((screen.getByLabelText("Ask anything") as HTMLTextAreaElement).value).toBe("");
+  expect(document.activeElement).toBe(screen.getByLabelText("Ask anything"));
+  expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
+});
+
+/** The composer states which application the message is addressed to, wearing the mark that app
+ *  wears in the sidebar, and the member can take the band away. The start screen states what the
+ *  pane is for above it, because a pane that opens on nothing else says nothing at all. */
+test("the composer names the app it addresses, and the band can be taken away", async () => {
+  wire(transcript());
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Ask anything");
+  expect(screen.getByText("What can I help you with?")).toBeTruthy();
+
+  // The band wears the mark the sidebar draws this app under, not a category glyph standing in.
+  const band = screen.getByText("Assistant");
+  expect(band.parentElement!.querySelector("svg")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Stop addressing Assistant" }));
+
+  expect(screen.queryByText("Assistant")).toBeNull();
+  // Taking the band away leaves the words and the acts under it exactly where they were.
+  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
 });
 
 const SLATE = {
@@ -3169,27 +3191,31 @@ const SLATE = {
     {
       kind: "app",
       mark: "omphalos",
-      title: "Runway report",
-      body: "Reports cash, burn, and the months of runway left.",
+      line: "Report cash, burn, and the months of runway left.",
       ask: "I want an application that reports our cash, burn, and months of runway.",
     },
     {
       kind: "app",
       mark: "hydria",
-      title: "Invoice chaser",
-      body: "Drafts the chase for every invoice past its terms.",
+      line: "Draft the chase for every invoice past its terms.",
       ask: "I want an application that drafts the chase for every overdue invoice.",
+    },
+    {
+      kind: "unlock",
+      mark: "kalathos",
+      line: "Name the accounts each deal is still waiting on.",
+      ask: "I want an application that names the accounts each deal waits on.",
+      providers: [{ name: "salesforce", label: "Salesforce" }],
     },
     {
       kind: "check_in",
       mark: null,
-      title: "Acme renewal",
-      body: "The renewal was waiting on legal last week.",
+      line: "The renewal was waiting on legal last week.",
       ask: "Where did the Acme renewal land?",
     },
   ],
   unlock: {
-    title: "Account brief",
+    line: "Keep a one-page brief per account current.",
     ask: "I want an application that keeps a one-page brief per account current.",
     providers: [
       { name: "hubspot", label: "HubSpot" },
@@ -3206,9 +3232,9 @@ test("a workspace with nothing ranked reads the rows the screen ships with", asy
   location.hash = "#/";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByRole("button", { name: /PR babysitter/ });
+  await screen.findByRole("button", { name: /open pull request/ });
   expect(
-    screen.getByRole("button", { name: /Competitive intel/ }),
+    screen.getByRole("button", { name: /competitors you name/ }),
   ).toBeTruthy();
   expect(
     screen.getByRole("link", { name: /Connect more accounts/ }),
@@ -3220,10 +3246,10 @@ test("a ranked slate replaces every row the screen ships with", async () => {
   location.hash = "#/";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByRole("button", { name: /Runway report/ });
-  expect(screen.getByRole("button", { name: /Invoice chaser/ })).toBeTruthy();
-  expect(screen.getByRole("button", { name: /Acme renewal/ })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
+  await screen.findByRole("button", { name: /months of runway left/ });
+  expect(screen.getByRole("button", { name: /invoice past its terms/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /waiting on legal/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
 });
 
 /** jsdom lays nothing out, so every width reads 0 and no line is ever cut. These stub the two the
@@ -3247,6 +3273,27 @@ function measureLines(scroll: number, client: number): () => void {
   };
 }
 
+/** A row the ranking could not make ready stands in an application's slot all the same, and what it
+ *  still needs is stated by the mark alone: the row says its work, and the account it waits on is
+ *  the brand it wears. The mark draws at the size every other row's mark draws at, never at the
+ *  square a connector tile takes. */
+test("a spare unlock stands in an app's slot and wears the brand of what it needs", async () => {
+  wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const row = await screen.findByRole("button", { name: /accounts each deal is still waiting on/ });
+  expect(row.textContent).not.toContain("Connect");
+
+  // The mark is the account's brand and not the app icon the row's own `mark` would draw, which is
+  // the whole of what states the price on a row that no longer says one.
+  const glyph = row.firstElementChild!;
+  expect(glyph.getAttribute("style")).toContain("--brand-salesforce");
+  const mark = glyph.getAttribute("class") ?? "";
+  expect(mark).toContain("size-(--size-glyph)");
+  expect(mark).not.toContain("--size-brand-mark");
+});
+
 test("a sentence the row cannot hold is stated in full on hover", async () => {
   const restore = measureLines(600, 200);
   try {
@@ -3254,11 +3301,11 @@ test("a sentence the row cannot hold is stated in full on hover", async () => {
     location.hash = "#/";
     render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-    const row = await screen.findByRole("button", { name: /Runway report/ });
+    const row = await screen.findByRole("button", { name: /months of runway left/ });
     await userEvent.hover(row);
 
     const tip = await screen.findByRole("tooltip");
-    expect(tip.textContent).toContain("Reports cash, burn, and the months of runway left.");
+    expect(tip.textContent).toContain("Report cash, burn, and the months of runway left.");
   } finally {
     restore();
   }
@@ -3271,7 +3318,7 @@ test("a sentence the row holds whole is never said a second time", async () => {
     location.hash = "#/";
     render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-    const row = await screen.findByRole("button", { name: /Runway report/ });
+    const row = await screen.findByRole("button", { name: /months of runway left/ });
     await userEvent.hover(row);
 
     await new Promise((wake) => setTimeout(wake, 250));
@@ -3299,7 +3346,7 @@ test("a ranked starter says its own sentence, and a check-in asks after work", a
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(
-    await screen.findByRole("button", { name: /Acme renewal/ }),
+    await screen.findByRole("button", { name: /waiting on legal/ }),
   );
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -3323,7 +3370,7 @@ test("an unlock is an ask, not a departure: it names its accounts and says the b
   location.hash = "#/";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const row = await screen.findByRole("button", { name: /Account brief/ });
+  const row = await screen.findByRole("button", { name: /one-page brief per account/ });
   expect(row.textContent).toContain("Connect HubSpot and Notion.");
   expect(
     screen.queryByRole("link", { name: /Connect more accounts/ }),
@@ -3331,7 +3378,7 @@ test("an unlock is an ask, not a departure: it names its accounts and says the b
 
   // The account's mark draws in the glyph the rows above it draw, not at the square a connector
   // tile takes: jsdom lays nothing out, so the size it is asked for is what a test can hold.
-  const mark = row.firstElementChild!.firstElementChild!.getAttribute("class") ?? "";
+  const mark = row.firstElementChild!.getAttribute("class") ?? "";
   expect(mark).toContain("size-(--size-glyph)");
   expect(mark).not.toContain("--size-brand-mark");
 
@@ -3397,7 +3444,7 @@ test("the starters close on a link to the connectors screen, which the press rea
   location.hash = "#/";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Message the app");
+  await screen.findByLabelText("Ask anything");
   const cta = screen.getByRole("link", { name: /Connect more accounts/ });
   expect(cta.getAttribute("href")).toBe("#/connectors");
 
@@ -3408,5 +3455,5 @@ test("the starters close on a link to the connectors screen, which the press rea
 
   expect(location.hash).toBe("#/connectors");
   await screen.findByText("No connector is offered yet.");
-  expect(screen.queryByRole("button", { name: /PR babysitter/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
 });

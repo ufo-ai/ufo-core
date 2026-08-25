@@ -60,8 +60,8 @@ export function AppConversations({
                   <PressRow
                     key={row.name}
                     glyph={<IconMessage className="size-(--size-glyph) shrink-0 text-ink-soft" />}
-                    title={row.summary}
-                    body={[surfaceWord(row.surface), day(row.last_at)]
+                    line={row.summary}
+                    note={[surfaceWord(row.surface), day(row.last_at)]
                       .filter(Boolean)
                       .join(" · ")}
                     onPress={() => onPlace({ ...place, opens: opened(opens, lane) })}

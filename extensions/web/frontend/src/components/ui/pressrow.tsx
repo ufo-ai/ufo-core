@@ -1,25 +1,24 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { IconArrowRight } from "@tabler/icons-react";
+import { IconChevronRight } from "@tabler/icons-react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 
-/** One thing offered on a list of things to open: its mark, what it is called, what it is, and the
- *  way in. The name and the line about it share one line and one truncation, so a long name takes
- *  the room a short one leaves rather than every row wrapping to the longest. The rows rule between
- *  themselves and the last one does not, because the list ends where the rows do. */
+/** One thing offered on a list of things to open: its mark, what it says, and the way in. What the
+ *  row says shares one line and one truncation, so a long sentence takes the room a short one
+ *  leaves rather than every row wrapping to the longest. A row is one row
+ *  high whatever it says, so a list of them is a rhythm the eye reads down rather than a stack of
+ *  boxes each sized by its own words. Nothing rules between them — the rows are close enough to
+ *  read as one list, and a rule between rows one row apart is a stripe pattern rather than a
+ *  separation. */
 const ROW = cn(
-  "group flex w-full items-center gap-md border-0 border-b border-edge bg-transparent",
-  "px-md py-lg text-start text-ui text-inherit no-underline last:border-b-0 hover:bg-fill",
+  "group flex h-(--size-row) w-full items-center gap-sm border-0 bg-transparent",
+  "px-lg text-start text-ui text-inherit no-underline hover:bg-fill",
 );
 
-/** The way in is drawn only under the pointer: a column of arrows down a resting list is a column
- *  of marks saying the same thing about every row. */
-const ARROW = cn(
-  "size-(--size-glyph) shrink-0 text-ink-soft opacity-0 transition-opacity duration-100",
-  "ease-control group-hover:opacity-100 group-focus-visible:opacity-100",
-  "motion-reduce:transition-none",
-);
+/** The way in, drawn on every row at rest: the chevron is what says a row opens something, and a
+ *  row that only admits it under the pointer reads as text until the member happens to cross it. */
+const CHEVRON = "size-(--size-glyph) shrink-0 text-ink-soft";
 
 /** Whether the line is cut, so a row that fits is never given a tooltip saying what it already
  *  says. */
@@ -39,29 +38,34 @@ function useCutLine(): [RefObject<HTMLSpanElement | null>, boolean] {
 }
 
 /** A row that opens something. `onPress` where the caller holds the verb, `href` where the thing has
- *  an address of its own — the row is a link then, so it opens the way every other link does. */
+ *  an address of its own — the row is a link then, so it opens the way every other link does.
+ *
+ *  `line` is what the row says: one sentence that reads on its own. `note` is the trailing detail
+ *  a few rows carry — what a listed row costs, or when it last moved — and it is set in the same
+ *  type as the line, because a row drawn in two registers is a row the eye assembles out of two
+ *  pieces rather than reads as one thing. */
 export function PressRow({
   glyph,
-  title,
-  body,
+  line,
+  note,
   onPress,
   href,
 }: {
   glyph: ReactNode;
-  title: string;
-  body: string;
+  line: string;
+  note?: string;
   onPress?: () => void;
   href?: string;
 }) {
-  const [line, cut] = useCutLine();
+  const [measured, cut] = useCutLine();
+  const says = note ? line + " " + note : line;
   const inside = (
     <>
       {glyph}
-      <span ref={line} className="min-w-0 flex-1 truncate">
-        <span className="font-medium">{title}</span>
-        <span className="text-ink-soft"> {body}</span>
+      <span ref={measured} className="min-w-0 flex-1 truncate">
+        {says}
       </span>
-      <IconArrowRight className={ARROW} aria-hidden />
+      <IconChevronRight className={CHEVRON} aria-hidden />
     </>
   );
   return (
@@ -78,7 +82,7 @@ export function PressRow({
         )}
       </TooltipTrigger>
       <TooltipContent className="max-w-hint rounded-panel">
-        <span className="font-medium">{title}</span> {body}
+        {says}
       </TooltipContent>
     </Tooltip>
   );
@@ -86,4 +90,4 @@ export function PressRow({
 
 /** The row's own frame, for a row a caller draws itself — the connectors line under the starters is
  *  a row of this list that opens no thing on it. */
-export { ROW as PRESS_ROW, ARROW as PRESS_ROW_ARROW };
+export { ROW as PRESS_ROW, CHEVRON as PRESS_ROW_CHEVRON };

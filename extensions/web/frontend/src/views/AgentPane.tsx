@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconMessage, IconSettings } from "@tabler/icons-react";
+import { IconLayoutSidebarRight, IconMessage, IconPlus, IconSettings } from "@tabler/icons-react";
 
 import { attachBridge, type BridgeHandle } from "@/lib/bridge";
 import { Button } from "@/components/ui/button";
@@ -454,15 +454,27 @@ export function AgentPane({
   );
 
   /** Where the conversation stands when the app has a page: a slot in the screen's own track,
-   *  opened by the titlebar's act and named by the conversation it holds. The app has one editing
-   *  conversation, so the slot's band carries no act to start another and no menu to switch — the
-   *  toggle opens the one there is, and a sidebar click still lands any directive conversation
-   *  here by its own address. An app with no page has no track to divide, so the conversation is
-   *  the screen and takes the width whole. */
+   *  opened by the titlebar's act and named by the conversation it holds. Its band carries the one
+   *  act the member cannot reach from the page — starting another conversation with this app —
+   *  and no menu to switch between them, because a sidebar click lands any conversation here by
+   *  its own address. The act is spent where the pane already stands on a conversation nobody has
+   *  spoken in, so it draws as unavailable rather than founding a second empty one. An app with no
+   *  page has no track to divide, so the conversation is the screen and takes the width whole. */
   const slot = useSlot(beside && held !== undefined ? conversation : null, {
     id: held ?? FRESH,
     kind: "panel",
     title: opened ? subject(opened, viewer) : NEW_CONVERSATION,
+    acts: (
+      <Button
+        variant="quiet"
+        size="icon"
+        aria-label={NEW_CONVERSATION + " with " + agentName(agent.name)}
+        disabled={held === FRESH}
+        onClick={start}
+      >
+        <IconPlus aria-hidden />
+      </Button>
+    ),
     onClose: () => onPlace({ ...place, opens: [] }, "replace"),
   });
 
@@ -490,8 +502,10 @@ export function AgentPane({
             </Button>
             <Button
               variant="quiet"
-              size="icon"
-              aria-label={"Chat with " + agentName(agent.name)}
+              size={held !== undefined ? "icon" : "bar"}
+              aria-label={
+                (held !== undefined ? "Close chat with " : "Chat with ") + agentName(agent.name)
+              }
               aria-pressed={held !== undefined}
               className={cn(
                 "rounded-full border border-edge bg-surface",
@@ -506,7 +520,14 @@ export function AgentPane({
                   : onPlace({ ...place, opens: [] }, "replace")
               }
             >
-              <IconMessage aria-hidden />
+              {held !== undefined ? (
+                <IconLayoutSidebarRight aria-hidden />
+              ) : (
+                <>
+                  <IconMessage className="size-(--size-glyph)" aria-hidden />
+                  Chat
+                </>
+              )}
             </Button>
           </div>
           {/* Each frame's key carries the deploy generation, so a redeploy at the same URL mounts

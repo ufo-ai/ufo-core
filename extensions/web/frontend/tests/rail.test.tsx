@@ -416,7 +416,7 @@ test("a first message opens a conversation, lands it in the rail, and routes to 
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "hello there");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "hello there");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
@@ -442,17 +442,17 @@ test("a second message sent before the first is answered opens no second convers
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "first half");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "first half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   // Until that POST answers, nothing here knows which conversation it opened, and a second send to
   // the `new` sentinel opens another one: the two halves would end up in separate conversations,
   // each answered without the other. So the composer holds the words rather than founding again.
-  await userEvent.type(screen.getByLabelText("Message the app"), "second half");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "second half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(posts.length).toBe(1);
-  expect((screen.getByLabelText("Message the app") as HTMLInputElement).value).toBe("second half");
+  expect((screen.getByLabelText("Ask anything") as HTMLInputElement).value).toBe("second half");
 
   found({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "first half", opened_run: true });
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
@@ -477,8 +477,8 @@ test("two submits the page could not re-render between still open one conversati
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "one thought");
-  const form = screen.getByLabelText("Message the app").closest("form");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "one thought");
+  const form = screen.getByLabelText("Ask anything").closest("form");
 
   // Both submits read the composer of one render, so a held form cannot be what keeps the second
   // from founding — the send is, which is where the `new` sentinel is spent.
@@ -502,7 +502,7 @@ test("a first message sent before the rail resolves still lands, and the rail me
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "early words");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "early words");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
   expect(within(screen.getByTestId("log")).getByText("early words")).toBeTruthy();
@@ -558,7 +558,7 @@ test("sending from an existing conversation posts to it and bumps its rail row",
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
-  await userEvent.type(screen.getByLabelText("Message the app"), "follow-up");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "follow-up");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() =>
@@ -706,10 +706,10 @@ test("an origin rail row opens a live comment chat", async () => {
   await userEvent.click(await screen.findByRole("button", { name: /Slack question/ }));
 
   expect(await screen.findByText("slack words")).toBeTruthy();
-  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 
-  await userEvent.type(screen.getByLabelText("Message the app"), "from the portal");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "from the portal");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() =>
     expect(calls.some((url) => url.includes("/chat?conversation=" + CONVO_ID))).toBe(true),
@@ -746,7 +746,7 @@ test("a private extension conversation opens the live chat", async () => {
   // linked.
   expect(crumb.getByText("Daily-Brief")).toBeTruthy();
   expect(crumb.queryByRole("link")).toBeNull();
-  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
@@ -824,7 +824,7 @@ test("a Slack conversation permalink opens a live comment chat", async () => {
 
   expect(await screen.findByText("from Slack")).toBeTruthy();
   expect(screen.getByText("reply in Slack")).toBeTruthy();
-  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
   expect(
@@ -894,7 +894,7 @@ test("a terminal conversation is marked with its surface and no way out", async 
   expect(header.getByText("Deploy the branch")).toBeTruthy();
   expect(header.getByText("Terminal")).toBeTruthy();
   expect(header.getByText("Terminal").closest("a")).toBeNull();
-  expect(screen.getByLabelText("Message the app")).toBeTruthy();
+  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
@@ -1013,7 +1013,7 @@ test("the new-conversation control targets the main agent, and offers no other",
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
-  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
   // A conversation that does not exist yet is headed by nothing: the address names the app that
   // would hold it, and a crumb back to a conversation nobody has founded leads nowhere.
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
@@ -1033,7 +1033,7 @@ test("the applications flyout opens the agent's page, and the sidebar starts the
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   await userEvent.click(rail.getByRole("button", { name: "New conversation" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
-  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
@@ -1124,7 +1124,7 @@ test("a failed send neither bumps the rail nor reorders it", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
-  await userEvent.type(screen.getByLabelText("Message the app"), "doomed");
+  await userEvent.type(screen.getByLabelText("Ask anything"), "doomed");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(await screen.findByText("Error 500 — try again.")).toBeTruthy();

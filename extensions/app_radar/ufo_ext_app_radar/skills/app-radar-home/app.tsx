@@ -375,8 +375,8 @@ function ReadNext({ pinned }: { pinned: string }) {
                   </AvatarFallback>
                 </Avatar>
               }
-              title={run.entry?.title ?? run.task ?? "Scheduled run"}
-              body={run.entry?.summary ?? ""}
+              line={run.entry?.title ?? run.task ?? "Scheduled run"}
+              note={run.entry?.summary || undefined}
             />
           );
         })}

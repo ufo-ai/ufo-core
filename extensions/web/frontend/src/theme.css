@@ -654,14 +654,16 @@
     transition-duration: 0s;
   }
 
-  /* The second selector is a field drawn as a card: the box inside it draws no surface of its own,
-     so the outline belongs at the card's edge, and it is this one rather than another like it. */
-  :focus-visible,
-  [data-field-card]:has(textarea:focus-visible) {
+  :focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
 
+  /* A field drawn as a card says it has the cursor with the cursor. The box inside the card draws
+     no surface of its own, so an outline on it would ring a shape the member cannot see, and one
+     at the card's edge would ring a box they are already looking into; the caret stands in the
+     words they are about to write and states it where they are looking. Every other focusable
+     thing keeps the ring above. */
   [data-field-card] textarea:focus-visible {
     outline: none;
   }
