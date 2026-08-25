@@ -2181,6 +2181,7 @@ async def _source_state(source_id: UUID) -> sa.RowMapping:
                 await connection.execute(
                     sa.select(
                         tables.source.c.cursor,
+                        tables.source.c.config,
                         tables.source.c.consecutive_errors,
                         tables.source.c.consecutive_refusals,
                         tables.source.c.parked_at,
@@ -2775,6 +2776,40 @@ async def test_a_refused_stream_parks_on_the_threshold_run_and_records_it_withou
     assert submitted == []  # the park is not the failure path's check to speak on
 
 
+async def test_a_grant_settled_refusal_parks_until_the_grant_changes_not_on_the_hour(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A broker reporting its account unusable answers the same way on every read until the member
+    reconnects, and that reconnect is an event `GrantStore.record` delivers. An hourly request would
+    ask a question already answered elsewhere, so this park holds far out instead, and the release
+    is what wakes the row.
+
+    The hold is a date and not an infinity, so it cannot wedge if every release path misses one. And
+    it is the raiser's call alone: a missing scope takes the hourly park in the test above, because
+    an administrator can widen one out of band and no event tells us."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, "held-cursor")
+    settled = StreamSkipped("the grant needs the member to reconnect", awaits_grant=True)
+    driver, _ = _scripted_driver(
+        [settled] * SOURCE_REFUSAL_PARK_THRESHOLD, database_url, tmp_path / "blobs"
+    )
+
+    for _ in range(SOURCE_REFUSAL_PARK_THRESHOLD - 1):
+        await _sync(driver)
+        await _make_due()
+    before = await _source_state(source_id)
+
+    await _sync(driver)
+
+    parked = await _source_state(source_id)
+    assert parked["parked_at"] is not None
+    assert parked["cursor"] == "held-cursor"
+    ahead = parked["next_sync_at"] - before["next_sync_at"]
+    assert ahead > timedelta(seconds=SOURCE_PARK_RETRY_SECONDS)  # not the hourly park
+    assert ahead > timedelta(days=300)  # held for the grant, not for a clock
+    assert await _claims(driver) == ()  # and no run reaches it meanwhile
+
+
 async def test_a_parked_source_waits_the_park_retry_and_then_reads_again(
     db: None, database_url: str, tmp_path: Path
 ) -> None:
@@ -2871,6 +2906,116 @@ async def test_a_reconnect_of_the_same_account_unparks_the_sources_it_carries(
     held = await _source_state(unrelated_id)
     assert held["parked_reason"] == PARK_REASON
     assert held["consecutive_refusals"] == SOURCE_REFUSAL_PARK_THRESHOLD
+
+
+async def _seed_peer_source(workspace_id: UUID) -> UUID:
+    """A second member's own connector source on the same provider, bound to its own connection —
+    the row a grantor's reconnect must not reach."""
+    peer_id, conversation_id, connection_id, source_id = uuid4(), uuid4(), uuid4(), uuid4()
+    account = f"{CONNECTOR_ACCOUNT}_peer"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=peer_id,
+                workspace_id=workspace_id,
+                email="peer@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=uuid5(NAMESPACE_URL, f"{workspace_id}/main"),
+                surface="probe",
+                queue_key=str(conversation_id),
+                member_id=peer_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider=CONNECTOR_PROVIDER,
+                account_id=account,
+                host=CONNECTOR_HOST,
+                owner_member_id=peer_id,
+                conversation_id=conversation_id,
+                shared=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend=CONNECTOR_PROVIDER,
+                config={"account": account, "stream": CONNECTOR_STREAM},
+                subject=member_subject(peer_id),
+                owner_member_id=peer_id,
+                connection_id=connection_id,
+                cursor="peer-cursor",
+                next_sync_at=sa.func.now(),
+                claimed_by=None,
+                claim_expires_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return source_id
+
+
+async def test_a_reconnect_under_a_new_account_id_still_releases_the_parked_feed(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The member repairs the grant, and the repair lands on an account id this workspace has never
+    seen. Connections are keyed on that id, so the connect writes a second connection row beside the
+    first, and the parked feed hangs off the first. Releasing only the matched row would leave that
+    feed parked while its member believed they had just fixed it — and a feed parked on a grant
+    event is never polled, so nothing else would ever find it.
+
+    This grantor's own parked feeds of the provider are released instead, whichever account they
+    name. Nothing is rebound: the older account usually still authenticates, and the feed proves
+    that or parks again within three runs.
+
+    Two rows are left alone, and each says a different thing. A feed on another provider is not this
+    repair. A feed another member registered on this same provider is not this grantor's to touch —
+    the resync verb refuses one member acting on another's source, and a reconnect must not reach
+    past that gate."""
+    workspace_id = await _workspace()
+    main_id = uuid5(NAMESPACE_URL, f"{workspace_id}/main")
+    member_id, conversation_id, source_id = await _seed_connected_source(workspace_id)
+    other_provider_id = await _seed_scripted_source(workspace_id, None)
+    peer_source_id = await _seed_peer_source(workspace_id)
+    driver, _ = _scripted_driver([], database_url, tmp_path / "blobs")
+    for row_id in (source_id, other_provider_id, peer_source_id):
+        await _park(row_id)
+
+    with ws(workspace_id), agent(main_id):
+        await GrantStore().record(
+            provider=CONNECTOR_PROVIDER,
+            account_id=f"{CONNECTOR_ACCOUNT}_reconnected",  # a second account, not the parked one
+            host=CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            conversation_id=conversation_id,
+            shared=False,
+        )
+        assert await _claims(driver) == (source_id,)  # released and due, through the driver's read
+
+    released = await _source_state(source_id)
+    assert (released["parked_at"], released["parked_reason"]) == (None, None)
+    assert released["consecutive_refusals"] == 0
+    assert released["cursor"] == "held-cursor"  # released, never rebound or reset
+    assert released["config"]["account"] == CONNECTOR_ACCOUNT
+    held = await _source_state(other_provider_id)
+    assert held["parked_reason"] == PARK_REASON  # another provider is not this repair
+    peer_held = await _source_state(peer_source_id)
+    assert peer_held["parked_reason"] == PARK_REASON  # nor is another member's feed
+    assert peer_held["consecutive_refusals"] == SOURCE_REFUSAL_PARK_THRESHOLD
 
 
 async def test_a_resync_unparks_the_source_it_names(

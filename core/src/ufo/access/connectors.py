@@ -99,7 +99,20 @@ class GrantUnusable(RuntimeError):
     without the member, so a caller that retried every interval would spend a request per interval
     and page an operator who can do nothing. The message names the reconnect, because whoever reads
     it is the one who has to ask for it. `sources.backend` turns it into a `StreamSkipped`, which
-    parks the feed onto the long interval and records it as a warning rather than an alert."""
+    parks the feed and records it as a warning rather than an alert.
+
+    `awaits_grant` says a member reconnecting is the ONLY repair, which is a narrower claim than the
+    message makes and is why it defaults to False. A broker reporting one account unhealthy earns
+    it: that state belongs to the account, and the reconnect that ends it raises an event the driver
+    already receives, so the feed can stop polling until then. A broker that does not recognise the
+    grant does not earn it, however much the guidance says to reconnect — one broker key or org
+    rotation makes every account unknown at once, and an operator restoring that configuration
+    raises no event at all. A feed held for the grant through that would wait for a member who has
+    nothing to fix, so it keeps the ordinary park and finds its own way back."""
+
+    def __init__(self, reason: str, *, awaits_grant: bool = False) -> None:
+        super().__init__(reason)
+        self.awaits_grant = awaits_grant
 
 
 def stale_grant_guidance(provider: str) -> str:

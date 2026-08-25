@@ -328,6 +328,26 @@ class GrantStore:
         done — or, written before the conversation is told, cost the member the answer they are
         owed.
 
+        Reusing the connection row is one of the two things this releases. The other is this
+        grantor's own parked feeds of the same provider, whichever account they are bound to. A
+        broker mints a new account id often enough that a member reconnecting can land on a row this
+        workspace has never seen — connections are keyed on the account id, so that is a second
+        connection beside the first, and a feed bound to the older one would sit parked while its
+        member believed they had just repaired it. Nothing here rebinds a feed: the older account
+        usually still authenticates, and a healthy feed on it is left exactly where it is. Only the
+        parked rows are released, and a release is one retry. A feed the provider still refuses
+        parks again within about five minutes, so the cost of releasing a row that was beyond repair
+        is three requests.
+
+        `owner_member_id` bounds that second arm, because a source is its registering member's to
+        act on: `SourceObjects` refuses another member's resync, and the workspace's own rule is
+        that a member-owner controls expansion. One member reconnecting a provider says nothing
+        about a feed another member registered on it, and clearing that feed's marks would both act
+        outside the grantor's reach and take the park state from the member who reads it. The
+        connection arm needs no such bound — `source` keys its connection on
+        `(workspace_id, connection_id, owner_member_id)`, so those rows already belong to that
+        connection's owner.
+
         Reusing the connection row is also what releases the feeds bound to it. A source the
         provider refused into a park, and one that backed off to the hour cap, are both an hour from
         their next look, and this act is the answer to both: the same account reconnected with the
@@ -436,7 +456,14 @@ class GrantStore:
                 )
                 .where(
                     tables.source.c.workspace_id == self.workspace_id,
-                    tables.source.c.connection_id == existing.id,
+                    sa.or_(
+                        tables.source.c.connection_id == existing.id,
+                        sa.and_(
+                            tables.source.c.backend == provider,
+                            tables.source.c.parked_at.is_not(None),
+                            tables.source.c.owner_member_id == grantor_member_id,
+                        ),
+                    ),
                     tables.source.c.removed_at.is_(None),
                 )
             )

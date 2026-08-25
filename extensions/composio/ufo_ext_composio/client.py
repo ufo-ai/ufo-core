@@ -210,7 +210,8 @@ class ComposioClient:
             raise GrantUnusable(
                 f"composio cannot authenticate connected account {account_id!r}: it is "
                 f"{status or 'unknown'}, not {ACTIVE_STATUS}, so its grant needs the member to "
-                "reconnect the account"
+                "reconnect the account",
+                awaits_grant=True,
             )
         toolkit = payload.get("toolkit")
         auth_config = payload.get("auth_config")

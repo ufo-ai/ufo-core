@@ -325,7 +325,8 @@ def _account(record: dict[str, object], account_id: str) -> ConnectedAccount:
     if record.get("healthy") is False:
         raise GrantUnusable(
             f"pipedream cannot authenticate connected account {account_id!r}: it is unhealthy, so "
-            "its grant needs the member to reconnect the account"
+            "its grant needs the member to reconnect the account",
+            awaits_grant=True,
         )
     app = _dict(record.get("app"))
     app_slug = app.get("name_slug")

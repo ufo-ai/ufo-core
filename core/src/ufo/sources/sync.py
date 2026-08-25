@@ -64,6 +64,9 @@ SOURCE_SYNC_INTERVAL_SECONDS = 60
 SOURCE_ERROR_BACKOFF_CAP_SECONDS = 3600
 SOURCE_REFUSAL_PARK_THRESHOLD = 3
 SOURCE_PARK_RETRY_SECONDS = 3600
+# A park nothing but a grant event can lift still carries a date, not an infinity: every release
+# path writes `next_sync_at = now()`, and a year out is the backstop for the day they all miss one.
+SOURCE_PARK_HOLD_SECONDS = 365 * 24 * 3600
 CLAIM_LEASE_SECONDS = 300
 DUE_BATCH_MAX_SOURCES = 50
 SOURCE_BLOB_PREFIX = "sources"
@@ -169,15 +172,23 @@ class StreamSkipped(RuntimeError):
     delete-detection never runs and the source's existing pages stand, and it reschedules at the
     normal interval with the cursor held and the error counter cleared, rather than backing the
     source off as if it had errored. It also counts the refusal, and parks the source at
-    `SOURCE_REFUSAL_PARK_THRESHOLD` of them, which holds it at `SOURCE_PARK_RETRY_SECONDS` rather
-    than the interval and writes a warning log, alerting nobody. A raiser therefore does not have to
-    know whether the refusal will clear: one that does costs an hour, and one that does not costs a
-    request an hour instead of a request a minute. A fault the caller can distinguish still reads
-    better as a fault — it raises through and takes the error backoff — but nothing about a stream
-    stopping rests on the caller getting that right."""
+    `SOURCE_REFUSAL_PARK_THRESHOLD` of them, which writes a warning log and alerts nobody. A raiser
+    therefore does not have to know whether the refusal will clear: one that does costs an hour, and
+    one that does not costs a request an hour instead of a request a minute. A fault the caller can
+    distinguish still reads better as a fault — it raises through and takes the error backoff — but
+    nothing about a stream stopping rests on the caller getting that right.
 
-    def __init__(self, reason: str) -> None:
+    `awaits_grant` says the refusal cannot lift on its own, and only a raiser that knows this
+    passes it. A missing scope does not qualify: an administrator widens one out of band and no
+    event reaches us, so the hourly park is the only way that stream is ever found again. A broker
+    reporting the account itself unusable does qualify — it answers that on every read until the
+    member reconnects, and the reconnect is an event `GrantStore.record` already delivers. Polling
+    that stream asks a question whose answer arrives another way, so the park holds it at
+    `SOURCE_PARK_HOLD_SECONDS` instead, and the release path is what wakes it."""
+
+    def __init__(self, reason: str, *, awaits_grant: bool = False) -> None:
         super().__init__(reason)
+        self.awaits_grant = awaits_grant
         self.reason = reason
 
 
@@ -559,7 +570,7 @@ class SyncDriver:
                         **_stream_tags(source),
                         reason=skipped.reason,
                     )
-                await self._skip(source, skipped.reason)
+                await self._skip(source, skipped.reason, awaits_grant=skipped.awaits_grant)
             except Exception as error:
                 cursor_reset = isinstance(error, CursorExpired)
                 errors, next_sync_at = self._error_backoff(source, datetime.now(UTC))
@@ -964,14 +975,17 @@ class SyncDriver:
                 )
             )
 
-    async def _skip(self, source: ClaimedSource, reason: str) -> None:
+    async def _skip(self, source: ClaimedSource, reason: str, *, awaits_grant: bool) -> None:
         """A backend raised `StreamSkipped`: the source is intentionally unreadable this run (a
         missing scope, a plan gate), not failed. Free the claim and reschedule at the normal
         interval with the cursor held and the error counter reset — no pages committed, so snapshot
         delete-detection never runs and the source's existing pages stand.
 
-        The refusal also counts, and at `SOURCE_REFUSAL_PARK_THRESHOLD` the row parks: held at
-        `SOURCE_PARK_RETRY_SECONDS` instead of the interval, with the two marks naming why. A grant
+        The refusal also counts, and at `SOURCE_REFUSAL_PARK_THRESHOLD` the row parks, with the two
+        marks naming why. How far the park holds it is the one thing the raiser decides: a refusal
+        that can lift on its own waits `SOURCE_PARK_RETRY_SECONDS`, and one that waits on a grant
+        event waits `SOURCE_PARK_HOLD_SECONDS`, because the event is what wakes it and an hourly
+        request would only ask a question already answered elsewhere. A grant
         does not widen between two attempts, so retrying a refused stream every interval costs a
         request a minute for as long as nobody re-grants the scope; three refusals absorb a token
         that momentarily failed to refresh and end that loop within about five minutes.
@@ -996,6 +1010,7 @@ class SyncDriver:
         now = datetime.now(UTC)
         counted = tables.source.c.consecutive_refusals + 1
         parks = counted >= SOURCE_REFUSAL_PARK_THRESHOLD
+        held = SOURCE_PARK_HOLD_SECONDS if awaits_grant else SOURCE_PARK_RETRY_SECONDS
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -1004,7 +1019,7 @@ class SyncDriver:
                         next_sync_at=_rescheduled(
                             source,
                             sa.case(
-                                (parks, now + timedelta(seconds=SOURCE_PARK_RETRY_SECONDS)),
+                                (parks, now + timedelta(seconds=held)),
                                 else_=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
                             ),
                         ),

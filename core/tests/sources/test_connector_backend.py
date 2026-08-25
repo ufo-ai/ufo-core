@@ -100,8 +100,10 @@ class _UnusableGrantProxy:
         "needs the member to reconnect the account"
     )
 
+    awaits_grant = False
+
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
-        raise GrantUnusable(self.reason)
+        raise GrantUnusable(self.reason, awaits_grant=self.awaits_grant)
 
 
 async def test_an_unusable_grant_skips_the_stream_instead_of_failing_the_run() -> None:
@@ -123,6 +125,29 @@ async def test_an_unusable_grant_skips_the_stream_instead_of_failing_the_run() -
 
     assert raised.value.reason == f"probe: 'tickets' {_UnusableGrantProxy.reason}"
     assert "reconnect the account" in raised.value.reason
+    assert raised.value.awaits_grant is False  # the raiser's claim, never invented here
+
+
+async def test_only_the_raiser_decides_that_a_grant_event_is_the_one_repair() -> None:
+    """`awaits_grant` reaches the driver exactly as the broker set it. A broker naming one account
+    unhealthy sets it, and that feed stops polling until the reconnect. A broker that does not
+    recognise the grant leaves it clear, because one broker key rotation makes every account unknown
+    at once and the operator who restores that configuration raises no event — a feed held for a
+    grant there would wait on a member with nothing to fix. Deciding this here, on a type both
+    reach, would collapse the two into whichever guess this line made."""
+    stream = StreamSpec(name="tickets", source_object="tickets")
+
+    class _Unhealthy(_UnusableGrantProxy):
+        awaits_grant = True
+
+    for proxy, expected in ((_UnusableGrantProxy(), False), (_Unhealthy(), True)):
+        with pytest.raises(StreamSkipped) as raised:
+            await ConnectorBackend(connector=_FeedConnector(stream, [])).fetch(
+                ConnectorSourceConfig(account=ACCOUNT, stream=stream.name),
+                None,
+                SourceAuth(workspace_id=uuid4(), auth_proxy=proxy),
+            )
+        assert raised.value.awaits_grant is expected
 
 
 async def _run(

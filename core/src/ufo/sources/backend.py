@@ -160,7 +160,8 @@ class ConnectorBackend:
             )
         except GrantUnusable as unusable:
             raise StreamSkipped(
-                f"{self.connector.name}: {config.stream!r} {unusable}"
+                f"{self.connector.name}: {config.stream!r} {unusable}",
+                awaits_grant=unusable.awaits_grant,
             ) from unusable
         stream = self._stream(config.stream)
         base_url = config.base_url or self.connector.base_url
