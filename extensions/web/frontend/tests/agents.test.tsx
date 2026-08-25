@@ -1237,6 +1237,134 @@ test("Start setup lands the member on the app's new conversation, founding nothi
   expect(StreamFake.opened).toEqual([]);
 });
 
+test("an app the workspace has never built stands on its setup screen", async () => {
+  /** Built is the line, not wired: an app builds a thinner page from fewer sources, and a member
+   *  who wants to see it before every todo is settled gets to. */
+  wire({
+    "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () =>
+      json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
+    "/setup": () =>
+      json({
+        own_page: false,
+        ready: false,
+        credentials: [],
+        connectors: [{ provider: "googlecalendar", granted: false, connected: false }],
+        standing: [],
+      }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(
+    <App agents={[{ ...AGENT, main: false, app: "meetings" }]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
+});
+
+test("a shipped app that declares no setup stands on its page", async () => {
+  /** The five apps this repository already ships declare none, and their page is the deploy's own.
+   *  A gate that read "no forked page" as "not set up" stranded them on a screen with no account
+   *  row, no schedule row, and nothing to press. */
+  wire({
+    "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () =>
+      json({ state: "set", url: "https://wiki.example.test", deploy_generation: 1 }),
+    "/setup": () =>
+      json({ own_page: false, ready: true, connectors: [], credentials: [], standing: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(
+    <App agents={[{ ...AGENT, main: false, app: "wiki" }]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  expect(await screen.findByLabelText(/^Settings for/)).toBeTruthy();
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+});
+
+test("the move to setup replaces, so Back steps past the app", async () => {
+  /** A pushed entry sends Back to the app address, which mounts the pane, reads the same answer and
+   *  pushes the setup screen over it again — the member could never step back past the app. */
+  const replaced: unknown[] = [];
+  const real = history.replaceState.bind(history);
+  vi.spyOn(history, "replaceState").mockImplementation((...args) => {
+    replaced.push(args[2]);
+    return real(...(args as Parameters<typeof history.replaceState>));
+  });
+  wire({
+    "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () =>
+      json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
+    "/setup": () =>
+      json({
+        own_page: false,
+        ready: false,
+        connectors: [{ provider: "googlecalendar", granted: false, connected: false }],
+        credentials: [],
+        standing: [],
+      }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(
+    <App agents={[{ ...AGENT, main: false, app: "meetings" }]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
+  expect(replaced).toContain("#/agents/" + AGENT_ID + "/setup");
+});
+
+test("an agent no extension shipped keeps its conversation column, however unbuilt", async () => {
+  /** The main agent and an agent a member built have no bound site and are never meant to have
+   *  one. A gate that read "no site" as "never built" sent them to a setup screen over an empty
+   *  declaration, and their conversation column could not be reached at its own address. */
+  const { calls } = wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json({ state: "none" }),
+    "/setup": () => json({ own_page: false, ready: true, credentials: [], connectors: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+  // It does not even ask: the read is for apps an extension shipped.
+  expect(calls.filter((url) => url.includes("/setup"))).toEqual([]);
+});
+
+test("an app that has been built once stands on its page, and the setup screen is gone", async () => {
+  wire({
+    "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () =>
+      json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
+    // Still owed an account, and still on its own page: the build is what settles this, not the
+    // todos.
+    "/setup": () =>
+      json({
+        own_page: true,
+        ready: false,
+        credentials: [],
+        connectors: [{ provider: "googlecalendar", granted: false, connected: false }],
+        standing: [],
+      }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(
+    <App agents={[{ ...AGENT, main: false, app: "meetings" }]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  expect(await screen.findByLabelText(/^Settings for/)).toBeTruthy();
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+});
+
 /** Starting a conversation with the open app is an act of its own band, standing with the acts at
  *  the far end: past the name the band leads with, and before the settings act that ends the row.
  *  It founds the conversation where the pane stands, with the app the pane shows, so the screen is

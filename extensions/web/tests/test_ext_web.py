@@ -188,10 +188,15 @@ from ufo.schema.records import (
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience, room_audience
 from ufo.sdk.jobs import unseeded_agent_workspaces, untitled_conversation_workspaces
 from ufo.sdk.manifest import (
+    SCHEDULE_KIND,
     AgentProvision,
+    AgentSetup,
     AgentSpec,
     CredentialSlot,
     Manifest,
+    SetupCadence,
+    SetupCredential,
+    SetupSchedule,
     SubagentProfile,
 )
 from ufo.sdk.seats import Seats
@@ -11207,6 +11212,592 @@ async def test_the_session_cookie_is_secure_where_the_portal_publishes_https(
     assert "HttpOnly" in cookie and "domain" not in cookie.lower()
 
 
+SHIPPED_SETUP = AgentSetup(
+    connectors=("acme",),
+    credentials=(
+        SetupCredential(label="ACME install", slots=("acme_install_seal", "acme_api_key")),
+    ),
+    standing=(SCHEDULE_KIND,),
+    schedule=SetupSchedule(
+        name="acme-sweep",
+        prompt="Sweep what arrived and report it.",
+        cadences=(SetupCadence(), SetupCadence(hour=9, weekdays=(1, 2, 3, 4, 5))),
+    ),
+    instructions="Connect the ACME account.",
+)
+"""One shipped app's whole declaration: an account its member grants, a credential an admin fills
+once for the workspace, and the standing order that gives it an occasion to run."""
+
+
+async def _seed_account(
+    workspace_id: UUID, agent_id: UUID, owner_member_id: UUID, provider: str
+) -> UUID:
+    """One connection of a provider, held by the workspace and granted to nobody — the state a
+    second app's account leaves behind for every other app that names the same provider."""
+    conversation_id, connection_id = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key=conversation_id.hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider=provider,
+                account_id=f"{provider}-account",
+                host="api.example.test",
+                owner_member_id=owner_member_id,
+                conversation_id=conversation_id,
+                shared=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return connection_id
+
+
+async def _grant_account(workspace_id: UUID, agent_id: UUID, connection_id: UUID) -> None:
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.connection.c.conversation_id).where(
+                    tables.connection.c.id == connection_id
+                )
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.connector_grant).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                connection_id=connection_id,
+                conversation_id=conversation_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def _fill_slot(workspace_id: UUID, slot: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot=slot,
+                ciphertext=CREDENTIAL_FERNET.encrypt(b"filled"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def _declare_setup(agent_id: UUID, setup: AgentSetup = SHIPPED_SETUP) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == agent_id)
+            .values(setup=setup.model_dump(mode="json"))
+        )
+
+
+async def test_the_setup_read_states_the_whole_declaration_and_what_is_outstanding(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The band a member reads asks what the app runs on, not only what is missing — so the read
+    states the whole declaration, settled and outstanding together, and `ready` is the one word
+    for whether the app can actually run. Nothing here is member data: a declaration, the presence
+    of a grant, the existence of a standing order, never whose account or whose schedule."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "reader@example.com")
+    await _declare_setup(agent_id)
+    state = (
+        await client.get(
+            f"/surface/web/agents/{agent_id}/setup",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+    ).json()
+    assert state["connectors"] == [{"provider": "acme", "granted": False, "connected": False}]
+    assert state["credentials"] == [{"label": "ACME install", "filled": False, "provider": None}]
+    assert state["standing"] == [{"kind": "scheduled_task", "armed": False}]
+    assert state["schedule"]["name"] == "acme-sweep"
+    assert state["schedule"]["cadences"][0] == {"hour": None, "minute": 0, "weekdays": []}
+    assert state["instructions"] == "Connect the ACME account."
+    assert state["ready"] is False
+
+
+async def test_an_account_the_workspace_holds_for_another_app_is_a_different_offer(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Connected-to-another-app and not-connected are two states, because they take two different
+    acts: one attaches an account that is already there, the other sends the member through the
+    provider's consent. The row this agent holds itself is `granted`, and only that settles it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "grantee@example.com")
+    await _declare_setup(agent_id)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    connection_id = await _seed_account(workspace_id, agent_id, member_id, "acme")
+    held = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
+    assert held["connectors"] == [{"provider": "acme", "granted": False, "connected": True}]
+
+    await _grant_account(workspace_id, agent_id, connection_id)
+    granted = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
+    assert granted["connectors"] == [{"provider": "acme", "granted": True, "connected": True}]
+    # The credential and the standing order are still outstanding, so the app still cannot run.
+    assert granted["ready"] is False
+
+
+async def test_a_credential_is_filled_by_any_slot_that_answers_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A credential often has more than one way in — an app installation and a fine-grained token
+    reach the same API — so the declaration names a set and any one of them settles it. An app
+    naming only the first would report itself unready for a workspace that chose the second."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    await _declare_setup(agent_id)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    assert (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()[
+        "credentials"
+    ] == [{"label": "ACME install", "filled": False, "provider": None}]
+
+    await _fill_slot(workspace_id, "acme_api_key")
+    assert (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()[
+        "credentials"
+    ] == [{"label": "ACME install", "filled": True, "provider": None}]
+
+
+async def test_a_credential_the_deploy_supplies_reads_as_filled(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slot the deploy fills from its own environment is filled. `WorkspaceScope.credential` falls
+    back to it where the workspace stored none, so the agent obtains the secret and works — and a
+    read that asked the credential table alone answered a different question, reporting a working
+    app unready for ever with a row stating a need the member had no act to settle."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    await _declare_setup(agent_id)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    read = await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)
+    assert [row["filled"] for row in read.json()["credentials"]] == [False]
+
+    monkeypatch.setenv("UFO_ACME_API_KEY", "from-the-deploy")
+    supplied = await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)
+    assert [row["filled"] for row in supplied.json()["credentials"]] == [True]
+
+
+async def test_an_app_with_every_account_and_no_standing_order_is_not_ready(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An account is half of what a shipped app arrives without. Connected and unarmed it holds the
+    authority to work and no occasion to, and a setup read that stopped at the account would call
+    that done — so the standing order is declared, read, and counted in `ready`."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "arming@example.com", admin=True)
+    await _declare_setup(agent_id)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    connection_id = await _seed_account(workspace_id, agent_id, member_id, "acme")
+    await _grant_account(workspace_id, agent_id, connection_id)
+    await _fill_slot(workspace_id, "acme_api_key")
+    unarmed = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
+    assert unarmed["standing"] == [{"kind": "scheduled_task", "armed": False}]
+    assert unarmed["ready"] is False
+
+    applied = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "acme-sweep",
+            "spec": {"schedule": "0 9 * * 1-5", "prompt": "Sweep what arrived and report it."},
+        },
+        headers=cookie,
+    )
+    assert applied.status_code == 200, applied.text
+    armed = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
+    assert armed["standing"] == [{"kind": "scheduled_task", "armed": True}]
+    assert armed["ready"] is True
+    # The offer stands after the arming: the band says what the app runs on, not only what is
+    # missing, and a member who wants a different hour picks again against the same schedule.
+    assert armed["schedule"]["name"] == "acme-sweep"
+
+
+async def test_a_second_feature_armed_does_not_arm_the_one_the_app_arrived_holding(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """One kind holds every feature's order. An app that offers a schedule names the task that
+    schedule arms, and that name is what the read asks for.
+
+    Asking the kind alone would call the app ready the moment a member turned on a second feature —
+    taking away the cadence pick that arms the one it arrived holding, while that feature's band
+    stayed blank and its schedule never fired."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "arming@example.com", admin=True)
+    await _declare_setup(agent_id)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    connection_id = await _seed_account(workspace_id, agent_id, member_id, "acme")
+    await _grant_account(workspace_id, agent_id, connection_id)
+    await _fill_slot(workspace_id, "acme_api_key")
+
+    # A feature the member asked for in chat, armed under its own name.
+    other = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "acme-followups",
+            "spec": {"schedule": "0 * * * *", "prompt": "Chase what is late."},
+        },
+        headers=cookie,
+    )
+    assert other.status_code == 200, other.text
+    state = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
+    assert state["standing"] == [{"kind": "scheduled_task", "armed": False}]
+    assert state["ready"] is False
+    assert state["schedule"]["name"] == "acme-sweep"
+
+    # The app's own task is what arms it.
+    armed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "acme-sweep",
+            "spec": {"schedule": "0 9 * * 1-5", "prompt": "Sweep what arrived and report it."},
+        },
+        headers=cookie,
+    )
+    assert armed.status_code == 200, armed.text
+    settled = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
+    assert settled["standing"] == [{"kind": "scheduled_task", "armed": True}]
+    assert settled["ready"] is True
+
+
+async def test_the_app_reads_armed_with_its_own_task_behind_a_page_of_others(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """One kind holds every feature's order and a kind's listing is paged. An app whose other tasks
+    sort ahead of its own and fill a page would read its own as missing on every read — and the
+    member could not clear it, because re-applying the same name only moves the row already there.
+
+    So the name goes down to the registry and comes back as the one row it is."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "crowded@example.com", admin=True)
+    await _declare_setup(agent_id)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    connection_id = await _seed_account(workspace_id, agent_id, member_id, "acme")
+    await _grant_account(workspace_id, agent_id, connection_id)
+    await _fill_slot(workspace_id, "acme_api_key")
+
+    armed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "acme-sweep",
+            "spec": {"schedule": "0 9 * * 1-5", "prompt": "Sweep what arrived and report it."},
+        },
+        headers=cookie,
+    )
+    assert armed.status_code == 200, armed.text
+    await _crowd_the_listing(agent_id, "acme-sweep", OBJECT_LIST_PAGE)
+
+    state = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
+    assert state["standing"] == [{"kind": "scheduled_task", "armed": True}]
+    assert state["ready"] is True
+
+
+async def _crowd_the_listing(agent_id: UUID, held: str, count: int) -> None:
+    """`count` more tasks on the same agent, every name sorting ahead of the one it holds."""
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(scheduled_task).where(
+                    scheduled_task.c.agent_id == agent_id, scheduled_task.c.name == held
+                )
+            )
+        ).one()
+        await connection.execute(
+            sa.insert(scheduled_task),
+            [
+                {
+                    **{
+                        column: getattr(row, column)
+                        for column in ("workspace_id", "conversation_id", "agent_id", "schedule")
+                    },
+                    "id": uuid4(),
+                    "name": f"aaa-{index:03d}",
+                    "prompt": row.prompt,
+                    "description": row.description,
+                    "next_run_at": row.next_run_at,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+                for index in range(count)
+            ],
+        )
+
+
+async def test_the_setup_read_says_whether_this_workspace_has_its_own_page(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The band a page draws over an unwired app is a task list, and a task list that stays after
+    the tasks are done is what makes a member read their own app as a setup screen. So a page the
+    workspace has forked states a missing account in one line instead — which it can only do if the
+    read says whose page this is, read the same way the homepage read reads it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    await _declare_setup(agent_id)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    path = f"/surface/web/agents/{agent_id}/setup"
+    assert (await client.get(path, headers=cookie)).json()["own_page"] is False
+
+    conversation_id = await _seed_agent_conversation(
+        workspace_id, agent_id, queue_key="fork", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        await sites.register(
+            conversation_id,
+            "meetings-home",
+            8100,
+            member_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
+        )
+        assert await sites.set_homepage(agent_id, conversation_id, "meetings-home") is not None
+    assert (await client.get(path, headers=cookie)).json()["own_page"] is True
+
+
+async def test_an_agent_no_extension_shipped_declares_nothing_and_is_ready(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An agent a member built has no shipped declaration at all, so the read has nothing to state
+    and nothing to withhold — a band drawn over this says nothing rather than an empty checklist."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "builder@example.com")
+    state = (
+        await client.get(
+            f"/surface/web/agents/{agent_id}/setup",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+    ).json()
+    assert state == {
+        "connectors": [],
+        "credentials": [],
+        "standing": [],
+        "schedule": None,
+        "instructions": "",
+        "ready": True,
+        "own_page": False,
+    }
+
+
+def test_an_app_that_a_clock_wakes_offers_the_cadences_that_arm_it() -> None:
+    """The band that states a need carries the act that settles it. A `scheduled_task` need with no
+    cadences would state one the member can only settle by leaving the page and composing the app's
+    own job for it — so the declaration is refused where it is written."""
+    with pytest.raises(ValidationError, match="offers no cadences"):
+        AgentSetup(standing=(SCHEDULE_KIND,))
+    # The offer is what makes it legal, and an app that a feed wakes needs none: nothing about a
+    # source trigger is a question of how often.
+    assert AgentSetup(standing=("source_trigger",)).schedule is None
+    assert AgentSetup(
+        standing=(SCHEDULE_KIND,),
+        schedule=SetupSchedule(name="s", prompt="p", cadences=(SetupCadence(hour=9),)),
+    ).standing == (SCHEDULE_KIND,)
+
+
+def test_an_hourly_cadence_names_no_weekday() -> None:
+    """A local weekday spans two UTC days, and an hourly cadence has no anchor hour to decide
+    which — so the pair is refused rather than resolved to whichever day the converter guessed."""
+    with pytest.raises(ValidationError, match="no anchor hour"):
+        SetupCadence(weekdays=(1,))
+    assert SetupCadence(hour=9, weekdays=(1,)).weekdays == (1,)
+
+
+async def test_the_intents_lane_refuses_a_verb_it_does_not_name(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The lane's own fence, under the bridge's. A verb no intent model names is malformed at the
+    door rather than dispatched to whatever tool its name resembles."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "prober@example.com")
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "build_the_homepage"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert refused.status_code == 400
+    assert refused.json() == {"error": "malformed intent"}
+
+
+async def test_a_portal_act_lands_in_a_room_that_states_what_it_is(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A room is named where it is opened, because nothing else will. A conversation with no title
+    lists its own first words, and a prepared intent's first words are the serialized tool call the
+    lane admitted — so a member's list of conversations reads as a column of raw JSON."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "presser@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    applied = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "skill",
+            "name": "note-taking",
+            "spec": {"body": "Write it down.", "description": "How to write things down."},
+        },
+        headers=cookie,
+    )
+    assert applied.status_code == 200, applied.text
+    listed = (
+        await client.get(f"/surface/web/agents/{agent_id}/conversations", headers=cookie)
+    ).json()["conversations"]
+    assert "Portal actions" in {row["description"] for row in listed}
+    assert not any(row["description"].startswith("{") for row in listed)
+
+
+async def test_an_armed_schedule_reports_into_the_lane_that_armed_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A scheduled task reports into the conversation that created it, for as long as it exists —
+    so where the arming intent lands is where every run of that task lands.
+
+    That is the member's one prepared-intent lane with this app, and it has to be: a second durable
+    lane is a second partition, and a member's acts on one object could then execute out of the
+    order they submitted them — a queued arm applying after the delete that followed it, leaving the
+    task armed and firing. The room is named, so what it holds reads as what it is rather than as
+    the serialized tool call the lane admitted."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "arming@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    armed = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "scheduled_task",
+            "name": "delivery-report",
+            "spec": {"schedule": "0 9 * * 1", "prompt": "report the week"},
+        },
+        headers=cookie,
+    )
+    assert armed.status_code == 200, armed.text
+    async with workspace_tx() as connection:
+        rooms = {
+            row.title: row.queue_key
+            for row in await connection.execute(
+                sa.select(tables.conversation.c.title, tables.conversation.c.queue_key).where(
+                    tables.conversation.c.workspace_id == workspace_id
+                )
+            )
+        }
+    assert rooms["Portal actions"].startswith("intent/")
+    # One lane, so one partition: nothing else durable was opened for this member and this app.
+    assert len(rooms) == 1
+
+
+async def test_the_prepared_intent_lane_takes_no_member_message(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The one portal room a member may not speak in. An intent turn dispatches its one tool call
+    and runs no model round, so it claims no arrivals — a message folded onto a live one is a
+    message no round ever reads, and the member waits for a reply that is not coming. The lane is
+    read like any other room; it is the chat POST that is refused."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "submitter@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    applied = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "skill",
+            "name": "note-taking",
+            "spec": {"body": "Write it down.", "description": "How to write things down."},
+        },
+        headers=cookie,
+    )
+    assert applied.status_code == 200, applied.text
+    async with workspace_tx() as connection:
+        room = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == workspace_id,
+                    tables.conversation.c.queue_key.like("intent/%"),
+                )
+            )
+        ).scalar_one()
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{room}/transcript", headers=cookie
+    )
+    assert read.status_code == 200, read.text
+    spoke = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={room}",
+        content=b"Actually, make it weekly.",
+        headers=cookie,
+    )
+    assert spoke.status_code == 404
+
+
+async def test_a_member_reads_the_room_the_sweep_opened_for_them(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A room carries no chat row — that row is the (agent, member) binding a chat is founded with,
+    and the homepage room is opened by the sweep instead, on behalf of one member. So the durable
+    audience is what says whose it is, and without reading it the member the page was built for
+    opened their own room and met a 404 on it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "builder@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=f"homepage/{agent_id}/{member_id}",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers=cookie,
+    )
+    assert read.status_code == 200, read.text
+    # And speaks in it: the room is where the app answers, so a member who wants a different page
+    # says so where the build was asked for rather than opening a second conversation about it.
+    spoke = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"Put the open pull requests at the top.",
+        headers=cookie,
+    )
+    assert spoke.status_code == 200, spoke.text
+
+    # Another member's room is still another member's, whatever its surface.
+    _other_id, other_token = await _seed_member(workspace_id, "onlooker@example.com")
+    other = {"cookie": f"{SESSION_COOKIE}={other_token}"}
+    onlooking = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers=other,
+    )
+    assert onlooking.status_code == 404
+    intruding = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"Mine now.",
+        headers=other,
+    )
+    assert intruding.status_code == 404
+
+
 async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
     db: None,
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -14093,6 +14684,9 @@ async def test_the_settings_read_offers_the_setup_a_shipped_agent_still_needs(
     assert offered.status_code == 200
     assert offered.json()["agent"]["setup"] == {
         "connectors": ["acme"],
+        "credentials": [],
+        "standing": [],
+        "schedule": None,
         "instructions": "Connect the Acme account.",
     }
 

@@ -1,5 +1,6 @@
 import { BASE, REFUSAL_HEADER, SESSION_FAULT_HEADER } from "@/lib/api";
-import { framedNavigation, type WorkspacePlace } from "@/lib/route";
+import { setPendingAsk } from "@/lib/pendingAsk";
+import { framedNavigation, newChatHash, type WorkspacePlace } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import type { Crumb } from "@/lib/title";
 import type { Agent, Member } from "@/lib/types";
@@ -47,14 +48,25 @@ const ENDPOINTS: Endpoint[] = (
 ).map(([method, template, body]) => ({ method, template: template.split("/"), body }));
 
 /** The intent verbs a frame may post: the object mutations the kernel's own record panes speak
- *  (`apply`, `delete` — the same authority the table's direct-write rows already grant) and the
- *  rebuilds the shipped pages carry as controls. The intents lane reaches acts far past a page's
- *  remit — membership, credentials, deploys — and a frame speaks with the viewer's whole session,
- *  so the fence names the verbs rather than trusting the page (RFC 0039 security debt: the
- *  per-message gate is deferred, the table is the fence). */
+ *  (`apply`, `delete` — the same authority the table's direct-write rows already grant), the
+ *  rebuilds the shipped pages carry as controls, and `connect`, which mints a consent link the
+ *  member completes on the provider's own site and so authorizes nothing on its own. A band that
+ *  states a need has to carry the act that settles it, or a member reads a list of chores each of
+ *  which sends them somewhere else to type.
+ *
+ *  Every one of them dispatches verbatim and runs no model round. That is the line, and it is the
+ *  same line `POST agents/{id}/chat` is held to: a turn that runs model rounds runs with the
+ *  viewer's whole authority, so a frame gets no way to start one on load. An act that wants rounds
+ *  is asked for in the portal's composer, where the words are the member's own to send.
+ *
+ *  The intents lane reaches acts far past a page's remit — membership, credentials, deploys — and
+ *  a frame speaks with the viewer's whole session, so the fence names the verbs rather than
+ *  trusting the page (RFC 0039 security debt: the per-message gate is deferred, the table is the
+ *  fence). */
 const FRAME_INTENT_VERBS: ReadonlySet<string> = new Set([
   "apply",
   "delete",
+  "connect",
   "rebuild_reports",
   "rebuild_page_facts",
 ]);
@@ -77,6 +89,11 @@ ENDPOINTS.push(STREAM_ENDPOINT);
  *  watching, not every turn it ever saw. */
 const STREAM_CAP = 8;
 
+/** How much text a page may put in front of the member at once. A composer is where a member reads
+ *  what they are about to say, and a page handing over more than a screenful is handing over
+ *  something they will send unread. */
+const COMPOSE_MAX_CHARS = 2000;
+
 type BridgeMessage =
   | { ufo: "ready" }
   | { ufo: "site-session-ended" }
@@ -94,6 +111,7 @@ type BridgeMessage =
     }
   | { ufo: "close"; id: string }
   | { ufo: "navigate"; to: string }
+  | { ufo: "compose"; text: string }
   | { ufo: "founded"; agent_id: string; conversation_id: string; title: string }
   | { ufo: "resize"; height: number };
 
@@ -356,6 +374,25 @@ export function attachBridge({
             refuse("This intent is not available from an app page.");
             return;
           }
+          // A grant binds to the app the page belongs to. The shell forwards under the viewer's
+          // whole session, so a page naming another agent would bind that member's new account
+          // there, with their authority and no sign of it on the provider's consent screen.
+          //
+          // It is `connect` alone. The other verbs a page may post name the agent that owns the
+          // record they act on — the main agent for a rebuild, an object's own agent on a record
+          // sheet — and each is gated by the kind it names.
+          const named = message.path.replace(/^\//, "").split("?")[0].split("/")[1];
+          if (verb === "connect" && named !== agentId) {
+            refuse("An app page connects an account to its own app.");
+            return;
+          }
+          // And it never widens one. `shared` decides whether the grant binds to the member or to
+          // the whole workspace, which that consent screen states neither way — so sharing stays
+          // the connectors screen's own act, made where it is read.
+          if (verb === "connect" && (body as { spec?: { shared?: unknown } }).spec?.shared) {
+            refuse("An app page connects an account to itself alone.");
+            return;
+          }
         }
         const path = message.path.startsWith("/") ? message.path : "/" + message.path;
         if (endpoint.stream) {
@@ -414,6 +451,16 @@ export function attachBridge({
          task later. */
       case "navigate":
         if (typeof message.to === "string" && framedNavigation(message.to)) navigate(message.to);
+        return;
+      /* Words handed to the composer of a new chat with this app, unsent — the same act the
+         portal's own setup row performs, reached from inside the frame. `send` is false here and
+         nowhere passed by the page: a frame may put words in front of the member, never say them.
+         The agent is the shell's own, so a page cannot compose into another app's chat. */
+      case "compose":
+        if (typeof message.text === "string" && message.text.trim()) {
+          setPendingAsk(agentId, message.text.slice(0, COMPOSE_MAX_CHARS), false);
+          navigate(newChatHash(agentId));
+        }
         return;
       case "founded":
         if (

@@ -108,6 +108,69 @@ def test_skills_gate_flags_a_missing_core_skill() -> None:
     assert any("sandbox" in failure for failure in failures)
 
 
+APP_SHIPPED = frozenset({"app_radar", "app_wiki"})
+APP_HOMES = frozenset({"app-radar-home", "app-wiki-home"})
+APP_BUILT = frozenset({"radar", "wiki"})
+
+
+def _app_failures(
+    shipped: frozenset[str] = APP_SHIPPED,
+    homes: frozenset[str] = APP_HOMES,
+    built: frozenset[str] = APP_BUILT,
+    entries: frozenset[str] | None = None,
+    typechecked: frozenset[str] | None = None,
+) -> list[str]:
+    settled = APP_BUILT if entries is None else entries
+    return gates._app_slug_failures(
+        shipped, homes, built, settled, built if typechecked is None else typechecked
+    )
+
+
+def test_app_bundle_gate_passes_for_the_apps_this_repo_ships() -> None:
+    assert gates._app_bundle_failures() == []
+
+
+def test_app_bundle_gate_flags_a_home_skill_named_for_another_slug() -> None:
+    """The failure this gate exists for: the extension installs, the deploy builds a bundle with no
+    page in it, and a member opens the app to a blank frame."""
+    failures = _app_failures(homes=frozenset({"app-radar-home", "app-wikipage-home"}))
+    assert any("app_wiki" in failure and "app-wiki-home" in failure for failure in failures)
+
+
+def test_app_bundle_gate_flags_an_app_the_bundle_never_names() -> None:
+    failures = _app_failures(
+        built=frozenset({"radar"}), entries=frozenset({"radar"}), typechecked=frozenset({"radar"})
+    )
+    assert any("does not build 'wiki'" in failure for failure in failures)
+
+
+def test_app_bundle_gate_flags_a_built_page_with_no_entry_document() -> None:
+    failures = _app_failures(entries=frozenset({"radar"}))
+    assert any("apps/wiki/index.html" in failure for failure in failures)
+
+
+def test_app_bundle_gate_flags_a_bundle_entry_no_extension_ships() -> None:
+    built = APP_BUILT | {"ghost"}
+    failures = _app_failures(built=built, entries=built, typechecked=built)
+    assert any("app_ghost" in failure for failure in failures)
+
+
+def test_app_bundle_gate_flags_a_slug_the_homepage_read_cannot_key() -> None:
+    """A slug is lowercase letters and digits, because the homepage read keys an agent by the one
+    in its extension name — so a page under any other name is unreachable however carefully the
+    rest is spelled."""
+    failures = _app_failures(shipped=frozenset({"app_code_review"}))
+    assert any("app_code_review" in failure and "lowercase" in failure for failure in failures)
+
+
+def test_app_bundle_gate_flags_a_page_the_typecheck_never_reads() -> None:
+    """A page left off the typecheck's file list is built and shipped having never been checked:
+    the bundle transpiles without types, so a prop the kit does not declare is dropped in silence
+    and the page draws without it."""
+    failures = _app_failures(typechecked=frozenset({"radar"}))
+    assert any("does not read the 'wiki' page" in failure for failure in failures)
+
+
 def test_skill_boundary_gate_flags_a_script_importing_ufo() -> None:
     trees = {Path("extensions/x/skills/y/s.py"): ast.parse("from ufo.sdk.tools import ToolDef\n")}
     failures = gates._skill_boundary_failures(trees)

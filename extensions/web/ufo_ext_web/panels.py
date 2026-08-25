@@ -671,6 +671,8 @@ def _tool_intent(
     slot: CredentialSlotView | None,
     body_max_chars: int,
 ) -> ToolIntent:
+    """Every panel intent that is a tool call, as the call it dispatches to. Every intent here is
+    one: a panel act that needs a model round is asked for in the composer, not admitted here."""
     match submitted:
         case RefillIntent():
             return ToolIntent(
@@ -893,6 +895,34 @@ def _rebuild_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
     return JSONResponse({"applied": True, "message": frame.text, "turn_id": str(turn_id)})
 
 
+PORTAL_ROOM = "Portal actions"
+"""What the portal's prepared-intent lane is called.
+
+A room is named where it is opened, because nothing else will: a conversation with no title lists
+its own first words, and an intent's first words are the serialized tool call the lane admitted — so
+a member's list of conversations reads as a column of raw JSON.
+
+It holds every act a member takes from the portal for this app, and the runs those acts armed: a
+scheduled task reports into the conversation that created it, and the conversation that created it
+is this one. Arming it anywhere else would be a second durable lane for one member and one app, and
+two lanes are two partitions — a queued arm could then apply after the delete that followed it and
+leave the task armed and firing."""
+
+PORTAL_LANE_PREFIX = "intent/"
+SPOKEN_ROOM_PREFIXES = ("homepage/",)
+"""The portal rooms a member may speak in, by the key they are opened under.
+
+A member speaks where the app answers, and the homepage room is where it does: the sweep builds the
+app's page there, and the member reads what it did and says what the page should hold instead. It
+takes their message safely because a build is an ordinary turn — a message folded onto a live one is
+read by the rounds it is already running.
+
+The prepared-intent lane takes none, and that is the whole of the rest of the rule. An intent turn
+dispatches its one tool call and runs no model round, so it claims no arrivals: a message folded
+onto a live one is a message no round ever reads, and the member waits for a reply that is not
+coming. A member reads that room and speaks to the app in their own chat with it."""
+
+
 async def submit_intent(
     ctx: SurfaceContext, request: Request, agent_id: UUID, member_id: UUID, email: str
 ) -> Response:
@@ -980,10 +1010,11 @@ async def submit_intent(
                 status_code=413,
             )
     conversation_id = await ctx.conversation_for(
-        f"intent/{agent_id}/{email}",
+        f"{PORTAL_LANE_PREFIX}{agent_id}/{email}",
         conversation_audience(member_id),
         agent_id=agent_id,
     )
+    await ctx.retitle_conversation(conversation_id, PORTAL_ROOM)
     admitted = await ctx.admit(
         conversation_id,
         intent.model_dump_json(),

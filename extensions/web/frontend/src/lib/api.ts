@@ -66,7 +66,19 @@ export async function postIntent(agentId: string, envelope: unknown): Promise<In
   } catch {
     return { applied: false, message: "Network error — try again." };
   }
-  const outcome = (await res.json().catch(() => null)) as Partial<IntentOutcome> | null;
+  const answered = await res.text().catch(() => "");
+  let outcome: Partial<IntentOutcome> | null = null;
+  try {
+    outcome = JSON.parse(answered) as Partial<IntentOutcome>;
+  } catch {
+    // A fence refuses in its own words and in plain text — the bridge's endpoint and verb tables
+    // answer before the lane is reached at all. Reading those words is the difference between a
+    // member being told why an act is not available here and being told "Error 400".
+    return {
+      applied: false,
+      message: answered.trim() || "Error " + res.status + " — try again.",
+    };
+  }
   if (!outcome) return { applied: false, message: "Error " + res.status + " — try again." };
   return {
     applied: Boolean(outcome.applied),

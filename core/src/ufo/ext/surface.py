@@ -82,7 +82,7 @@ from ufo.billing.accounting import (
 from ufo.blob import BlobNotFound, FleetBlobStore, WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
 from ufo.hub import LiveFrame, SkillLoad, ToolCall
-from ufo.kinds.agent_setup import AgentSetup, pending_setup
+from ufo.kinds.agent_setup import AgentSetup, SetupState, pending_setup, setup_state
 from ufo.kinds.governance import prompt_digest
 from ufo.media.artifact_url import (
     artifact_url_expiry,
@@ -3297,6 +3297,40 @@ class SurfaceContext:
                 )
             )
         return tuple(statuses)
+
+    async def agent_setup(self, agent_id: UUID, member_id: UUID) -> SetupState:
+        """What one agent still needs before it works: the accounts its provision declared, which
+        of them this workspace has granted it, whether the credentials it cannot run without are
+        filled, whether it holds the standing order that gives it an occasion to run, and what to
+        do about the rest.
+
+        Workspace shape rather than member data — a declaration, the presence of a grant, the
+        existence of a standing order, never whose account or whose schedule — so it answers the
+        agent's whole audience, and the account itself stays behind `list_agent_connections`.
+
+        The standing half reads through the object registry rather than off a core table, because
+        the kinds that arm an agent are extensions': `member_id` names the reader the registry's
+        own gate wants, and the read runs as an admin because whether an app is armed is a fact
+        about the app, not about who is looking at it.
+
+        A named order is read as the one row it is, never looked for in a listing, because a
+        listing is paged: an agent whose other orders of that kind fill a page would read its own
+        as missing, and re-applying the same name only moves the row that is already there."""
+        from ufo.objects import ObjectListQuery
+
+        async def armed(kind: str, name: str | None) -> bool:
+            if name is not None:
+                return (
+                    await self.member_object(kind, name, agent_id, member_id, admin=True)
+                    is not None
+                )
+            page = await self.list_member_objects(
+                kind, agent_id, member_id, admin=True, query=ObjectListQuery()
+            )
+            return page is not None and bool(page.rows)
+
+        with ws(self.workspace_id):
+            return await setup_state(agent_id, armed=armed)
 
     async def list_member_objects(
         self,

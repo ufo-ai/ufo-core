@@ -128,6 +128,7 @@ from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
 from ufo_ext_web.panels import (
     FIRST_RUN_PROVIDERS,
+    SPOKEN_ROOM_PREFIXES,
     UNLOCKS_BY_NAME,
     ApplyIntent,
     agent_settings,
@@ -837,7 +838,19 @@ async def _member_chat(
     agent_visible: bool,
 ) -> ListedConversation | None:
     """One conversation this member may continue through the portal. A member-private extension
-    grants only itself; Slack and terminal comments require the agent's ordinary web reach."""
+    grants only itself; Slack and terminal comments require the agent's ordinary web reach.
+
+    A room the portal opened for this member is theirs to read, and theirs to speak in where the app
+    answers there. It carries no chat row — that row is the (agent, member) binding a chat is
+    founded with, and a room is opened by a press instead — so the durable audience is what says
+    whose it is: `conversation_for` names exactly this member, and nothing else can widen it
+    afterwards. Without it a member who pressed Build app, or armed a schedule, was handed a link to
+    the room their own press opened and met a 404 on it.
+
+    The prepared-intent lane is not covered, by its key. An intent turn dispatches its one tool call
+    and runs no model round, so it claims no arrivals — a message folded onto a live one is a
+    message no round ever reads. It is read like any other room; it is the chat POST that is
+    refused."""
     web = await _own_web_chat(store, agent_id, email, conversation_id)
     listed = await ctx.list_agent_conversations(
         agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
@@ -847,8 +860,14 @@ async def _member_chat(
     conversation = listed[0]
     if web is not None:
         return conversation
-    if conversation.summary.surface.startswith("extension:") and conversation.audience == str(
-        conversation_audience(member_id)
+    own = conversation.audience == str(conversation_audience(member_id))
+    if own and conversation.summary.surface.startswith("extension:"):
+        return conversation
+    if (
+        own
+        and agent_visible
+        and conversation.summary.surface == SURFACE_WEB
+        and conversation.summary.queue_key.startswith(SPOKEN_ROOM_PREFIXES)
     ):
         return conversation
     if agent_visible and _commentable(conversation, member_id):
@@ -4331,6 +4350,53 @@ async def settings(ctx: SurfaceContext, request: Request) -> Response:
     return await agent_settings(ctx, agent_id, admin=audience.admin, archivable=archivable)
 
 
+async def agent_setup(ctx: SurfaceContext, request: Request) -> Response:
+    """What the selected app needs before it works: the accounts its provision declared, which of
+    them this workspace already holds, the workspace credentials it cannot run without, and whether
+    it holds the standing order that gives it an occasion to run.
+
+    It answers the agent's whole web audience, like the settings read beside it — what an app runs
+    on is what the app is, and a member who cannot see it cannot tell a resting app from an unwired
+    one. Which account answered a provider is not here; that is `agents/{id}/connections`, gated on
+    the member."""
+    gated = await _panel_gate(ctx, request)
+    if isinstance(gated, Response):
+        return gated
+    member_id, _email, _audience, agent_id = gated
+    state = await ctx.agent_setup(agent_id, member_id)
+    return JSONResponse(
+        {**state.model_dump(mode="json"), "own_page": await _has_own_page(ctx, agent_id, member_id)}
+    )
+
+
+async def _has_own_page(ctx: SurfaceContext, agent_id: UUID, member_id: UUID) -> bool:
+    """Whether this workspace has built this app its own page, read from the row the homepage read
+    answers `set` from.
+
+    It asks whether the workspace built one, not whether a page exists to draw. A shipped app always
+    has a page — the deploy carries one for every workspace — so "is a page available" is answered
+    `yes` from the first moment and could gate nothing.
+
+    What it gates is where a shipped app stands. Until the workspace builds, the app stands on its
+    setup screen, which is what holds the accounts, the installs, the cadences, and the Build app
+    press; from the first build it stands on the page it built, for good. The deploy's own page is
+    the shape that build starts from rather than a screen a member browses first — an app the
+    workspace has not wired has nothing real to draw on it.
+
+    Read the same way the homepage read reads it, so the two can never disagree about whose page
+    this is."""
+    page = await ctx.list_member_objects(
+        SITE_KIND,
+        agent_id,
+        member_id,
+        admin=True,
+        query=ObjectListQuery(filters={"homepage_agent": str(agent_id)}),
+    )
+    if page is None:
+        return False
+    return any("site_url" in row.fields for row in page.rows)
+
+
 async def homepage(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's homepage: the frame link of the hosted site `set_homepage` bound.
     Its audience is the agent's — every member for a workspace-visible agent, the owner and
@@ -4467,6 +4533,7 @@ ROUTES = (
     SurfaceRoute(method="POST", path="preview", handler=preview),
     SurfaceRoute(method="GET", path="agents/{agent_id}/transcript", handler=transcript),
     SurfaceRoute(method="GET", path="agents/{agent_id}/settings", handler=settings),
+    SurfaceRoute(method="GET", path="agents/{agent_id}/setup", handler=agent_setup),
     SurfaceRoute(method="GET", path="agents/{agent_id}/homepage", handler=homepage),
     SurfaceRoute(method="POST", path="agents/{agent_id}/intents", handler=intents),
     SurfaceRoute(method="GET", path="agents/{agent_id}/connections", handler=connections),

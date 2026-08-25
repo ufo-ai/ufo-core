@@ -50,6 +50,7 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents"; build?: boolean }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
+  | { kind: "agent-setup"; agentId: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
   | { kind: "first-run" }
@@ -229,6 +230,7 @@ const TAB_NAME = "[\\w-]+";
 /** What a screen's own address may end in: the place it stands at, captured whole for the place
  *  codec to read. */
 const PLACE_TAIL = "(?:\\?(.*))?$";
+const SETUP_SEGMENT = "/setup";
 const SLOT_ONLY = new RegExp("^" + SLOT_NAME + "$");
 
 /** A route with no parts to carry reads its own path, and reads it whatever query the address
@@ -342,6 +344,18 @@ const NEW_CHAT = row(
   (agentId: string) => NEW_CHAT_PREFIX + agentId,
 );
 
+/** An app the workspace has not finished wiring stands here instead of on its own page, so setup
+ *  is an address a member can be sent to, link, and come back to — never a band the page carries.
+ *  A page draws what the app is and what it has done; neither has an answer yet for an app with no
+ *  account, and standing sample rows in their place would be showing the member someone else's app
+ *  and calling it theirs. */
+const AGENT_SETUP = row(
+  "agent-setup",
+  new RegExp(`^${AGENT_PREFIX}(${UUID})${SETUP_SEGMENT}(?:\\?.*)?$`),
+  (match) => ({ kind: "agent-setup", agentId: match[1] }),
+  (agentId: string) => AGENT_PREFIX + agentId + SETUP_SEGMENT,
+);
+
 const AGENT = row(
   "agent",
   new RegExp(`^${AGENT_PREFIX}(${UUID})${PLACE_TAIL}`),
@@ -398,6 +412,7 @@ const ROUTES: readonly RouteReader[] = [
   CHAT,
   CONVERSATION_SLOT,
   NEW_CHAT,
+  AGENT_SETUP,
   AGENT,
   WORKSPACE,
   SECTION,
@@ -445,6 +460,7 @@ const FRAMED: { [Kind in RouteKind]: boolean } = {
   "conversation-slot": false,
   "new-chat": true,
   agent: true,
+  "agent-setup": false,
   workspace: false,
   section: true,
   "bad-link": false,
@@ -483,6 +499,8 @@ function stands(route: Route): Stand[] {
       const app: Stand = `agent:${route.agentId}`;
       return head === undefined ? [app] : [app, `open:${head}`];
     }
+    case "agent-setup":
+      return [`agent:${route.agentId}`];
     case "workspace":
       return ["workspace"];
     case "section":
@@ -532,5 +550,6 @@ export const chatHash = CHAT.write;
 export const conversationSlotHash = CONVERSATION_SLOT.write;
 export const newChatHash = NEW_CHAT.write;
 export const agentHash = AGENT.write;
+export const agentSetupHash = AGENT_SETUP.write;
 export const workspaceHash = WORKSPACE.write;
 export const sectionHash = SECTION.write;

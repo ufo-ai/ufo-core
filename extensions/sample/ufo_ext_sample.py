@@ -47,6 +47,7 @@ from ufo.sdk.index import Chunk, Hit, IndexScope
 from ufo.sdk.jobs import JobSpec, owner_candidates
 from ufo.sdk.listings import ListingCursor, ListingPage
 from ufo.sdk.manifest import (
+    SCHEDULE_KIND,
     SETUP_TOOLS,
     AgentProvision,
     AgentSetup,
@@ -75,6 +76,9 @@ from ufo.sdk.manifest import (
     PromptSection,
     RouteSpec,
     SearchProviderSpec,
+    SetupCadence,
+    SetupCredential,
+    SetupSchedule,
     SkillSpec,
     SourceProvider,
     Stop,
@@ -138,6 +142,15 @@ SUBAGENT_NAME = "sample_probe"
 PROVISIONED_AGENT_NAME = "sample-probe-agent"
 PROVISIONED_AGENT_PROMPT = "Probe agent: answer from the workspace's own records."
 PROVISIONED_AGENT_PURPOSE = "Answers questions about what this workspace has recorded."
+API_CREDENTIAL_LABEL = "Sample API key"
+INSTALL_CREDENTIAL_LABEL = "Sample workspace install"
+INSTALL_SLOT = "sample_install"
+INSTALL_PROVIDER = "github"
+PROVISIONED_AGENT_SCHEDULE = SetupSchedule(
+    name="sample-sweep",
+    prompt="Read what arrived since the last sweep and note anything new.",
+    cadences=(SetupCadence(), SetupCadence(hour=9), SetupCadence(hour=9, weekdays=(1, 2, 3, 4, 5))),
+)
 PROVISIONED_AGENT_SETUP = "Connect the sample account, then add its source for this agent."
 API_SLOT = "sample_api"
 UNDECLARED_SLOT = "sample_unset"
@@ -1225,6 +1238,18 @@ def manifest() -> Manifest:
                 tools=(TOOL_NAME, *SETUP_TOOLS),
                 setup=AgentSetup(
                     connectors=(CONNECTOR_PROVIDER,),
+                    credentials=(
+                        SetupCredential(label=API_CREDENTIAL_LABEL, slots=(API_SLOT,)),
+                        # The second half of the seam: a credential a workspace install fills, so
+                        # the setup screen's install press has a declaration to read here.
+                        SetupCredential(
+                            label=INSTALL_CREDENTIAL_LABEL,
+                            slots=(INSTALL_SLOT,),
+                            provider=INSTALL_PROVIDER,
+                        ),
+                    ),
+                    standing=(SCHEDULE_KIND,),
+                    schedule=PROVISIONED_AGENT_SCHEDULE,
                     instructions=PROVISIONED_AGENT_SETUP,
                 ),
             ),

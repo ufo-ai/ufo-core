@@ -17,7 +17,9 @@ import {
 
 import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 
+import { AppConversations } from "@/apps/bands";
 import {
+  compose,
   connect,
   founded,
   installShims,
@@ -111,6 +113,7 @@ import { Markdown } from "@/lib/markdown";
 import { Moment, day } from "@/lib/moments";
 import {
   agentHash,
+  agentSetupHash,
   chatHash,
   conversationSlotHash,
   newChatHash,
@@ -159,6 +162,15 @@ export type {
 };
 
 export {
+  /* What the app has done, as page API. An app's own work is the app's own page to draw, so the
+     kit publishes the one band every app shares and no more.
+
+     Setup is not among them and cannot be. An app the workspace has never built a page for stands
+     on its setup screen in the portal instead, because the acts that wire it — a workspace install
+     an admin makes, a model turn that authors a page — are exactly the two a framed page is never
+     given a way to start. */
+  AppConversations,
+  compose,
   React,
   useCallback,
   useEffect,
@@ -259,6 +271,7 @@ export {
      the test that says which kind a route is. A page is built against this surface, so a builder it
      cannot reach is an address it spells by hand instead. */
   agentHash,
+  agentSetupHash,
   chatHash,
   conversationSlotHash,
   newChatHash,

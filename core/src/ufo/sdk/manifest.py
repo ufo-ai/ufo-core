@@ -211,7 +211,19 @@ from ufo.ext.manifest import (
     UserPromptSubmit as UserPromptSubmit,
 )
 from ufo.kinds.agent_setup import (
+    SCHEDULE_KIND as SCHEDULE_KIND,
+)
+from ufo.kinds.agent_setup import (
     AgentSetup as AgentSetup,
+)
+from ufo.kinds.agent_setup import (
+    SetupCadence as SetupCadence,
+)
+from ufo.kinds.agent_setup import (
+    SetupCredential as SetupCredential,
+)
+from ufo.kinds.agent_setup import (
+    SetupSchedule as SetupSchedule,
 )
 from ufo.kinds.agents import (
     AgentSpec as AgentSpec,

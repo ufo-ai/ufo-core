@@ -165,6 +165,7 @@ export function Header({
   title,
   note,
   acts,
+  lede,
   bar,
   onClose,
   closes,
@@ -186,6 +187,12 @@ export function Header({
    *  is. It is the part that gives when the line runs out, before the name does. */
   note?: ReactNode;
   acts?: ReactNode;
+  /** The one sentence the screen opens with, under its own name and above everything the screen
+   *  holds: what this surface is for. A member who arrived at an app they did not install reads it
+   *  before anything else on the page, which is why it stands inside the band rather than as the
+   *  first band under it — a lede a full gap away from the name reads as content rather than as the
+   *  name's own line. It is stated once, so no section under it repeats it. */
+  lede?: string;
   /** The band directly under the name, inside the same box and above the same rule: the controls
    *  that redraw what the surface shows rather than act on what it holds. */
   bar?: ReactNode;
@@ -286,6 +293,7 @@ export function Header({
           </div>
         ) : null}
       </div>
+      {lede ? <p className="m-0 max-w-hint text-label text-ink-soft">{lede}</p> : null}
       {bar}
     </div>
   );

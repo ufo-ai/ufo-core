@@ -387,6 +387,28 @@ test("the kind's mark stands inside the name's measure, not beside it", () => {
   expect(name.firstElementChild!.className).toContain("[&_svg]:size-(--size-glyph)");
 });
 
+test("the lede stands inside the band, under the name it belongs to", () => {
+  /** A member who arrived at an app they did not install reads what it is for before anything else
+   *  on the page. Inside the band rather than as the first band under it: a lede a full gap away
+   *  from the name reads as content rather than as the name's own line. */
+  render(<Header heading={1} title="Meetings" lede="Briefs you before each meeting." />);
+
+  const band = screen
+    .getByRole("heading", { level: 1, name: "Meetings" })
+    .closest("[data-slot=header]") as HTMLElement;
+  const lede = within(band).getByText("Briefs you before each meeting.");
+  expect(lede.tagName).toBe("P");
+  expect(lede.className).toContain("text-ink-soft");
+});
+
+test("a band with no lede draws none", () => {
+  render(<Header heading={1} title="Meetings" />);
+  const band = screen
+    .getByRole("heading", { level: 1, name: "Meetings" })
+    .closest("[data-slot=header]") as HTMLElement;
+  expect(band.querySelector("p")).toBeNull();
+});
+
 /** A band carrying a crumb ends it with the name, marked as the page the path leads to. Where the
  *  caller states no level the crumb is all it is, so a surface the landmark around it already names
  *  takes no second name. The step is an address, so it is a link: pressing it is navigation, and a

@@ -134,6 +134,17 @@ export function navigate(to: string): void {
   send({ ufo: "navigate", to });
 }
 
+/** Hand words to the composer of a new chat with this app, unsent.
+
+ *  The member reads them and presses send themselves. A press that spends a turn without the member
+ *  reading it is a surprise, and an ask that turns a feature on binds what it grants to whoever
+ *  speaks it — so the member has to be in that conversation rather than merely the cause of one.
+ *  The frame could not send it anyway: the bridge admits `POST agents/{id}/chat` from the chat
+ *  surface alone, and that fence does not move for this. */
+export function compose(text: string): void {
+  send({ ufo: "compose", text });
+}
+
 /** Tell the shell a send on this page founded a conversation, so its rail carries the row without
  *  waiting for the next read. */
 export function founded(agentId: string, conversationId: string, title: string): void {

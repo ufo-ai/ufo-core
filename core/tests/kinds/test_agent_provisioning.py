@@ -699,10 +699,9 @@ async def test_the_shipped_agent_records_every_grant_it_still_needs(
     workspace_id = await _workspace(database_url, tmp_path, (sample.manifest(),))
     created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert created is not None
-    assert created.setup == {
-        "connectors": [sample.CONNECTOR_PROVIDER],
-        "instructions": sample.PROVISIONED_AGENT_SETUP,
-    }
+    assert created.setup == sample.manifest().agents[0].setup.model_dump(mode="json")
+    assert created.setup["connectors"] == [sample.CONNECTOR_PROVIDER]
+    assert created.setup["instructions"] == sample.PROVISIONED_AGENT_SETUP
     assert await _unmet(workspace_id, PROVISIONED_AGENT_NAME) == AgentSetup(
         connectors=(sample.CONNECTOR_PROVIDER,), instructions=sample.PROVISIONED_AGENT_SETUP
     )

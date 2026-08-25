@@ -290,6 +290,154 @@ test("an intent rides through only when its verb is a page's own control", async
   expect(posted[1]).toMatchObject({ ufo: "data", id: "i2", ok: false });
 });
 
+test("the setup band's act rides through, and the fence names why the others do not", async () => {
+  /** A band that states a need has to carry the act that settles it: `connect` mints a consent
+   *  link the member completes on the provider's own site, so it grants nothing by itself and a
+   *  member is not sent somewhere else to type.
+   *
+   *  A refusal is read for its words, not its status: the fence answers in plain text, and the
+   *  page shows the member what it said. */
+  const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ applied: true, message: "" }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { iframe, posted } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+  deliver(
+    {
+      ufo: "call",
+      id: "c1",
+      method: "POST",
+      path: "agents/" + AGENT_ID + "/intents",
+      body: { verb: "connect", kind: "connection", name: "github" },
+    },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(1));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(posted[0]).toMatchObject({ ufo: "data", id: "c1", ok: true });
+
+  // The fence is an allowlist, so a verb it does not name is refused whether the lane knows it or
+  // not: a credential prompt and a web grant are both acts far past a page's remit, and a frame
+  // speaks with the viewer's whole session.
+  for (const [id, body] of [
+    ["c2", { verb: "request", kind: "credential", name: "acme_api_key" }],
+    ["c3", { verb: "grant_web_access", email: "x@example.com" }],
+  ] as const) {
+    deliver(
+      { ufo: "call", id, method: "POST", path: "agents/" + AGENT_ID + "/intents", body },
+      iframe.contentWindow,
+    );
+  }
+  await vi.waitFor(() => expect(posted).toHaveLength(3));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  for (const refused of posted.slice(1)) {
+    expect(refused).toMatchObject({
+      ufo: "data",
+      ok: false,
+      error: "This intent is not available from an app page.",
+    });
+  }
+});
+
+test("an app page reads its own records, and no endpoint it was not given", async () => {
+  /** Setup is not among them, and that is deliberate: an app the workspace has not wired stands on
+   *  a portal screen instead of on its page, so the page never asks what it still needs. */
+  const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ objects: [] }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { iframe, posted } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+  deliver(
+    { ufo: "call", id: "s1", method: "GET", path: "objects/scheduled_task" },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({ ufo: "data", id: "s1", ok: true, status: 200 });
+
+  for (const [id, path] of [
+    ["s2", "agents/" + AGENT_ID + "/setup"],
+    ["s3", "agents/" + AGENT_ID + "/spend"],
+  ] as const) {
+    deliver({ ufo: "call", id, method: "GET", path }, iframe.contentWindow);
+  }
+  await vi.waitFor(() => expect(posted).toHaveLength(3));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  for (const refused of posted.slice(1)) {
+    expect(refused).toMatchObject({ ok: false, error: "This endpoint is not available." });
+  }
+});
+
+test("a page's intent acts on its own app, and never widens an account", async () => {
+  /** The shell forwards under the viewer's whole session, so a page naming another agent would act
+   *  there with the member's authority and no sign of it on screen. And `shared` decides whether
+   *  the grant a member is about to make binds to them or to the whole workspace, which the
+   *  provider's consent screen states neither way — so sharing is the connectors screen's own act.
+   */
+  const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ applied: true }));
+  vi.stubGlobal("fetch", fetchMock);
+  const { iframe, posted } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+
+  const other = "9f1d3c2b-0000-4000-8000-0000000000aa";
+  // A leading slash is how a page's own client spells the path, so the fence reads past one.
+  deliver(
+    {
+      ufo: "call",
+      id: "c1",
+      method: "POST",
+      path: "/agents/" + other + "/intents",
+      body: { verb: "connect", kind: "connection", name: "github" },
+    },
+    iframe.contentWindow,
+  );
+  deliver(
+    {
+      ufo: "call",
+      id: "c2",
+      method: "POST",
+      path: "agents/" + AGENT_ID + "/intents",
+      body: { verb: "connect", kind: "connection", name: "github", spec: { shared: true } },
+    },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(2));
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(posted[0]).toMatchObject({ ok: false, error: "An app page connects an account to its own app." });
+  expect(posted[1]).toMatchObject({
+    ok: false,
+    error: "An app page connects an account to itself alone.",
+  });
+
+  // Its own app, kept private, rides through.
+  deliver(
+    {
+      ufo: "call",
+      id: "c3",
+      method: "POST",
+      path: "agents/" + AGENT_ID + "/intents",
+      body: { verb: "connect", kind: "connection", name: "github", spec: { shared: false } },
+    },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(3));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(posted[2]).toMatchObject({ ufo: "data", id: "c3", ok: true });
+
+  // Every other verb a page may post names the agent that owns the record it acts on — the main
+  // agent for a rebuild, an object's own agent on a record sheet — and each is gated by its kind.
+  deliver(
+    {
+      ufo: "call",
+      id: "c4",
+      method: "POST",
+      path: "/agents/" + other + "/intents",
+      body: { verb: "rebuild_reports" },
+    },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(4));
+  expect(posted[3]).toMatchObject({ ufo: "data", id: "c4", ok: true });
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
 test("a form call reassembles the multipart body the page decomposed", async () => {
   const admitted = { turn_id: "t1", conversation_id: CONVERSATION_ID, opened_run: true };
   const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(admitted));

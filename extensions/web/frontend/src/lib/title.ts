@@ -12,6 +12,7 @@ const FIRST_RUN = "Set up this workspace";
 const WORKSPACE = "Workspace";
 const APPS = "Apps";
 const ADMINISTRATION = "Administration";
+const SETUP = "Setup";
 const INVALID_LINK = "Invalid link";
 
 /** One step of where the member is: what a surface is called, and the address it stands at where
@@ -114,6 +115,8 @@ function where(
       return [{ label: APPS }];
     case "agent":
       return [named(route.agentId)];
+    case "agent-setup":
+      return [{ label: SETUP }, named(route.agentId)];
     case "workspace":
       return [{ label: WORKSPACE_VIEWS[route.view].label }, { label: WORKSPACE }];
     case "section":

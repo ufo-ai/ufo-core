@@ -32,6 +32,8 @@ import {
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
+import { AgentSetup } from "@/views/AgentSetup";
+
 import { Agents, AppsIndex } from "@/views/Agents";
 import { ArchivedAppsProvider } from "@/views/ArchivedApps";
 import { Chat } from "@/views/Chat";
@@ -861,6 +863,18 @@ function RoutedPane({
   switch (route.kind) {
     case "admin":
       return <Admin />;
+    case "agent-setup": {
+      const app = agents.find((entry) => entry.id === route.agentId) ?? null;
+      if (!app) return <PaneNote>No such app.</PaneNote>;
+      return (
+        <Pane className={COLUMN}>
+          <Header crumb={crumb} title={agentName(app.name)} />
+          <div className="flex-1 overflow-y-auto p-2xl">
+            <AgentSetup agent={app} admin={member.admin} />
+          </div>
+        </Pane>
+      );
+    }
     case "bad-link":
       return <PaneNote>This link is not valid.</PaneNote>;
     case "workspace":

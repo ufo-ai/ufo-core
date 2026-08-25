@@ -42,6 +42,11 @@ SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/sch
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "cancel", "list", "inspect"})
 PORTAL_SOURCE = Path("extensions/web/frontend/src")
 APP_PAGE_GLOB = "extensions/app_*/ufo_ext_*/skills/*/**/*.tsx"
+APP_EXTENSION = re.compile(r"app_(?P<slug>[a-z0-9]+)$")
+APP_HOME_SKILL = "app-{slug}-home"
+APPS_CONFIG = PORTAL_SOURCE.parent / "vite.apps.config.ts"
+APPS_TYPECHECK = PORTAL_SOURCE.parent / "tsconfig.apps.json"
+APPS_LIST = re.compile(r"const APPS = \[(?P<apps>[^\]]*)\]")
 PORTAL_ENTRIES = frozenset({PORTAL_SOURCE / "main.tsx", PORTAL_SOURCE / "apps" / "kit.ts"})
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
 PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
@@ -1569,6 +1574,101 @@ def _portal_style_failures() -> list[str]:
     return failures
 
 
+def _app_slug_failures(
+    shipped: frozenset[str],
+    homes: frozenset[str],
+    built: frozenset[str],
+    entries: frozenset[str],
+    typechecked: frozenset[str],
+) -> list[str]:
+    """The decision an app's five spellings of its slug have to agree on.
+
+    `shipped` is the app extensions by directory name, `homes` the home skills they ship, `built`
+    the slugs the app bundle names, `entries` the slugs it has an entry document for, and
+    `typechecked` the pages the app typecheck reads. A slug that disagrees between any two fails
+    silently and late: the deploy builds a bundle missing the page, the extension installs fine,
+    and a member opens the app to a blank frame.
+
+    The typecheck is a list of files rather than a glob, so a page left off it is built and shipped
+    having never been checked — the bundle transpiles without types, and a prop the kit does not
+    declare is dropped in silence."""
+    failures = []
+    slugs = set()
+    for name in sorted(shipped):
+        named = APP_EXTENSION.match(name)
+        if named is None:
+            failures.append(
+                f"extensions/{name}: an app extension is `app_<slug>`, lowercase letters and "
+                "digits — the homepage read keys an agent by that slug"
+            )
+            continue
+        slug = named.group("slug")
+        slugs.add(slug)
+        home = APP_HOME_SKILL.format(slug=slug)
+        if home not in homes:
+            failures.append(
+                f"extensions/{name}: ships no skill {home!r} — an app's page is the skill named "
+                "for its own slug, and a mismatch drops the page out of the deploy bundle"
+            )
+        if slug not in built:
+            failures.append(
+                f"{APPS_CONFIG}: does not build {slug!r} — an app extension the bundle does not "
+                "name installs fine and opens to a blank frame"
+            )
+        elif slug not in entries:
+            failures.append(f"{_app_entry(slug)}: the app bundle's entry for {slug!r} is missing")
+        if slug not in typechecked:
+            failures.append(
+                f"{APPS_TYPECHECK}: does not read the {slug!r} page — a page left off this list "
+                "ships having never been typechecked, and the build transpiles without types"
+            )
+    failures.extend(
+        f"{APPS_CONFIG}: builds {slug!r}, which no `app_{slug}` extension ships"
+        for slug in sorted(built - slugs)
+    )
+    return failures
+
+
+def _app_entry(slug: str) -> Path:
+    return PORTAL_SOURCE.parent / "apps" / slug / "index.html"
+
+
+def _app_bundle_failures() -> list[str]:
+    """Every app's slug, read off the tree and off the bundle's own list, and handed to the one
+    decision above."""
+    extensions = ROOT / "extensions"
+    shipped = frozenset(
+        path.name for path in extensions.iterdir() if path.is_dir() and path.name.startswith("app_")
+    )
+    if not shipped:
+        return ["extensions/app_*: no app extensions found — the gate lost its subjects"]
+    config = ROOT / APPS_CONFIG
+    if not config.is_file():
+        return [f"{APPS_CONFIG}: the app bundle's config is missing"]
+    stated = APPS_LIST.search(config.read_text())
+    if stated is None:
+        return [f"{APPS_CONFIG}: the bundle names no apps — the gate lost its list"]
+    homes = frozenset(
+        skill.name
+        for path in extensions.iterdir()
+        if path.is_dir() and path.name.startswith("app_")
+        for skills in path.rglob("skills")
+        if skills.is_dir()
+        for skill in skills.iterdir()
+        if skill.is_dir()
+    )
+    built = frozenset(
+        word.strip().strip("\"'") for word in stated.group("apps").split(",") if word.strip()
+    )
+    entries = frozenset(slug for slug in built if (ROOT / _app_entry(slug)).is_file())
+    typecheck = ROOT / APPS_TYPECHECK
+    if not typecheck.is_file():
+        return [f"{APPS_TYPECHECK}: the app pages' typecheck config is missing"]
+    read = typecheck.read_text()
+    typechecked = frozenset(slug for slug in built if f"app-{slug}-home/app.tsx" in read)
+    return _app_slug_failures(shipped, homes, built, entries, typechecked)
+
+
 def _waiting_line_failures() -> list[str]:
     """The waiting mark's words are written once. `Waiting` states the line a screen shows while it
     has nothing else, and it appears on the theme's threshold, so the same literal spelled anywhere
@@ -1742,6 +1842,7 @@ def main() -> int:
     failures.extend(_registered_naming_failures())
     failures.extend(_portal_style_failures())
     failures.extend(_waiting_line_failures())
+    failures.extend(_app_bundle_failures())
     terraform = _env_terraform()
     if not terraform:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")
