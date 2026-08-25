@@ -156,6 +156,7 @@ def scenario_task(
     judge_model: str | None = None,
     judge_max_tokens: int = JUDGE_MAX_TOKENS,
     judge_reasoning: ReasoningEffort = "low",
+    wait_seconds: float | None = None,
 ) -> EvalTask:
     needs_judge = any(case.rubric for case in cases)
     if needs_judge and judge_model is None:
@@ -200,6 +201,7 @@ def scenario_task(
             judge_model=judge_model if any(case.rubric for case in kept) else None,
             judge_max_tokens=judge_max_tokens,
             judge_reasoning=judge_reasoning,
+            wait_seconds=wait_seconds,
         )
 
     return EvalTask(
@@ -216,6 +218,7 @@ def scenario_task(
         judge_max_tokens=judge_max_tokens,
         judge_reasoning=judge_reasoning,
         exclusive=True,
+        wait_seconds=wait_seconds,
         narrow=narrow,
     )
 

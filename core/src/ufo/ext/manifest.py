@@ -45,6 +45,7 @@ from ufo.schema.records import (
     TABLER_ICON_MAX_LENGTH,
     TABLER_ICON_PATTERN,
     Agent,
+    ReasoningEffort,
     Turn,
 )
 from ufo.search import SearchProvider
@@ -587,7 +588,8 @@ class SubagentProfile:
     profile lifts it to
     the main ceiling; the default suits an ordinary focused subagent. `model` runs the child under
     a model distinct from its parent — possibly a different provider — while `None` inherits the
-    parent's; a spawn resolves and bills the child under whichever model answers it.
+    parent's; `reasoning` does the same for the model's reasoning effort. A spawn resolves and bills
+    the child under those settings.
     `untrusted_output` declares the child's answer derives from untrusted content (web pages, third
     parties): every path that returns it to a parent — a foreground spawn, and the
     arrival a background child delivers — walls it as data, exactly as an untrusted tool's own
@@ -601,8 +603,10 @@ class SubagentProfile:
     output_model: type[BaseModel]
     max_rounds: int = SUBAGENT_ROUND_LIMIT
     model: str | None = None
+    reasoning: ReasoningEffort | None = None
     untrusted_output: bool = False
     isolated_tools: bool = False
+    connector_read_only: bool = False
 
 
 @dataclass(frozen=True)

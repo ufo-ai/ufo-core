@@ -984,11 +984,11 @@ async def _run(
                     compaction=compaction,
                     loadable_skills=loadable_skills,
                     workspace_probe_for=(
-                        AppBenchWorkspaceProbe
-                        if config.sandbox.backend in UFO_APP_BENCH_BACKENDS
-                        and any(task.name in UFO_APP_TASKS for task in tasks)
-                        else None
-                    ),
+                        lambda conversation_id: AppBenchWorkspaceProbe(conversation_id, driver)
+                    )
+                    if config.sandbox.backend in UFO_APP_BENCH_BACKENDS
+                    and any(task.name in UFO_APP_TASKS for task in tasks)
+                    else None,
                 )
                 targets = tuple(
                     _with_task_wait(

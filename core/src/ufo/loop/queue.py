@@ -572,6 +572,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             )
         preload: tuple[LoadedSkill, ...] = ()
         member_skill_block = ""
+        connector_read_only = False
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
             tools = ToolRegistry(
@@ -619,7 +620,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     preload=preload,
                 ),
                 model=runtime.registry.resolve(profile.model or agent.model),
-                reasoning=agent.reasoning,
+                reasoning=profile.reasoning or agent.reasoning,
             )
             tools = ToolRegistry(
                 _subagent_tools(
@@ -631,6 +632,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             system_prompt = rendered_prompt(resolved.prompt)
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
             output_model = profile.output_model
+            connector_read_only = profile.connector_read_only
         model = await runtime.registry.client_for(resolved.model)
         byok = await _frozen_byok(
             turn.workspace_id,
@@ -701,6 +703,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             search_provider=runtime.search_provider,
             memory=runtime.memory,
             connectors=runtime.connectors,
+            connector_read_only=connector_read_only,
             tools=tools,
             tool_ext=tool_ext,
             requestable_credentials=(

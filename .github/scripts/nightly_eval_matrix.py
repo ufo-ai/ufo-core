@@ -32,6 +32,7 @@ DATABASE_URL = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 PUBLIC_BASE_URL = "http://evals.invalid"
 SMOKE_PROBE = "basics"
 SMOKE_SUITES = (SMOKE_PROBE, "semantic_quality", "scenario_smoke", "ab_reversal")
+APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy"})
 
 
 @dataclass(frozen=True)
@@ -68,8 +69,8 @@ def plan(smoke: bool) -> tuple[Shard, ...]:
     """Every registered suite, split into shards that each fit inside one job's ceiling."""
     tasks = TASKS
     if smoke:
-        carried = {task.name for task in TASKS}
-        unknown = tuple(name for name in SMOKE_SUITES if name not in carried)
+        registered = {task.name for task in TASKS}
+        unknown = tuple(name for name in SMOKE_SUITES if name not in registered)
         if unknown:
             raise SystemExit(f"smoke names unregistered suites: {', '.join(unknown)}")
         tasks = tuple(task for task in TASKS if task.name in SMOKE_SUITES)
@@ -86,7 +87,9 @@ def plan(smoke: bool) -> tuple[Shard, ...]:
             stem = f"nightly-{arm.pack.replace('_', '-')}"
             if agent is not None:
                 stem += f"-{agent.replace('_', '-')}"
-            groups = _balance(carried)
+            app_tasks = tuple(task for task in carried if task.name in APP_SUITES)
+            other_tasks = tuple(task for task in carried if task.name not in APP_SUITES)
+            groups = (*_balance(app_tasks), *_balance(other_tasks))
             for index, group in enumerate(groups, start=1):
                 label = stem if len(groups) == 1 else f"{stem}-{index}"
                 shards.append(Shard(label, arm.pack, agent, tuple(task.name for task in group)))

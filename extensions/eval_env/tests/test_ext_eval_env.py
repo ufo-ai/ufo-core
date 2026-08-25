@@ -5,8 +5,9 @@ transaction, exactly as an eval grader reads them from another process — and e
 comes back condensed by the shipped pass, landing on the side of the engine's inline budget its
 eval case measures."""
 
+import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -41,7 +42,7 @@ from ufo.loop.engine import MAX_TOOL_RESULT_CHARS, TOOL_RESULT_PREVIEW_CHARS
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
-from ufo.sdk.context import ScopedStore
+from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
 
@@ -333,15 +334,134 @@ async def test_an_unseeded_app_tool_fails_loud(db: None) -> None:
         )
 
 
-def test_app_provider_catalog_covers_every_fixture_source() -> None:
+async def test_app_action_applies_once_without_mutating_the_connector_fixture(db: None) -> None:
+    workspace_id = await _workspace()
+    fixture = {
+        "repository": "evalco/app",
+        "issues": [
+            {
+                "number": 521,
+                "title": "Webhook retries lose delivery order",
+                "owner": None,
+            }
+        ],
+    }
+    with ws(workspace_id):
+        store = ScopedStore(extension=env.NAME)
+        await store.put(f"{env.APP_FIXTURE_PREFIX}{env.GITHUB_PROVIDER}:list_issues", fixture)
+        ctx = replace(
+            _ctx(workspace_id, APP_GRANTS),
+            ext=ExtensionContext(
+                store=store,
+                credentials=CredentialAccess(declared=frozenset()),
+            ),
+        )
+        action = env.AppActionSpec(
+            case="issue-owner",
+            action="assign_issue",
+            target="521",
+            value="alex",
+        )
+
+        await env.AppActionStore().apply(
+            ctx,
+            "assign-521",
+            action,
+            None,
+            expected_generation=None,
+        )
+        await env.AppActionStore().apply(
+            ctx,
+            "assign-521",
+            action,
+            action,
+            expected_generation=None,
+        )
+        response = await env.EvalEnvBroker().execute(
+            workspace_id,
+            env.GITHUB_PROVIDER,
+            "list_issues",
+            {},
+            env.ACCOUNT_ID,
+            None,
+        )
+        stored = await env.AppActionStore().status(
+            ctx,
+            "assign-521",
+            expected_generation=None,
+        )
+        action_fixture = await store.get(env.APP_ACTION_FIXTURE_PREFIX + "assign-521")
+
+    assert response == fixture
+    assert isinstance(action_fixture, dict)
+    assert action_fixture["issues"][0]["owner"] == "alex"
+    assert action_fixture["issues"][0]["project_status"] == "Assigned"
+    assert stored == {"state": "applied", "result": "Issue #521 assigned to alex."}
+
+
+async def test_parallel_app_actions_keep_case_fixture_state_isolated(db: None) -> None:
+    workspace_id = await _workspace()
+    fixture = {
+        "repository": "evalco/app",
+        "issues": [
+            {
+                "number": 521,
+                "title": "Webhook retries lose delivery order",
+                "owner": None,
+            }
+        ],
+    }
+    with ws(workspace_id):
+        store = ScopedStore(extension=env.NAME)
+        await store.put(f"{env.APP_FIXTURE_PREFIX}{env.GITHUB_PROVIDER}:list_issues", fixture)
+        ctx = replace(
+            _ctx(workspace_id, APP_GRANTS),
+            ext=ExtensionContext(
+                store=store,
+                credentials=CredentialAccess(declared=frozenset()),
+            ),
+        )
+        action = env.AppActionSpec(
+            case="issue-owner",
+            action="assign_issue",
+            target="521",
+            value="alex",
+        )
+        first_name = f"{uuid4().hex}-issue-owner"
+        second_name = f"{uuid4().hex}-issue-owner"
+
+        await asyncio.gather(
+            env.AppActionStore().apply(ctx, first_name, action, None, expected_generation=None),
+            env.AppActionStore().apply(ctx, second_name, action, None, expected_generation=None),
+        )
+        await env.AppActionStore().apply(ctx, first_name, action, action, expected_generation=None)
+        first = await store.get(env.APP_ACTION_FIXTURE_PREFIX + first_name)
+        second = await store.get(env.APP_ACTION_FIXTURE_PREFIX + second_name)
+        shared = await store.get(f"{env.APP_FIXTURE_PREFIX}{env.GITHUB_PROVIDER}:list_issues")
+
+    assert isinstance(first, dict)
+    assert isinstance(second, dict)
+    assert first["issues"] == [
+        {
+            "number": 521,
+            "title": "Webhook retries lose delivery order",
+            "owner": "alex",
+            "project_status": "Assigned",
+        }
+    ]
+    assert second == first
+    assert shared == fixture
+
+
+def test_app_provider_catalog_uses_fixed_provider_names() -> None:
     providers = {connector.oauth.provider for connector in env.manifest().connectors}
 
     assert {
-        "eval_google_drive",
-        "eval_github",
-        "eval_stripe",
-        "eval_hubspot",
-        "eval_greenhouse",
+        "google_drive",
+        env.GITHUB_PROVIDER,
+        "stripe",
+        "hubspot",
+        "greenhouse",
     } <= providers
 
 

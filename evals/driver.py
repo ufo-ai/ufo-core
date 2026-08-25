@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from dbos import DBOSClient, WorkflowHandleAsync
 from dbos import error as dbos_error
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from evals.harness.capability import UndeliveredRound, WorkspaceFile
@@ -36,7 +37,14 @@ from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
 from ufo.object_name import validate_object_name
 from ufo.schema import tables
-from ufo.schema.records import PENDING, ReasoningEffort, TurnContext, Usage
+from ufo.schema.records import (
+    PENDING,
+    ReasoningEffort,
+    TerminalFrame,
+    ToolIntent,
+    TurnContext,
+    Usage,
+)
 from ufo.sdk.models import (
     ImageBlock,
     ImageSource,
@@ -643,6 +651,87 @@ class WorkspaceDriver:
             speaker_member_id=speaker,
         )
         return admitted.turn_id
+
+    async def apply_object_intent(
+        self,
+        source_conversation_id: UUID,
+        kind: str,
+        name: str,
+        spec: dict[str, JsonValue],
+        idempotency_key: str,
+    ) -> tuple[UUID, TerminalFrame]:
+        """Apply one browser-captured object write through the member's prepared-intent lane."""
+
+        async with workspace_tx() as connection:
+            source = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.agent_id,
+                        tables.conversation.c.member_id,
+                        tables.member.c.email,
+                    )
+                    .join(tables.member, tables.member.c.id == tables.conversation.c.member_id)
+                    .where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == source_conversation_id,
+                    )
+                )
+            ).one()
+            queue_key = f"intent/{source.agent_id}/{source.email}"
+            conversation_id = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.queue_key == queue_key,
+                    )
+                )
+            ).scalar_one_or_none()
+            if conversation_id is None:
+                conversation_id = uuid4()
+                await connection.execute(
+                    sa.insert(tables.conversation).values(
+                        id=conversation_id,
+                        workspace_id=self.workspace_id,
+                        agent_id=source.agent_id,
+                        member_id=source.member_id,
+                        surface=EVAL_SURFACE,
+                        queue_key=queue_key,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+        manifest = json.dumps({"kind": kind, "name": name, "spec": spec})
+        intent = ToolIntent(
+            tool="object_apply",
+            input={
+                "manifest": manifest,
+                "user_description": f"Apply {kind} {name} from the application.",
+            },
+        )
+        admitted = await MemberAdmission(
+            admission=Admission(dbos=self.dbos, durable_surfaces=frozenset()),
+            workspace_id=self.workspace_id,
+        ).admit(
+            conversation_id,
+            intent.model_dump_json(),
+            idempotency_key,
+            TurnContext(sender=source.email),
+            speaker_member_id=source.member_id,
+            intent=intent,
+        )
+        await self.settle(conversation_id, admitted.turn_id)
+        async with workspace_tx() as connection:
+            terminal = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(
+                        tables.turn.c.workspace_id == self.workspace_id,
+                        tables.turn.c.id == admitted.turn_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        if terminal is None:
+            raise RuntimeError("prepared object intent produced no terminal")
+        return admitted.turn_id, TerminalFrame.model_validate(terminal)
 
     async def stage(self, conversation_id: UUID, path: str, source: Path) -> None:
         target = self.workspace_path(conversation_id, path)

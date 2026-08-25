@@ -1,17 +1,79 @@
+import asyncio
 import json
 import re
 import shlex
+import subprocess
+import threading
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
-from uuid import uuid4
+from typing import cast
+from uuid import UUID, uuid4
 
 import pytest
+import sqlalchemy as sa
+from PIL import Image
 from pydantic import ValidationError
-from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
+from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL, JsReplInput
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 from ufo_ext_sites import manifest as sites_manifest
 from ufo_ext_sites import share_card
+from ufo_ext_sites.application_audit import (
+    APPLICATION_AUDIT_ATTEMPT_KEY,
+    APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
+    APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    ApplicationAuditContract,
+    ApplicationAuditFact,
+    ApplicationAuditReport,
+    audit_application,
+)
+from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_DELEGATION_TOOL,
+    APPLICATION_BUILDER_DEPLOY_GUARD_REASON,
+    APPLICATION_BUILDER_EDIT_TOOL,
+    APPLICATION_BUILDER_MODEL,
+    APPLICATION_BUILDER_NAME,
+    APPLICATION_BUILDER_PROFILE,
+    APPLICATION_BUILDER_QA_LIMIT,
+    APPLICATION_BUILDER_QA_LIMIT_REASON,
+    APPLICATION_BUILDER_QA_TOOL,
+    APPLICATION_BUILDER_READ_TOOL,
+    APPLICATION_BUILDER_REASONING,
+    APPLICATION_BUILDER_REDEPLOY_KEY,
+    APPLICATION_BUILDER_REPAIR_READ_LIMIT,
+    APPLICATION_BUILDER_REPAIR_READ_REASON,
+    APPLICATION_BUILDER_SKILL,
+    APPLICATION_BUILDER_WRITE_TOOL,
+    APPLICATION_INDEX,
+    APPLICATION_PLACEHOLDER,
+    APPLICATION_PREVIEW_FILENAME,
+    APPLICATION_PREVIEW_SCAFFOLD,
+    APPLICATION_PREVIEW_TOOL,
+    APPLICATION_SCAFFOLD_PATH,
+    APPLICATION_SOURCE_CLAIM,
+    APPLICATION_SOURCE_READ,
+    ApplicationBuildAcceptance,
+    ApplicationBuilderResult,
+    ApplicationBuilderTask,
+    ApplicationPreviewResult,
+    ApplicationSourceEdit,
+    BuildUfoApplicationInput,
+    EditApplicationSourceInput,
+    ReadApplicationSourceInput,
+    RenderApplicationPreviewInput,
+    WriteApplicationSourceInput,
+    build_ufo_application,
+    edit_application_source,
+    limit_application_builder_qa,
+    limit_application_builder_repair_reads,
+    read_application_source,
+    record_application_builder_qa,
+    render_application_preview,
+    require_application_builder_qa,
+    write_application_source,
+)
 from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
 from ufo_ext_sites.objects import (
     CONVERSATION_DIGEST_HEX,
@@ -38,22 +100,39 @@ from ufo_ext_sites.share_card import (
     card_page,
     shot_command,
 )
-from ufo_ext_sites.store import SITE_NAME_MAX, InvalidSiteName, site_name
+from ufo_ext_sites.store import (
+    SITE_NAME_MAX,
+    HostedSite,
+    HostedSites,
+    InvalidSiteName,
+    SiteFile,
+    SourceManifest,
+    hosted_site,
+    site_name,
+)
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
+    APPLICATION_AUDIT_MAX_ATTEMPTS,
     LOG_CLEAR_PROG,
     LOG_TAIL_TIMEOUT_SECONDS,
+    PORT_STOP_PROG,
     PREVIEW_HEIGHT,
     PREVIEW_WIDTH,
     READINESS_TIMEOUT_SECONDS,
     SITES_TOOL_NAMES,
+    DeployWebsiteInput,
     StartServerInput,
     WebsiteInput,
+    _audit_builder_application,
+    _redeploy_homepage,
+    deploy_website,
     start_server,
     website,
 )
 
 from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.ext.context import ExtensionContext, context_for
 from ufo.ext.loader import skill_registry
 from ufo.loop.subagents import subagent_system_prompt
 from ufo.object_name import OBJECT_NAME_MAX_LENGTH
@@ -61,12 +140,16 @@ from ufo.sandbox.session import (
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
     ExecResult,
+    SandboxHandle,
 )
+from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.sdk.manifest import Deny, HookContext, ModifyInput, PostToolUse, PreToolUse
 from ufo.skills.runtime import mount_skill
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.workspace import ws
 
 TOOL_NARRATION = "building the site"
 HOUSE_STYLE = "ufo-style"
@@ -93,10 +176,22 @@ class FakeSandbox:
     without a real container."""
 
     scripted: dict[str, ExecResult] = field(default_factory=dict)
+    scripted_programs: dict[str, ExecResult] = field(default_factory=dict)
+    scripted_paths: dict[str, ExecResult] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
     budgets: dict[str, int | None] = field(default_factory=dict)
     programs: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+    shells: list[tuple[str, tuple[str, ...], int | None]] = field(default_factory=list)
+    writes: dict[str, bytes] = field(default_factory=dict)
     claim: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
+    shell: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
+    handle: SandboxHandle = field(
+        default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="sites-test")
+    )
+
+    @property
+    def conversation_id(self) -> UUID:
+        return self.handle.conversation_id
 
     async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
         self.commands.append(command)
@@ -108,7 +203,38 @@ class FakeSandbox:
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         self.programs.append((program, args))
+        for needle, result in self.scripted_paths.items():
+            if args and needle in args[0]:
+                return result
+        for needle, result in self.scripted_programs.items():
+            if needle in program:
+                return result
+        if program == APPLICATION_SOURCE_READ and args and args[0] in self.writes:
+            return ExecResult(self.writes[args[0]].decode(), "", 0)
         return self.claim
+
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        self.shells.append((script, args, timeout_s))
+        return self.shell
+
+    async def write_file(self, path: str, content: bytes) -> None:
+        self.writes[path] = content
+
+
+@dataclass
+class FakeHookStore:
+    values: dict[str, object] = field(default_factory=dict)
+
+    async def get(self, key: str) -> object | None:
+        return self.values.get(key)
+
+    async def put(self, key: str, value: object) -> None:
+        self.values[key] = value
+
+
+@dataclass
+class FakeHookExt:
+    store: FakeHookStore
 
 
 async def _unavailable_spawn(profile: str, payload: dict, background: bool = False) -> SpawnResult:
@@ -156,6 +282,11 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
         "publish_website",
         "set_homepage",
         "build_website",
+        APPLICATION_BUILDER_DELEGATION_TOOL,
+        APPLICATION_BUILDER_EDIT_TOOL,
+        APPLICATION_BUILDER_READ_TOOL,
+        APPLICATION_BUILDER_WRITE_TOOL,
+        APPLICATION_PREVIEW_TOOL,
     }
     deploy = next(tool for tool in manifest.tools if tool.name == "deploy_website")
     assert deploy.description.startswith("Serve a website folder and host it")
@@ -169,7 +300,7 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     assert {"objective", "preload_skills", "extended_context"} <= set(
         build.input_model.model_json_schema()["properties"]
     )
-    (profile,) = manifest.subagents
+    profile = next(profile for profile in manifest.subagents if profile.name == "website_building")
     assert profile.name == "website_building"
     assert profile.input_model.model_validate({"objective": "x" * 10_000}).objective == "x" * 10_000
     assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["objective"]
@@ -177,8 +308,252 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     assert "deploy_website" in profile.tool_names
     assert "publish_website" not in profile.tool_names
     assert "this conversation's sandbox" in build.description
+    assert [(hook.event, hook.tools) for hook in manifest.hooks] == [
+        ("pre_tool_use", (APPLICATION_BUILDER_QA_TOOL,)),
+        ("post_tool_use", (APPLICATION_BUILDER_QA_TOOL,)),
+        (
+            "pre_tool_use",
+            (APPLICATION_BUILDER_READ_TOOL, APPLICATION_BUILDER_EDIT_TOOL),
+        ),
+        ("pre_tool_use", ("deploy_website",)),
+    ]
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
+
+
+def test_application_audit_accepts_measured_interactive_facts() -> None:
+    report = ApplicationAuditReport.model_validate(
+        {
+            "url": "http://localhost:3000/preview.html",
+            "floor": 4.5,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 8,
+                    "text": [],
+                    "documentWidth": width,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Acme renewal Aug 27 #2042",
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {
+                "controls": [
+                    {"selector": "button:nth-of-type(1)", "name": "Open brief"},
+                    {"selector": "button:nth-of-type(2)", "name": "Show risks"},
+                ],
+                "successes": [
+                    {"selector": "button:nth-of-type(1)", "name": "Open brief"},
+                    {"selector": "button:nth-of-type(2)", "name": "Show risks"},
+                ],
+                "states": [["Acme renewal", "Aug 27", "#2042"]],
+                "console": [],
+            },
+        }
+    )
+    contract = ApplicationAuditContract(
+        facts=(
+            ApplicationAuditFact(label="customer", alternatives=("Acme renewal",)),
+            ApplicationAuditFact(label="date", alternatives=("Aug 27", "August 27")),
+            ApplicationAuditFact(label="issue", alternatives=("#2042",)),
+        )
+    )
+
+    assert audit_application(report, contract).issues == ()
+
+
+def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
+    report = ApplicationAuditReport.model_validate(
+        {
+            "url": "http://localhost:3000/preview.html",
+            "floor": 4.5,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 4,
+                    "text": [
+                        {
+                            "text": "Muted status",
+                            "selector": "span.muted",
+                            "px": 14,
+                            "weight": 400,
+                            "ratio": 3.2,
+                        }
+                    ],
+                    "documentWidth": width + 12,
+                    "clipped": ["td.owner: Alexandra"],
+                    "console": ["pageerror: broken"],
+                    "aboveFoldText": "Acme renewal",
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {
+                "controls": [{"selector": "button", "name": "Open brief"}],
+                "successes": [{"selector": "button", "name": "Open brief"}],
+                "states": [["Acme renewal"]],
+                "console": ["pageerror: action failed"],
+            },
+        }
+    )
+    contract = ApplicationAuditContract(
+        facts=(ApplicationAuditFact(label="issue", alternatives=("#2042",)),)
+    )
+
+    verdict = audit_application(report, contract)
+
+    assert {issue.code for issue in verdict.issues} == {
+        "contrast",
+        "overflow",
+        "clipping",
+        "console",
+        "controls",
+        "interaction",
+        "fact",
+        "above_fold",
+    }
+    assert len(verdict.issues) <= 8
+    assert all(len(issue.message) <= 500 for issue in verdict.issues)
+
+
+async def test_application_builder_audit_returns_feedback_to_the_same_worker(
+    tmp_path: Path,
+) -> None:
+    def _report(issue: bool) -> str:
+        return json.dumps(
+            {
+                "views": [
+                    {
+                        "scheme": scheme,
+                        "width": width,
+                        "textChecked": 8,
+                        "text": (
+                            [
+                                {
+                                    "selector": "span.muted",
+                                    "px": 14,
+                                    "weight": 400,
+                                    "ratio": 3.2,
+                                }
+                            ]
+                            if issue
+                            else []
+                        ),
+                        "documentWidth": width,
+                        "clipped": [],
+                        "console": [],
+                        "aboveFoldText": "#2042",
+                    }
+                    for width in (1440, 390)
+                    for scheme in ("light", "dark")
+                ],
+                "interaction": {
+                    "controls": [
+                        {"selector": "#first", "name": "First"},
+                        {"selector": "#second", "name": "Second"},
+                    ],
+                    "successes": [
+                        {"selector": "#first", "name": "First"},
+                        {"selector": "#second", "name": "Second"},
+                    ],
+                    "states": [["#2042"]],
+                    "console": [],
+                },
+            }
+        )
+
+    contract = ApplicationAuditContract(
+        facts=(ApplicationAuditFact(label="issue", alternatives=("#2042",)),)
+    ).model_dump_json()
+    sandbox = FakeSandbox(
+        scripted_paths={
+            "/application-audit/": ExecResult(_report(True), "", 0),
+        }
+    )
+    parent_turn_id = uuid4()
+    store = FakeHookStore(
+        values={
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=parent_turn_id): json.loads(contract)
+        }
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "parent_turn_id": parent_turn_id,
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+
+    with pytest.raises(RuntimeError, match='"code":"contrast"'):
+        await _audit_builder_application(ctx, "/workspace/ufo-app")
+
+    key = APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id)
+    assert store.values[key] == 1
+    sandbox.scripted_paths["/application-audit/"] = ExecResult(_report(False), "", 0)
+    await _audit_builder_application(ctx, "/workspace/ufo-app")
+    assert len(sandbox.shells) == 2
+    port_stops = [program for program, _args in sandbox.programs if program == PORT_STOP_PROG]
+    assert len(port_stops) == 4
+
+
+def test_application_builder_port_cleanup_supports_hosts_without_procfs() -> None:
+    assert "if tables:" in PORT_STOP_PROG
+    assert '["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"]' in PORT_STOP_PROG
+    assert "os.kill(pid, 0)" in PORT_STOP_PROG
+
+
+async def test_application_builder_audit_stops_after_two_failed_attempts(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeSandbox()
+    store = FakeHookStore()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    key = APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id)
+    store.values[key] = APPLICATION_AUDIT_MAX_ATTEMPTS
+
+    with pytest.raises(RuntimeError, match="stopped after two failed deployment attempts"):
+        await _audit_builder_application(ctx, "/workspace/ufo-app")
+
+    assert sandbox.commands == []
+
+
+async def test_application_builder_deploy_requires_the_scaffold_root(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="project_path must be /workspace/ufo-app, not /workspace/ufo-app/dist",
+    ):
+        await deploy_website(
+            ctx,
+            DeployWebsiteInput(
+                project_path="/workspace/ufo-app/dist",
+                site_name="meeting-tasks",
+                entry_point="index.html",
+                user_description="Deploy the meeting tasks application.",
+            ),
+        )
+
+    assert sandbox.commands == []
+    assert sandbox.programs == []
 
 
 def test_website_profile_receives_the_complete_per_turn_skill_index() -> None:
@@ -256,6 +631,617 @@ async def test_build_website_omits_the_unset_knobs(tmp_path: Path) -> None:
     assert captured["payload"] == {"objective": "minimal"}
 
 
+async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    spawns = 0
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        nonlocal spawns
+        spawns += 1
+        captured["profile"] = profile
+        captured["payload"] = payload
+        captured["dedup_key"] = dedup_key
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path="/workspace/ufo-app/app.tsx",
+                browser_batches=0,
+                blocker="The connector is unavailable.",
+            ),
+        )
+
+    ctx = replace(
+        _context(FakeSandbox(), tmp_path),
+        spawn=_capture,
+        idempotency_key="turn-1/build_ufo_application/call-2",
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+    assert set(BuildUfoApplicationInput.model_fields) == {"user_description"}
+    assert BuildUfoApplicationInput.model_fields["user_description"].is_required()
+    result = await build_ufo_application(
+        ctx,
+        BuildUfoApplicationInput(user_description=TOOL_NARRATION),
+    )
+    repeated = await build_ufo_application(
+        ctx, BuildUfoApplicationInput(user_description=TOOL_NARRATION)
+    )
+
+    assert captured == {
+        "profile": "profile:ufo_application_builder",
+        "payload": {
+            "objective": (
+                f"Application instructions:\n{ctx.agent.prompt}\n\n"
+                f"Current request:\n{ctx.turn.inbound}"
+            ),
+            "scaffold_path": "/workspace/ufo-app",
+            "source_path": "/workspace/ufo-app/app.tsx",
+            "preload_skills": ("website-building",),
+        },
+        "dedup_key": "turn-1/build_ufo_application/call-2",
+    }
+    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
+    assert repeated.content == result.content
+    assert spawns == 2
+    assert returned.status == "blocked"
+    assert returned.blocker == "The connector is unavailable."
+
+
+async def test_build_ufo_application_creates_the_product_scaffold(tmp_path: Path) -> None:
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path="/workspace/ufo-app/app.tsx",
+                browser_batches=0,
+                blocker="No connector.",
+            ),
+        )
+
+    sandbox = FakeSandbox(claim=ExecResult("", "not found", 1))
+    ctx = replace(
+        _context(sandbox, tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+
+    await build_ufo_application(ctx, BuildUfoApplicationInput(user_description=TOOL_NARRATION))
+
+    assert sandbox.writes == {
+        "/workspace/ufo-app/index.html": APPLICATION_INDEX,
+        "/workspace/ufo-app/app.tsx": APPLICATION_PLACEHOLDER,
+        "/workspace/ufo-app/preview.html": APPLICATION_PREVIEW_SCAFFOLD,
+    }
+
+
+async def test_concurrent_application_requests_bind_their_own_audit_contracts(
+    tmp_path: Path,
+) -> None:
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path="/workspace/ufo-app/app.tsx",
+                browser_batches=0,
+                blocker="No connector.",
+            ),
+        )
+
+    first = _context(FakeSandbox(), tmp_path)
+    second = _context(FakeSandbox(), tmp_path)
+    store = FakeHookStore()
+    first = replace(
+        first,
+        turn=first.turn.model_copy(update={"inbound": "Build the first app."}),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    second = replace(
+        second,
+        turn=second.turn.model_copy(update={"inbound": "Build the second app."}),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    first_contract = {"facts": [{"label": "first", "alternatives": ["one"]}]}
+    second_contract = {"facts": [{"label": "second", "alternatives": ["two"]}]}
+    for ctx, contract in ((first, first_contract), (second, second_contract)):
+        store.values[
+            APPLICATION_AUDIT_REQUEST_CONTRACT_KEY.format(
+                request_sha256=sha256(ctx.turn.inbound.encode()).hexdigest()
+            )
+        ] = contract
+
+    await asyncio.gather(
+        build_ufo_application(first, BuildUfoApplicationInput(user_description=TOOL_NARRATION)),
+        build_ufo_application(second, BuildUfoApplicationInput(user_description=TOOL_NARRATION)),
+    )
+
+    assert (
+        store.values[APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=first.turn.id)]
+        == first_contract
+    )
+    assert (
+        store.values[APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=second.turn.id)]
+        == second_contract
+    )
+
+
+async def test_build_ufo_application_returns_one_blocked_result_when_the_worker_fails(
+    tmp_path: Path,
+) -> None:
+    async def _fail(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        raise RuntimeError("model stream produced no usage")
+
+    member_id = uuid4()
+    store = FakeHookStore()
+    ctx = replace(
+        _context(FakeSandbox(), tmp_path),
+        spawn=_fail,
+        speaker_member_id=member_id,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+
+    result = await build_ufo_application(
+        ctx, BuildUfoApplicationInput(user_description=TOOL_NARRATION)
+    )
+
+    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
+    assert returned.status == "blocked"
+    assert returned.blocker == (
+        "The application worker failed: RuntimeError: model stream produced no usage"
+    )
+    assert store.values[APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=ctx.turn.id)] == str(
+        member_id
+    )
+
+
+async def test_application_worker_redeploy_uses_the_exact_parent_speaker(
+    tmp_path: Path,
+) -> None:
+    member_id = uuid4()
+    parent_turn_id = uuid4()
+    now = datetime(2026, 8, 25, tzinfo=UTC)
+    store = FakeHookStore(
+        values={APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=parent_turn_id): str(member_id)}
+    )
+    base = _context(FakeSandbox(), tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "parent_turn_id": parent_turn_id,
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+        on_behalf_of_member_id=member_id,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    bound = HostedSite(
+        conversation_id=uuid4(),
+        name="tasks-homepage",
+        port=5000,
+        visibility="private",
+        creator_member_id=member_id,
+        generation=uuid4(),
+        deploy_generation=1,
+        homepage_agent_id=ctx.turn.agent_id,
+        preview_blob_key=None,
+        preview_size_bytes=None,
+        share_card_blob_key=None,
+        share_card_hash=None,
+        source_manifest=None,
+        created_at=now,
+        updated_at=now,
+    )
+    args = DeployWebsiteInput(
+        project_path=APPLICATION_SCAFFOLD_PATH,
+        site_name=bound.name,
+        entry_point="index.html",
+        visibility="private",
+        user_description=TOOL_NARRATION,
+    )
+
+    with pytest.raises(ValueError, match="answers the agent's visibility"):
+        await _redeploy_homepage(ctx, args, bound, 40000)
+
+    store.values[APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=parent_turn_id)] = str(uuid4())
+    with pytest.raises(RuntimeError, match="only a member speaking"):
+        await _redeploy_homepage(ctx, args, bound, 40000)
+
+
+async def test_application_build_acceptance_binds_only_verified_worker_output(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("UFO_TOKEN_SECRET", "sites-test-secret")
+    workspace_id = uuid4()
+    member_id = uuid4()
+    agent_id = uuid4()
+    conversation_id = uuid4()
+    child_turn_id = uuid4()
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+    manifest = SourceManifest(
+        root=f"sites/{uuid4()}/",
+        files={
+            "src/app.tsx": SiteFile(size=120, media_type="text/plain", sha256="a" * 64),
+            "index.html": SiteFile(size=80, media_type="text/html", sha256="b" * 64),
+        },
+    ).model_dump_json()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(id=workspace_id, created_at=now, updated_at=now)
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="owner@example.com",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="tasks",
+                prompt="Track the team's work.",
+                model="claude-opus-4-8",
+                visibility="private",
+                is_main=False,
+                owner_member_id=member_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key="homepage/tasks/owner",
+                audience=SHARED_AUDIENCE,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(hosted_site).values(
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                name="tasks-homepage",
+                port=5000,
+                visibility="private",
+                creator_member_id=member_id,
+                generation=uuid4(),
+                deploy_generation=1,
+                source_manifest=manifest,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        return SpawnResult(
+            turn_id=child_turn_id,
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="deployed",
+                source_path="/workspace/ufo-app/app.tsx",
+                site_name="tasks-homepage",
+                site_url="https://untrusted.example",
+                browser_batches=4,
+                controls_checked=("Open task",),
+            ),
+        )
+
+    with ws(workspace_id):
+        ext = context_for("sites", frozenset())
+        await ext.store.put(
+            f"application-builder/qa-success/{child_turn_id}",
+            2,
+        )
+        sandbox = FakeSandbox(
+            scripted_paths={
+                f".{child_turn_id}.accepted": ExecResult("", "current source is absent", 1),
+                ".accepted": ExecResult("", "accepted source is absent", 1),
+            },
+            handle=SandboxHandle(conversation_id=conversation_id, container_id="sites-test"),
+        )
+        ctx = ToolContext(
+            sandbox=sandbox,
+            blob=FilesystemBlobStore(root=tmp_path),
+            turn=Turn(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="Build the homepage.",
+                created_at=now,
+                on_behalf_of_member_id=member_id,
+            ),
+            agent=Agent(
+                prompt="Track the team's work.",
+                model="claude-opus-4-8",
+                visibility="private",
+            ),
+            spawn=_capture,
+            speaker_member_id=None,
+            on_behalf_of_member_id=member_id,
+            audience=SHARED_AUDIENCE,
+            artifact_token_secret="",
+            ext=ext,
+            public_base_url="https://ufo.example.test",
+        )
+        rejected = await build_ufo_application(
+            ctx, BuildUfoApplicationInput(user_description=TOOL_NARRATION)
+        )
+        bound_before_source = await HostedSites(workspace_id, workspace_tx).homepage(agent_id)
+        sandbox.scripted_paths[f".{child_turn_id}.accepted"] = ExecResult("a" * 64, "", 0)
+        ctx = replace(ctx, turn=ctx.turn.model_copy(update={"id": uuid4()}))
+        result = await build_ufo_application(
+            ctx, BuildUfoApplicationInput(user_description=TOOL_NARRATION)
+        )
+        bound = await HostedSites(workspace_id, workspace_tx).homepage(agent_id)
+
+    refused = ApplicationBuilderResult.model_validate_json(rejected.content[0].text)
+    assert refused.status == "blocked"
+    assert refused.blocker == "The worker produced no accepted app.tsx."
+    assert bound_before_source is None
+    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
+    assert returned.status == "deployed"
+    assert returned.browser_batches == 2
+    assert returned.site_url.startswith("https://ufo.example.test/surface/sites/")
+    assert bound is not None
+    assert bound.name == "tasks-homepage"
+
+    other_conversation = uuid4()
+    other_sandbox = FakeSandbox(
+        scripted_paths={f".{child_turn_id}.accepted": ExecResult("a" * 64, "", 0)},
+        handle=SandboxHandle(conversation_id=other_conversation, container_id="sites-test"),
+    )
+    other_ctx = replace(
+        ctx,
+        sandbox=other_sandbox,
+        turn=ctx.turn.model_copy(update={"id": uuid4(), "conversation_id": other_conversation}),
+    )
+    with ws(workspace_id):
+        cross_conversation = await ApplicationBuildAcceptance(other_ctx, child_turn_id).accept(
+            returned
+        )
+    assert cross_conversation.status == "deployed"
+    assert cross_conversation.site_url.startswith("https://ufo.example.test/surface/sites/")
+
+
+async def test_application_build_acceptance_blocks_missing_qa(tmp_path: Path) -> None:
+    ctx = replace(
+        _context(FakeSandbox(), tmp_path),
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+    result = ApplicationBuilderResult(
+        status="deployed",
+        source_path="/workspace/ufo-app/app.tsx",
+        site_name="tasks-homepage",
+        site_url="https://untrusted.example",
+        browser_batches=4,
+    )
+
+    accepted = await ApplicationBuildAcceptance(ctx, uuid4()).accept(result)
+
+    assert accepted.status == "blocked"
+    assert accepted.browser_batches == 0
+    assert accepted.blocker == "The worker completed fewer than two browser QA batches."
+
+
+async def test_application_preview_is_one_fixed_product_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sandbox = FakeSandbox()
+    shared: list[tuple[str, bytes, str | None]] = []
+
+    async def _share(
+        _ctx: ToolContext, filename: str, data: bytes, subject: str | None = None
+    ) -> None:
+        shared.append((filename, data, subject))
+
+    monkeypatch.setattr(ToolContext, "share_artifact", _share)
+    args = RenderApplicationPreviewInput(
+        purpose="Review support requests before assignment.",
+        first_screen_priority="Overdue queue",
+        regions=("Overdue", "Unassigned", "Recent activity"),
+        layout="queue-detail",
+        design_direction="Compact and factual.",
+        user_description="Rendering the application preview.",
+    )
+
+    result = await render_application_preview(_context(sandbox, tmp_path), args)
+
+    rendered = ApplicationPreviewResult.model_validate_json(result.content[0].text)
+    assert rendered.shared_filename == APPLICATION_PREVIEW_FILENAME
+    assert len(rendered.design_digest) == 64
+    assert sandbox.writes == {}
+    assert [(filename, subject) for filename, _, subject in shared] == [
+        (APPLICATION_PREVIEW_FILENAME, "Application preview")
+    ]
+    image = Image.open(BytesIO(shared[0][1]))
+    assert image.size == (1280, 800)
+    assert image.mode == "RGB"
+
+
+async def test_application_preview_does_not_block_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_preview(_args: RenderApplicationPreviewInput) -> bytes:
+        started.set()
+        assert release.wait(1)
+        return b"preview"
+
+    async def _share(
+        _ctx: ToolContext, _filename: str, _data: bytes, _subject: str | None = None
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "ufo_ext_sites.application_builder._PillowApplicationPreview.render", _slow_preview
+    )
+    monkeypatch.setattr(ToolContext, "share_artifact", _share)
+    args = RenderApplicationPreviewInput(
+        purpose="Review support requests before assignment.",
+        first_screen_priority="Overdue queue",
+        regions=("Overdue", "Unassigned"),
+        layout="queue-detail",
+        design_direction="Compact and factual.",
+        user_description="Rendering the application preview.",
+    )
+
+    task = asyncio.create_task(render_application_preview(_context(FakeSandbox(), tmp_path), args))
+    assert await asyncio.to_thread(started.wait, 1)
+    release.set()
+    await task
+
+
+def test_application_preview_contract_has_bounded_regions() -> None:
+    with pytest.raises(ValidationError):
+        RenderApplicationPreviewInput(
+            purpose="Review support requests.",
+            first_screen_priority="Overdue queue",
+            regions=("Only one",),
+            layout="queue-detail",
+            user_description="Rendering the application preview.",
+        )
+
+
+def test_application_preview_scaffold_answers_the_app_bridge() -> None:
+    assert b'message.ufo==="ready"' in APPLICATION_PREVIEW_SCAFFOLD
+    assert b'ufo:"init"' in APPLICATION_PREVIEW_SCAFFOLD
+    assert b"agents:[agent]" in APPLICATION_PREVIEW_SCAFFOLD
+    assert b'ufo:"data"' in APPLICATION_PREVIEW_SCAFFOLD
+    assert b'path.startsWith("objects/")' in APPLICATION_PREVIEW_SCAFFOLD
+    assert b"response={ok:true,name,detail:result}" in APPLICATION_PREVIEW_SCAFFOLD
+    assert b'status:{state:"applied",result:stored.result}' in APPLICATION_PREVIEW_SCAFFOLD
+
+
+def test_application_preview_scaffold_answers_object_reads_and_actions() -> None:
+    script = APPLICATION_PREVIEW_SCAFFOLD.decode().split("<script>", 1)[1].split("</script>", 1)[0]
+    program = """
+const handlers=[];
+const values=new Map();
+global.location={origin:"http://preview.test"};
+global.localStorage={
+  getItem:key=>values.get(key)||null,
+  setItem:(key,value)=>values.set(key,value)
+};
+global.window={addEventListener:(_name,handler)=>handlers.push(handler)};
+eval(process.argv[1]);
+const replies=[];
+const source={postMessage:message=>replies.push(message)};
+const send=data=>handlers[0]({data,source});
+send({ufo:"ready"});
+send({ufo:"call",id:"list",method:"GET",path:"/objects/conversation?agent=preview-agent"});
+send({ufo:"call",id:"write",method:"POST",path:"/objects/eval_app_action",body:JSON.stringify({name:"assign",spec:{owner:"Alex"}})});
+send({ufo:"call",id:"read",method:"GET",path:"/objects/eval_app_action/assign"});
+process.stdout.write(JSON.stringify(replies));
+"""
+
+    completed = subprocess.run(
+        ("node", "-e", program, script),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    replies = json.loads(completed.stdout)
+    bodies = {reply["id"]: json.loads(reply["body"]) for reply in replies if reply["ufo"] == "data"}
+
+    assert replies[0]["ufo"] == "init"
+    assert bodies["list"]["objects"] == []
+    assert bodies["list"]["next_cursor"] is None
+    assert bodies["write"] == {
+        "ok": True,
+        "name": "assign",
+        "detail": "Prepared action accepted.",
+    }
+    assert bodies["read"]["spec"] == {"owner": "Alex"}
+    assert bodies["read"]["status"] == {
+        "state": "applied",
+        "result": "Prepared action accepted.",
+    }
+
+
+def test_application_audit_excludes_hidden_text_from_contrast() -> None:
+    source = (
+        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
+    ).read_text()
+
+    assert "if (!visible(element, box)) continue;" in source
+    assert "visuallyHidden(element, style, box)" not in source
+
+
+def test_application_audit_returns_copy_grader_text() -> None:
+    source = (
+        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
+    ).read_text()
+
+    returned = source.split("textUnderFloor: underFloor,", 1)[1].split("};", 1)[0]
+    assert "renderedText," in returned
+    assert "renderedParts," in returned
+    assert "aboveFoldText," in returned
+    assert "aboveFold.join" not in returned
+
+
+def test_application_audit_accepts_framed_and_direct_pages() -> None:
+    source = (
+        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
+    ).read_text()
+
+    application_frame = source.split("async function applicationFrame(page) {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "await page.$" in application_frame
+    assert "if (!element) return page;" in application_frame
+    assert "await element.contentFrame()" in application_frame
+
+
+def test_application_page_builds_with_relative_asset_urls() -> None:
+    vite_config = (Path(sites_manifest.__file__).parent / "page" / "vite.config.ts").read_text()
+
+    assert 'base: "./"' in vite_config
+
+
 def test_website_building_indexes_the_parent_and_hides_the_nested_child() -> None:
     registry = skill_registry((sites_manifest.manifest(),))
     index = dict(registry.index())
@@ -300,6 +1286,777 @@ async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> No
     assert not any(path.startswith("/workspace/.skills/website-building-") for path in written)
 
 
+def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
+    manifest = sites_manifest.manifest()
+    profile = next(
+        profile for profile in manifest.subagents if profile.name == APPLICATION_BUILDER_NAME
+    )
+    write_tool = next(
+        tool for tool in manifest.tools if tool.name == APPLICATION_BUILDER_WRITE_TOOL
+    )
+
+    assert profile is APPLICATION_BUILDER_PROFILE
+    assert profile.model == APPLICATION_BUILDER_MODEL
+    assert profile.reasoning == APPLICATION_BUILDER_REASONING
+    assert profile.max_rounds == 35
+    assert profile.isolated_tools is True
+    assert profile.connector_read_only is True
+    assert set(profile.tool_names) == {
+        "list_external_tools",
+        "describe_external_tools",
+        "search_connector_tools",
+        "call_external_tool",
+        "read",
+        "start_server",
+        "js_repl",
+        APPLICATION_BUILDER_EDIT_TOOL,
+        APPLICATION_BUILDER_READ_TOOL,
+        APPLICATION_BUILDER_WRITE_TOOL,
+        "deploy_website",
+    }
+    assert profile.untrusted_output is True
+    assert profile.input_model is ApplicationBuilderTask
+    assert profile.output_model is ApplicationBuilderResult
+    assert "Inspect the needed connected sources" in profile.prompt
+    assert "run two to four browser batches" in " ".join(profile.prompt.split())
+    assert "Deploy only after browser QA passes" in profile.prompt
+    assert "Your result is evidence, not a verdict" in profile.prompt
+    edit_tool = next(tool for tool in manifest.tools if tool.name == APPLICATION_BUILDER_EDIT_TOOL)
+    edit_schema = edit_tool.input_model.model_json_schema()
+    edit_fields = edit_schema["$defs"]["ApplicationSourceEdit"]["properties"]
+    assert set(edit_fields) == {"old_text", "new_text"}
+    encoded = EditApplicationSourceInput.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "edits": [
+                json.dumps(
+                    {
+                        "old_text": "old",
+                        "new_text": "new",
+                    }
+                )
+            ],
+        }
+    )
+    assert encoded.edits == (ApplicationSourceEdit(old_text="old", new_text="new"),)
+    patch = EditApplicationSourceInput.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "edits": [
+                "<<<<<<< SEARCH\n"
+                "const { React } = (window as any).UfoAppKit;\n"
+                "=======\n"
+                "const { React } = UfoAppKit;\n"
+                ">>>>>>>"
+            ],
+        }
+    )
+    assert patch.edits == (
+        ApplicationSourceEdit(
+            old_text="const { React } = (window as any).UfoAppKit;",
+            new_text="const { React } = UfoAppKit;",
+        ),
+    )
+    pairs = EditApplicationSourceInput.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "edits": ["old one", "new one", "old two", "new two"],
+        }
+    )
+    assert pairs.edits == (
+        ApplicationSourceEdit(old_text="old one", new_text="new one"),
+        ApplicationSourceEdit(old_text="old two", new_text="new two"),
+    )
+    trailing_newline = EditApplicationSourceInput.model_validate(
+        {
+            "user_description": TOOL_NARRATION,
+            "edits": ["<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>>\n"],
+        }
+    )
+    assert trailing_newline.edits == (ApplicationSourceEdit(old_text="old", new_text="new"),)
+    assert write_tool.profile_only is True
+    assert {"spawn", "share_file", "ask_user", "connect_account", "write", "edit"}.isdisjoint(
+        profile.tool_names
+    )
+
+    with pytest.raises(ValidationError, match=r"source_path must be app\.tsx"):
+        ApplicationBuilderTask(
+            objective="Build the queue",
+            scaffold_path="/workspace/application",
+            source_path="/workspace/other/index.html",
+        )
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    assert task.objective == "Build the queue"
+    assert task.preload_skills == (APPLICATION_BUILDER_SKILL,)
+    assert set(ApplicationBuilderTask.model_fields) == {
+        "objective",
+        "scaffold_path",
+        "source_path",
+        "preload_skills",
+    }
+    deployed = ApplicationBuilderResult(
+        status="deployed",
+        source_path=task.source_path,
+        site_name="queue",
+        site_url="https://queue.example",
+        browser_batches=2,
+        controls_checked=("Approve", "Filter"),
+    )
+    assert deployed.site_url == "https://queue.example"
+    with pytest.raises(ValidationError, match="requires site_name and site_url"):
+        ApplicationBuilderResult(
+            status="deployed",
+            source_path=task.source_path,
+            browser_batches=2,
+        )
+    with pytest.raises(ValidationError, match="requires a blocker"):
+        ApplicationBuilderResult(
+            status="blocked",
+            source_path=task.source_path,
+            browser_batches=0,
+        )
+
+
+async def test_application_builder_qa_gate_refuses_a_fifth_batch(tmp_path: Path) -> None:
+    ctx = _context(FakeSandbox(), tmp_path)
+    turn = ctx.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME})
+    store = FakeHookStore()
+    hook = HookContext(
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+        payload=PreToolUse(
+            tool_name=APPLICATION_BUILDER_QA_TOOL,
+            tool_input=JsReplInput(
+                code="console.log('checked')",
+                reset=False,
+                user_description="Checking the application",
+            ),
+        ),
+        turn=turn,
+    )
+
+    for _ in range(APPLICATION_BUILDER_QA_LIMIT):
+        modified = await limit_application_builder_qa(hook)
+        assert isinstance(modified, ModifyInput)
+        assert modified.tool_input.reset is True
+    refused = await limit_application_builder_qa(hook)
+
+    assert isinstance(refused, Deny)
+    assert refused.reason == APPLICATION_BUILDER_QA_LIMIT_REASON
+
+
+async def test_application_builder_deployment_requires_two_successful_qa_batches(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(FakeSandbox(), tmp_path)
+    turn = ctx.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME})
+    store = FakeHookStore()
+    ext = cast(ExtensionContext, FakeHookExt(store))
+    deployment = HookContext(
+        ext=ext,
+        payload=PreToolUse(
+            tool_name="deploy_website",
+            tool_input=ReadApplicationSourceInput(user_description=TOOL_NARRATION),
+        ),
+        turn=turn,
+    )
+    completed = HookContext(
+        ext=ext,
+        payload=PostToolUse(
+            tool_name=APPLICATION_BUILDER_QA_TOOL,
+            tool_input=ReadApplicationSourceInput(user_description=TOOL_NARRATION),
+            output="checked",
+        ),
+        turn=turn,
+    )
+
+    refused = await require_application_builder_qa(deployment)
+    assert isinstance(refused, Deny)
+    assert refused.reason == APPLICATION_BUILDER_DEPLOY_GUARD_REASON
+    await record_application_builder_qa(completed)
+    assert isinstance(await require_application_builder_qa(deployment), Deny)
+    await record_application_builder_qa(completed)
+    assert await require_application_builder_qa(deployment) is None
+
+
+async def test_application_builder_limits_consecutive_source_reads_after_audit(
+    tmp_path: Path,
+) -> None:
+    ctx = _context(FakeSandbox(), tmp_path)
+    turn = ctx.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME})
+    store = FakeHookStore()
+    ext = cast(ExtensionContext, FakeHookExt(store))
+
+    def source_hook(tool_name: str) -> HookContext:
+        return HookContext(
+            ext=ext,
+            payload=PreToolUse(
+                tool_name=tool_name,
+                tool_input=ReadApplicationSourceInput(user_description=TOOL_NARRATION),
+            ),
+            turn=turn,
+        )
+
+    read = source_hook(APPLICATION_BUILDER_READ_TOOL)
+    edit = source_hook(APPLICATION_BUILDER_EDIT_TOOL)
+    assert await limit_application_builder_repair_reads(read) is None
+    await store.put(APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=turn.id), 1)
+
+    for _ in range(APPLICATION_BUILDER_REPAIR_READ_LIMIT):
+        assert await limit_application_builder_repair_reads(read) is None
+    refused = await limit_application_builder_repair_reads(read)
+    assert isinstance(refused, Deny)
+    assert refused.reason == APPLICATION_BUILDER_REPAIR_READ_REASON
+
+    assert await limit_application_builder_repair_reads(edit) is None
+    for _ in range(APPLICATION_BUILDER_REPAIR_READ_LIMIT):
+        assert await limit_application_builder_repair_reads(read) is None
+
+
+async def test_application_builder_write_tool_writes_only_the_contract_source(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    source = (
+        'import { mountApp } from "ufo/kit";\nmountApp(document.getElementById("root")!, '
+        "() => <main />);"
+    )
+    result = await write_application_source(
+        ctx,
+        WriteApplicationSourceInput(user_description=TOOL_NARRATION, content=source),
+    )
+
+    assert sandbox.writes["/workspace/application/app.tsx"] == source.encode()
+    assert [
+        content for path, content in sandbox.writes.items() if path.endswith(".candidate.tsx")
+    ] == [source.encode()]
+    assert [content for path, content in sandbox.writes.items() if path.endswith(".accepted")] == [
+        sha256(source.encode()).hexdigest().encode()
+    ]
+    assert len(sandbox.shells) == 2
+    assert all(script == 'cd "$1" && vite build' for script, _, _ in sandbox.shells)
+    assert json.loads(result.content[0].text) == {
+        "path": "/workspace/application/app.tsx",
+        "size_bytes": len(source.encode()),
+    }
+
+
+async def test_application_builder_write_tool_rejects_another_module(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="may import only from ufo/kit"):
+        await write_application_source(
+            ctx,
+            WriteApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                content=(
+                    'import React from "react";\n'
+                    'import { mountApp } from "ufo/kit";\n'
+                    'mountApp(document.getElementById("root")!, () => <main />);'
+                ),
+            ),
+        )
+
+    assert "/workspace/application/app.tsx" not in sandbox.writes
+    assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
+
+
+async def test_application_builder_write_tool_allows_apostrophes_in_jsx_text(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+    source = (
+        'import { mountApp } from "ufo/kit";\n'
+        "function App() { return <main>What's next</main>; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+
+    await write_application_source(
+        ctx,
+        WriteApplicationSourceInput(user_description=TOOL_NARRATION, content=source),
+    )
+
+    assert sandbox.writes["/workspace/application/app.tsx"] == source.encode()
+
+
+async def test_application_builder_write_tool_rejects_the_old_runtime_global(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="import from ufo/kit instead of using UfoAppKit"):
+        await write_application_source(
+            ctx,
+            WriteApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                content=(
+                    'import { mountApp } from "ufo/kit";\n'
+                    "const oldRuntime = UfoAppKit;\n"
+                    'mountApp(document.getElementById("root")!, () => <main />);'
+                ),
+            ),
+        )
+
+    assert "/workspace/application/app.tsx" not in sandbox.writes
+    assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
+
+
+async def test_application_builder_write_tool_rejects_an_invalid_mount(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="root element and a render callback"):
+        await write_application_source(
+            ctx,
+            WriteApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                content='import { mountApp } from "ufo/kit";\nmountApp(App);',
+            ),
+        )
+
+    assert "/workspace/application/app.tsx" not in sandbox.writes
+    assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
+
+
+async def test_application_builder_write_tool_rejects_a_second_initial_build(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox(claim=ExecResult(stdout="", stderr="", exit_code=17))
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"initial app\.tsx candidate already exists"):
+        await write_application_source(
+            ctx,
+            WriteApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                content=(
+                    'import { mountApp } from "ufo/kit";\n'
+                    'mountApp(document.getElementById("root")!, () => <main />);'
+                ),
+            ),
+        )
+
+    assert "/workspace/application/app.tsx" not in sandbox.writes
+    assert sandbox.writes == {}
+
+
+async def test_application_builder_read_tool_returns_bounded_repair_excerpts(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Repair the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    source = "\n".join(
+        (
+            'import { mountApp } from "ufo/kit";',
+            *(f"const line{number} = {number};" for number in range(300)),
+            'function App() { return <main className="status-copy" />; }',
+            'mountApp(document.getElementById("root")!, () => <App />);',
+        )
+    )
+    sandbox = FakeSandbox(
+        claim=ExecResult(stdout=source, stderr="", exit_code=0),
+    )
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    result = await read_application_source(
+        ctx,
+        ReadApplicationSourceInput(
+            user_description=TOOL_NARRATION,
+            terms=("status-copy", "mountApp"),
+        ),
+    )
+
+    assert "status-copy" in result.content[0].text
+    assert "mountApp(document.getElementById" in result.content[0].text
+    assert "SOURCE LINES " in result.content[0].text
+    assert "END SOURCE" in result.content[0].text
+    assert "const line150" not in result.content[0].text
+    assert len(result.content[0].text) <= 5_000
+
+
+async def test_application_builder_read_tool_balances_repeated_and_distinct_terms(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Repair the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    source = "\n".join(
+        (
+            'import { mountApp } from "ufo/kit";',
+            *(f"const repeated{number} = 'color-mark-soft';" for number in range(80)),
+            "const badge = 'Prepared';",
+            *(f"const middle{number} = {number};" for number in range(80)),
+            "const load = 'open issues now';",
+            'mountApp(document.getElementById("root")!, () => <App />);',
+        )
+    )
+    sandbox = FakeSandbox(claim=ExecResult(stdout=source, stderr="", exit_code=0))
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    result = await read_application_source(
+        ctx,
+        ReadApplicationSourceInput(
+            user_description=TOOL_NARRATION,
+            terms=("color-mark-soft", "Prepared", "open issues now"),
+        ),
+    )
+
+    text = result.content[0].text
+    assert 'matches for "color-mark-soft": 80' in text
+    assert 'matches for "Prepared": 1' in text
+    assert 'matches for "open issues now": 1' in text
+    assert "const repeated40 = 'color-mark-soft';" in text
+    assert "const repeated79 = 'color-mark-soft';" in text
+    assert "const badge = 'Prepared';" in text
+    assert "const load = 'open issues now';" in text
+    assert len(text) <= 5_000
+
+
+async def test_application_builder_read_tool_allows_another_bounded_read(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Repair the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    source = (
+        'import { mountApp } from "ufo/kit";\n'
+        'mountApp(document.getElementById("root")!, () => <main>Old title</main>);'
+    )
+    sandbox = FakeSandbox(scripted_programs={APPLICATION_SOURCE_READ: ExecResult(source, "", 0)})
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    first = await read_application_source(
+        ctx,
+        ReadApplicationSourceInput(
+            user_description=TOOL_NARRATION,
+            terms=("Old title",),
+        ),
+    )
+    second = await read_application_source(
+        ctx,
+        ReadApplicationSourceInput(
+            user_description=TOOL_NARRATION,
+            terms=("mountApp",),
+        ),
+    )
+
+    assert "Old title" in first.content[0].text
+    assert "mountApp" in second.content[0].text
+
+
+async def test_application_builder_edit_tool_applies_one_bounded_repair(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Repair the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    source = 'import { mountApp } from "ufo/kit";\nmountApp(App);'
+    replacement = 'mountApp(document.getElementById("root")!, () => <App />);'
+    corrected = f'import {{ mountApp }} from "ufo/kit";\n{replacement}'
+    sandbox = FakeSandbox(claim=ExecResult(stdout=source, stderr="", exit_code=0))
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    result = await edit_application_source(
+        ctx,
+        EditApplicationSourceInput(
+            user_description=TOOL_NARRATION,
+            edits=(
+                ApplicationSourceEdit(
+                    old_text="mountApp(App);",
+                    new_text=replacement,
+                ),
+            ),
+        ),
+    )
+
+    assert sandbox.writes["/workspace/application/app.tsx"] == corrected.encode()
+    assert [
+        content for path, content in sandbox.writes.items() if path.endswith(".candidate.tsx")
+    ] == [corrected.encode()]
+    assert [content for path, content in sandbox.writes.items() if path.endswith(".accepted")] == [
+        sha256(corrected.encode()).hexdigest().encode()
+    ]
+    assert json.loads(result.content[0].text) == {
+        "path": "/workspace/application/app.tsx",
+        "replacements": 1,
+        "size_bytes": len(corrected.encode()),
+    }
+
+
+async def test_application_builder_edit_tool_rejects_structural_damage(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Repair the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    source = (
+        'import { mountApp } from "ufo/kit";\n'
+        "function App() { return <main><section>Old</section></main>; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+    sandbox = FakeSandbox(
+        claim=ExecResult(stdout=source, stderr="", exit_code=0),
+        shell=ExecResult(stdout="", stderr="Unexpected closing tag", exit_code=1),
+    )
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="does not compile: Unexpected closing tag"):
+        await edit_application_source(
+            ctx,
+            EditApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                edits=(
+                    ApplicationSourceEdit(
+                        old_text="Old",
+                        new_text="Old</section>",
+                    ),
+                ),
+            ),
+        )
+
+    assert "/workspace/application/app.tsx" not in sandbox.writes
+    assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
+
+
+async def test_application_builder_edit_tool_rejects_ambiguous_old_text(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Repair the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    source = (
+        'import { mountApp } from "ufo/kit";\n'
+        "function App() { return <main>Old Old</main>; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+    sandbox = FakeSandbox(claim=ExecResult(stdout=source, stderr="", exit_code=0))
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="old_text must occur exactly once"):
+        await edit_application_source(
+            ctx,
+            EditApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                edits=(ApplicationSourceEdit(old_text="Old", new_text="New"),),
+            ),
+        )
+
+    assert sandbox.writes == {}
+
+
+async def test_application_builder_rejects_source_the_product_compiler_rejects(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox(shell=ExecResult("", "Unexpected token at 12:4", 1))
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Candidate retained"):
+        await write_application_source(
+            ctx,
+            WriteApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                content=(
+                    'import { mountApp } from "ufo/kit";\n'
+                    'mountApp(document.getElementById("root")!, () => <main />);'
+                ),
+            ),
+        )
+
+    assert "/workspace/application/app.tsx" not in sandbox.writes
+    assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
+    assert sandbox.programs[0][0] == APPLICATION_SOURCE_CLAIM
+
+
+async def test_application_builder_read_tool_rejects_an_initial_build(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox(claim=ExecResult("", "", 17))
+    ctx = _context(sandbox, tmp_path)
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="write_application_source must complete"):
+        await read_application_source(
+            ctx, ReadApplicationSourceInput(user_description=TOOL_NARRATION)
+        )
+
+    assert len(sandbox.programs) == 1
+
+
 async def test_website_building_pulls_the_house_style_and_scopes_it_to_our_own_pages() -> None:
     """A page of ours is built in the house tokens with no second load, so the tokens mount with the
     skill and the art-direction ladder states the exception before its first rung. A site with a
@@ -326,24 +2083,29 @@ async def test_website_building_pulls_the_house_style_and_scopes_it_to_our_own_p
     assert "Member-supplied design direction wins" in instructions
 
 
-def test_ufo_application_homepages_bind_only_after_browser_proof_and_deploy() -> None:
+def test_ufo_application_homepages_use_one_end_to_end_worker() -> None:
     instructions = (
         skill_registry((sites_manifest.manifest(),)).named("website-building").instructions
     )
     application = instructions.partition("## ufo application homepage")[2].partition(
         "## Build and verify"
     )[0]
+    application_text = " ".join(application.split())
 
     assert application
-    assert APPLICATION_QA_GUIDANCE in application
     assert PLAYWRIGHT_GUIDANCE not in application
-    assert "set_homepage" in application
-    assert application.index("browser QA") < application.index("deploy_website")
-    assert "each requested fact" in application
-    assert "initial and changed state" in application
-    assert "Do not put the contract in the page or a separate file" in application
-    assert application.index("deploy_website") < application.index("set_homepage")
-    assert "visible state" in application
+    assert "checks decide acceptance and bind the homepage" in application_text
+    assert "build_ufo_application(" not in application
+    assert "user_description" not in application
+    assert "worker receives the fixed scaffold and source paths" in application_text
+    assert "parent does not inspect connector data, source, or browser output" in application_text
+    assert "does not repair, deploy, verify, or delegate again" in application_text
+    assert "Deterministic product checks decide acceptance" in application_text
+    assert "no stable worker or harness rule" in application
+    assert "repair_diagnostics" not in application
+    assert "source_facts" not in application
+    assert "requirements" not in application
+    assert "Do not call `build_website`" in application
 
 
 def test_interactive_internal_homepages_route_to_the_application_workflow() -> None:
@@ -364,7 +2126,11 @@ def test_interactive_internal_homepages_route_to_the_application_workflow() -> N
 def test_ufo_application_qa_is_progressive_and_batches_full_proof() -> None:
     guidance = _application_qa_guidance()
 
-    assert 'start_server(project_path="/workspace/my-project", port=3000)' in guidance
+    assert 'start_server(project_path="/workspace/ufo-app", port=3000)' in guidance
+    assert "open the returned URL at `/preview.html`" in guidance
+    assert 'page.frame({ name: "ufo-app" })' in guidance
+    assert "Run locators and evaluations on that" in guidance
+    assert "frame. The top page is only the product preview shell" in guidance
     assert "Call 1 opens the page and completes every functional check" in guidance
     assert "Call 2 completes every visual check" in guidance
     assert "Call `emitImage` three times" in guidance
@@ -576,6 +2342,56 @@ async def test_start_server_serves_a_static_folder_without_a_command(tmp_path: P
     assert "nohup env PORT=5173 python3 -m http.server 5173 --bind 0.0.0.0" in launch
 
 
+async def test_application_builder_start_server_returns_the_framed_preview(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
+    )
+
+    result = await start_server(
+        ctx,
+        StartServerInput(
+            user_description=TOOL_NARRATION,
+            project_path="/workspace/ufo-app",
+            port=5173,
+        ),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["url"] == "http://localhost:5173/preview.html"
+
+
+async def test_application_builder_start_server_rejects_an_alternate_server(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
+    )
+
+    with pytest.raises(RuntimeError, match="project_path must be /workspace/ufo-app"):
+        await start_server(
+            ctx,
+            StartServerInput(
+                user_description=TOOL_NARRATION,
+                project_path="/workspace/ufo-app/dist",
+            ),
+        )
+    with pytest.raises(RuntimeError, match="does not accept a command"):
+        await start_server(
+            ctx,
+            StartServerInput(
+                user_description=TOOL_NARRATION,
+                command="npm run dev",
+                project_path="/workspace/ufo-app",
+            ),
+        )
+
+    assert sandbox.commands == []
+
+
 async def test_the_failure_log_tail_states_its_own_budget(tmp_path: Path) -> None:
     """The tail runs after a start that already ended, and reads twenty lines out of one file: it
     must not sit on the sandbox's 120s default, which is a budget for work rather than for a failure
@@ -672,7 +2488,8 @@ async def test_a_server_log_defaults_into_the_engines_own_offload_dir(tmp_path: 
     assert payload["log"] == "/workspace/.tool-output/server-5173.log"
     assert payload["project_path"] == "/workspace/site"
     assert sandbox.programs == [
-        (LOG_CLEAR_PROG, ("/workspace/.tool-output/server-5173.log", "/workspace"))
+        (LOG_CLEAR_PROG, ("/workspace/.tool-output/server-5173.log", "/workspace")),
+        (PORT_STOP_PROG, ("5173",)),
     ]
     launch = next(
         command

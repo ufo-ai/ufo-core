@@ -208,11 +208,13 @@ class CapturingModel:
     seen: list[tuple[Message, ...]] = field(default_factory=list)
     seen_system: list[str] = field(default_factory=list)
     seen_conversation_cache_ttl: list[ConversationCacheTtl] = field(default_factory=list)
+    seen_tools: list[tuple[ToolSchema, ...]] = field(default_factory=list)
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         self.seen.append(request.messages)
         self.seen_system.append(request.system)
         self.seen_conversation_cache_ttl.append(request.conversation_cache_ttl)
+        self.seen_tools.append(request.tools)
         yield TextDelta(text="ok")
         yield Usage(input_tokens=1, output_tokens=1)
 
@@ -1223,6 +1225,68 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
         assert result.is_error
     assert len(seen) == 3
     assert len(authorized) == 3
+
+
+async def test_speakerless_turn_does_not_offer_requested_by(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None, acts_on_behalf=True)
+    model = CapturingModel()
+    engine = _engine(turn, model, tmp_path)
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert len(model.seen_tools) == 1
+    assert all(
+        "requested_by" not in schema.input_schema["properties"] for schema in model.seen_tools[0]
+    )
+
+
+async def test_profile_tool_keeps_inherited_authority_when_it_sends_requested_by(
+    db: None, tmp_path: Path
+) -> None:
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    turn = await _seed_turn("queued", None, acts_on_behalf=True)
+    turn = turn.model_copy(update={"subagent_profile": "application_builder"})
+    seen: list[tuple[UUID | None, UUID | None, dict[str, object]]] = []
+
+    async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        seen.append((ctx.speaker_member_id, ctx.acting_member_id, args.model_dump()))
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="profile_probe",
+                    description="d",
+                    input_model=StrictInput,
+                    handler=capture,
+                    profile_only=True,
+                ),
+            )
+        ),
+    )
+    context = replace(
+        _dispatch_context(engine),
+        on_behalf_of_member_id=turn.on_behalf_of_member_id,
+    )
+
+    result = await _dispatch(
+        engine,
+        context,
+        ToolUseBlock(
+            id="profile-call",
+            name="profile_probe",
+            input={"requested_by": str(uuid4())},
+        ),
+        {},
+    )
+
+    assert not result.is_error
+    assert seen == [(None, turn.on_behalf_of_member_id, {})]
 
 
 async def _queue_arrival(

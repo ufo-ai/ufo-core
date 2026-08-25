@@ -17,6 +17,8 @@ import {
 
 import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 
+import { ApplicationAction } from "@/apps/action";
+import type { ApplicationActionRecord } from "@/apps/action";
 import { AppConversations } from "@/apps/bands";
 import {
   compose,
@@ -142,6 +144,7 @@ export type { JSX } from "react/jsx-runtime";
 
 export type {
   Agent,
+  ApplicationActionRecord,
   AppInit,
   ChatRow,
   Conversation,
@@ -172,6 +175,7 @@ export {
   AppConversations,
   compose,
   React,
+  ApplicationAction,
   useCallback,
   useEffect,
   useId,

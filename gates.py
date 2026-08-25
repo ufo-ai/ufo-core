@@ -239,6 +239,9 @@ DEFERRED_INGRESS: dict[tuple[Path, str], str] = {
     (Path(EXTENSIONS_ROOT) / "web" / "ufo_ext_web" / "surface.py", "load_apps"): (
         "the built app pages are deploy input, read whole at boot"
     ),
+    (Path(EXTENSIONS_ROOT) / "sites" / "ufo_ext_sites" / "tools.py", "PORT_STOP_PROG"): (
+        "the fixed Linux proc tables identify the process listening on a validated integer port"
+    ),
     (
         CORE_SRC / "ext" / "loader.py",
         "extension_digest",

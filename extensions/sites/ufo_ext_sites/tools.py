@@ -47,12 +47,28 @@ unless the same turn deployed the site, the seed's deploy-and-bind shape."""
 
 import json
 import shlex
+from pathlib import Path
+from typing import Never
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
 from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, serve_port, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
+from ufo_ext_sites.application_audit import (
+    APPLICATION_AUDIT_ATTEMPT_KEY,
+    APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    ApplicationAuditContract,
+    ApplicationAuditFeedback,
+    ApplicationAuditIssue,
+    ApplicationAuditReport,
+    audit_application,
+)
+from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_NAME,
+    APPLICATION_BUILDER_REDEPLOY_KEY,
+    APPLICATION_SCAFFOLD_PATH,
+)
 from ufo_ext_sites.objects import effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page
 from ufo_ext_sites.source import (
@@ -82,6 +98,88 @@ PUBLISH_WEBSITE_TOOL = "publish_website"
 SET_HOMEPAGE_TOOL = "set_homepage"
 
 START_SERVER_PORT = 5000
+APPLICATION_AUDIT_PORT_FLOOR = 40000
+APPLICATION_AUDIT_PORT_SPAN = 20000
+APPLICATION_AUDIT_TIMEOUT_SECONDS = 120
+APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS = 15
+APPLICATION_AUDIT_REPORT_MAX_BYTES = 1024 * 1024
+APPLICATION_AUDIT_MAX_ATTEMPTS = 2
+APPLICATION_AUDIT_SCRIPT = (
+    Path(__file__).parent / "scripts" / "audit_application.cjs"
+).read_bytes()
+APPLICATION_AUDIT_REPORT_READ = """from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+data = path.read_bytes()
+if len(data) > int(sys.argv[2]):
+    raise SystemExit("application audit report is too large")
+sys.stdout.buffer.write(data)"""
+PORT_STOP_PROG = """import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+port = int(sys.argv[1])
+inodes = set()
+tables = tuple(
+    table for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")) if table.exists()
+)
+for table in tables:
+    for line in table.read_text().splitlines()[1:]:
+        fields = line.split()
+        if int(fields[1].rsplit(":", 1)[1], 16) == port and fields[3] == "0A":
+            inodes.add(fields[9])
+pids = set()
+if tables:
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit() or int(process.name) == os.getpid():
+            continue
+        try:
+            for descriptor in (process / "fd").iterdir():
+                target = os.readlink(descriptor)
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    pids.add(int(process.name))
+                    break
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            pass
+else:
+    try:
+        listed = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        listed = None
+    if listed is not None:
+        pids.update(int(line) for line in listed.stdout.splitlines() if line.isdigit())
+for pid in pids:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+deadline = time.monotonic() + 2
+while pids and time.monotonic() < deadline:
+    alive = set()
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        alive.add(pid)
+    pids = alive
+    time.sleep(0.05)
+for pid in pids:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass"""
 
 
 READINESS_TIMEOUT_SECONDS = 30
@@ -344,14 +442,19 @@ async def _free_log(ctx: ToolContext, log_path: str) -> None:
         raise RuntimeError(result.stderr.strip() or f"cannot clear {log_path}")
 
 
+async def _stop_server(ctx: ToolContext, port: int) -> None:
+    result = await ctx.sandbox.python(
+        PORT_STOP_PROG, str(port), timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS
+    )
+    if result.exit_code != 0:
+        raise RuntimeError(result.stderr.strip() or f"cannot free port {port}")
+
+
 async def _serve(
     ctx: ToolContext, command: str, project: str, port: int, log_path: str
 ) -> dict[str, object]:
     await _free_log(ctx, log_path)
-    port_cleanup = (
-        f"(fuser -k {port}/tcp 2>/dev/null; "
-        f"lsof -ti tcp:{port} 2>/dev/null | xargs -r kill 2>/dev/null) || true; sleep 1"
-    )
+    await _stop_server(ctx, port)
     readiness_probe = (
         "python3 - <<'PY'\n"
         "import socket\n"
@@ -374,7 +477,7 @@ async def _serve(
         "PY"
     )
     result = await ctx.sandbox.bash(
-        f"cd {shlex.quote(project)} && {port_cleanup}\n"
+        f"cd {shlex.quote(project)}\n"
         f"set -C\n"
         f"nohup env PORT={port} {command} >{shlex.quote(log_path)} 2>&1 &\n"
         f"set +C\n"
@@ -600,13 +703,146 @@ async def website(ctx: ToolContext, args: WebsiteInput) -> ToolResult:
 async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
     port = args.port or START_SERVER_PORT
     project = workspace_path(args.project_path)
+    application_builder = ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME
+    if application_builder and project != APPLICATION_SCAFFOLD_PATH:
+        raise RuntimeError(
+            f"ufo application preview project_path must be {APPLICATION_SCAFFOLD_PATH}, "
+            f"not {project}"
+        )
+    if application_builder and args.command is not None:
+        raise RuntimeError("ufo application preview does not accept a command")
     log_path = workspace_path(args.log_file or SERVER_LOG.format(port=port))
     command = args.command or f"python3 -m http.server {port} --bind 0.0.0.0"
     served = await _serve(ctx, command, project, port, log_path)
+    if application_builder:
+        served["url"] = f"{served['url']}/preview.html"
     return _json_result({**served, "project_path": project})
 
 
+async def _application_audit_attempts(ctx: ToolContext) -> int:
+    if ctx.ext is None:
+        raise RuntimeError("the application audit dispatched without its extension context")
+    stored = await ctx.ext.store.get(APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id))
+    if stored is None:
+        return 0
+    if type(stored) is not int:
+        raise RuntimeError("application audit attempt count is not an integer")
+    return stored
+
+
+async def _return_application_audit_feedback(
+    ctx: ToolContext, issues: tuple[ApplicationAuditIssue, ...], attempts: int
+) -> Never:
+    if ctx.ext is None:
+        raise RuntimeError("the application audit dispatched without its extension context")
+    used = attempts + 1
+    await ctx.ext.store.put(APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id), used)
+    feedback = ApplicationAuditFeedback(
+        attempt=used,
+        attempts_remaining=APPLICATION_AUDIT_MAX_ATTEMPTS - used,
+        issues=issues,
+    )
+    raise RuntimeError(f"Application audit requires repair: {feedback.model_dump_json()}")
+
+
+async def _audit_builder_application(ctx: ToolContext, project: str) -> None:
+    attempts = await _application_audit_attempts(ctx)
+    if attempts >= APPLICATION_AUDIT_MAX_ATTEMPTS:
+        raise RuntimeError("Application audit stopped after two failed deployment attempts.")
+    root = f"{TOOL_OUTPUT_DIR}/application-audit/{ctx.turn.id}"
+    script_path = f"{root}.cjs"
+    report_path = f"{root}.json"
+    light_path = f"{root}-light.png"
+    dark_path = f"{root}-dark.png"
+    interactive_path = f"{root}-interactive.html"
+    static_path = f"{root}-static.html"
+    await ctx.sandbox.write_file(script_path, APPLICATION_AUDIT_SCRIPT)
+    port = (
+        APPLICATION_AUDIT_PORT_FLOOR + ctx.sandbox.conversation_id.int % APPLICATION_AUDIT_PORT_SPAN
+    )
+    command = f"python3 -m http.server {port} --bind 0.0.0.0"
+    await _serve(ctx, command, project, port, f"{root}.log")
+    try:
+        run = await ctx.sandbox.sh(
+            'node "$1" "$2" "$3" "$4" "$5" "$6" "$7"',
+            script_path,
+            f"http://localhost:{port}/preview.html",
+            report_path,
+            light_path,
+            dark_path,
+            interactive_path,
+            static_path,
+            timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
+        )
+        if run.exit_code != 0:
+            detail = (run.stderr or run.stdout or "audit returned no error").strip()[:400]
+            await _return_application_audit_feedback(
+                ctx,
+                (
+                    ApplicationAuditIssue(
+                        code="audit_run",
+                        message=f"Run the browser audit successfully: {detail}",
+                    ),
+                ),
+                attempts,
+            )
+        report_read = await ctx.sandbox.python(
+            APPLICATION_AUDIT_REPORT_READ,
+            report_path,
+            str(APPLICATION_AUDIT_REPORT_MAX_BYTES),
+        )
+        if report_read.exit_code != 0:
+            detail = (report_read.stderr or report_read.stdout or "audit report is absent").strip()[
+                :400
+            ]
+            await _return_application_audit_feedback(
+                ctx,
+                (
+                    ApplicationAuditIssue(
+                        code="audit_run",
+                        message=f"Produce a readable browser audit report: {detail}",
+                    ),
+                ),
+                attempts,
+            )
+        try:
+            report = ApplicationAuditReport.model_validate_json(report_read.stdout)
+            if ctx.ext is None:
+                raise RuntimeError("the application audit dispatched without its extension context")
+            if ctx.turn.parent_turn_id is None:
+                raise RuntimeError("the application audit dispatched without its parent turn")
+            stored_contract = await ctx.ext.store.get(
+                APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=ctx.turn.parent_turn_id)
+            )
+            contract = ApplicationAuditContract.model_validate(stored_contract or {})
+        except ValueError as error:
+            await _return_application_audit_feedback(
+                ctx,
+                (
+                    ApplicationAuditIssue(
+                        code="audit_run",
+                        message=f"Produce a valid browser audit report: {str(error)[:400]}",
+                    ),
+                ),
+                attempts,
+            )
+        verdict = audit_application(report, contract)
+        if not verdict.passed:
+            await _return_application_audit_feedback(ctx, verdict.issues, attempts)
+    finally:
+        await _stop_server(ctx, port)
+
+
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
+    source_project = workspace_path(args.project_path)
+    if (
+        ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME
+        and source_project != APPLICATION_SCAFFOLD_PATH
+    ):
+        raise RuntimeError(
+            f"ufo application deploy project_path must be {APPLICATION_SCAFFOLD_PATH}, "
+            f"not {source_project}"
+        )
     conversation = ctx.sandbox.conversation_id
     port = serve_port(conversation)
     bound = await _agent_homepage(ctx)
@@ -619,7 +855,9 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
     ):
         return await _redeploy_homepage(ctx, args, bound, port)
     name, _displaced = await _refuse_before_serving(ctx, args.site_name, port, args.visibility)
-    project, listing = await _served_directory(ctx, workspace_path(args.project_path))
+    project, listing = await _served_directory(ctx, source_project)
+    if ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME:
+        await _audit_builder_application(ctx, source_project)
     manifest = await _promote_source(ctx, project, conversation, name, listing)
     command = f"python3 -m http.server {port} --bind 0.0.0.0"
     served = await _serve(ctx, command, project, port, DEPLOY_LOG.format(port=port))
@@ -683,7 +921,19 @@ async def _redeploy_homepage(
     of this conversation displaced from the scratch port is unhosted outright once the serve has
     killed its server: its row must not keep answering a port that now serves the homepage
     build."""
-    if ctx.speaker_member_id is None:
+    requested_by_speaker = ctx.speaker_member_id is not None
+    if (
+        not requested_by_speaker
+        and ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME
+        and ctx.turn.parent_turn_id is not None
+        and ctx.acting_member_id is not None
+        and ctx.ext is not None
+    ):
+        requester = await ctx.ext.store.get(
+            APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=ctx.turn.parent_turn_id)
+        )
+        requested_by_speaker = requester == str(ctx.acting_member_id)
+    if not requested_by_speaker:
         raise RuntimeError(HOMEPAGE_REDEPLOY_NEEDS_A_SPEAKER)
     if args.visibility is not None:
         raise ValueError(HOMEPAGE_KEEPS_THE_AGENTS_VISIBILITY)
@@ -698,7 +948,10 @@ async def _redeploy_homepage(
         None,
         True,
     )
-    project, listing = await _served_directory(ctx, workspace_path(args.project_path))
+    source_project = workspace_path(args.project_path)
+    project, listing = await _served_directory(ctx, source_project)
+    if ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME:
+        await _audit_builder_application(ctx, source_project)
     manifest = await _promote_source(ctx, project, bound.conversation_id, bound.name, listing)
     command = f"python3 -m http.server {scratch_port} --bind 0.0.0.0"
     served = await _serve(ctx, command, project, scratch_port, DEPLOY_LOG.format(port=scratch_port))

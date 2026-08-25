@@ -21,6 +21,7 @@ const KIT = new URL("./sdk/kit.js", import.meta.url).pathname;
 const SOURCE = ["app.tsx", "index.html"];
 
 export default {
+  base: "./",
   esbuild: { jsx: "automatic", jsxImportSource: "ufo/kit", jsxDev: false },
   resolve: {
     alias: [

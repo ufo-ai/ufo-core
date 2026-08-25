@@ -155,6 +155,7 @@ PINNED_PROFILE = SubagentProfile(
     input_model=RoundTripInput,
     output_model=RoundTripOutput,
     model=PINNED_MODEL,
+    reasoning="high",
 )
 
 FORCED_ECHO = -1
@@ -1766,6 +1767,16 @@ async def test_subagent_runs_at_the_parent_agents_reasoning_effort(surface: Turn
     assert terminal["status"] == "done"
     assert SEEN_REASONING
     assert set(SEEN_REASONING) == {"medium"}
+
+
+async def test_subagent_profile_reasoning_overrides_the_parent_agent(surface: Turns) -> None:
+    seed = await _bootstrap(reasoning="low")
+    SEEN_REASONING.clear()
+    parent = await surface.admit(seed, "spawn-pinned")
+    _, terminal = await surface.consume(seed, parent)
+    assert terminal["status"] == "done"
+    assert SEEN_REASONING.count("high") == 1
+    assert SEEN_REASONING.count("low") >= 1
 
 
 async def test_subagent_exhausting_its_round_budget_does_not_detonate_its_parent(

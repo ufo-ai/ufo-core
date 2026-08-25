@@ -455,6 +455,10 @@ def slack_attributed(
 
 async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
     entry = _registry(ctx).entry(args.source_id)
+    if ctx.connector_read_only:
+        described = await entry.broker.schema(ctx.turn.workspace_id, entry.provider, args.tool_name)
+        if not described.read_only:
+            raise PermissionError
     account_id = await ctx.connector_account(args.source_id, args.account_id)
     arguments = slack_attributed(entry.provider, args.tool_name, args.arguments)
     call = _ConnectorCall(ctx=ctx, entry=entry, slug=args.tool_name)

@@ -23,7 +23,12 @@ from ufo.models.interface import AUTO_MODEL
 from ufo.models.registry import model_registry
 from ufo.o11y import log
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME, MAIN_AGENT_ICON
+from ufo.schema.records import (
+    DEFAULT_AGENT_NAME,
+    DEFAULT_REASONING_EFFORT,
+    MAIN_AGENT_ICON,
+    ReasoningEffort,
+)
 from ufo.seats import create_member
 from ufo.workspace import ws
 
@@ -85,6 +90,7 @@ class Onboarding:
     model: str
     credentials: CredentialStore | None
     manifests: tuple[Manifest, ...]
+    reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
 
     async def run(self) -> Onboarded:
         onboarded = await self.create()
@@ -151,6 +157,7 @@ class Onboarding:
                     icon=MAIN_AGENT_ICON,
                     prompt=DEFAULT_AGENT_PROMPT,
                     model=self.model,
+                    reasoning=self.reasoning,
                     is_main=True,
                     visibility="workspace",
                     created_at=sa.func.now(),

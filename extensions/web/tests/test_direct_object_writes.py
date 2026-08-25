@@ -107,6 +107,7 @@ async def test_object_write_admits_an_object_apply_intent(member) -> None:
     assert intent.tool == "object_apply"
     manifest = json.loads(intent.input["manifest"])
     assert manifest == {"kind": "scheduled_task", "name": "daily", "spec": {"cron": "0 9"}}
+    assert intent.input["user_description"] == ("Apply scheduled_task daily from the application.")
     assert ctx.queue_key == f"intent/{main_id}/{EMAIL}"
     assert ctx.speaker == member_id
 
@@ -143,7 +144,11 @@ async def test_object_remove_admits_an_object_delete_intent(member) -> None:
     assert json.loads(bytes(response.body))["ok"] is True
     intent = ctx.admitted_intent
     assert intent.tool == "object_delete"
-    assert intent.input == {"kind": "scheduled_task", "name": "daily"}
+    assert intent.input == {
+        "kind": "scheduled_task",
+        "name": "daily",
+        "user_description": "Delete scheduled_task daily from the application.",
+    }
 
 
 async def test_the_audit_read_is_admin_only(monkeypatch: pytest.MonkeyPatch) -> None:

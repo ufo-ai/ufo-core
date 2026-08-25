@@ -609,6 +609,7 @@ async def test_schema_rewrites_file_params_to_the_workspace_vocabulary(
     payload = {
         "slug": GITHUB_SLUG,
         "description": TOOL_DESCRIPTION,
+        "tags": ["readOnlyHint"],
         "input_parameters": {
             "type": "object",
             "properties": {
@@ -631,6 +632,7 @@ async def test_schema_rewrites_file_params_to_the_workspace_vocabulary(
         lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handler)),
     )
     described = await ComposioBroker().schema(uuid4(), PROVIDER, GITHUB_SLUG)
+    assert described.read_only is True
     properties = described.input_schema["properties"]
     assert properties["title"] == {"type": "string"}
     assert properties["media"] == {

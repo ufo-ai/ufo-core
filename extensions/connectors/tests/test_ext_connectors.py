@@ -135,6 +135,31 @@ class _AnySlugBroker(sample._SampleBroker):
         return {"slug": slug, "arguments": dict(arguments), "account": account_id}
 
 
+@dataclass(frozen=True)
+class _ReadBoundaryBroker(_AnySlugBroker):
+    read_only: bool = False
+    described: list[str] = field(default_factory=list)
+    executed: list[str] = field(default_factory=list)
+
+    async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool:
+        self.described.append(slug)
+        return BrokerTool(slug=slug, read_only=self.read_only)
+
+    async def execute(
+        self,
+        workspace_id: UUID,
+        provider: str,
+        slug: str,
+        arguments: Mapping[str, object],
+        account_id: str,
+        idempotency_key: str | None,
+    ) -> dict[str, object]:
+        self.executed.append(slug)
+        return await super().execute(
+            workspace_id, provider, slug, arguments, account_id, idempotency_key
+        )
+
+
 def _registry() -> ConnectorRegistry:
     broker = sample._SampleBroker()
     return ConnectorRegistry(
@@ -154,6 +179,7 @@ def _ctx(
     accounts: tuple[str, ...] = (),
     sandbox: SandboxSession | None = None,
     provider: str = sample.CONNECTOR_PROVIDER,
+    connector_read_only: bool = False,
 ) -> ToolContext:
     return ToolContext(
         sandbox=sandbox,
@@ -175,6 +201,7 @@ def _ctx(
         artifact_token_secret="",
         grants=_Grants(accounts, provider),
         connectors=registry,
+        connector_read_only=connector_read_only,
         idempotency_key="t1/call_external_tool/c1",
     )
 
@@ -324,6 +351,61 @@ async def test_call_external_tool_uses_the_only_connected_account() -> None:
         ),
     )
     assert _payload(result)["account"] == "acct-one"
+
+
+async def test_read_only_turn_redescribes_and_executes_a_connector_read() -> None:
+    broker = _ReadBoundaryBroker(read_only=True)
+    registry = ConnectorRegistry(
+        entries={
+            sample.CONNECTOR_PROVIDER: ConnectorEntry(
+                provider=sample.CONNECTOR_PROVIDER,
+                label=sample.CONNECTOR_LABEL,
+                broker=broker,
+            )
+        }
+    )
+
+    result = await call_external_tool(
+        _ctx(registry, accounts=("acct-one",), connector_read_only=True),
+        CallExternalToolInput(
+            user_description=TOOL_NARRATION,
+            tool_name="list_records",
+            source_id=sample.CONNECTOR_PROVIDER,
+            arguments={},
+        ),
+    )
+
+    assert _payload(result)["slug"] == "list_records"
+    assert broker.described == ["list_records"]
+    assert broker.executed == ["list_records"]
+
+
+@pytest.mark.parametrize("slug", ("create_record", "tool_without_metadata"))
+async def test_read_only_turn_refuses_mutating_or_unclassified_connector_tools(slug: str) -> None:
+    broker = _ReadBoundaryBroker(read_only=False)
+    registry = ConnectorRegistry(
+        entries={
+            sample.CONNECTOR_PROVIDER: ConnectorEntry(
+                provider=sample.CONNECTOR_PROVIDER,
+                label=sample.CONNECTOR_LABEL,
+                broker=broker,
+            )
+        }
+    )
+
+    with pytest.raises(PermissionError):
+        await call_external_tool(
+            _ctx(registry, accounts=("acct-one",), connector_read_only=True),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name=slug,
+                source_id=sample.CONNECTOR_PROVIDER,
+                arguments={},
+            ),
+        )
+
+    assert broker.described == [slug]
+    assert broker.executed == []
 
 
 async def test_call_external_tool_requires_a_choice_between_connected_accounts() -> None:

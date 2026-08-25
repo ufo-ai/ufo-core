@@ -57,11 +57,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tomli_w
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from evals.harness.registry import narrowed_tasks
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
+from ufo.schema.records import ReasoningEffort
 
 CONTROL_ARM = "control"
 INGESTION_PREFIX = "memory_ingestion"
@@ -82,12 +83,29 @@ SIGNAL_GAP = 2
 SIGNAL_FLOOR = 3
 
 
+class ArmReplacement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str
+    old: str = Field(min_length=1)
+    new: str
+
+    @model_validator(mode="after")
+    def _changes_one_relative_repo_file(self) -> ArmReplacement:
+        path = Path(self.path)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"replacement path must stay inside the repo: {self.path!r}")
+        if self.old == self.new:
+            raise ValueError("replacement old and new text are identical")
+        return self
+
+
 class ArmSpec(BaseModel):
-    """One variant arm: variant files copied over repo paths in the arm's own worktree."""
+    """One variant arm: variant files or exact replacements applied in its own worktree."""
 
     model_config = ConfigDict(extra="forbid")
     name: str
-    files: dict[str, Path]
+    files: dict[str, Path] = Field(default_factory=dict)
+    replacements: tuple[ArmReplacement, ...] = ()
 
     @field_validator("name")
     @classmethod
@@ -117,6 +135,8 @@ class ExperimentSpec(BaseModel):
     max_stacks: int = 3
     budget_usd: float
     est_usd_per_case: float = 1.20
+    model: str | None = None
+    reasoning: ReasoningEffort | None = None
     template: dict[str, dict[str, str]]
     arm: tuple[ArmSpec, ...]
 
@@ -164,6 +184,7 @@ def load_experiment(path: Path) -> ExperimentSpec:
                 repo_path: (path.parent / variant).resolve()
                 for repo_path, variant in arm.files.items()
             },
+            replacements=arm.replacements,
         )
         for arm in spec.arm
     )
@@ -469,8 +490,8 @@ class Ablation:
     def _archive(self, root: Path, archive: Path, output: str) -> None:
         """Everything the arm produced that has to outlive its worktree: its records, this
         orchestrator's whole view of the stack run, and each stack's own `seed`, `serve`, `egress`
-        and `eval` logs. Written before any verdict is read, because a record that never landed is
-        only explainable from the logs of the stack that owed it."""
+        `eval`, and process-lifecycle logs. Written before any verdict is read, because a record
+        that never landed is only explainable from the logs of the stack that owed it."""
         archive.mkdir(parents=True, exist_ok=True)
         (archive / STACK_LOG).write_text(output)
         for path in (root / RUNS_DIR).glob("*.json"):
@@ -485,11 +506,7 @@ class Ablation:
             self._remove_worktree(root)
         root.parent.mkdir(parents=True, exist_ok=True)
         self._git("worktree", "add", "--detach", str(root), base)
-        for repo_path, variant in arm.files.items():
-            target = root / repo_path
-            if not target.is_file():
-                raise RuntimeError(f"arm {arm.name!r}: {repo_path} is not a file at {base}")
-            shutil.copy(variant, target)
+        self._apply_arm(arm, root)
         self._sync(root)
         binary = root / EGRESS_BINARY
         binary.parent.mkdir(parents=True, exist_ok=True)
@@ -499,6 +516,28 @@ class Ablation:
         config = root / "ablate-template.toml"
         config.write_text(tomli_w.dumps(self.spec.template))
         (root / "ablate-matrix.toml").write_text(tomli_w.dumps(self.matrix(arm, config)))
+
+    def _apply_arm(self, arm: ArmSpec, root: Path) -> None:
+        for repo_path, variant in arm.files.items():
+            target = root / repo_path
+            if not target.is_file():
+                raise RuntimeError(
+                    f"arm {arm.name!r}: {repo_path} is not a file at the selected base"
+                )
+            shutil.copy(variant, target)
+        for replacement in arm.replacements:
+            target = root / replacement.path
+            if not target.is_file():
+                raise RuntimeError(
+                    f"arm {arm.name!r}: {replacement.path} is not a file at the selected base"
+                )
+            source = target.read_text()
+            matches = source.count(replacement.old)
+            if matches != 1:
+                raise RuntimeError(
+                    f"arm {arm.name!r}: {replacement.path} replacement matched {matches} times"
+                )
+            target.write_text(source.replace(replacement.old, replacement.new))
 
     def _carry_build_output(self, root: Path) -> None:
         """Carry the ignored app pages and page SDK into an arm worktree when they exist."""
@@ -538,12 +577,18 @@ class Ablation:
             if self.spec.memory_ingestion is not None
             else {}
         )
+        agent: dict[str, object] = {
+            key: value
+            for key, value in (("model", self.spec.model), ("reasoning", self.spec.reasoning))
+            if value is not None
+        }
         return {
             "run": [
                 {
                     "label": f"{ARM_LABEL_PREFIX}-{arm.name}-{index}",
                     "config": str(config),
                     "args": args,
+                    **agent,
                     **corpus,
                 }
                 for index in range(self.spec.repeats)

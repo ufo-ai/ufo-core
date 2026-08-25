@@ -11,14 +11,15 @@ cannot pass against data it did not seed."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import ClassVar, Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.connectors import (
@@ -31,6 +32,16 @@ from ufo.sdk.connectors import (
 )
 from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.sdk.manifest import ConnectorProvider, Manifest
+from ufo.sdk.objects import (
+    ObjectDetail,
+    ObjectKind,
+    ObjectListQuery,
+    ObjectPage,
+    ObjectRow,
+    VerbNotSupported,
+    object_page,
+)
+from ufo.sdk.tools import ToolContext
 
 NAME = "eval_env"
 VERSION = "0.1.0"
@@ -44,22 +55,25 @@ CODE_PROVIDER = "eval_code_search"
 CODE_LABEL = "Code Search (eval)"
 CODE_HOST = "code.evalenv.test"
 CODE_FIXTURE_PREFIX = "code_search:"
-DRIVE_PROVIDER = "eval_google_drive"
+DRIVE_PROVIDER = "google_drive"
 DRIVE_LABEL = "Google Drive (eval)"
 DRIVE_HOST = "drive.evalenv.test"
 GITHUB_PROVIDER = "eval_github"
 GITHUB_LABEL = "GitHub (eval)"
 GITHUB_HOST = "github.evalenv.test"
-STRIPE_PROVIDER = "eval_stripe"
+STRIPE_PROVIDER = "stripe"
 STRIPE_LABEL = "Stripe (eval)"
 STRIPE_HOST = "stripe.evalenv.test"
-HUBSPOT_PROVIDER = "eval_hubspot"
+HUBSPOT_PROVIDER = "hubspot"
 HUBSPOT_LABEL = "HubSpot (eval)"
 HUBSPOT_HOST = "hubspot.evalenv.test"
-GREENHOUSE_PROVIDER = "eval_greenhouse"
+GREENHOUSE_PROVIDER = "greenhouse"
 GREENHOUSE_LABEL = "Greenhouse (eval)"
 GREENHOUSE_HOST = "greenhouse.evalenv.test"
 APP_FIXTURE_PREFIX = "app_fixture:"
+APP_ACTION_KIND = "eval_app_action"
+APP_ACTION_KEY_PREFIX = "app_action:"
+APP_ACTION_FIXTURE_PREFIX = "app_action_fixture:"
 ACCOUNT_ID = "eval-env-account"
 OWN_ADDRESS = "assistant@evalco.test"
 MAX_LIST_LIMIT = 50
@@ -134,6 +148,24 @@ class SearchCodeArgs(BaseModel):
     query: str = Field(min_length=1, description="Code search query, e.g. 'reserve repo:acme/x'.")
 
 
+class AppActionSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case: Literal["meeting-tasks", "issue-owner", "pr-babysitter"]
+    action: Literal["create_issue", "assign_issue", "set_babysitter"]
+    target: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+
+
+class StoredAppAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    spec: AppActionSpec
+    result: str
+    created_at: datetime
+    updated_at: datetime
+
+
 _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
     EMAIL_PROVIDER: (
         BrokerTool(
@@ -145,6 +177,7 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="list_emails",
             description="List emails in a folder, newest first, optionally filtered.",
             input_schema=ListEmailsArgs.model_json_schema(),
+            read_only=True,
         ),
     ),
     CALENDAR_PROVIDER: (
@@ -157,6 +190,7 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="list_events",
             description="List calendar events in start order, optionally filtered by title.",
             input_schema=ListEventsArgs.model_json_schema(),
+            read_only=True,
         ),
         BrokerTool(
             slug="update_event",
@@ -177,6 +211,7 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
                 "repository record it belongs to."
             ),
             input_schema=SearchCodeArgs.model_json_schema(),
+            read_only=True,
         ),
     ),
     DRIVE_PROVIDER: (
@@ -184,6 +219,7 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="list_documents",
             description="List the connected Drive documents with their text content.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
     ),
     GITHUB_PROVIDER: (
@@ -191,21 +227,25 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="list_issues",
             description="List repository issues with labels, owners, status, and source links.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
         BrokerTool(
             slug="list_pull_requests",
             description="List pull requests with review, check, issue, and merge state.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
         BrokerTool(
             slug="list_members",
             description="List repository members with ownership areas and current load.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
         BrokerTool(
             slug="get_delivery_metrics",
             description="Get pull-request delivery metrics and their reporting window.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
     ),
     STRIPE_PROVIDER: (
@@ -213,16 +253,19 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="list_subscriptions",
             description="List subscriptions with customer, status, amount, and interval.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
         BrokerTool(
             slug="list_invoices",
             description="List invoices with amount, status, customer, and billing date.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
         BrokerTool(
             slug="list_balance_transactions",
             description="List balance transactions with net amount, fee, type, and date.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
     ),
     HUBSPOT_PROVIDER: (
@@ -230,16 +273,19 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="list_companies",
             description="List customer companies with owner, lifecycle stage, and activity.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
         BrokerTool(
             slug="list_deals",
             description="List customer deals with amount, stage, close date, and company.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
         BrokerTool(
             slug="list_tickets",
             description="List customer tickets with priority, state, age, and company.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
     ),
     GREENHOUSE_PROVIDER: (
@@ -247,11 +293,13 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             slug="list_candidates",
             description="List candidates with role, stage, interviews, and source.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
         BrokerTool(
             slug="list_scorecards",
             description="List submitted interview scorecards with ratings and evidence.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
         ),
     ),
 }
@@ -528,6 +576,173 @@ class _EvalEnvOAuth:
         return OAuthAccount(account_id=ACCOUNT_ID)
 
 
+@dataclass(frozen=True)
+class AppActionStore:
+    kind_name: ClassVar[str] = APP_ACTION_KIND
+
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
+        entries = await self._ext(ctx).store.list(APP_ACTION_KEY_PREFIX)
+        rows = tuple(
+            ObjectRow(
+                name=key.removeprefix(APP_ACTION_KEY_PREFIX),
+                summary=stored.result,
+                fields={
+                    "state": "applied",
+                    "case": stored.spec.case,
+                    "action": stored.spec.action,
+                    "target": stored.spec.target,
+                    "value": stored.spec.value,
+                    "result": stored.result,
+                },
+            )
+            for key, value in entries
+            if (stored := StoredAppAction.model_validate(value))
+        )
+        return object_page(rows, query)
+
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[AppActionSpec] | None:
+        stored = await self._stored(ctx, name)
+        if stored is None:
+            return None
+        return ObjectDetail(
+            spec=stored.spec,
+            created_at=stored.created_at,
+            updated_at=stored.updated_at,
+        )
+
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
+        stored = await self._stored(ctx, name)
+        if stored is None:
+            return None
+        return {"state": "applied", "result": stored.result}
+
+    async def apply(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: AppActionSpec,
+        old: AppActionSpec | None,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
+        stored = await self._stored(ctx, name)
+        if stored is not None:
+            if stored.spec != spec:
+                raise ValueError(f"application action {name!r} already has a different request")
+            return
+        result = await self._apply_fixture(ctx, name, spec)
+        now = datetime.now(UTC)
+        await self._ext(ctx).store.put(
+            APP_ACTION_KEY_PREFIX + name,
+            StoredAppAction(
+                spec=spec,
+                result=result,
+                created_at=now,
+                updated_at=now,
+            ).model_dump(mode="json"),
+        )
+
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
+        raise VerbNotSupported("eval application actions are immutable")
+
+    async def _apply_fixture(self, ctx: ToolContext, name: str, spec: AppActionSpec) -> str:
+        key, field = {
+            "meeting-tasks": (f"{APP_FIXTURE_PREFIX}{GITHUB_PROVIDER}:list_issues", "issues"),
+            "issue-owner": (f"{APP_FIXTURE_PREFIX}{GITHUB_PROVIDER}:list_issues", "issues"),
+            "pr-babysitter": (
+                f"{APP_FIXTURE_PREFIX}{GITHUB_PROVIDER}:list_pull_requests",
+                "pull_requests",
+            ),
+        }[spec.case]
+        seeded = await self._ext(ctx).store.get(key)
+        if not isinstance(seeded, dict):
+            raise ValueError(f"no app fixture is seeded for {spec.case!r}")
+        response = json.loads(json.dumps(seeded))
+        records = response.get(field)
+        if not isinstance(records, list):
+            raise ValueError(f"app fixture {spec.case!r} has no {field}")
+        match spec.case, spec.action, spec.target, spec.value:
+            case "meeting-tasks", "create_issue", "support-runbook", "priya":
+                if not any(
+                    isinstance(item, dict) and item.get("number") == 900 for item in records
+                ):
+                    records.append(
+                        {
+                            "number": 900,
+                            "title": "Update support runbook for billing cutover",
+                            "state": "open",
+                            "owner": "priya",
+                        }
+                    )
+                result = "Issue #900 created for priya."
+            case "issue-owner", "assign_issue", "521", "alex":
+                issue = next(
+                    (
+                        item
+                        for item in records
+                        if isinstance(item, dict) and item.get("number") == 521
+                    ),
+                    None,
+                )
+                if issue is None:
+                    raise ValueError("app fixture has no issue 521")
+                issue["owner"] = "alex"
+                issue["project_status"] = "Assigned"
+                result = "Issue #521 assigned to alex."
+            case "pr-babysitter", "set_babysitter", "743", "Gemini 3.7 Flash":
+                pull_request = next(
+                    (
+                        item
+                        for item in records
+                        if isinstance(item, dict) and item.get("number") == 743
+                    ),
+                    None,
+                )
+                if pull_request is None:
+                    raise ValueError("app fixture has no pull request 743")
+                pull_request["babysitter"] = {
+                    "enabled": True,
+                    "model": "Gemini 3.7 Flash",
+                    "state": "watching",
+                }
+                result = "PR #743 babysitter set to Gemini 3.7 Flash."
+            case _:
+                raise ValueError(f"invalid application action for {spec.case!r}")
+        await self._ext(ctx).store.put(APP_ACTION_FIXTURE_PREFIX + name, response)
+        return result
+
+    async def _stored(self, ctx: ToolContext, name: str) -> StoredAppAction | None:
+        value = await self._ext(ctx).store.get(APP_ACTION_KEY_PREFIX + name)
+        return None if value is None else StoredAppAction.model_validate(value)
+
+    def _ext(self, ctx: ToolContext) -> ExtensionContext:
+        if ctx.ext is None:
+            raise RuntimeError("eval app action dispatched without its ExtensionContext")
+        return ctx.ext
+
+
+APP_ACTION_OBJECT = ObjectKind(
+    name=APP_ACTION_KIND,
+    description="Fixed app-bench actions over the mutable connector fixture.",
+    guidance="Apply only the exact action contract returned by the eval connector fixture.",
+    spec_model=AppActionSpec,
+    store=AppActionStore(),
+    list_fields=frozenset({"state", "case", "action", "target", "value"}),
+)
+
+
 def manifest() -> Manifest:
     broker = EvalEnvBroker()
     return Manifest(
@@ -575,4 +790,5 @@ def manifest() -> Manifest:
                 broker=broker,
             ),
         ),
+        objects=(APP_ACTION_OBJECT,),
     )

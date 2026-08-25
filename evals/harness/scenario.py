@@ -7,15 +7,17 @@ front, and ends the conversation with an in-band stop token once its goal is met
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from evals.harness.capability import (
     CapabilityOutput,
     CapabilityVerdict,
     EvalSeed,
+    ToolInvocation,
     grading_statement,
     source_digest,
 )
+from evals.harness.handoff import SubagentHandoff
 from evals.harness.harness import (
     EvalCaseResult,
     Json,
@@ -25,6 +27,7 @@ from evals.harness.harness import (
 )
 from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, JudgeLeg, rubric_pass
 from evals.harness.target import CapabilityTarget, TargetResult
+from evals.harness.timing import CaseTiming, case_timing
 from ufo.sdk.models import Message
 from ufo.workspace import ws_current
 
@@ -91,13 +94,22 @@ class ScenarioOutcome:
     turns: tuple[ScenarioTurn, ...]
     output: CapabilityOutput
     stopped: bool
+    followups: tuple[CapabilityOutput, ...] = ()
 
     @property
     def replies(self) -> tuple[str, ...]:
         return tuple(turn.reply for turn in self.turns)
 
+    @property
+    def followup(self) -> CapabilityOutput | None:
+        return self.followups[-1] if self.followups else None
+
 
 type ScenarioGrader = Callable[[ScenarioOutcome], Awaitable[CapabilityVerdict]]
+type ScenarioFollowup = Callable[
+    [ScenarioOutcome, CapabilityTarget],
+    Awaitable[TargetResult | tuple[TargetResult, ...]],
+]
 
 
 @dataclass(frozen=True)
@@ -122,6 +134,7 @@ class ScenarioCase:
     trials: int = 1
     tier: int = 1
     rubric: tuple[str, ...] = ()
+    followup: ScenarioFollowup | None = None
 
     def __post_init__(self) -> None:
         if self.trials < 1:
@@ -143,6 +156,8 @@ class ScenarioCase:
         }
         if self.rubric:
             payload["judgeRevision"] = JUDGE_REVISION
+        if self.followup is not None:
+            payload["followup"] = source_digest(self.followup)
         if self.member_key is not None:
             payload["memberKey"] = self.member_key
         return payload
@@ -172,6 +187,31 @@ def _bounded(reply: str) -> str:
     return reply[:MAX_SIMULATOR_REPLY_CHARS] + "\n[reply truncated for the simulator]"
 
 
+def _scenario_evidence(
+    result: TargetResult,
+    timings: tuple[CaseTiming, ...],
+    handoffs: tuple[SubagentHandoff, ...],
+) -> TargetResult:
+    errors = tuple(dict.fromkeys(timing.error for timing in timings if timing.error))
+    timing = (
+        None
+        if not timings
+        else case_timing(
+            sum(item.wall_ms for item in timings),
+            tuple(turn for item in timings for turn in item.turns),
+            "; ".join(errors),
+        )
+    )
+    return replace(result, output=replace(result.output, timing=timing, handoffs=handoffs))
+
+
+def _merge_calls(
+    before: tuple[ToolInvocation, ...], after: tuple[ToolInvocation, ...]
+) -> tuple[ToolInvocation, ...]:
+    known = frozenset(call.call_id for call in before if call.call_id)
+    return (*before, *(call for call in after if not call.call_id or call.call_id not in known))
+
+
 @dataclass(frozen=True)
 class _Trial:
     """One independent run of the case's conversation and its verdict. `infra` marks a trial whose
@@ -187,6 +227,7 @@ class _Trial:
     grader_evidence: JsonObject | None = None
     infra: bool = False
     judge: tuple[CriterionVerdict, ...] = ()
+    followups: tuple[TargetResult, ...] = ()
 
 
 async def run_scenario_case(case: ScenarioCase, target: CapabilityTarget) -> EvalCaseResult:
@@ -262,6 +303,8 @@ class _ScenarioRun:
         stopped = False
         tokens = 0
         cost_micro_usd = 0
+        timings: list[CaseTiming] = []
+        handoffs: list[SubagentHandoff] = []
         for index in range(case.max_turns):
             try:
                 message = await self.simulator.next_message(tuple(turns))
@@ -289,6 +332,10 @@ class _ScenarioRun:
                 conversation_id, message, f"{case.name}:{conversation_id}:{index}"
             )
             turns.append(ScenarioTurn(message, result.output.response))
+            if result.output.timing is not None:
+                timings.append(result.output.timing)
+            handoffs.extend(result.output.handoffs)
+            result = _scenario_evidence(result, tuple(timings), tuple(handoffs))
             last = result
             tokens += result.output.tokens
             cost_micro_usd += result.output.cost_micro_usd
@@ -317,7 +364,74 @@ class _ScenarioRun:
                 tokens,
                 cost_micro_usd,
             )
-        verdict = await case.grader(ScenarioOutcome(tuple(turns), last.output, stopped))
+        outcome = ScenarioOutcome(tuple(turns), last.output, stopped)
+        followups: tuple[TargetResult, ...] = ()
+        if case.followup is not None:
+            try:
+                returned = await case.followup(outcome, self.target)
+            except Exception as error:
+                reason = f"followup raised: {type(error).__name__}: {error}"
+                return _Trial(
+                    tuple(turns),
+                    stopped,
+                    last,
+                    False,
+                    reason,
+                    tokens,
+                    cost_micro_usd,
+                    infra=infra_owned_fault(type(error).__name__, reason, None),
+                )
+            followups = returned if isinstance(returned, tuple) else (returned,)
+            for index, followup in enumerate(followups):
+                tokens += followup.output.tokens
+                cost_micro_usd += followup.output.cost_micro_usd
+                if followup.output.timing is not None:
+                    timings.append(followup.output.timing)
+                handoffs.extend(followup.output.handoffs)
+                calls = _merge_calls(last.output.calls, followup.output.calls)
+                own_calls = _merge_calls(last.output.own_calls, followup.output.own_calls)
+                merged = replace(
+                    last.output,
+                    calls=calls,
+                    own_tools=tuple(call.name for call in own_calls),
+                    own_calls=own_calls,
+                    tool_errors=(*last.output.tool_errors, *followup.output.tool_errors),
+                    tokens=tokens,
+                    cost_micro_usd=cost_micro_usd,
+                )
+                last = replace(
+                    last,
+                    output=_scenario_evidence(
+                        replace(last, output=merged), tuple(timings), tuple(handoffs)
+                    ).output,
+                )
+                if not followup.clean:
+                    return _Trial(
+                        tuple(turns),
+                        stopped,
+                        last,
+                        False,
+                        followup.failure_reason,
+                        tokens,
+                        cost_micro_usd,
+                        infra=infra_owned_fault(
+                            followup.error_class,
+                            followup.failure_reason,
+                            (
+                                followup.trajectory.status
+                                if followup.trajectory is not None
+                                else None
+                            ),
+                        ),
+                        followups=followups[: index + 1],
+                    )
+            outcome = ScenarioOutcome(
+                tuple(turns),
+                last.output,
+                stopped,
+                tuple(item.output for item in followups),
+            )
+        verdict = await case.grader(outcome)
         judged: tuple[CriterionVerdict, ...] = ()
         if verdict.passed and case.rubric:
             if self.target.judge is None:
@@ -343,6 +457,7 @@ class _ScenarioRun:
             cost_micro_usd,
             verdict.evidence,
             judge=judged,
+            followups=followups,
         )
 
     def _attempt(self, trial: _Trial) -> Json:
@@ -371,6 +486,8 @@ class _ScenarioRun:
             "infra": trial.infra,
             "tokens": trial.tokens,
             "costMicroUsd": trial.cost_micro_usd,
+            "timing": None if output.timing is None else output.timing.model_dump(mode="json"),
+            "handoffs": [handoff.model_dump(mode="json") for handoff in output.handoffs],
             "grader": trial.grader_evidence or None,
             "judge": (
                 [
@@ -381,4 +498,13 @@ class _ScenarioRun:
                 else None
             ),
             "trajectory": None if trajectory is None else trajectory.model_dump(mode="json"),
+            "followupTrajectory": (
+                None
+                if not trial.followups or trial.followups[-1].trajectory is None
+                else trial.followups[-1].trajectory.model_dump(mode="json")
+            ),
+            "followupTrajectories": [
+                None if followup.trajectory is None else followup.trajectory.model_dump(mode="json")
+                for followup in trial.followups
+            ],
         }

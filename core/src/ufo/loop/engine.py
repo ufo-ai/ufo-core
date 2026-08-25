@@ -418,6 +418,7 @@ class _RoundInput:
     offer_tools: bool
     force_finish: bool
     first_round: bool
+    include_requested_by: bool = True
 
     def __repr__(self) -> str:
         return (
@@ -978,6 +979,7 @@ class TurnEngine:
     audience: Audience
     artifact_token_secret: str
     grants: GrantStore | None
+    connector_read_only: bool = False
     site_previewer: SitePreviewer | None = None
     previous_turn_ended_at: datetime | None = None
     lineage: RunLineage | None = None
@@ -1086,6 +1088,7 @@ class TurnEngine:
             cdp_provider=self.cdp_provider,
             search_provider=self.search_provider,
             connectors=self.connectors,
+            connector_read_only=self.connector_read_only,
             find=rank_find,
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
@@ -1259,6 +1262,7 @@ class TurnEngine:
             cdp_provider=self.cdp_provider,
             search_provider=self.search_provider,
             connectors=self.connectors,
+            connector_read_only=self.connector_read_only,
             requestable_credentials=self.requestable_credentials,
             public_base_url=self.public_base_url,
             site_previewer=self.site_previewer,
@@ -1484,6 +1488,9 @@ class TurnEngine:
                     system,
                     active_requests=active_requests,
                     first_round=meter.rounds == 1,
+                    include_requested_by=any(
+                        requester.member_id is not None for requester in requesters.values()
+                    ),
                 )
                 text, tool_calls = round_result.text, round_result.tool_calls
             except ModelStreamError as error:
@@ -1955,6 +1962,7 @@ class TurnEngine:
         force_finish: bool = False,
         active_requests: tuple[str, ...] = (),
         first_round: bool = False,
+        include_requested_by: bool = True,
     ) -> tuple[tuple[Message, ...], StreamResult]:
         """Run one model round, recovering from a provider context-overflow: the proactive
         compaction already ran, so an overflow here means the window is still too large — force a
@@ -1970,6 +1978,7 @@ class TurnEngine:
                     offer_tools=offer_tools,
                     force_finish=force_finish,
                     first_round=first_round,
+                    include_requested_by=include_requested_by,
                 )
             )
             usage_events.extend(result.usages)
@@ -1999,6 +2008,7 @@ class TurnEngine:
                     offer_tools=offer_tools,
                     force_finish=force_finish,
                     first_round=first_round,
+                    include_requested_by=include_requested_by,
                 )
             )
             usage_events.extend(result.usages)
@@ -2100,7 +2110,8 @@ class TurnEngine:
                 raise RuntimeError("finish forced on a turn with no output model")
             tools: tuple[ToolSchema, ...] = (finish,)
         elif round_input.offer_tools:
-            tools = self.tools.schemas() if finish is None else (*self.tools.schemas(), finish)
+            offered = self.tools.schemas(include_requested_by=round_input.include_requested_by)
+            tools = offered if finish is None else (*offered, finish)
         else:
             tools = ()
         request = ModelRequest(
@@ -2406,7 +2417,13 @@ class TurnEngine:
     ) -> tuple[ToolContext, ToolUseBlock]:
         tool_input = dict(call.input)
         requester: UUID | None = None
-        if REQUESTED_BY in tool_input:
+        try:
+            profile_only = self.tools.get(call.name).profile_only
+        except KeyError:
+            profile_only = False
+        if self.turn.subagent_profile is not None and profile_only:
+            tool_input.pop(REQUESTED_BY, None)
+        elif REQUESTED_BY in tool_input:
             raw = tool_input.pop(REQUESTED_BY)
             if not isinstance(raw, str):
                 raise ValueError(f"{REQUESTED_BY} must be a message ref")

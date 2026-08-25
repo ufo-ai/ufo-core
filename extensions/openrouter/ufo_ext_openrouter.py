@@ -69,6 +69,8 @@ INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
 JSON_REFERENCE_KEYS = frozenset({"$ref", "$dynamicRef"})
+GENERATION_PATH = "/generation"
+GENERATION_TIMEOUT_SECONDS = 10.0
 
 OPENROUTER_CONTEXT_WINDOW = 200_000
 _REASONS = ReasoningSupport(supported=True, tools_with_reasoning=True)
@@ -300,16 +302,28 @@ def _usage_of(usage: CompletionUsage, cache_write_30m_rate: int) -> Usage:
     )
 
 
+class _GenerationData(BaseModel):
+    cancelled: bool
+    finish_reason: str | None
+    native_tokens_prompt: int
+    native_tokens_completion: int
+    native_tokens_cached: int | None = 0
+
+
+class _GenerationResponse(BaseModel):
+    data: _GenerationData
+
+
 def _contains_json_reference(value: object) -> bool:
-    remaining = [value]
-    while remaining:
-        match remaining.pop():
-            case dict() as node:
-                if JSON_REFERENCE_KEYS & node.keys():
+    pending = [value]
+    while pending:
+        match pending.pop():
+            case dict() as item:
+                if JSON_REFERENCE_KEYS & item.keys():
                     return True
-                remaining.extend(node.values())
-            case list() as node:
-                remaining.extend(node)
+                pending.extend(item.values())
+            case list() as item:
+                pending.extend(item)
             case _:
                 continue
     return False
@@ -370,6 +384,8 @@ class OpenRouterModelClient:
 
     client: openai.AsyncOpenAI
     spec: ModelSpec
+    key: str
+    generation_transport: httpx.AsyncBaseTransport | None = None
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         delay = INITIAL_RETRY_DELAY_SECONDS
@@ -382,12 +398,14 @@ class OpenRouterModelClient:
             usage: Usage | None = None
             finish_reason: str | None = None
             provider: str | None = None
+            generation_id: str | None = None
             try:
                 stream = await self.client.chat.completions.create(
                     **self._create_kwargs(request, frozenset(ignore_providers))
                 )
                 stream_started = False
                 async for chunk in stream:
+                    generation_id = chunk.id or generation_id
                     if not stream_started:
                         stream_started = True
                         yield ModelStreamStart()
@@ -460,6 +478,8 @@ class OpenRouterModelClient:
                     "OpenRouter completion truncated at the max_tokens budget "
                     "(finish_reason=length)"
                 )
+            if usage is None and finish_reason is not None and generation_id is not None:
+                usage = await self._generation_usage(generation_id, finish_reason)
             if usage is None:
                 raise RuntimeError("model stream produced no usage")
             dead = finish_reason == "stop" and not yielded
@@ -476,6 +496,33 @@ class OpenRouterModelClient:
                 continue
             yield usage
             return
+
+    async def _generation_usage(self, generation_id: str, finish_reason: str) -> Usage | None:
+        async with httpx.AsyncClient(
+            base_url=OPENROUTER_BASE_URL,
+            headers={"Authorization": f"Bearer {self.key}"},
+            timeout=GENERATION_TIMEOUT_SECONDS,
+            transport=self.generation_transport,
+        ) as client:
+            response = await client.get(GENERATION_PATH, params={"id": generation_id})
+        response.raise_for_status()
+        generation = _GenerationResponse.model_validate(response.json()).data
+        if generation.cancelled or generation.finish_reason != finish_reason:
+            return None
+        cached = generation.native_tokens_cached or 0
+        if cached > generation.native_tokens_prompt:
+            raise ValueError("cached generation tokens exceed prompt tokens")
+        emit_metric(
+            "model_provider_retry_total",
+            provider=self.spec.provider,
+            model=self.spec.id,
+            kind="usage",
+        )
+        return Usage(
+            input_tokens=generation.native_tokens_prompt - cached,
+            output_tokens=generation.native_tokens_completion,
+            cache_read_tokens=cached,
+        )
 
     def _create_kwargs(
         self, request: ModelRequest, ignore_providers: frozenset[str]
@@ -520,6 +567,7 @@ def _model_client(spec: ModelSpec, key: str) -> OpenRouterModelClient:
     return OpenRouterModelClient(
         client=openai_sdk_client(key, base_url=OPENROUTER_BASE_URL),
         spec=spec,
+        key=key,
     )
 
 

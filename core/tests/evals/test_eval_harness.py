@@ -123,6 +123,7 @@ from evals.harness.target import (
     CapabilityTarget,
     InProcessTarget,
     TargetResult,
+    _current_turn_messages,
     _terminal_result,
     capability_output,
 )
@@ -156,7 +157,12 @@ from evals.suites.closing_message import (
 )
 from evals.suites.document_visual import WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUAL_WAIT_SECONDS
 from evals.suites.first_run import FIRST_RUN_PACKS, FIRST_RUN_SKILL
-from evals.suites.new_application import _interviews
+from evals.suites.new_application import (
+    _accepted_contract_failure,
+    _guided_design_failure,
+    _interviews,
+    _sync_active_application_workspace,
+)
 from evals.suites.response_formatting import CASES as FORMATTING_CASES
 from evals.suites.response_formatting import structured_answer_scorer
 from evals.suites.response_register import CASES as REGISTER_CASES
@@ -228,7 +234,7 @@ from ufo.models.interface import (
 from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef, validate_object_name
 from ufo.schema import tables
-from ufo.schema.records import AgentChange, TurnStatus, Usage
+from ufo.schema.records import AgentChange, ToolIntent, TurnContext, TurnStatus, Usage
 from ufo.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
@@ -415,6 +421,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
 def test_ufo_app_bench_uses_its_screen_build_wait_bound() -> None:
     tasks = {task.name: task for task in TASKS}
 
+    assert tasks["new_application"].wait_seconds == UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
     assert _task_workflow_wait_seconds((tasks["ufo-app-bench"],)) == (
         UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
     )
@@ -428,6 +435,8 @@ def test_ufo_app_bench_uses_its_screen_build_wait_bound() -> None:
     assert _task_workflow_wait_seconds((tasks["ufo-app-bench"], tasks["basics"])) == (
         DEFAULT_WORKFLOW_WAIT_SECONDS
     )
+    assert tasks["ufo-app-bench"].wait_seconds == UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
+    assert tasks["ufo-app-copy"].wait_seconds == UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
 
 
 def test_the_interview_is_the_succeeded_ask_before_the_create() -> None:
@@ -442,6 +451,189 @@ def test_the_interview_is_the_succeeded_ask_before_the_create() -> None:
     assert _interviews(CapabilityOutput("", (apply, asked))) == ()
     assert _interviews(CapabilityOutput("", (refused, apply))) == ()
     assert _interviews(CapabilityOutput("", (asked,))) == ()
+
+
+def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
+    manifest = "kind: agent\nname: helper\nspec:\n  prompt: p\n"
+    apply = ToolInvocation(name="object_apply", input={"manifest": manifest}, has_result=True)
+    asked = ToolInvocation(name="ask_user", input={}, has_result=True)
+    contract = {
+        "purpose": "Review support requests.",
+        "first_screen_priority": "Unassigned requests",
+        "regions": ["Unassigned", "Assigned", "Recent activity"],
+        "layout": "queue-detail",
+        "design_direction": "House style",
+    }
+    revised_contract = {
+        **contract,
+        "first_screen_priority": "Overdue queue",
+        "regions": ["Overdue", "Unassigned", "Recent activity"],
+    }
+    preview = ToolInvocation(name="render_application_preview", input=contract, has_result=True)
+    revised = ToolInvocation(
+        name="render_application_preview", input=revised_contract, has_result=True
+    )
+    one_preview = CapabilityOutput("", (asked, asked, preview, asked, apply))
+    two_previews = CapabilityOutput("", (asked, asked, preview, asked, revised, asked, apply))
+    clarified_revision = CapabilityOutput(
+        "", (asked, asked, preview, asked, asked, revised, asked, apply)
+    )
+
+    assert _guided_design_failure(one_preview, 1) is None
+    assert _guided_design_failure(two_previews, 2) is None
+    assert _guided_design_failure(clarified_revision, 2) is None
+    natural_revision = replace(
+        revised,
+        input={
+            **contract,
+            "first_screen_priority": "Overdue issues, oldest first",
+            "regions": ["Overdue issues", "Unassigned", "Recent activity"],
+        },
+    )
+    assert (
+        _guided_design_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, natural_revision, asked, apply)), 2
+        )
+        is None
+    )
+    one_of_two = CapabilityOutput("", (asked, asked, preview, asked, asked, apply))
+    assert "rendered 1 previews" in str(_guided_design_failure(one_of_two, 2))
+    assert "has no later design choice" in str(
+        _guided_design_failure(CapabilityOutput("", (asked, asked, asked, preview, apply)), 1)
+    )
+    direct = CapabilityOutput(
+        "", (asked, asked, ToolInvocation("write", {}, has_result=True), asked, apply)
+    )
+    assert "parent ran preview build tools" in str(_guided_design_failure(direct, 1))
+    delegated = CapabilityOutput(
+        "",
+        (
+            asked,
+            asked,
+            ToolInvocation("build_application_preview", {}, has_result=True),
+            asked,
+            apply,
+        ),
+    )
+    assert "used a model worker" in str(_guided_design_failure(delegated, 1))
+
+
+def test_the_accepted_preview_contract_must_reach_the_application_prompt() -> None:
+    preview = ToolInvocation(
+        "render_application_preview",
+        {
+            "purpose": "Review support requests.",
+            "first_screen_priority": "Overdue queue",
+            "regions": ["Overdue", "Unassigned", "Recent activity"],
+            "layout": "queue-detail",
+            "design_direction": "House style",
+        },
+        has_result=True,
+    )
+    output = CapabilityOutput("", (preview,))
+    prompt = (
+        "Homepage design: Review support requests. Put Overdue queue first. "
+        "Regions: Overdue, Unassigned, Recent\nactivity. Layout: queue-detail. House style."
+    )
+
+    assert _accepted_contract_failure(output, prompt) is None
+    paraphrased = prompt.replace(
+        "Review support requests.",
+        "Review the member's support requests.",
+    )
+    assert _accepted_contract_failure(output, paraphrased) is None
+    priority_paraphrase = prompt.replace("Overdue queue", "The overdue queue for your review")
+    assert _accepted_contract_failure(output, priority_paraphrase) is None
+    natural_layout = prompt.replace("queue-detail", "a queue with detail beside it")
+    assert _accepted_contract_failure(output, natural_layout) is None
+    assert "Overdue queue" in str(
+        _accepted_contract_failure(output, prompt.replace("Overdue queue", "Summary"))
+    )
+    assert "Review support requests" in str(
+        _accepted_contract_failure(output, prompt.replace("support requests", "invoices"))
+    )
+
+    shipping = ToolInvocation(
+        "render_application_preview",
+        {
+            "purpose": (
+                "Show what shipped across every repository this week, and let each merged pull "
+                "request be read in full."
+            ),
+            "first_screen_priority": "This week's shipping summary in plain language",
+            "regions": ["This week's summary", "Merged pull requests"],
+            "layout": "summary-detail",
+            "design_direction": "House style",
+        },
+        has_result=True,
+    )
+    shipping_prompt = (
+        "Build a homepage that helps the member see what shipped across every repository this "
+        "week and read each merged pull request in full. Lead with this week's shipping summary "
+        "in plain language. Use summary and detail. Regions: This week's summary, Merged pull "
+        "requests. Use the house style."
+    )
+    assert _accepted_contract_failure(CapabilityOutput("", (shipping,)), shipping_prompt) is None
+
+
+def test_internal_turn_messages_start_at_the_last_matching_inbound() -> None:
+    messages = (
+        Message(role="user", content="Build the homepage."),
+        Message(role="assistant", content="First attempt."),
+        Message(role="user", content="<context>second</context>\nBuild the homepage."),
+        Message(role="assistant", content="Second attempt."),
+        Message(
+            role="user",
+            content=(
+                "<context>third</context>\nBuild the homepage.\n\n"
+                "<injected_context>Relevant memory</injected_context>"
+            ),
+        ),
+        Message(role="assistant", content="Third attempt."),
+    )
+
+    assert _current_turn_messages(messages, "Build the homepage.") == messages[4:]
+    assert _current_turn_messages(messages, "Unknown turn.") == messages
+
+
+def test_internal_turn_messages_match_a_founding_inbound_with_injected_context() -> None:
+    messages = (
+        Message(
+            role="user",
+            content=("Build the homepage.\n\n<injected_context>Relevant memory</injected_context>"),
+        ),
+        Message(role="assistant", content="Built."),
+    )
+
+    assert _current_turn_messages(messages, "Build the homepage.") == messages
+
+
+async def test_creation_scaffold_syncs_into_an_active_application_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def create(*args: str, **_kwargs: object) -> Process:
+        calls.append(args)
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    conversation_id = UUID("11111111-1111-1111-1111-111111111111")
+    source = tmp_path / "ufo-app"
+
+    await _sync_active_application_workspace(conversation_id, source)
+
+    container = "ufo-sbx-11111111-1111-1111-1111-111111111111"
+    assert calls == [
+        ("docker", "inspect", container),
+        ("docker", "cp", f"{source}/.", f"{container}:/workspace/ufo-app"),
+    ]
 
 
 def test_stateful_and_scenario_tasks_are_exclusive() -> None:
@@ -5422,6 +5614,122 @@ async def test_in_process_target_records_a_terminal_turn_without_a_workflow(
     assert result.trajectory.status == "cancelled"
 
 
+async def test_workspace_driver_applies_a_browser_object_write_as_a_prepared_intent(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    owner_id = await _seed_owner(workspace_id)
+    agent_id = await _seed_agent(workspace_id)
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path),
+        UNCALLED_DBOS,
+        tmp_path / "workspaces",
+    )
+    with ws(workspace_id):
+        source_conversation_id = await driver.open("browser-action")
+    captured: dict[str, object] = {}
+
+    class PreparedAdmission:
+        def __init__(self, **values: object) -> None:
+            captured["admission"] = values
+
+        async def admit(
+            self,
+            conversation_id: UUID,
+            message: str,
+            idempotency_key: str,
+            context: object,
+            *,
+            speaker_member_id: UUID,
+            intent: object,
+        ) -> SimpleNamespace:
+            turn_id = uuid4()
+            captured.update(
+                conversation_id=conversation_id,
+                message=message,
+                idempotency_key=idempotency_key,
+                context=context,
+                speaker_member_id=speaker_member_id,
+                intent=intent,
+            )
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=turn_id,
+                        workspace_id=workspace_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        seq=1,
+                        status="done",
+                        inbound=message,
+                        admission_source="intent",
+                        speaker_member_id=speaker_member_id,
+                        terminal={"status": "done", "text": "Applied.", "model": MODEL},
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            return SimpleNamespace(turn_id=turn_id)
+
+    monkeypatch.setattr("evals.driver.MemberAdmission", PreparedAdmission)
+    spec = {
+        "case": "issue-owner",
+        "action": "assign_issue",
+        "target": "521",
+        "value": "alex",
+    }
+
+    with ws(workspace_id):
+        returned_turn_id, terminal = await driver.apply_object_intent(
+            source_conversation_id,
+            "eval_app_action",
+            "assign-521",
+            spec,
+            "browser-action-1",
+        )
+
+    assert terminal.status == "done"
+    assert terminal.text == "Applied."
+    async with workspace_tx() as connection:
+        stored_turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.id == returned_turn_id)
+            )
+        ).scalar_one()
+    assert returned_turn_id == stored_turn_id
+    assert captured["speaker_member_id"] == owner_id
+    assert captured["idempotency_key"] == "browser-action-1"
+    assert captured["context"] == TurnContext(sender=OWNER_EMAIL)
+    intent = cast(ToolIntent, captured["intent"])
+    assert intent.tool == "object_apply"
+    assert loads(cast(dict[str, str], intent.input)["manifest"]) == {
+        "kind": "eval_app_action",
+        "name": "assign-521",
+        "spec": spec,
+    }
+    assert intent.input["user_description"] == (
+        "Apply eval_app_action assign-521 from the application."
+    )
+    async with workspace_tx() as connection:
+        prepared = (
+            await connection.execute(
+                sa.select(
+                    tables.conversation.c.id,
+                    tables.conversation.c.surface,
+                    tables.conversation.c.queue_key,
+                    tables.conversation.c.member_id,
+                ).where(tables.conversation.c.id == captured["conversation_id"])
+            )
+        ).one()
+    assert prepared.id != source_conversation_id
+    assert prepared.surface == "eval"
+    assert prepared.queue_key == f"intent/{agent_id}/{OWNER_EMAIL}"
+    assert prepared.member_id == owner_id
+
+
 async def test_workspace_driver_waits_when_a_queued_workflow_does_not_exist(
     db: None, tmp_path
 ) -> None:
@@ -5579,7 +5887,15 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
         )
     )
     blob = FilesystemBlobStore(root=tmp_path)
-    worker = StubWorker(blob, workspace_id, None, status="running")
+    worker = StubWorker(
+        blob,
+        workspace_id,
+        None,
+        status="running",
+        child_transcript=DELEGATED_CHILD_TRANSCRIPT,
+        child_tokens=30_000,
+        child_cost_micro_usd=200_000,
+    )
     driver = WorkspaceDriver(
         workspace_id,
         agent_id,
@@ -5597,6 +5913,7 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
         conversations=DriverConversations(driver, worker),
         outcome=driver,
         turn_steps=driver,
+        blob=blob,
     )
 
     with ws(workspace_id):
@@ -5625,9 +5942,26 @@ async def test_in_process_target_saves_completed_steps_when_turn_wait_expires(
             has_result=True,
             call_id=call.id,
         ),
+        ToolInvocation(
+            "navigate",
+            {"url": "https://example.com"},
+            "ok",
+            has_result=True,
+            call_id="n1",
+        ),
+        ToolInvocation(
+            "read_page",
+            {},
+            "upstream 503 from the page",
+            has_result=True,
+            is_error=True,
+            call_id="r1",
+        ),
     )
-    assert result.output.tokens == 220_000
-    assert result.output.cost_micro_usd == 1_500_000
+    assert result.output.tokens == 440_000
+    assert result.output.cost_micro_usd == 3_000_000
+    assert [turn.role for turn in result.output.timing.turns] == ["evaluated", "child"]
+    assert len(result.output.handoffs) == 1
     assert result.output.timing.slowest[0].name == "bash"
 
 

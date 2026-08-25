@@ -88,12 +88,9 @@ def test_create_application_reaches_the_skill_index_as_a_routing_trigger() -> No
     assert len(description.split()) <= 50
 
 
-def test_creating_an_application_pulls_the_house_style_with_its_tokens() -> None:
-    """An app's homepage is one of ours, so the tokens arrive with the skill that designs it rather
-    than behind a second load the model may skip. The stylesheet is the whole point of the pull, so
-    a closure that resolves without it mounts a workflow pointing at nothing."""
+def test_creating_an_application_leaves_style_inside_the_product_renderer() -> None:
     closure = [ref.card.name for ref in CORE_SKILL_REGISTRY.closure("create-application")]
-    assert closure == ["create-application", HOUSE_STYLE]
+    assert closure == ["create-application"]
     house = CORE_SKILL_REGISTRY.named(HOUSE_STYLE)
     assert HOUSE_STYLE_TOKENS in dict(house.files)
     files = dict(house.files)
@@ -105,9 +102,9 @@ def test_creating_an_application_pulls_the_house_style_with_its_tokens() -> None
 
 
 def test_the_house_style_cites_only_paths_its_own_load_mounts() -> None:
-    """`ufo-style` is pulled on its own by app creation and alongside `design-foundations` by the
-    document skills, so it may name no other skill's mounted file: half its loads would put that
-    path nowhere. Another skill is named by name, and its own file by path."""
+    """`ufo-style` is pulled with website and document design, so it may name no other skill's
+    mounted file: some loads would put that path nowhere. Another skill is named by name, and its
+    own file by path."""
     house = CORE_SKILL_REGISTRY.named(HOUSE_STYLE)
     sources = (
         house.raw_skill_md,

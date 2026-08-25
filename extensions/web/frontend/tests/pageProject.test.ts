@@ -61,8 +61,8 @@ const built = (project: string): string => {
   );
   for (const sprite of named) expect(emitted, sprite).toContain(sprite);
   const page = readFileSync(join(dist, "index.html"), "utf8");
-  expect(page).toMatch(/<script type="module"[^>]* src="\/assets\/[^"]+\.js"/);
-  expect(page).toMatch(/<link rel="stylesheet"[^>]* href="\/assets\/[^"]+\.css"/);
+  expect(page).toMatch(/<script type="module"[^>]* src="\.\/assets\/[^"]+\.js"/);
+  expect(page).toMatch(/<link rel="stylesheet"[^>]* href="\.\/assets\/[^"]+\.css"/);
   expect(page).not.toContain("sdk/");
   expect(page).not.toContain("app.tsx");
   expect(readdirSync(join(dist, "assets")).length).toBeGreaterThan(0);

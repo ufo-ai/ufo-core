@@ -651,7 +651,9 @@ class _Binding:
 
 
 def bindings_from(
-    manifests: tuple[Manifest, ...], core_jobs: tuple[JobSpec, ...]
+    manifests: tuple[Manifest, ...],
+    core_jobs: tuple[JobSpec, ...],
+    disabled: frozenset[str] = frozenset(),
 ) -> tuple[_Binding, ...]:
     """Core jobs live in the `core` namespace with no declared slots; each extension's jobs live in
     its own namespace with exactly the credential slots that extension declared."""
@@ -677,7 +679,10 @@ def bindings_from(
             )
             for spec in manifest.jobs
         )
-    return tuple(bindings)
+    known = frozenset(binding.key for binding in bindings)
+    if unknown := sorted(disabled - known):
+        raise ValueError(f"disabled jobs are not registered: {', '.join(unknown)}")
+    return tuple(binding for binding in bindings if binding.key not in disabled)
 
 
 @dataclass(frozen=True)

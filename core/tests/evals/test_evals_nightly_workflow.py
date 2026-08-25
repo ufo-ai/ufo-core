@@ -73,6 +73,12 @@ def test_an_agent_specific_suite_runs_in_its_own_shard(planner) -> None:
     assert shard.suites == ("code_review",)
 
 
+def test_application_suites_do_not_share_a_shard_with_other_suites(planner) -> None:
+    for shard in planner.plan(smoke=False):
+        app_suites = planner.APP_SUITES.intersection(shard.suites)
+        assert not app_suites or set(shard.suites) <= planner.APP_SUITES
+
+
 def test_a_suite_bound_to_no_planned_pack_fails_the_plan(planner, monkeypatch) -> None:
     stranded = tuple(
         dataclasses.replace(task, packs=("no_such_pack",)) if task.name == "basics" else task

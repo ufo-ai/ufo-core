@@ -53,18 +53,15 @@ Show what the application does, what it watches, its recent work, and what it ne
 Give the primary workflow at least two accessible controls. Each control must produce a visible
 state change with the supplied or clearly synthetic data.
 
-Before writing files, make one compact build contract in working memory. List each requested fact
-with its exact supplied value, each supplied passage that needs reader copy, each control with its
-initial and changed state, and the deployment and homepage-binding steps. Audit the rendered page
-against the contract before browser QA. Do not put the contract in the page or a separate file.
+The product provides the fixed Vite project at `"/workspace/ufo-app"`. Keep `index.html` and
+`preview.html` unchanged. Make one foreground delegation for the complete build.
 
-Use the house style. Read `shared/13-ufo-application-qa.md`, run its batched browser QA, and fix
-failures until each action produces its expected visible state without a console error or
-horizontal overflow.
-
-After browser QA passes, run `deploy_website`. For the first homepage, pass the exact site object
-name from that result to `set_homepage`. To update the bound homepage, deploy the same site name;
-the binding stays in place.
+The worker receives the fixed scaffold and source paths. It inspects connected data, writes and
+repairs `app.tsx`, runs browser QA, deploys the site, and returns evidence. Deterministic product
+checks decide acceptance and bind the homepage. The parent does not inspect connector data, source, or browser output
+and does not repair, deploy, verify, or delegate again. Do not call `build_website`. Return the
+accepted `site_url`, or state the worker's blocker. Escalate only when the request is ambiguous or
+when product checks return a failure class with no stable worker or harness rule.
 
 ## Build and verify
 

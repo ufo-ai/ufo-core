@@ -50,14 +50,15 @@ class ToolDef[ModelT: BaseModel]:
     parallel_safe: bool = False
     profile_only: bool = False
 
-    def schema(self) -> ToolSchema:
+    def schema(self, *, include_requested_by: bool = True) -> ToolSchema:
         input_schema = self.input_model.model_json_schema()
         properties = input_schema.setdefault("properties", {})
-        properties[REQUESTED_BY] = {
-            "type": "string",
-            "format": "uuid",
-            "description": REQUESTED_BY_DESCRIPTION,
-        }
+        if include_requested_by:
+            properties[REQUESTED_BY] = {
+                "type": "string",
+                "format": "uuid",
+                "description": REQUESTED_BY_DESCRIPTION,
+            }
         return ToolSchema(
             name=self.name,
             description=self.description,
@@ -80,8 +81,8 @@ class ToolRegistry:
         if collisions:
             raise ValueError(f"tool inputs reserve {REQUESTED_BY!r}: {', '.join(collisions)}")
 
-    def schemas(self) -> tuple[ToolSchema, ...]:
-        return tuple(tool.schema() for tool in self.tools)
+    def schemas(self, *, include_requested_by: bool = True) -> tuple[ToolSchema, ...]:
+        return tuple(tool.schema(include_requested_by=include_requested_by) for tool in self.tools)
 
     def get(self, name: str) -> ToolDef[Any]:
         for tool in self.tools:

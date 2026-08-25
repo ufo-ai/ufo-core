@@ -279,6 +279,7 @@ class ToolContext:
     cdp_provider: CdpProvider | None = None
     search_provider: SearchProvider | None = None
     connectors: ConnectorRegistry | None = None
+    connector_read_only: bool = False
     find: FindCompleter | None = None
     requestable_credentials: CredentialRequests | None = None
     models: tuple[str, ...] = ()

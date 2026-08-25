@@ -1,9 +1,6 @@
 ---
 name: create-application
 description: Load when a member asks to create a new application of their own, including an underspecified app, a separate assistant for one job, or an app that watches and acts. Not for a page, website, dashboard, or browser app.
-metadata:
-  depends:
-  - ufo-style
 ---
 # New application
 
@@ -95,21 +92,26 @@ line: what the application settles itself, what it brings to a person.
 
 Every application builds a homepage: the page members open on the Apps screen, where it states
 what it is for, what it watches, its recent work, and what it needs. The design pass settles what
-this app's page reports and how it is laid out — draw it as a mock the member can react to, not as
-prose describing it. `load_skill(name="website-building")` for the design system, build the page
-as static HTML in the sandbox, screenshot it at 1280×800 with the Playwright REPL, and share the
-PNG with `share_file`. The chat draws shared pictures inline, so the mock lands in the
-conversation itself.
+this app's page reports and how it is laid out. Settle one small contract and call
+`render_application_preview`:
 
-The page is one of ours, so it is drawn in the house style: the `ufo-style` tokens this skill
-pulled are the palette, type and spacing of the mock, and of the prompt's description of it. A
-member who names their own colours, font or brand gets theirs instead — say which of the two you
-took in the reply that carries the mock.
+| Field | Value |
+|---|---|
+| `purpose` | One sentence naming what the page helps the member do. |
+| `first_screen_priority` | The one region the first screen leads with. |
+| `regions` | Two to six short region names in display order. |
+| `layout` | `summary-detail`, `queue-detail`, `timeline`, or `metrics`. |
+| `design_direction` | The member's own direction, or `House style`. |
 
-One page, at most two variants, is the whole design pass. End with `ask_user`: `Build it`,
-`Change the design`. You do not build the live page from here: the application builds and binds
-its own homepage on its first homepage turn, and the prompt you draft is what carries the design
-to it.
+The product renderer owns the components and tokens. It shares one PNG in the conversation and
+runs no model, file or browser tool, deployment, or member-state change. Do not load a design skill,
+inspect the PNG, or share it again. After the renderer returns, end with `ask_user`: `Build it`,
+`Change the design`.
+
+On `Change the design`, replace the whole contract and call the renderer once. Put the member's
+revision in the exact contract field it changes. One page and at most two previews are the whole
+design pass. Put every field from the accepted contract in the application prompt under `Homepage
+design`. The application builds and binds its live homepage on its first homepage turn.
 
 ## Create it
 

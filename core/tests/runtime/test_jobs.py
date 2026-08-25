@@ -69,6 +69,27 @@ def _runner(core_jobs: tuple[JobSpec, ...]) -> JobRunner:
     return JobRunner(bindings=bindings_from((), core_jobs))
 
 
+def test_bindings_exclude_only_named_jobs() -> None:
+    first = JobSpec(
+        name="first",
+        schedule=DORMANT_CRON,
+        handler=_write_marker,
+        candidates=_every_workspace(),
+    )
+    second = JobSpec(
+        name="second",
+        schedule=DORMANT_CRON,
+        handler=_write_marker,
+        candidates=_every_workspace(),
+    )
+
+    bindings = bindings_from((), (first, second), disabled=frozenset({"core:first"}))
+
+    assert tuple(binding.key for binding in bindings) == ("core:second",)
+    with pytest.raises(ValueError, match="disabled jobs are not registered: core:missing"):
+        bindings_from((), (first,), disabled=frozenset({"core:missing"}))
+
+
 def _every_workspace() -> object:
     """A test candidate naming every workspace — the boot jobs here have no work table of their
     own, so they run on each seeded workspace. Real jobs name only the workspaces holding work."""

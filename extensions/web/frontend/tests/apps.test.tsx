@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { AppInit } from "@/apps/kit";
@@ -363,6 +363,51 @@ test("a page remounted across a deploy reads its audience when its standing shel
 
   expect(await screen.findByText(AGENT.name)).toBeTruthy();
   expect(calls).toEqual(["/api/agents"]);
+});
+
+test("an application action reads its durable result and submits the exact prepared write", async () => {
+  vi.resetModules();
+  const { ApplicationAction } = await import("@/apps/kit");
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      return new Response(JSON.stringify({ ok: true, detail: "Issue #521 assigned to alex." }), {
+        status: 200,
+      });
+    }
+    return new Response(
+      JSON.stringify({ status: { result: "Issue #521 remains assigned to alex." } }),
+      { status: 200 },
+    );
+  });
+  window.fetch = fetcher as unknown as typeof fetch;
+  const action = {
+    label: "Assign issue 521 to Alex",
+    write: {
+      function: "ufoWrite" as const,
+      arguments: [
+        "eval_app_action",
+        "assign-issue-521",
+        { case: "issue-owner", action: "assign_issue", target: "521", value: "alex" },
+      ] as [string, string, Record<string, unknown>],
+    },
+    read: {
+      function: "ufoRead" as const,
+      arguments: ["objects/eval_app_action/assign-issue-521"] as [string],
+    },
+    success_text: "Issue #521 assigned to alex.",
+  };
+
+  render(<ApplicationAction action={action} />);
+  expect(await screen.findByText("Issue #521 remains assigned to alex.")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: action.label }));
+  expect(await screen.findByText(action.success_text)).toBeTruthy();
+  expect(fetcher).toHaveBeenCalledWith(
+    "/surface/web/objects/eval_app_action",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ name: action.write.arguments[1], spec: action.write.arguments[2] }),
+    }),
+  );
 });
 
 /** A page spells no address by hand: every builder the route table declares stands on the kit, so a

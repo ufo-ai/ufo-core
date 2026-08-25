@@ -115,10 +115,19 @@ TASKS: tuple[EvalTask, ...] = (
         agent="code-review",
     ),
     rewrapped(
-        capability_task("ufo-app-bench", ufo_app_bench.CASES, judge_model=VISUAL_JUDGE_MODEL),
+        capability_task(
+            "ufo-app-bench",
+            ufo_app_bench.CASES,
+            judge_model=VISUAL_JUDGE_MODEL,
+            wait_seconds=ufo_app_bench.WORKFLOW_WAIT_SECONDS,
+        ),
         ufo_app_bench._scored_task,
     ),
-    capability_task("ufo-app-copy", ufo_app_bench.COPY_CASES),
+    capability_task(
+        "ufo-app-copy",
+        ufo_app_bench.COPY_CASES,
+        wait_seconds=ufo_app_bench.WORKFLOW_WAIT_SECONDS,
+    ),
     capability_task("document_read", document_read.CASES),
     capability_task(
         "app_home_change",
@@ -153,6 +162,7 @@ TASKS: tuple[EvalTask, ...] = (
         new_application.SCENARIOS,
         simulator_model=SCENARIO_SIMULATOR_MODEL,
         judge_model=SEMANTIC_JUDGE_MODEL,
+        wait_seconds=ufo_app_bench.WORKFLOW_WAIT_SECONDS,
     ),
     skill_authoring_task("skill_authoring", SKILL_AUTHORING_CASES),
     skill_authoring_task("skill_gtm", SKILL_GTM_CASES),

@@ -134,6 +134,7 @@ class BrokerTool:
     slug: str
     description: str = ""
     input_schema: Mapping[str, object] = field(default_factory=dict)
+    read_only: bool = False
 
 
 WORKSPACE_FILE_KEY = "workspace_file"

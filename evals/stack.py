@@ -9,6 +9,7 @@ summary prints each stack's run dir and database URL."""
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import secrets
@@ -40,11 +41,14 @@ from ufo.sandbox.session import (
     EGRESS_CA_KEY_ENV,
     EGRESS_CONTROL_TOKEN_ENV,
 )
+from ufo.schema.records import ReasoningEffort
 
 RUNS_ROOT = Path(".local/evals")
 DEFAULT_OUT = Path("eval-reports")
 STACK_OWNER_EMAIL = "evals@localhost"
 APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy"})
+CREATION_SUITES = frozenset({"new_application"})
+CREATION_DISABLED_JOBS = ("web:seed_homepages",)
 POSTGRES_NAME_LIMIT = 63
 READY_DEADLINE_SECONDS = 180.0
 READY_POLL_SECONDS = 0.5
@@ -124,6 +128,7 @@ class RunSpec(BaseModel):
     args: tuple[str, ...] = ()
     env: dict[str, str] = {}
     model: str | None = None
+    reasoning: ReasoningEffort | None = None
     memory_100: Path | None = None
     memory_ingestion: Path | None = None
     issue_recall: bool = False
@@ -144,12 +149,21 @@ class RunSpec(BaseModel):
         for name in ORCHESTRATOR_ENV:
             if name in self.env:
                 raise ValueError(f"run {self.label!r} sets {name} — the stack owns it")
-        if (
-            self.memory_100 is not None or self.memory_ingestion is not None
-        ) and self.model is not None:
+        if any(
+            token in APP_SUITES
+            or (token.startswith("--only=") and token.removeprefix("--only=") in APP_SUITES)
+            for token in self.args
+        ) and (self.model is not None or self.reasoning is not None):
             raise ValueError(
-                f"run {self.label!r} sets model with a memory corpus — materialization owns the "
-                "agent"
+                f"run {self.label!r}: app suites use the template parent agent; "
+                "vary the application-builder profile"
+            )
+        if (self.memory_100 is not None or self.memory_ingestion is not None) and (
+            self.model is not None or self.reasoning is not None
+        ):
+            raise ValueError(
+                f"run {self.label!r} sets model or reasoning with a memory corpus — "
+                "materialization owns the agent"
             )
         corpora = sum(
             (
@@ -202,6 +216,7 @@ class EvalStack:
     repo_root: Path
     config: Config
     config_file: Path
+    serve_binary: Path
     admin_database_url: str | None
     env: dict[str, str]
     serve_probe: socket.socket
@@ -211,6 +226,7 @@ class EvalStack:
     serve_log: IO[bytes]
     egress_log: IO[bytes]
     eval_log: IO[bytes]
+    process_log: IO[str]
 
     @classmethod
     def provision(cls, spec: RunSpec, root: Path, out: Path, repo_root: Path) -> Self:
@@ -238,8 +254,24 @@ class EvalStack:
             otlp_port=otlp_port,
             database_name=_database_name(root),
         )
+        selected_parser = argparse.ArgumentParser(add_help=False)
+        selected_parser.add_argument("--only", nargs="*", default=())
+        selected, _ = selected_parser.parse_known_args(spec.args)
+        selected_suites = frozenset(selected.only)
+        if not APP_SUITES.isdisjoint(selected_suites) and not selected_suites <= APP_SUITES:
+            raise ValueError("app suites require a separate eval stack")
+        if not CREATION_SUITES.isdisjoint(selected.only):
+            config = config.model_copy(
+                update={
+                    "serve": config.serve.model_copy(
+                        update={"disabled_jobs": CREATION_DISABLED_JOBS}
+                    )
+                }
+            )
         config_file = root / "ufo.toml"
         config_file.write_text(tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)))
+        serve_binary = (root / "eval-serve").absolute()
+        serve_binary.symlink_to(Path(sys.executable).with_name("ufoctl"))
         env = dict(os.environ) | spec.env
         # Each stack derives its own per-run owner DSN as database.owner_url. Drop any UFO_OWNER_DSN
         # inherited from the shell, which _shared_owner_dsn prefers over the config — else it would
@@ -266,6 +298,7 @@ class EvalStack:
             repo_root=repo_root,
             config=config,
             config_file=config_file,
+            serve_binary=serve_binary,
             admin_database_url=(
                 template.database.url if template.database.url.startswith("postgresql") else None
             ),
@@ -277,6 +310,7 @@ class EvalStack:
             serve_log=(root / "serve.log").open("wb"),
             egress_log=(root / "egress.log").open("wb"),
             eval_log=(root / "eval.log").open("wb"),
+            process_log=(root / "process.log").open("w"),
         )
 
     async def run(self, creation: asyncio.Lock) -> StackResult:
@@ -308,6 +342,7 @@ class EvalStack:
                 self.serve_log,
                 self.egress_log,
                 self.eval_log,
+                self.process_log,
             ):
                 if handle is not None:
                     handle.close()
@@ -373,12 +408,15 @@ class EvalStack:
         only = argparse.ArgumentParser(add_help=False)
         only.add_argument("--only", nargs="*", default=())
         selected, _ = only.parse_known_args(self.spec.args)
-        if APP_SUITES.isdisjoint(selected.only):
+        app_selected = not APP_SUITES.isdisjoint(selected.only)
+        creation_selected = not CREATION_SUITES.isdisjoint(selected.only)
+        if not app_selected and not creation_selected:
             return
+        argv = [sys.executable, "-m", "evals.suites.ufo_app_prepare"]
+        if creation_selected and not app_selected:
+            argv.append("--creation")
         prepare = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "evals.suites.ufo_app_prepare",
+            *argv,
             cwd=self.repo_root,
             env=self.env,
             stdout=self.seed_log,
@@ -390,10 +428,14 @@ class EvalStack:
         argv = ["init", "--email", STACK_OWNER_EMAIL]
         if self.spec.model is not None:
             argv += ["--model", self.spec.model]
+        if self.spec.reasoning is not None:
+            argv += ["--reasoning", self.spec.reasoning]
         return tuple(argv)
 
-    async def _ufoctl(self, *argv: str, log: IO[bytes]) -> asyncio.subprocess.Process:
-        binary = Path(sys.executable).with_name("ufoctl")
+    async def _ufoctl(
+        self, *argv: str, log: IO[bytes], binary: Path | None = None
+    ) -> asyncio.subprocess.Process:
+        binary = binary or Path(sys.executable).with_name("ufoctl")
         if not binary.exists():
             raise RuntimeError(f"ufoctl not found beside the interpreter: {binary}")
         return await asyncio.create_subprocess_exec(
@@ -421,7 +463,9 @@ class EvalStack:
     async def _start_serve(self) -> asyncio.subprocess.Process:
         self.serve_probe.close()
         self.proxy_probe.close()
-        return await self._ufoctl("serve", log=self.serve_log)
+        process = await self._ufoctl("serve", log=self.serve_log, binary=self.serve_binary)
+        self._process_event("started", "serve", process)
+        return process
 
     async def _start_egress(self, binary: Path) -> asyncio.subprocess.Process:
         """Run ufo-egress on the probed proxy port, sharing serve's env (the CA, control token, and
@@ -433,9 +477,11 @@ class EvalStack:
             "UFO_EGRESS_CONTROL_URL": f"http://127.0.0.1:{self.config.serve.port}",
             "UFO_EGRESS_GRACEFUL_SHUTDOWN_SECONDS": str(EGRESS_GRACEFUL_SHUTDOWN_SECONDS),
         }
-        return await asyncio.create_subprocess_exec(
+        process = await asyncio.create_subprocess_exec(
             str(binary), cwd=self.root, env=env, stdout=self.egress_log, stderr=self.egress_log
         )
+        self._process_event("started", "egress", process)
+        return process
 
     async def _egress_ready(self, egress: asyncio.subprocess.Process) -> None:
         port = self.config.sandbox.proxy_port
@@ -501,6 +547,7 @@ class EvalStack:
             stdout=self.eval_log,
             stderr=self.eval_log,
         )
+        self._process_event("started", "eval", child)
         child_wait = asyncio.ensure_future(child.wait())
         infra = {
             asyncio.ensure_future(serve.wait()): ("serve", serve),
@@ -509,15 +556,24 @@ class EvalStack:
         done, pending = await asyncio.wait(
             (child_wait, *infra), return_when=asyncio.FIRST_COMPLETED
         )
+        for future in done:
+            if future is child_wait:
+                self._process_event("exited", "eval", child)
+            elif future in infra:
+                name, process = infra[future]
+                self._process_event("exited", name, process)
         dead = next((infra[future] for future in infra if future in done), None)
         if dead is not None and child_wait not in done:
             name, process = dead
+            self._process_event("terminate", "eval", child)
             child.terminate()
             try:
                 await asyncio.wait_for(asyncio.shield(child_wait), SHUTDOWN_GRACE_SECONDS)
             except TimeoutError:
+                self._process_event("kill", "eval", child)
                 child.kill()
                 await child.wait()
+            self._process_event("exited", "eval", child)
             raise RuntimeError(
                 f"{name} exited {process.returncode} mid-run — see {self._log_path(name)}"
             )
@@ -557,16 +613,35 @@ class EvalStack:
         egress: asyncio.subprocess.Process | None = None,
     ) -> None:
         # Drain the proxy first, while serve's control RPC is up for its meter flush, then serve.
-        for process in (egress, serve):
+        for name, process in (("egress", egress), ("serve", serve)):
             if process is None or process.returncode is not None:
                 continue
+            self._process_event("terminate", name, process)
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), SHUTDOWN_GRACE_SECONDS)
             except TimeoutError:
+                self._process_event("kill", name, process)
                 process.kill()
                 await process.wait()
+            self._process_event("exited", name, process)
         await self._release_sandboxes()
+
+    def _process_event(self, action: str, name: str, process: asyncio.subprocess.Process) -> None:
+        self.process_log.write(
+            json.dumps(
+                {
+                    "at": datetime.now(UTC).isoformat(),
+                    "action": action,
+                    "name": name,
+                    "pid": process.pid,
+                    "returncode": process.returncode,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        self.process_log.flush()
 
     async def _release_sandboxes(self) -> None:
         """Release the Docker sandboxes this stack's serve created.

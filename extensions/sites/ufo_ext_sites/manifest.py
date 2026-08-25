@@ -19,7 +19,21 @@ parent; its `game/`, `shared/`, and `informational/` subdirectories are ordinary
 
 from pathlib import Path
 
-from ufo.sdk.manifest import Manifest, PromptSection, SkillSpec
+from ufo.sdk.manifest import HookSpec, Manifest, PromptSection, SkillSpec
+from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_DELEGATION,
+    APPLICATION_BUILDER_EDIT,
+    APPLICATION_BUILDER_PROFILE,
+    APPLICATION_BUILDER_QA_TOOL,
+    APPLICATION_BUILDER_READ,
+    APPLICATION_BUILDER_READ_TOOL,
+    APPLICATION_BUILDER_WRITE,
+    APPLICATION_PREVIEW,
+    limit_application_builder_qa,
+    limit_application_builder_repair_reads,
+    record_application_builder_qa,
+    require_application_builder_qa,
+)
 from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.delegation import DELEGATION_TOOLS
 from ufo_ext_sites.objects import SITE_OBJECT
@@ -40,11 +54,41 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        tools=(*SITES_TOOLS, *DELEGATION_TOOLS),
+        tools=(
+            *SITES_TOOLS,
+            *DELEGATION_TOOLS,
+            APPLICATION_BUILDER_DELEGATION,
+            APPLICATION_BUILDER_EDIT,
+            APPLICATION_BUILDER_READ,
+            APPLICATION_BUILDER_WRITE,
+            APPLICATION_PREVIEW,
+        ),
         objects=(SITE_OBJECT,),
-        subagents=(WEBSITE_BUILDING_PROFILE,),
+        subagents=(WEBSITE_BUILDING_PROFILE, APPLICATION_BUILDER_PROFILE),
         surfaces=(SITES_SURFACE,),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
         skills=(SkillSpec(path=SKILLS_ROOT / SKILL_NAME),),
+        hooks=(
+            HookSpec(
+                event="pre_tool_use",
+                handler=limit_application_builder_qa,
+                tools=(APPLICATION_BUILDER_QA_TOOL,),
+            ),
+            HookSpec(
+                event="post_tool_use",
+                handler=record_application_builder_qa,
+                tools=(APPLICATION_BUILDER_QA_TOOL,),
+            ),
+            HookSpec(
+                event="pre_tool_use",
+                handler=limit_application_builder_repair_reads,
+                tools=(APPLICATION_BUILDER_READ_TOOL, APPLICATION_BUILDER_EDIT.name),
+            ),
+            HookSpec(
+                event="pre_tool_use",
+                handler=require_application_builder_qa,
+                tools=("deploy_website",),
+            ),
+        ),
         conversation_slots=(SITES_SLOT,),
     )

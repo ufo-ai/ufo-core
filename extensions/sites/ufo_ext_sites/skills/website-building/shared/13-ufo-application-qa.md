@@ -1,7 +1,7 @@
 # ufo application QA
 
-Use this path for an application homepage. It keeps full browser proof in a small number of model
-turns. Read `12-playwright-interactive.md` as well only when the
+Use this path for a ufo application homepage built in the fixed product scaffold. It keeps full
+browser proof in a small number of model turns. Read `12-playwright-interactive.md` as well only when the
 application has multi-page routing, authentication, realtime behavior, or motion that needs its
 extended checks.
 
@@ -10,12 +10,17 @@ extended checks.
 Start the static folder once:
 
 ```
-start_server(project_path="/workspace/my-project", port=3000)
+start_server(project_path="/workspace/ufo-app", port=3000)
 ```
 
 Omit `command` for static files. `start_server` supplies the server, frees the port, waits for it,
 and returns the URL. Do not inspect installed servers, install a package, write a server, restart
-after edits, or add a manual health wait. Reload the page after an edit.
+after edits, or add a manual health wait. For QA, open the returned URL at `/preview.html`. Reload
+the page after an edit.
+
+After navigation, select `page.frame({ name: "ufo-app" })`. Run locators and evaluations on that
+frame. The top page is only the product preview shell; its empty text and controls are not app
+evidence.
 
 Use the Chromium endpoint at `http://127.0.0.1:9222` when it answers. Start Chromium once only when
 that endpoint is absent, with `bash(background=true)`:

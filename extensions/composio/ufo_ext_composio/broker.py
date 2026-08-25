@@ -62,6 +62,7 @@ class ComposioBroker:
             slug=slug,
             description=description if isinstance(description, str) else "",
             input_schema=input_schema if isinstance(input_schema, dict) else {},
+            read_only=_read_only(payload),
         )
 
     async def execute(
@@ -209,6 +210,12 @@ def _discovered_tools(rows: tuple[dict[str, object], ...]) -> tuple[BrokerTool, 
                 if isinstance(description, str)
                 else "",
                 input_schema=input_schema if isinstance(input_schema, dict) else {},
+                read_only=_read_only(item),
             )
         )
     return tuple(tools)
+
+
+def _read_only(payload: dict[str, object]) -> bool:
+    tags = payload.get("tags")
+    return isinstance(tags, list) and "readOnlyHint" in tags

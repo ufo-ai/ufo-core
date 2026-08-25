@@ -5,6 +5,7 @@ The engine tests drive `Onboarding.run` against a fresh db (both dialects) and a
 turn path consumes. The cold-start test drives the real `ufoctl init` command through Click: a
 first run writes the token and durable state, a second run fails loud."""
 
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,7 +32,7 @@ from ufo.onboard.onboarding import (
     Onboarding,
 )
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME, MAIN_AGENT_ICON
+from ufo.schema.records import DEFAULT_AGENT_NAME, MAIN_AGENT_ICON, ReasoningEffort
 from ufo.workspace import init_workspace_credentials, ws
 
 OWNER_EMAIL = "owner@example.com"
@@ -43,6 +44,7 @@ def _onboarding(
     tmp_path: Path,
     credentials: CredentialStore | None = None,
     manifests: tuple = (),
+    reasoning: ReasoningEffort = "auto",
 ) -> Onboarding:
     return Onboarding(
         config=Config(
@@ -53,6 +55,7 @@ def _onboarding(
         model=DEFAULT_MODEL,
         credentials=credentials,
         manifests=manifests,
+        reasoning=reasoning,
     )
 
 
@@ -60,7 +63,7 @@ async def test_onboarding_creates_the_initial_admin_and_main_agent(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-onboard")
-    onboarded = await _onboarding(database_url, tmp_path).run()
+    onboarded = await _onboarding(database_url, tmp_path, reasoning="high").run()
     async with workspace_tx() as connection:
         workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
         member = (await connection.execute(sa.select(tables.member))).one()
@@ -72,10 +75,11 @@ async def test_onboarding_creates_the_initial_admin_and_main_agent(
         onboarded.workspace_id,
     )
     assert member.is_admin
-    assert (agent.name, agent.model, agent.prompt) == (
+    assert (agent.name, agent.model, agent.prompt, agent.reasoning) == (
         DEFAULT_AGENT_NAME,
         DEFAULT_MODEL,
         DEFAULT_AGENT_PROMPT,
+        "high",
     )
     assert agent.workspace_id == onboarded.workspace_id
     assert agent.is_main
@@ -266,9 +270,12 @@ def test_cold_start_init_creates_durable_state_and_then_fails_loud(
     monkeypatch.setenv("UFOCTL_DIR", str(tmp_path / ".ufoctl"))
     runner = CliRunner()
     with runner.isolated_filesystem():
-        first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
+        first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL, "--reasoning", "high"])
         assert first.exit_code == 0, first.output
         assert "workspace ready" in first.output
+        assert "high reasoning" in first.output
+        with sqlite3.connect("ufo.db") as connection:
+            assert connection.execute("select reasoning from agent").fetchone() == ("high",)
         assert (tmp_path / ".ufoctl" / "token").read_text()
         second = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert second.exit_code != 0

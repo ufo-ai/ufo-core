@@ -20,6 +20,9 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, model_validator
 from ufo_ext_eval_env.manifest import (
     ACCOUNT_ID,
+    APP_ACTION_FIXTURE_PREFIX,
+    APP_ACTION_KEY_PREFIX,
+    APP_ACTION_KIND,
     APP_FIXTURE_PREFIX,
     CALENDAR_HOST,
     CALENDAR_PROVIDER,
@@ -41,8 +44,35 @@ from ufo_ext_eval_env.manifest import (
 from ufo_ext_eval_env.manifest import (
     NAME as EVAL_ENV_NAME,
 )
+from ufo_ext_sites.application_audit import (
+    APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
+    APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    DESKTOP_WIDTH,
+    MIN_CONTROLS,
+    MIN_INTERACTIONS,
+    SCHEMES,
+    ApplicationAuditContract,
+    ApplicationAuditFact,
+    ApplicationAuditReport,
+    audit_application,
+)
+from ufo_ext_sites.application_audit import (
+    MEASURED_VIEWS as APPLICATION_MEASURED_VIEWS,
+)
+from ufo_ext_sites.application_audit import (
+    NARROW_WIDTH as APPLICATION_NARROW_WIDTH,
+)
+from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_DELEGATION_TOOL,
+    APPLICATION_BUILDER_EDIT_TOOL,
+    APPLICATION_BUILDER_NAME,
+    APPLICATION_BUILDER_QA_LIMIT_REASON,
+    APPLICATION_BUILDER_READ_TOOL,
+    APPLICATION_BUILDER_WRITE_TOOL,
+    ApplicationBuilderResult,
+)
 
-from evals.driver import EVAL_SURFACE
+from evals.driver import EVAL_SURFACE, WorkspaceDriver
 from evals.harness.artifact_checks import ArtifactCheck, valid_png
 from evals.harness.capability import (
     ArtifactProbeResult,
@@ -53,49 +83,111 @@ from evals.harness.capability import (
     Grader,
     ProbeCommandResult,
     SharedArtifact,
+    WorkspaceFile,
     WorkspaceProbe,
     grading_statement,
 )
 from evals.harness.harness import EvalMetric, EvalReport, Json, JsonObject
 from evals.harness.registry import EvalTask
-from evals.harness.scorers import combine, content_words, required_tools_scorer, skill_scorer
+from evals.harness.scorers import combine, content_words, skill_scorer
 from evals.harness.target import CapabilityTarget
 from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.schema import tables
+from ufo.schema.records import TerminalFrame
 from ufo.sdk.context import ScopedStore
+from ufo.workspace import ws
 
 HOUSE_STYLE_SKILL = "ufo-style"
 SITE_SKILL = "website-building"
-AUDIT_CONTENT = Path(__file__).with_name("ufo_app_bench_audit.cjs").read_bytes()
+REPO_ROOT = Path(__file__).parents[2]
+AUDIT_CONTENT = (
+    REPO_ROOT / "extensions/sites/ufo_ext_sites/scripts/audit_application.cjs"
+).read_bytes()
 COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read_bytes()
 AUDIT_DIGEST = sha256(AUDIT_CONTENT).hexdigest()
 COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()
+APP_SCAFFOLD_ROOT = REPO_ROOT / "extensions/app_tasks/ufo_ext_app_tasks/skills/app-tasks-home"
+APP_WORKSPACE_ROOT = "/workspace/ufo-app"
+APP_PREVIEW = rb"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Application preview</title>
+<style>html,body,iframe{width:100%;height:100%;margin:0;border:0}body{overflow:hidden}</style>
+</head>
+<body>
+<iframe name="ufo-app" title="Application preview" src="./dist/index.html"></iframe>
+<script>
+const agent={id:"eval-agent",name:"Assistant",model:"eval",main:true,icon:"user"};
+window.__ufoCalls=[];
+window.__ufoNavigations=[];
+const actionKey="ufo-app-bench-actions";
+const actionResult=spec=>({
+  "meeting-tasks":"Issue #900 created for priya.",
+  "issue-owner":"Issue #521 assigned to alex.",
+  "pr-babysitter":"PR #743 babysitter set to Gemini 3.7 Flash."
+})[spec.case]||"Prepared action accepted.";
+window.addEventListener("message",event=>{
+  const message=event.data;
+  if(!message||typeof message!=="object")return;
+  if(message.ufo==="ready"){
+    event.source.postMessage({ufo:"init",member:{email:"evals@localhost",admin:true},agentId:agent.id,place:{},portal:location.origin},"*");
+    return;
+  }
+  if(message.ufo==="navigate"){
+    window.__ufoNavigations.push(message.to);
+    return;
+  }
+  if(message.ufo!=="call")return;
+  const path=message.path.replace(/^\/+/,"");
+  const callBody=typeof message.body==="string"?JSON.parse(message.body):message.body;
+  window.__ufoCalls.push({method:message.method,path,body:callBody});
+  const actions=JSON.parse(localStorage.getItem(actionKey)||"{}");
+  let response={applied:true,message:"Prepared action accepted."};
+  if(path==="api/agents"){
+    response={agents:[agent],member:{email:"evals@localhost",admin:true}};
+  }else if(message.method==="POST"&&path==="objects/eval_app_action"){
+    const result=actionResult(callBody.spec);
+    actions[callBody.name]={spec:callBody.spec,result};
+    localStorage.setItem(actionKey,JSON.stringify(actions));
+    response={ok:true,name:callBody.name,detail:result};
+  }else if(message.method==="GET"&&path.startsWith("objects/eval_app_action/")){
+    const name=decodeURIComponent(path.split("/").pop());
+    const stored=actions[name];
+    response=stored
+      ? {name,spec:stored.spec,status:{state:"applied",result:stored.result}}
+      : {error:"not found"};
+  }
+  const body=JSON.stringify(response);
+  event.source.postMessage({ufo:"data",id:message.id,ok:true,status:200,body},"*");
+});
+</script>
+</body>
+</html>
+"""
+APP_PLACEHOLDER = b"""import { mountApp } from "ufo/kit";
+mountApp(document.getElementById("root")!, () => <main>Application source is not built.</main>);
+"""
+APP_WORKSPACE_FILES = (
+    WorkspaceFile("ufo-app/index.html", (APP_SCAFFOLD_ROOT / "index.html").read_bytes()),
+    WorkspaceFile("ufo-app/app.tsx", APP_PLACEHOLDER),
+    WorkspaceFile("ufo-app/preview.html", APP_PREVIEW),
+)
 PROBE_OUTPUT = ".eval-output"
 PROBE_PORT = 8137
 PROBE_TIMEOUT_SECONDS = 120
-DESKTOP_WIDTH = 1440
 DESKTOP_HEIGHT = 900
-NARROW_WIDTH = 390
+NARROW_WIDTH = APPLICATION_NARROW_WIDTH
 NARROW_HEIGHT = 844
-SCHEMES = ("light", "dark")
-# The four views `app-audit.cjs` measures. A report missing one fails the case as an unmeasured view
-# rather than passing on the three that ran.
-MEASURED_VIEWS = tuple(
-    (scheme, width) for width in (DESKTOP_WIDTH, NARROW_WIDTH) for scheme in SCHEMES
-)
-AA_BODY = 4.5
-AA_LARGE = 3.0
-LARGE_PX = 24.0
-LARGE_BOLD_PX = 18.66
-BOLD_WEIGHT = 700
-REPORTED_FAILURES = 4
+MEASURED_VIEWS = APPLICATION_MEASURED_VIEWS
+INTERACTION_MIN_CONTROLS = MIN_CONTROLS
+INTERACTION_MIN_SUCCESSES = MIN_INTERACTIONS
 WORKFLOW_WAIT_SECONDS = 900.0
 SUPPORTED_BACKENDS = ("docker",)
-INTERACTION_MIN_CONTROLS = 2
-INTERACTION_MIN_SUCCESSES = 2
 MAX_PREVIEW_SERVER_CALLS = 1
 MAX_BROWSER_QA_CALLS = 4
 DEPLOY_TOOLS = ("deploy_website", "publish_website")
@@ -226,6 +318,65 @@ class _ConnectedApps(BaseModel):
     cases: tuple[_ConnectedApp, ...]
 
 
+class _ActionContract(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    source_case: str
+    label: str
+    fixture_tool: str
+    kind: str = APP_ACTION_KIND
+    spec: JsonObject
+    expected_result: str
+    expected_fixture: JsonObject
+
+    def connector_value(self) -> JsonObject:
+        return {
+            "label": self.label,
+            "write": {
+                "function": "ufoWrite",
+                "arguments": [self.kind, self.name, self.spec],
+            },
+            "read": {
+                "function": "ufoRead",
+                "arguments": [f"objects/{self.kind}/{self.name}"],
+            },
+            "success_text": self.expected_result,
+            "render": {"component": "ApplicationAction", "prop": "action"},
+        }
+
+
+class _SetupContract(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    source_case: str
+    fixture_tool: str
+    connectors: tuple[str, ...]
+    notifications: tuple[str, ...] = ("Chat", "Slack", "iMessage")
+    review_label: str = "Review setup in chat"
+    navigation: str = "#/new/eval-agent"
+
+    def connector_value(self) -> JsonObject:
+        return {
+            "application": self.source_case,
+            "connectors": [
+                {"label": connector, "state": "connected"} for connector in self.connectors
+            ],
+            "notifications": [
+                {"surface": surface, "state": state}
+                for surface, state in zip(
+                    self.notifications,
+                    ("selected", "available", "not connected"),
+                    strict=True,
+                )
+            ],
+            "review": {
+                "label": self.review_label,
+                "navigate": {"function": "ufoNavigate", "arguments": [self.navigation]},
+            },
+        }
+
+
 def _source_segments(source: str) -> tuple[str, ...]:
     return tuple(segment.strip() for segment in SOURCE_SENTENCE.split(source) if segment.strip())
 
@@ -233,6 +384,87 @@ def _source_segments(source: str) -> tuple[str, ...]:
 APP_DATA_CONTENT = Path(__file__).with_name("ufo_app_bench_data.json").read_bytes()
 APP_DATA_DIGEST = sha256(APP_DATA_CONTENT).hexdigest()
 CONNECTED_APPS = _ConnectedApps.model_validate_json(APP_DATA_CONTENT).cases
+CONNECTED_APP_BY_NAME = {case.name: case for case in CONNECTED_APPS}
+ACTION_CONTRACTS = (
+    _ActionContract(
+        name="create-support-runbook-issue",
+        source_case="meeting-tasks",
+        label="Create support runbook issue",
+        fixture_tool="list_issues",
+        spec={
+            "case": "meeting-tasks",
+            "action": "create_issue",
+            "target": "support-runbook",
+            "value": "priya",
+        },
+        expected_result="Issue #900 created for priya.",
+        expected_fixture={"issues": [{"number": 900, "owner": "priya"}]},
+    ),
+    _ActionContract(
+        name="assign-issue-521",
+        source_case="issue-owner",
+        label="Assign issue 521 to Alex",
+        fixture_tool="list_issues",
+        spec={
+            "case": "issue-owner",
+            "action": "assign_issue",
+            "target": "521",
+            "value": "alex",
+        },
+        expected_result="Issue #521 assigned to alex.",
+        expected_fixture={
+            "issues": [{"number": 521, "owner": "alex", "project_status": "Assigned"}]
+        },
+    ),
+    _ActionContract(
+        name="set-pr-743-babysitter",
+        source_case="pr-babysitter",
+        label="Use Gemini 3.7 Flash for PR 743",
+        fixture_tool="list_pull_requests",
+        spec={
+            "case": "pr-babysitter",
+            "action": "set_babysitter",
+            "target": "743",
+            "value": "Gemini 3.7 Flash",
+        },
+        expected_result="PR #743 babysitter set to Gemini 3.7 Flash.",
+        expected_fixture={
+            "pull_requests": [
+                {
+                    "number": 743,
+                    "babysitter": {
+                        "enabled": True,
+                        "model": "Gemini 3.7 Flash",
+                        "state": "watching",
+                    },
+                }
+            ]
+        },
+    ),
+)
+SETUP_CONTRACTS = (
+    _SetupContract(
+        source_case="meeting-tasks",
+        fixture_tool="list_issues",
+        connectors=("Google Drive", "GitHub"),
+    ),
+    _SetupContract(
+        source_case="issue-owner",
+        fixture_tool="list_issues",
+        connectors=("GitHub",),
+    ),
+    _SetupContract(
+        source_case="pr-babysitter",
+        fixture_tool="list_pull_requests",
+        connectors=("GitHub",),
+    ),
+)
+ACTION_CASE_NAMES = frozenset(
+    f"{prefix}-{contract.source_case}"
+    for prefix, contracts in (("action", ACTION_CONTRACTS), ("setup", SETUP_CONTRACTS))
+    for contract in contracts
+)
+SETUP_CASE_NAMES = frozenset(f"setup-{contract.source_case}" for contract in SETUP_CONTRACTS)
 
 
 def _merge_app_tools(cases: tuple[_ConnectedApp, ...]) -> dict[str, dict[str, JsonObject]]:
@@ -261,11 +493,30 @@ def _merge_app_tools(cases: tuple[_ConnectedApp, ...]) -> dict[str, dict[str, Js
 APP_UNIVERSE_EMAILS = tuple(item for spec in CONNECTED_APPS for item in spec.emails)
 APP_UNIVERSE_EVENTS = tuple(item for spec in CONNECTED_APPS for item in spec.events)
 APP_UNIVERSE_TOOLS = _merge_app_tools(CONNECTED_APPS)
+CONNECTED_MEMBER_QUERIES = {
+    case.name: " ".join((case.request, *(item.prompt for item in case.requirements)))
+    for case in CONNECTED_APPS
+}
+ACTION_MEMBER_QUERIES = {
+    f"action-{contract.source_case}": (
+        f"{CONNECTED_MEMBER_QUERIES[contract.source_case]} "
+        "Use the application action contract in the connected GitHub data. Its named control "
+        "must apply the exact prepared action, show the returned result, and keep that result "
+        "visible after a page reload."
+    )
+    for contract in ACTION_CONTRACTS
+}
 MEMBER_QUERIES = {
     **CONTROL_MEMBER_QUERIES,
+    **CONNECTED_MEMBER_QUERIES,
+    **ACTION_MEMBER_QUERIES,
     **{
-        case.name: " ".join((case.request, *(item.prompt for item in case.requirements)))
-        for case in CONNECTED_APPS
+        f"setup-{contract.source_case}": (
+            f"{ACTION_MEMBER_QUERIES[f'action-{contract.source_case}']} "
+            "Include a setup and status view with required connector states and notification "
+            "surfaces from connected data. Open chat when I review setup changes."
+        )
+        for contract in SETUP_CONTRACTS
     },
 }
 PROVIDER_HOSTS = {
@@ -282,17 +533,11 @@ PROVIDER_HOSTS = {
 @dataclass(frozen=True)
 class _ConnectedAppSeed:
     spec: _ConnectedApp
+    request: str
 
     async def __call__(self, workspace_id: UUID, agent_id: UUID, _blob: WorkspaceBlobStore) -> None:
         conversation_id = uuid4()
         async with workspace_tx() as connection:
-            (
-                await connection.execute(
-                    sa.select(tables.workspace.c.id)
-                    .where(tables.workspace.c.id == workspace_id)
-                    .with_for_update()
-                )
-            ).scalar_one()
             await connection.execute(
                 sa.delete(eval_env_email).where(eval_env_email.c.workspace_id == workspace_id)
             )
@@ -356,10 +601,31 @@ class _ConnectedAppSeed:
             call.provider for requirement in self.spec.requirements for call in requirement.calls
         }
         store = ScopedStore(extension=EVAL_ENV_NAME)
+        await ScopedStore(extension="sites").put(
+            APPLICATION_AUDIT_REQUEST_CONTRACT_KEY.format(
+                request_sha256=sha256(self.request.encode()).hexdigest()
+            ),
+            _application_audit_contract(self.spec).model_dump(mode="json"),
+        )
         for provider in sorted(providers & APP_UNIVERSE_TOOLS.keys()):
             tools = APP_UNIVERSE_TOOLS[provider]
             for tool, response in tools.items():
-                await store.put(f"{APP_FIXTURE_PREFIX}{provider}:{tool}", response)
+                seeded = json.loads(json.dumps(response))
+                actions = tuple(
+                    contract.connector_value()
+                    for contract in ACTION_CONTRACTS
+                    if provider == GITHUB_PROVIDER and tool == contract.fixture_tool
+                )
+                if actions:
+                    seeded["application_actions"] = actions
+                setups = tuple(
+                    contract.connector_value()
+                    for contract in SETUP_CONTRACTS
+                    if provider == GITHUB_PROVIDER and tool == contract.fixture_tool
+                )
+                if setups:
+                    seeded["application_setups"] = setups
+                await store.put(f"{APP_FIXTURE_PREFIX}{provider}:{tool}", seeded)
         with agent(agent_id):
             grants = GrantStore()
             for provider in sorted(providers):
@@ -494,9 +760,9 @@ def _requirement_scorer(spec: _ConnectedApp) -> Grader:
             )
             passed += len(requirement.visible_any) - len(missing_any)
             if missing_any:
-                labels = tuple(" or ".join(items) for items in missing_any[:4])
+                missing_labels = tuple(" or ".join(items) for items in missing_any[:4])
                 failures.append(
-                    f"{requirement.prompt} lacks rendered facts: {', '.join(labels)}",
+                    f"{requirement.prompt} lacks rendered facts: {', '.join(missing_labels)}",
                 )
             copied = tuple(item for item in requirement.absent if item.casefold() in text)
             if copied:
@@ -594,6 +860,21 @@ def _above_fold_scorer(spec: _ConnectedApp) -> Grader:
     )
 
 
+def _application_audit_contract(spec: _ConnectedApp) -> ApplicationAuditContract:
+    return ApplicationAuditContract(
+        facts=tuple(
+            ApplicationAuditFact(label=fact, alternatives=(fact,))
+            for requirement in spec.requirements
+            for fact in requirement.visible
+        )
+        + tuple(
+            ApplicationAuditFact(label=" or ".join(alternatives), alternatives=alternatives)
+            for requirement in spec.requirements
+            for alternatives in requirement.visible_any
+        )
+    )
+
+
 def _copy_scorer(spec: _ConnectedApp) -> Grader:
     rewrite_requirements = tuple(
         requirement for requirement in spec.requirements if requirement.rewrite_sources
@@ -652,9 +933,9 @@ def _copy_scorer(spec: _ConnectedApp) -> Grader:
                 if not any(item.casefold() in text for item in alternatives)
             )
             if missing_any:
-                labels = tuple(" or ".join(items) for items in missing_any[:4])
+                missing_labels = tuple(" or ".join(items) for items in missing_any[:4])
                 failures.append(
-                    f"{requirement.prompt} lacks rendered source facts: {', '.join(labels)}"
+                    f"{requirement.prompt} lacks rendered source facts: {', '.join(missing_labels)}"
                 )
             copied = tuple(item for item in requirement.absent if item.casefold() in text)
             if copied:
@@ -678,6 +959,7 @@ class AppBenchWorkspaceProbe(WorkspaceProbe):
     """Run a bounded app-bench command in a local Docker conversation sandbox."""
 
     conversation_id: UUID
+    driver: WorkspaceDriver | None = None
 
     async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
         async with _browser_probe_slot():
@@ -702,6 +984,44 @@ class AppBenchWorkspaceProbe(WorkspaceProbe):
                 stdout.decode(errors="replace"),
                 stderr.decode(errors="replace"),
             )
+
+    async def apply_object_intent(
+        self,
+        kind: str,
+        name: str,
+        spec: JsonObject,
+        idempotency_key: str,
+    ) -> tuple[UUID, TerminalFrame]:
+        if self.driver is None:
+            raise RuntimeError("app action probe has no workspace driver")
+        scoped_name = f"{(await self.contract_identity()).hex}-{name}"
+        return await self.driver.apply_object_intent(
+            self.conversation_id,
+            kind,
+            scoped_name,
+            spec,
+            idempotency_key,
+        )
+
+    async def contract_identity(self) -> UUID:
+        async with workspace_tx() as connection:
+            turn_id = (
+                await connection.execute(
+                    sa.select(tables.turn.c.id)
+                    .where(
+                        tables.turn.c.conversation_id == self.conversation_id,
+                        tables.turn.c.parent_turn_id.is_(None),
+                    )
+                    .order_by(tables.turn.c.seq.desc())
+                    .limit(1)
+                )
+            ).scalar_one()
+        contract = await ScopedStore(extension="sites").get(
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=turn_id)
+        )
+        if contract is None:
+            raise RuntimeError("app action probe has no bound audit contract")
+        return turn_id
 
 
 @asynccontextmanager
@@ -760,21 +1080,6 @@ class _AppBenchProbe:
     def _command(self) -> str:
         directory = f"/workspace/{PROBE_OUTPUT}/{self.name}"
         audit = base64.b64encode(AUDIT_CONTENT).decode()
-        find_page = """python3 - <<'PY'
-from pathlib import Path
-
-root = Path('/workspace')
-excluded = {'.skills', '.eval-output', 'node_modules'}
-pages = [
-    path
-    for path in root.rglob('*.html')
-    if not excluded.intersection(path.parts) and path.is_file()
-]
-pages.sort(key=lambda path: (path.name == 'index.html', path.stat().st_mtime), reverse=True)
-if pages:
-    print(pages[0])
-PY
-"""
         readiness = f"""python3 - <<'PY'
 import socket
 import time
@@ -794,18 +1099,229 @@ PY"""
             'rm -rf "$capture"\n'
             'mkdir -p "$capture"\n'
             f"printf %s {shlex.quote(audit)} | base64 -d > /tmp/ufo-app-bench-audit.cjs\n"
-            f"page=$({find_page})\n"
-            'if [ -z "$page" ]; then printf %s "no generated HTML page" >&2; exit 2; fi\n'
+            f"test -s {APP_WORKSPACE_ROOT}/app.tsx\n"
             f"(fuser -k {PROBE_PORT}/tcp 2>/dev/null || true)\n"
             f"nohup python3 -m http.server {PROBE_PORT} --bind 127.0.0.1 "
-            ' --directory "$(dirname "$page")" >/tmp/ufo-app-bench-server.log 2>&1 &\n'
+            f"--directory {APP_WORKSPACE_ROOT} >/tmp/ufo-app-bench-server.log 2>&1 &\n"
             f"{readiness}\n"
             "node /tmp/ufo-app-bench-audit.cjs "
-            f'http://localhost:{PROBE_PORT}/$(basename "$page") '
+            f"http://localhost:{PROBE_PORT}/preview.html "
             f'"$capture/{self.name}-audit.json" "$capture/{self.name}-light.png" '
             f'"$capture/{self.name}-dark.png" "$capture/{self.name}-interactive.html" '
             f'"$capture/{self.name}-static.html"'
         )
+
+
+def _json_contains(value: Json, expected: Json) -> bool:
+    match expected:
+        case dict():
+            return isinstance(value, dict) and all(
+                key in value and _json_contains(value[key], item) for key, item in expected.items()
+            )
+        case list():
+            return isinstance(value, list) and all(
+                any(_json_contains(candidate, item) for candidate in value) for item in expected
+            )
+        case _:
+            return value == expected
+
+
+def _missing_setup_terms(state_text: str, setup: _SetupContract) -> tuple[str, ...]:
+    groups = (
+        *((connector,) for connector in setup.connectors),
+        ("connected",),
+        *((surface,) for surface in setup.notifications),
+        ("selected", "active"),
+        ("available",),
+        ("not connected", "disconnected"),
+        (setup.review_label,),
+    )
+    return tuple(
+        " or ".join(group)
+        for group in groups
+        if not any(term.casefold() in state_text for term in group)
+    )
+
+
+@dataclass(frozen=True)
+class _AppActionProbe:
+    name: str
+    contract: _ActionContract
+
+    async def __call__(
+        self, output: CapabilityOutput, probe: WorkspaceProbe
+    ) -> ArtifactProbeResult:
+        captured = await _AppBenchProbe(self.name)(output, probe)
+        if captured.error:
+            return captured
+        audit_artifact = next(
+            artifact for artifact in captured.artifacts if artifact.name.endswith("-audit.json")
+        )
+        try:
+            interaction = json.loads(audit_artifact.content)["interaction"]
+            calls = interaction["calls"]
+            reload_states = interaction["reloadStates"]
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
+            return replace(captured, error="app action audit has no browser calls or reload states")
+        expected_path = f"objects/{self.contract.kind}"
+        matched = [
+            call
+            for call in calls
+            if isinstance(call, dict)
+            and call.get("method") == "POST"
+            and call.get("path") == expected_path
+            and isinstance(call.get("body"), dict)
+            and call["body"].get("name") == self.contract.name
+            and call["body"].get("spec") == self.contract.spec
+        ]
+        reloaded_text = " ".join(
+            str(part)
+            for state in reload_states
+            if isinstance(state, dict)
+            for part in state.get("parts", [])
+        )
+        reload_visible = self.contract.expected_result.casefold() in reloaded_text.casefold()
+        if not isinstance(probe, AppBenchWorkspaceProbe):
+            return replace(captured, error="app action probe cannot admit prepared intents")
+        idempotency_key = f"ufo-app-bench:{self.name}:{self.contract.name}"
+        try:
+            contract_identity = await probe.contract_identity()
+            scoped_name = f"{contract_identity.hex}-{self.contract.name}"
+            first_turn, first = await probe.apply_object_intent(
+                self.contract.kind,
+                self.contract.name,
+                self.contract.spec,
+                idempotency_key,
+            )
+            second_turn, second = await probe.apply_object_intent(
+                self.contract.kind,
+                self.contract.name,
+                self.contract.spec,
+                idempotency_key,
+            )
+            refused_name = "refused"
+            refused_spec = {**self.contract.spec, "value": "refused-value"}
+            refused_turn, refused = await probe.apply_object_intent(
+                self.contract.kind,
+                refused_name,
+                refused_spec,
+                f"{idempotency_key}:refused",
+            )
+            store = ScopedStore(extension=EVAL_ENV_NAME)
+            action = await store.get(APP_ACTION_KEY_PREFIX + scoped_name)
+            refused_action = await store.get(
+                APP_ACTION_KEY_PREFIX + f"{contract_identity.hex}-{refused_name}"
+            )
+            fixture = await store.get(APP_ACTION_FIXTURE_PREFIX + scoped_name)
+            other_workspace = uuid4()
+            with ws(other_workspace):
+                leaked_action = await ScopedStore(extension=EVAL_ENV_NAME).get(
+                    APP_ACTION_KEY_PREFIX + self.contract.name
+                )
+        except Exception as error:
+            return replace(captured, error=f"prepared app action failed: {str(error)[:300]}")
+        proof = {
+            "browser_call": matched[0] if matched else None,
+            "reload_text": reloaded_text,
+            "first": {"turn_id": str(first_turn), "terminal": first.model_dump(mode="json")},
+            "redelivery": {
+                "turn_id": str(second_turn),
+                "terminal": second.model_dump(mode="json"),
+            },
+            "refused": {
+                "turn_id": str(refused_turn),
+                "terminal": refused.model_dump(mode="json"),
+                "stored": refused_action,
+            },
+            "action": action,
+            "fixture": fixture,
+            "other_workspace_action": leaked_action,
+            "checks": {
+                "browser": bool(matched),
+                "reload": reload_visible,
+                "applied": first.status == "done" and second.status == "done",
+                "idempotent": first_turn == second_turn,
+                "refused": refused.status == "failed"
+                and refused_action is None
+                and "invalid application action"
+                in (refused.error_message or refused.text).casefold(),
+                "scoped": leaked_action is None,
+                "result": isinstance(action, dict)
+                and action.get("result") == self.contract.expected_result,
+                "fixture": _json_contains(fixture, self.contract.expected_fixture),
+            },
+        }
+        artifact = SharedArtifact(
+            f"{self.name}-action-proof.json",
+            json.dumps(proof, indent=2, sort_keys=True).encode(),
+        )
+        return replace(captured, artifacts=(*captured.artifacts, artifact))
+
+
+@dataclass(frozen=True)
+class _AppSetupProbe:
+    name: str
+    action: _ActionContract
+    setup: _SetupContract
+
+    async def __call__(
+        self, output: CapabilityOutput, probe: WorkspaceProbe
+    ) -> ArtifactProbeResult:
+        captured = await _AppActionProbe(self.name, self.action)(output, probe)
+        if captured.error:
+            return captured
+        audit_artifact = next(
+            artifact for artifact in captured.artifacts if artifact.name.endswith("-audit.json")
+        )
+        try:
+            interaction = json.loads(audit_artifact.content)["interaction"]
+            states = interaction["states"]
+            calls = interaction["calls"]
+            navigations = interaction["navigations"]
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
+            return replace(captured, error="app setup audit has no browser state or navigation")
+        state_text = " ".join(
+            str(part)
+            for state in states
+            if isinstance(state, list)
+            for part in state
+            if isinstance(part, str)
+        ).casefold()
+        missing = _missing_setup_terms(state_text, self.setup)
+        matched_navigation = next(
+            (
+                item
+                for item in navigations
+                if isinstance(item, dict)
+                and "setup" in str(item.get("control", "")).casefold()
+                and "chat" in str(item.get("control", "")).casefold()
+                and item.get("to") == self.setup.navigation
+            ),
+            None,
+        )
+        forbidden = tuple(
+            call
+            for call in calls
+            if isinstance(call, dict)
+            and call.get("method") == "POST"
+            and call.get("path") != f"objects/{self.action.kind}"
+        )
+        proof = {
+            "required": self.setup.connector_value(),
+            "missing": missing,
+            "navigation": matched_navigation,
+            "forbidden_calls": forbidden,
+            "checks": {
+                "visible": not missing,
+                "chat": matched_navigation is not None,
+                "no_direct_setup_write": not forbidden,
+            },
+        }
+        artifact = SharedArtifact(
+            f"{self.name}-setup-proof.json",
+            json.dumps(proof, indent=2, sort_keys=True).encode(),
+        )
+        return replace(captured, artifacts=(*captured.artifacts, artifact))
 
 
 @dataclass(frozen=True)
@@ -920,68 +1436,29 @@ TASTE_CRITERIA = (
 )
 
 
-def _needed_ratio(px: float, weight: int) -> float:
-    """WCAG AA for one rendered string: 4.5:1, or 3:1 where the text is large — 24px, or 18.66px at
-    bold weight. The audit reports every string under the strict floor with its own size and weight,
-    so the threshold each string owed is decided here and not by the script that measured it."""
-    if px >= LARGE_PX or (px >= LARGE_BOLD_PX and weight >= BOLD_WEIGHT):
-        return AA_LARGE
-    return AA_BODY
-
-
 def _measured_screen(content: bytes) -> ArtifactCheck:
     """The measured half: every view `app-audit.cjs` shot, with contrast reported first because it
     is the check a first bench run showed a static token check cannot make. Contrast fails the
     screen, then a document wider than its viewport, then clipped text, then a console error."""
     try:
-        report = json.loads(content)
-        views = {(str(view["scheme"]), int(view["width"])): view for view in report["views"]}
-        missing = [
-            f"{scheme} at {width}px"
-            for scheme, width in MEASURED_VIEWS
-            if (scheme, width) not in views
-        ]
-        if missing:
-            return ArtifactCheck(False, f"measures no {', '.join(missing)}")
-        unread = [
-            f"{scheme} at {width}px"
-            for scheme, width in MEASURED_VIEWS
-            if int(views[(scheme, width)]["textChecked"]) == 0
-        ]
-        if unread:
-            return ArtifactCheck(False, f"read no text in {', '.join(unread)} — the page is empty")
-        below = [
-            f"{scheme} {width}px {item['selector']} at {float(item['ratio'])}:1 needs {needed}:1"
-            for scheme, width in MEASURED_VIEWS
-            for item in views[(scheme, width)]["text"]
-            if (needed := _needed_ratio(float(item["px"]), int(item["weight"])))
-            > float(item["ratio"])
-        ]
-        wide = [
-            f"{scheme} {width}px document is {int(views[(scheme, width)]['documentWidth'])}px"
-            for scheme, width in MEASURED_VIEWS
-            if int(views[(scheme, width)]["documentWidth"]) > width
-        ]
-        clipped = [
-            f"{scheme} {width}px clips {clip}"
-            for scheme, width in MEASURED_VIEWS
-            for clip in views[(scheme, width)]["clipped"]
-        ]
-        noisy = [
-            f"{scheme} {width}px logs {problem}"
-            for scheme, width in MEASURED_VIEWS
-            for problem in views[(scheme, width)]["console"]
-        ]
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError, KeyError) as error:
+        report = ApplicationAuditReport.model_validate_json(content)
+    except (UnicodeDecodeError, TypeError, ValueError) as error:
         return ArtifactCheck(False, f"is not a bench audit report: {error}")
-    if below:
-        return ArtifactCheck(
-            False,
-            f"{len(below)} string(s) of text below AA: {'; '.join(below[:REPORTED_FAILURES])}",
-        )
-    for reported in (wide, clipped, noisy):
-        if reported:
-            return ArtifactCheck(False, "; ".join(reported[:REPORTED_FAILURES]))
+    issues = tuple(
+        issue
+        for issue in audit_application(report).issues
+        if issue.code
+        in {
+            "missing_view",
+            "empty_view",
+            "contrast",
+            "overflow",
+            "clipping",
+            "console",
+        }
+    )
+    if issues:
+        return ArtifactCheck(False, issues[0].message)
     return ArtifactCheck(
         True, "every string clears AA in both schemes, and nothing clips or overflows horizontally"
     )
@@ -989,28 +1466,18 @@ def _measured_screen(content: bytes) -> ArtifactCheck:
 
 def _interaction_screen(name: str, content: bytes) -> ArtifactCheck:
     try:
-        interaction = json.loads(content)["interaction"]
-        controls = interaction["controls"]
-        successes = interaction["successes"]
-        problems = interaction["console"]
-        selectors = {str(success["selector"]) for success in successes}
-        names = [str(success["name"]) for success in successes]
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError, KeyError) as error:
+        report = ApplicationAuditReport.model_validate_json(content)
+    except (UnicodeDecodeError, TypeError, ValueError) as error:
         return ArtifactCheck(False, f"is not an interaction audit: {error}")
-    if problems:
-        return ArtifactCheck(False, f"interaction logs {str(problems[0])[:300]}")
-    if len(controls) < INTERACTION_MIN_CONTROLS:
-        return ArtifactCheck(
-            False,
-            f"{name} exposes {len(controls)} accessible control(s), needs "
-            f"{INTERACTION_MIN_CONTROLS}",
-        )
-    if len(selectors) < INTERACTION_MIN_SUCCESSES:
-        return ArtifactCheck(
-            False,
-            f"{name} has {len(selectors)} distinct visible state change(s), needs "
-            f"{INTERACTION_MIN_SUCCESSES}",
-        )
+    issues = tuple(
+        issue
+        for issue in audit_application(report).issues
+        if issue.code in {"console", "controls", "interaction"}
+    )
+    if issues:
+        return ArtifactCheck(False, issues[0].message.replace("Application", name, 1))
+    selectors = {success.selector for success in report.interaction.successes}
+    names = [success.name for success in report.interaction.successes]
     return ArtifactCheck(
         True,
         f"{name} has {len(selectors)} browser-proved visible state changes: "
@@ -1053,7 +1520,9 @@ def _screen_images_scorer() -> Grader:
 
 
 def _interaction_scorer(name: str) -> Grader:
-    base = _captured_artifact_scorer(".json", lambda content: _interaction_screen(name, content))
+    base = _captured_artifact_scorer(
+        "-audit.json", lambda content: _interaction_screen(name, content)
+    )
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         verdict = await base(output)
@@ -1067,11 +1536,89 @@ def _interaction_scorer(name: str) -> Grader:
     return DescribedGrader(grading_statement(base), grade)
 
 
+def _action_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        proofs = tuple(
+            artifact
+            for artifact in output.artifacts
+            if artifact.name.endswith("-action-proof.json")
+        )
+        if len(proofs) != 1:
+            return CapabilityVerdict(
+                False,
+                f"probe captured {len(proofs)} action proof artifact(s)",
+                _score_evidence("appAction", 0, 1),
+            )
+        try:
+            checks = json.loads(proofs[0].content)["checks"]
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
+            return CapabilityVerdict(
+                False,
+                "action proof is invalid",
+                _score_evidence("appAction", 0, 1),
+            )
+        failed = tuple(name for name, passed in checks.items() if passed is not True)
+        if failed:
+            return CapabilityVerdict(
+                False,
+                f"prepared action failed: {', '.join(failed)}",
+                _score_evidence("appAction", 0, 1),
+            )
+        return CapabilityVerdict(
+            True,
+            "browser call applied once, refused invalid input, and stayed workspace-scoped",
+            _score_evidence("appAction", 1, 1),
+        )
+
+    return DescribedGrader(
+        "the browser action reaches the prepared-intent lane and passes durable acceptance",
+        grade,
+    )
+
+
+def _setup_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        proofs = tuple(
+            artifact for artifact in output.artifacts if artifact.name.endswith("-setup-proof.json")
+        )
+        if len(proofs) != 1:
+            return CapabilityVerdict(
+                False,
+                f"probe captured {len(proofs)} setup proof artifact(s)",
+                _score_evidence("appSetup", 0, 1),
+            )
+        try:
+            checks = json.loads(proofs[0].content)["checks"]
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError):
+            return CapabilityVerdict(
+                False,
+                "setup proof is invalid",
+                _score_evidence("appSetup", 0, 1),
+            )
+        failed = tuple(name for name, passed in checks.items() if passed is not True)
+        if failed:
+            return CapabilityVerdict(
+                False,
+                f"application setup failed: {', '.join(failed)}",
+                _score_evidence("appSetup", 0, 1),
+            )
+        return CapabilityVerdict(
+            True,
+            "connector status stayed visible and setup opened chat without a direct write",
+            _score_evidence("appSetup", 1, 1),
+        )
+
+    return DescribedGrader(
+        "the setup view shows connection state and routes changes through chat",
+        grade,
+    )
+
+
 def _page_scorer() -> Grader:
     graders = (
         _captured_artifact_scorer("-interactive.html"),
         _captured_artifact_scorer("-static.html"),
-        _captured_artifact_scorer(".json", _measured_screen),
+        _captured_artifact_scorer("-audit.json", _measured_screen),
         _screen_images_scorer(),
     )
 
@@ -1090,11 +1637,125 @@ def _page_scorer() -> Grader:
     )
 
 
+def _application_builder_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        failed = _score_evidence("processBuilder", 0, 1)
+        own = output.own_calls
+        delegations = tuple(
+            call for call in own if call.name == APPLICATION_BUILDER_DELEGATION_TOOL
+        )
+        if not delegations:
+            return CapabilityVerdict(
+                False,
+                f"did not call {APPLICATION_BUILDER_DELEGATION_TOOL}",
+                failed,
+            )
+        if len(delegations) != 1:
+            return CapabilityVerdict(
+                False,
+                f"the parent delegated {len(delegations)} times, expected one worker call",
+                failed,
+            )
+        if not delegations[0].succeeded:
+            return CapabilityVerdict(False, "the worker delegation failed", failed)
+        try:
+            result = ApplicationBuilderResult.model_validate_json(delegations[0].result)
+        except ValueError:
+            return CapabilityVerdict(False, "the worker returned no structured result", failed)
+        if result.status != "deployed":
+            return CapabilityVerdict(
+                False,
+                f"the deterministic acceptance result was {result.status}: {result.blocker}",
+                failed,
+            )
+        parent_forbidden = {
+            "spawn",
+            "list_external_tools",
+            "describe_external_tools",
+            "search_connector_tools",
+            "call_external_tool",
+            "read",
+            "bash",
+            "start_server",
+            "js_repl",
+            APPLICATION_BUILDER_READ_TOOL,
+            APPLICATION_BUILDER_EDIT_TOOL,
+            APPLICATION_BUILDER_WRITE_TOOL,
+            *DEPLOY_TOOLS,
+            "set_homepage",
+            "build_website",
+            "write",
+            "edit",
+        }
+        parent_work = tuple(call.name for call in own if call.name in parent_forbidden)
+        if parent_work:
+            return CapabilityVerdict(
+                False,
+                f"the parent entered the worker loop: {', '.join(parent_work)}",
+                failed,
+            )
+        required_worker_tools = {
+            "start_server",
+            "js_repl",
+            "deploy_website",
+        }
+        completed = frozenset(call.name for call in output.calls if call.succeeded)
+        missing = required_worker_tools - completed
+        if missing:
+            return CapabilityVerdict(
+                False,
+                f"the worker did not complete: {', '.join(sorted(missing))}",
+                failed,
+            )
+        if not any(call.name == APPLICATION_BUILDER_WRITE_TOOL for call in output.calls):
+            return CapabilityVerdict(
+                False,
+                f"the worker did not call {APPLICATION_BUILDER_WRITE_TOOL}",
+                failed,
+            )
+        if any(call.name == "set_homepage" for call in output.calls):
+            return CapabilityVerdict(
+                False,
+                "the worker tried to certify its own homepage",
+                failed,
+            )
+        browser_batches = sum(
+            1 for call in output.calls if call.name == "js_repl" and call.succeeded
+        )
+        if browser_batches < 2:
+            return CapabilityVerdict(
+                False,
+                f"the worker completed {browser_batches} browser QA batch(es), expected at least 2",
+                failed,
+            )
+        return CapabilityVerdict(
+            True,
+            f"the parent delegated once and {APPLICATION_BUILDER_NAME} completed the worker loop",
+            _score_evidence("processBuilder", 1, 1),
+        )
+
+    return DescribedGrader(
+        f"the parent calls {APPLICATION_BUILDER_DELEGATION_TOOL} once; {APPLICATION_BUILDER_NAME} "
+        "owns connector inspection, source, QA, and deployment; deterministic acceptance binds",
+        grade,
+    )
+
+
 def _skill_scorer() -> Grader:
     base = skill_scorer(SITE_SKILL, HOUSE_STYLE_SKILL)
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         verdict = await base(output)
+        delegated = any(
+            call.name == APPLICATION_BUILDER_DELEGATION_TOOL and call.succeeded
+            for call in output.own_calls
+        )
+        if delegated:
+            return CapabilityVerdict(
+                True,
+                f"{APPLICATION_BUILDER_NAME} preloads '{SITE_SKILL}'",
+                _score_evidence("processSkill", 1, 1),
+            )
         return replace(
             verdict,
             evidence={
@@ -1114,37 +1775,43 @@ def _delivery_scorer() -> Grader:
         deployments = tuple(
             (index, call) for index, call in successful if call.name in DEPLOY_TOOLS
         )
-        homepages = tuple(
-            (index, call) for index, call in successful if call.name == "set_homepage"
+        delegations = tuple(
+            call
+            for call in output.own_calls
+            if call.name == APPLICATION_BUILDER_DELEGATION_TOOL and call.succeeded
         )
-        ordered = next(
-            (
-                (deployment, homepage)
-                for deployment in deployments
-                for homepage in homepages
-                if deployment[0] < homepage[0]
-            ),
-            None,
+        result = None
+        if len(delegations) == 1:
+            try:
+                result = ApplicationBuilderResult.model_validate_json(delegations[0].result)
+            except ValueError:
+                pass
+        accepted = bool(
+            result is not None
+            and result.status == "deployed"
+            and result.site_name
+            and result.site_url
         )
         evidence = _score_evidence(
-            "appDelivery", (1 if deployments else 0) + (1 if ordered else 0), 2
+            "appDelivery", (1 if deployments else 0) + (1 if accepted else 0), 2
         )
         if not deployments:
             return CapabilityVerdict(
                 False, "did not complete deploy_website or publish_website", evidence
             )
-        if ordered is None:
+        if not accepted:
             return CapabilityVerdict(
-                False, "set_homepage must complete after the application deployment", evidence
+                False, "deterministic acceptance did not bind the deployed application", evidence
             )
         return CapabilityVerdict(
             True,
-            f"{ordered[0][1].name} completed before set_homepage",
+            f"{deployments[0][1].name} completed before deterministic acceptance bound the page",
             evidence,
         )
 
     return DescribedGrader(
-        "deploy_website or publish_website completes successfully before set_homepage", grade
+        "deployment completes before deterministic acceptance binds the application homepage",
+        grade,
     )
 
 
@@ -1161,7 +1828,9 @@ def _qa_efficiency_scorer() -> Grader:
         if not starts[0].succeeded:
             return CapabilityVerdict(False, "the preview server did not start successfully", failed)
         browser_indexes = tuple(
-            index for index, call in enumerate(output.calls) if call.name == "js_repl"
+            index
+            for index, call in enumerate(output.calls)
+            if call.name == "js_repl" and call.result != APPLICATION_BUILDER_QA_LIMIT_REASON
         )
         if not browser_indexes:
             return CapabilityVerdict(False, "used no js_repl browser QA batch", failed)
@@ -1175,15 +1844,10 @@ def _qa_efficiency_scorer() -> Grader:
         deployments = tuple(
             (index, call) for index, call in enumerate(output.calls) if call.name in DEPLOY_TOOLS
         )
-        homepages = tuple(
-            index
-            for index, call in enumerate(output.calls)
-            if call.name == "set_homepage" and call.succeeded
-        )
-        if not deployments or not homepages:
+        if not deployments:
             return CapabilityVerdict(
                 False,
-                "browser QA must precede the application deployment and set_homepage",
+                "browser QA must precede the application deployment",
                 failed,
             )
         if not deployments[-1][1].succeeded:
@@ -1193,17 +1857,6 @@ def _qa_efficiency_scorer() -> Grader:
         if not start_index < min(browser_indexes):
             return CapabilityVerdict(False, "browser QA must run after start_server", failed)
         successful_deployments = tuple(index for index, call in deployments if call.succeeded)
-        first_deployment = successful_deployments[0]
-        homepage_deadline = (
-            successful_deployments[1] if len(successful_deployments) > 1 else len(output.calls)
-        )
-        if not any(first_deployment < homepage < homepage_deadline for homepage in homepages):
-            return CapabilityVerdict(
-                False,
-                f"set_homepage must run after the first {output.calls[first_deployment].name} "
-                "and before a redeploy",
-                failed,
-            )
         prior_deployment = start_index
         assigned_browser_indexes: list[int] = []
         for cycle_index, deployment in enumerate(successful_deployments):
@@ -1251,6 +1904,7 @@ APP_TIERS = {
         else 2
         for case in CONNECTED_APPS
     },
+    **{name: 3 for name in ACTION_CASE_NAMES},
 }
 
 
@@ -1270,6 +1924,7 @@ def _score_app_report(report: EvalReport) -> EvalReport:
         "density": [],
         "page": [],
         "interaction": [],
+        "action": [],
         "visual": [],
     }
     process_values = []
@@ -1292,6 +1947,17 @@ def _score_app_report(report: EvalReport) -> EvalReport:
             if isinstance(judge, list)
             else 0
         )
+        action_passed = scored.get("appActionPassed", 0)
+        action_total = scored.get("appActionTotal", 0)
+        if not isinstance(action_passed, int):
+            action_passed = 0
+        if not isinstance(action_total, int):
+            action_total = 0
+        if case.name in SETUP_CASE_NAMES:
+            setup_passed = scored.get("appSetupPassed", 0)
+            setup_total = scored.get("appSetupTotal", 0)
+            action_passed += setup_passed if isinstance(setup_passed, int) else 0
+            action_total += setup_total if isinstance(setup_total, int) else 0
         layers = {
             "delivery": _fraction(scored, "appDelivery"),
             "source": _fraction(
@@ -1302,10 +1968,18 @@ def _score_app_report(report: EvalReport) -> EvalReport:
             ),
             "page": _fraction(scored, "appPage"),
             "interaction": _fraction(scored, "appInteraction"),
+            "action": (
+                action_passed / action_total
+                if action_total > 0
+                else 0.0
+                if case.name in ACTION_CASE_NAMES
+                else 1.0
+            ),
             "visual": visual_passed / visual_total if visual_total else 0.0,
         }
         process_layers = {
             "skill": _fraction(scored, "processSkill"),
+            "builder": _fraction(scored, "processBuilder"),
             "qa": _fraction(scored, "processQa"),
         }
         app_score = sum(layers.values()) / len(layers)
@@ -1375,6 +2049,8 @@ def _screen(
     extra_graders: tuple[Grader, ...] = (),
     extra_visual: tuple[str, ...] = (),
     seed: _ConnectedAppSeed | None = None,
+    action: _ActionContract | None = None,
+    setup: _SetupContract | None = None,
     data_digest: str = "",
 ) -> CapabilityCase:
     return CapabilityCase(
@@ -1383,6 +2059,7 @@ def _screen(
         combine(
             _skill_scorer(),
             _delivery_scorer(),
+            _application_builder_scorer(),
             _qa_efficiency_scorer(),
             _page_scorer(),
             _interaction_scorer(name),
@@ -1399,12 +2076,18 @@ def _screen(
         ),
         judge_on_deterministic_failure=True,
         digest_tag=(
-            f"ufo-app-bench:{name}:interactive-homepage:qa-total-{MAX_BROWSER_QA_CALLS}:"
-            "redeploy-1:"
-            f"wait-{WORKFLOW_WAIT_SECONDS:g}:audit-{AUDIT_DIGEST[:12]}{data_digest}"
+            f"ufo-app-bench:{name}:interactive-homepage:qa-1x{MAX_BROWSER_QA_CALLS}:"
+            f"audit-{AUDIT_DIGEST[:12]}:wait-{WORKFLOW_WAIT_SECONDS:g}{data_digest}"
         ),
-        artifact_probe=_AppBenchProbe(name),
+        artifact_probe=(
+            _AppBenchProbe(name)
+            if action is None
+            else _AppActionProbe(name, action)
+            if setup is None
+            else _AppSetupProbe(name, action, setup)
+        ),
         seed=seed,
+        workspace_files=APP_WORKSPACE_FILES,
     )
 
 
@@ -1444,10 +2127,65 @@ CONNECTED_CASES = tuple(
         " ".join(requirement.prompt for requirement in spec.requirements),
         extra_graders=(_requirement_scorer(spec), _above_fold_scorer(spec)),
         extra_visual=TASTE_CRITERIA,
-        seed=_ConnectedAppSeed(spec),
+        seed=_ConnectedAppSeed(spec, MEMBER_QUERIES[spec.name]),
         data_digest=f":data-{APP_DATA_DIGEST[:12]}",
     )
     for spec in CONNECTED_APPS
+)
+
+ACTION_CASES = tuple(
+    _screen(
+        f"action-{contract.source_case}",
+        " ".join(
+            requirement.prompt
+            for requirement in CONNECTED_APP_BY_NAME[contract.source_case].requirements
+        ),
+        extra_graders=(
+            _requirement_scorer(CONNECTED_APP_BY_NAME[contract.source_case]),
+            _above_fold_scorer(CONNECTED_APP_BY_NAME[contract.source_case]),
+            _action_scorer(),
+        ),
+        extra_visual=TASTE_CRITERIA,
+        seed=_ConnectedAppSeed(
+            CONNECTED_APP_BY_NAME[contract.source_case],
+            MEMBER_QUERIES[f"action-{contract.source_case}"],
+        ),
+        action=contract,
+        data_digest=(
+            f":data-{APP_DATA_DIGEST[:12]}:action-"
+            f"{sha256(contract.model_dump_json().encode()).hexdigest()[:12]}"
+        ),
+    )
+    for contract in ACTION_CONTRACTS
+)
+
+SETUP_CASES = tuple(
+    _screen(
+        f"setup-{action.source_case}",
+        " ".join(
+            requirement.prompt
+            for requirement in CONNECTED_APP_BY_NAME[action.source_case].requirements
+        ),
+        extra_graders=(
+            _requirement_scorer(CONNECTED_APP_BY_NAME[action.source_case]),
+            _above_fold_scorer(CONNECTED_APP_BY_NAME[action.source_case]),
+            _action_scorer(),
+            _setup_scorer(),
+        ),
+        extra_visual=TASTE_CRITERIA,
+        seed=_ConnectedAppSeed(
+            CONNECTED_APP_BY_NAME[action.source_case],
+            MEMBER_QUERIES[f"setup-{action.source_case}"],
+        ),
+        action=action,
+        setup=setup,
+        data_digest=(
+            f":data-{APP_DATA_DIGEST[:12]}:action-"
+            f"{sha256(action.model_dump_json().encode()).hexdigest()[:12]}:setup-"
+            f"{sha256(setup.model_dump_json().encode()).hexdigest()[:12]}"
+        ),
+    )
+    for action, setup in zip(ACTION_CONTRACTS, SETUP_CONTRACTS, strict=True)
 )
 
 COPY_CASES = tuple(
@@ -1455,11 +2193,9 @@ COPY_CASES = tuple(
         f"copy-{spec.name}",
         MEMBER_QUERIES[spec.name],
         combine(
-            skill_scorer(SITE_SKILL, HOUSE_STYLE_SKILL),
-            required_tools_scorer(
-                ("deploy_website", "set_homepage"),
-                (("deploy_website", "set_homepage"),),
-            ),
+            _skill_scorer(),
+            _delivery_scorer(),
+            _application_builder_scorer(),
             _captured_artifact_scorer("-static.html"),
             _copy_scorer(spec),
         ),
@@ -1469,10 +2205,11 @@ COPY_CASES = tuple(
             f"data-{APP_DATA_DIGEST[:12]}"
         ),
         artifact_probe=_AppCopyProbe(spec.name),
-        seed=_ConnectedAppSeed(spec),
+        seed=_ConnectedAppSeed(spec, MEMBER_QUERIES[spec.name]),
+        workspace_files=APP_WORKSPACE_FILES,
     )
     for spec in CONNECTED_APPS
     if any(requirement.rewrite_sources for requirement in spec.requirements)
 )
 
-CASES = (*CONTROL_CASES, *CONNECTED_CASES)
+CASES = (*CONTROL_CASES, *CONNECTED_CASES, *ACTION_CASES, *SETUP_CASES)

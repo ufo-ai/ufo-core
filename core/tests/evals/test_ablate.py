@@ -16,6 +16,7 @@ from evals.ablate import (
     STACK_RUNS_DIR,
     WORKTREES_DIR,
     Ablation,
+    ArmReplacement,
     ArmResult,
     ArmSpec,
     CaseCount,
@@ -67,6 +68,51 @@ def test_load_experiment_rejects_a_missing_variant(tmp_path: Path) -> None:
     )
     with pytest.raises(SystemExit, match=r"gone\.py"):
         load_experiment(path)
+
+
+def test_load_experiment_keeps_an_exact_repo_replacement(tmp_path: Path) -> None:
+    path = _experiment(
+        tmp_path,
+        'name = "exp"\nbase = "origin/main"\nsuites = ["basics"]\nbudget_usd = 5.0\n'
+        f"{TEMPLATE}\n"
+        '[[arm]]\nname = "model"\n'
+        '[[arm.replacements]]\npath = "profile.py"\nold = "MODEL = \\"a\\""\n'
+        'new = "MODEL = \\"b\\""\n',
+    )
+
+    spec = load_experiment(path)
+
+    assert spec.arm[0].files == {}
+    assert spec.arm[0].replacements == (
+        ArmReplacement(path="profile.py", old='MODEL = "a"', new='MODEL = "b"'),
+    )
+
+
+def test_arm_replacement_requires_one_exact_match(tmp_path: Path) -> None:
+    target = tmp_path / "profile.py"
+    target.write_text('MODEL = "a"\n')
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("basics",),
+        budget_usd=5.0,
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(
+            ArmSpec(
+                name="model",
+                replacements=(
+                    ArmReplacement(path="profile.py", old='MODEL = "a"', new='MODEL = "b"'),
+                ),
+            ),
+        ),
+    )
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    ablation._apply_arm(spec.arm[0], tmp_path)
+
+    assert target.read_text() == 'MODEL = "b"\n'
+    with pytest.raises(RuntimeError, match="matched 0 times"):
+        ablation._apply_arm(spec.arm[0], tmp_path)
 
 
 def test_the_control_arm_name_is_reserved() -> None:
@@ -273,6 +319,26 @@ def test_a_matrix_row_without_a_corpus_names_no_snapshot(tmp_path: Path) -> None
     written = ablation.matrix(spec.arm[0], tmp_path / "ablate-template.toml")
 
     assert "memory_ingestion" not in written["run"][0]
+
+
+def test_every_arm_uses_the_experiment_model_and_reasoning(tmp_path: Path) -> None:
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("basics",),
+        budget_usd=5.0,
+        model="google/gemini-3.7-flash",
+        reasoning="medium",
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(ArmSpec(name="knockout", files={}),),
+    )
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    written = ablation.matrix(spec.arm[0], tmp_path / "ablate-template.toml")
+    matrix = Matrix.model_validate(tomllib.loads(tomli_w.dumps(written)))
+
+    assert matrix.run[0].model == "google/gemini-3.7-flash"
+    assert matrix.run[0].reasoning == "medium"
 
 
 def _record(cases: list[dict]) -> dict:

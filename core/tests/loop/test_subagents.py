@@ -361,8 +361,10 @@ def test_subagent_prompt_fails_loud_on_an_unfilled_slot() -> None:
         subagent_system_prompt(profile)
 
 
-def test_profile_model_defaults_to_none_meaning_inherit_the_parent() -> None:
-    assert _profile("a").model is None
+def test_profile_model_and_reasoning_default_to_inherit_the_parent() -> None:
+    profile = _profile("a")
+    assert profile.model is None
+    assert profile.reasoning is None
 
 
 def test_general_purpose_inherits_the_parent_model() -> None:
@@ -382,8 +384,10 @@ def test_a_profile_can_pin_a_distinct_model() -> None:
         input_model=_Task,
         output_model=_Finding,
         model="gpt-5.4",
+        reasoning="high",
     )
     assert pinned.model == "gpt-5.4"
+    assert pinned.reasoning == "high"
     assert (pinned.model or "claude-opus-4-8") == "gpt-5.4"
     assert (_profile("a").model or "claude-opus-4-8") == "claude-opus-4-8"
 

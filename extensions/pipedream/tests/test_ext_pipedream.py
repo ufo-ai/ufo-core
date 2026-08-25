@@ -498,6 +498,20 @@ async def test_describe_external_tools_builds_the_schema_from_configurable_props
     assert schema["properties"]["to"] == {"type": "string", "description": "Recipient"}
 
 
+async def test_broker_reads_the_action_read_only_annotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        async def action_definition(self, key: str) -> dict[str, object]:
+            return {**_action_row(key), "annotations": {"readOnlyHint": True}}
+
+    monkeypatch.setattr(pipedream, "pipedream_client", lambda: _Client())
+
+    described = await PipedreamBroker().schema(uuid4(), PROVIDER, GMAIL_ACTION)
+
+    assert described.read_only is True
+
+
 async def test_describe_external_tools_marks_an_unknown_name_unresolved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

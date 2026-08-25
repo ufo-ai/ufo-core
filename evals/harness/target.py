@@ -141,6 +141,23 @@ def _invoke_failure(conversation_id: UUID, error: Exception) -> TargetResult:
     )
 
 
+def _current_turn_messages(messages: tuple[Message, ...], inbound: str) -> tuple[Message, ...]:
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if (
+            message.role == "user"
+            and isinstance(message.content, str)
+            and (
+                message.content == inbound
+                or message.content.endswith(f"\n{inbound}")
+                or message.content.startswith(f"{inbound}\n\n<injected_context>")
+                or f"\n{inbound}\n\n<injected_context>" in message.content
+            )
+        ):
+            return messages[index:]
+    return messages
+
+
 class CapabilityTarget(Protocol):
     @property
     def judge(self) -> JudgeLeg | None: ...
@@ -158,6 +175,17 @@ class CapabilityTarget(Protocol):
 
     async def step(
         self, conversation_id: UUID, message: str, idempotency_key: str
+    ) -> TargetResult: ...
+
+    async def invoke(
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str,
+        *,
+        on_behalf_of_member_id: UUID | None,
+        as_scheduled: bool,
     ) -> TargetResult: ...
 
 
@@ -264,25 +292,7 @@ class InProcessTarget:
             wait_for_background=case.wait_for_background,
         )
         wall_ms = round((perf_counter() - started) * 1_000)
-        result = settled.result
-        turn_ids = (turn_id, *settled.descendant_ids)
-        timing = await self._case_timing(
-            wall_ms,
-            turn_ids,
-            result.output,
-            result.trajectory.messages if result.trajectory is not None else (),
-        )
-        recorded_tokens = sum(turn.tokens for turn in timing.turns)
-        recorded_cost = sum(turn.cost_micro_usd for turn in timing.turns)
-        result = replace(
-            result,
-            output=replace(
-                result.output,
-                timing=timing,
-                tokens=max(result.output.tokens, recorded_tokens),
-                cost_micro_usd=max(result.output.cost_micro_usd, recorded_cost),
-            ),
-        )
+        result = await self._record_timing(settled, turn_id, wall_ms)
         if not result.clean:
             if self.logs is not None:
                 await self.logs.discard(turn_id)
@@ -368,17 +378,73 @@ class InProcessTarget:
         """Drive one member turn on an existing conversation and reconstruct its result — the
         scenario runner's per-exchange seam. Log and artifact enrichment stay with `run`; a
         scenario grader reads durable state itself."""
+        started = perf_counter()
         try:
             turn_id = await self.conversations.admit(conversation_id, message, idempotency_key)
         except Exception as error:
             return _invoke_failure(conversation_id, error)
-        return (await self._settled(conversation_id, turn_id, message)).result
+        settled = await self._settled(conversation_id, turn_id, message)
+        wall_ms = round((perf_counter() - started) * 1_000)
+        return await self._record_timing(settled, turn_id, wall_ms)
+
+    async def invoke(
+        self,
+        conversation_id: UUID,
+        agent_id: UUID,
+        message: str,
+        idempotency_key: str,
+        *,
+        on_behalf_of_member_id: UUID | None,
+        as_scheduled: bool,
+    ) -> TargetResult:
+        """Drive and reconstruct one internal turn admitted by a multi-flow eval case."""
+        started = perf_counter()
+        try:
+            turn_id = await self.ctx.invoke(
+                conversation_id,
+                agent_id,
+                message,
+                idempotency_key,
+                on_behalf_of_member_id=on_behalf_of_member_id,
+                as_scheduled=as_scheduled,
+            )
+        except Exception as error:
+            return _invoke_failure(conversation_id, error)
+        if turn_id is None:
+            return _invoke_failure(
+                conversation_id, RuntimeError("internal turn admission returned no turn")
+            )
+        settled = await self._settled(conversation_id, turn_id, message, current_turn_only=True)
+        wall_ms = round((perf_counter() - started) * 1_000)
+        return await self._record_timing(settled, turn_id, wall_ms)
+
+    async def _record_timing(self, settled: _Settled, turn_id: UUID, wall_ms: int) -> TargetResult:
+        result = settled.result
+        timing = await self._case_timing(
+            wall_ms,
+            (turn_id, *settled.descendant_ids),
+            result.output,
+            result.trajectory.messages if result.trajectory is not None else (),
+        )
+        recorded_tokens = sum(turn.tokens for turn in timing.turns)
+        recorded_cost = sum(turn.cost_micro_usd for turn in timing.turns)
+        return replace(
+            result,
+            output=replace(
+                result.output,
+                timing=timing,
+                tokens=max(result.output.tokens, recorded_tokens),
+                cost_micro_usd=max(result.output.cost_micro_usd, recorded_cost),
+            ),
+        )
 
     async def _settled(
         self,
         conversation_id: UUID,
         turn_id: UUID,
         inbound: str,
+        *,
+        current_turn_only: bool = False,
         wait_for_background: bool = False,
     ) -> _Settled:
         trajectory = await self.outcome.settle(conversation_id, turn_id)
@@ -394,7 +460,10 @@ class InProcessTarget:
                 own_tools=tuple(call.name for call in output.calls),
                 own_calls=tuple(output.calls),
             )
-            tokens, cost_micro_usd = await self._turn_resources((turn_id,))
+            output, descendant_ids, missing_child = await self._merge_descendants(
+                turn_id, output, wait_for_background
+            )
+            tokens, cost_micro_usd = await self._turn_resources((turn_id, *descendant_ids))
             output = replace(output, tokens=tokens, cost_micro_usd=cost_micro_usd)
             snapshot = trajectory_snapshot(
                 conversation_id,
@@ -405,6 +474,8 @@ class InProcessTarget:
             snapshot_error = (
                 WAIT_EXPIRED if not snapshot.error else f"{WAIT_EXPIRED}; {snapshot.error}"
             )
+            if missing_child:
+                snapshot_error = f"{snapshot_error}; {missing_child}"
             snapshot = snapshot.model_copy(update={"error": snapshot_error})
             return _Settled(
                 TargetResult(
@@ -412,16 +483,22 @@ class InProcessTarget:
                     False,
                     WAIT_EXPIRED,
                     trajectory=snapshot,
-                )
+                ),
+                descendant_ids,
             )
-        output = capability_output(trajectory.messages)
+        messages = (
+            _current_turn_messages(trajectory.messages, inbound)
+            if current_turn_only
+            else trajectory.messages
+        )
+        output = capability_output(messages)
         output = replace(
             output,
             own_tools=tuple(call.name for call in output.calls),
             own_calls=tuple(output.calls),
         )
         status = await self._turn_status(turn_id)
-        snapshot = trajectory_snapshot(conversation_id, turn_id, status, trajectory.messages)
+        snapshot = trajectory_snapshot(conversation_id, turn_id, status, messages)
         output, descendant_ids, missing_child = await self._merge_descendants(
             turn_id, output, wait_for_background
         )

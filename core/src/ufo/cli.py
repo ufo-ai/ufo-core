@@ -52,7 +52,11 @@ from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.sandbox.containment import contained_file
 from ufo.sandbox.ingress_serve import run as ingress_run
 from ufo.schema import tables
-from ufo.schema.records import DEFAULT_AGENT_NAME
+from ufo.schema.records import (
+    DEFAULT_AGENT_NAME,
+    DEFAULT_REASONING_EFFORT,
+    ReasoningEffort,
+)
 from ufo.seats import email_domain
 from ufo.serve import home_surface
 from ufo.serve import run as serve_run
@@ -63,6 +67,7 @@ UFOCTL_DIR_ENV = "UFOCTL_DIR"
 RESERVED_DOTENV_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 PORTAL_REACH_TIMEOUT_SECONDS = 5.0
 HANDOFF_PATH_BYTES = 24
+REASONING_EFFORTS = ("auto", "off", "low", "medium", "high")
 LOOPBACK = "127.0.0.1"
 MICRO_USD_PER_USD = 1_000_000
 CLI_TOKEN_TTL = timedelta(days=3650)
@@ -190,7 +195,13 @@ def _one_address(_ctx: click.Context, _param: click.Parameter, value: str) -> st
 @main.command()
 @click.option("--email", required=True, callback=_one_address)
 @click.option("--model", default=DEFAULT_AGENT_MODEL, show_default=True)
-def init(email: str, model: str) -> None:
+@click.option(
+    "--reasoning",
+    type=click.Choice(REASONING_EFFORTS),
+    default=DEFAULT_REASONING_EFFORT,
+    show_default=True,
+)
+def init(email: str, model: str, reasoning: ReasoningEffort) -> None:
     """Write ufo.toml if absent, apply the schema, then onboard the workspace, owner, default
     agent and model key (plus any extension onboarding steps) and bind this machine's CLI token."""
     path = config_path()
@@ -208,7 +219,7 @@ def init(email: str, model: str) -> None:
     if not secret:
         raise click.ClickException(f"{UFO_TOKEN_SECRET_ENV} is unset — cannot mint a CLI token")
     try:
-        onboarded = asyncio.run(_onboard(config, email, model))
+        onboarded = asyncio.run(_onboard(config, email, model, reasoning))
     except (AlreadyInitialized, ValueError, RuntimeError) as error:
         raise click.ClickException(str(error)) from error
     token = mint_token(secret, str(onboarded.workspace_id), email, CLI_TOKEN_TTL)
@@ -217,7 +228,10 @@ def init(email: str, model: str) -> None:
     token_path = ufoctl_dir / "token"
     token_path.write_text(token)
     token_path.chmod(0o600)
-    click.echo(f"workspace ready — owner {email}, agent {DEFAULT_AGENT_NAME!r} ({model})")
+    click.echo(
+        f"workspace ready — owner {email}, agent {DEFAULT_AGENT_NAME!r} "
+        f"({model}, {reasoning} reasoning)"
+    )
     click.echo(f"cli token written to {token_path}")
     for missing in _missing_deploy_keys(config):
         click.echo(
@@ -269,7 +283,7 @@ def _write_dev_secrets(config: Config) -> tuple[str, ...]:
     return tuple(added)
 
 
-async def _onboard(config: Config, email: str, model: str) -> Onboarded:
+async def _onboard(config: Config, email: str, model: str, reasoning: ReasoningEffort) -> Onboarded:
     """Open the db boundary once: create the core workspace and owner member, THEN run the
     extension onboarding steps — so core access lands before any add-on step that could fail. The
     CLI's bearer names this owner by email; the `ufo` surface links the member on first contact."""
@@ -281,6 +295,7 @@ async def _onboard(config: Config, email: str, model: str) -> Onboarded:
             config=config,
             email=email,
             model=model,
+            reasoning=reasoning,
             credentials=credentials,
             manifests=load_manifests(config.pack.name),
         )

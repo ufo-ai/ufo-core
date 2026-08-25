@@ -95,6 +95,7 @@ function measure(floor) {
   };
 
   const text = [];
+  const aboveFold = [];
   const seen = new Set();
   let checked = 0;
   let underFloor = 0;
@@ -105,6 +106,7 @@ function measure(floor) {
     const box = element.getBoundingClientRect();
     const style = getComputedStyle(element);
     if (!visible(element, box)) continue;
+    if (box.bottom > 0 && box.top < window.innerHeight) aboveFold.push(words);
     const foreground = parse(style.color);
     if (!foreground) continue;
     const behind = backdrop(element);
@@ -262,6 +264,8 @@ function controlCandidates() {
 }
 
 function visibleState() {
+  const rawText = (document.body.innerText || '').trim().slice(0, 12000);
+  const parts = rawText.split(/\n+/).map((part) => part.trim().replace(/\s+/g, ' ')).filter(Boolean);
   const controls = Array.from(document.querySelectorAll(
     'button, summary, select, input, [role="button"], [role="tab"], [role="checkbox"], ' +
       '[role="switch"], dialog'
@@ -281,9 +285,19 @@ function visibleState() {
     open: element.hasAttribute('open'),
   }));
   return JSON.stringify({
-    text: (document.body.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 12000),
+    text: parts.join(' '),
+    parts,
     controls,
   });
+}
+
+async function applicationFrame(page) {
+  const element = await page.$('iframe[name="ufo-app"]');
+  if (!element) return page;
+  const frame = await element.contentFrame();
+  if (!frame) throw new Error('application frame did not load');
+  await frame.waitForSelector('#root > *', { timeout: 15000 });
+  return frame;
 }
 
 async function interactionAudit(browser, url) {
@@ -293,40 +307,87 @@ async function interactionAudit(browser, url) {
   });
   const index = await source.newPage();
   await index.goto(url, { waitUntil: 'load' });
+  const indexFrame = await applicationFrame(index);
   await index.waitForTimeout(700);
-  const controls = await index.evaluate(controlCandidates);
+  const controls = await indexFrame.evaluate(controlCandidates);
+  const initial = JSON.parse(await indexFrame.evaluate(visibleState));
   await source.close();
 
   const successes = [];
   const problems = [];
-  for (const control of controls.slice(0, 12)) {
+  const states = [initial.parts];
+  const calls = [];
+  const navigations = [];
+  const reloadStates = [];
+  const paths = controls.map((control) => [control]);
+  const known = new Set(controls.map((control) => control.name + '|' + control.selector));
+  let attempts = 0;
+  while (paths.length && attempts++ < 12) {
+    const path = paths.shift();
+    const control = path[path.length - 1];
     const context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       colorScheme: 'light',
     });
     const page = await context.newPage();
     page.on('console', (message) => {
-      if (message.type() === 'error') problems.push(`console: ${message.text()}`);
+      if (message.type() === 'error' && problems.length < 8) {
+        problems.push(`console: ${message.text()}`.slice(0, 500));
+      }
     });
-    page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
+    page.on('pageerror', (error) => {
+      if (problems.length < 8) problems.push(`pageerror: ${error.message}`.slice(0, 500));
+    });
     try {
       await page.goto(url, { waitUntil: 'load' });
+      const frame = await applicationFrame(page);
       await page.waitForTimeout(300);
-      const target = page.locator(control.selector);
-      const before = await page.evaluate(visibleState);
-      if (control.tag === 'select') {
-        const values = await target.locator('option').evaluateAll((options) =>
-          options.map((option) => option.value)
-        );
-        const current = await target.inputValue();
-        const next = values.find((value) => value !== current);
-        if (next !== undefined) await target.selectOption(next);
-      } else {
-        await target.click({ timeout: 2000 });
+      let before = '';
+      for (let index = 0; index < path.length; index += 1) {
+        const step = path[index];
+        const target = frame.locator(step.selector);
+        if (index === path.length - 1) before = await frame.evaluate(visibleState);
+        if (step.tag === 'select') {
+          const values = await target.locator('option').evaluateAll((options) =>
+            options.map((option) => option.value)
+          );
+          const current = await target.inputValue();
+          const next = values.find((value) => value !== current);
+          if (next !== undefined) await target.selectOption(next);
+        } else {
+          await target.click({ timeout: 2000 });
+        }
+        await page.waitForTimeout(index === path.length - 1 ? 300 : 100);
       }
-      await page.waitForTimeout(300);
-      const after = await page.evaluate(visibleState);
-      if (before !== after) successes.push(control);
+      const after = await frame.evaluate(visibleState);
+      const controlCalls = await page.evaluate(() => window.__ufoCalls || []);
+      const controlNavigations = await page.evaluate(() => window.__ufoNavigations || []);
+      calls.push(...controlCalls);
+      navigations.push(...controlNavigations.map((to) => ({ control: control.name, to })));
+      if (before !== after) {
+        successes.push(control);
+        states.push(JSON.parse(after).parts);
+      }
+      if (path.length < 2) {
+        const discovered = await frame.evaluate(controlCandidates);
+        for (const child of discovered.reverse()) {
+          const key = child.name + '|' + child.selector;
+          if (known.has(key)) continue;
+          known.add(key);
+          controls.push(child);
+          paths.unshift([...path, child]);
+        }
+      }
+      if (controlCalls.some((call) =>
+        call.method === 'POST' && call.path === 'objects/eval_app_action'
+      )) {
+        await page.reload({ waitUntil: 'load' });
+        const reloadedFrame = await applicationFrame(page);
+        await page.waitForTimeout(300);
+        reloadStates.push({ control: control.name, ...JSON.parse(
+          await reloadedFrame.evaluate(visibleState)
+        ) });
+      }
     } catch (error) {
       if (!String(error).includes('Timeout')) problems.push(`interaction: ${String(error)}`);
     } finally {
@@ -336,12 +397,16 @@ async function interactionAudit(browser, url) {
   return {
     controls,
     successes,
+    states: Array.from(new Map(states.map((state) => [JSON.stringify(state), state])).values()),
+    calls,
+    navigations,
+    reloadStates,
     console: Array.from(new Set(problems)).slice(0, 8),
   };
 }
 
-async function interactiveDocument(page) {
-  return page.evaluate(async () => {
+async function interactiveDocument(frame) {
+  return frame.evaluate(async () => {
     const source = await (await fetch(location.href)).text();
     const documentCopy = new DOMParser().parseFromString(source, 'text/html');
     const asDataUrl = async (resource) => {
@@ -352,6 +417,18 @@ async function interactiveDocument(page) {
         reader.addEventListener('error', () => reject(reader.error), { once: true });
         reader.readAsDataURL(blob);
       });
+    };
+    const inlineCssResources = async (css, baseUrl) => {
+      const replacements = new Map();
+      for (const match of css.matchAll(/url\(\s*(?:"([^"]+)"|'([^']+)'|([^)'"\s][^)]*?))\s*\)/g)) {
+        const value = (match[1] || match[2] || match[3]).trim();
+        if (value.startsWith('data:') || value.startsWith('blob:') || value.startsWith('#')) continue;
+        const resource = new URL(value, baseUrl);
+        if (resource.origin !== location.origin) continue;
+        replacements.set(match[0], `url("${await asDataUrl(resource)}")`);
+      }
+      for (const [source, replacement] of replacements) css = css.split(source).join(replacement);
+      return css;
     };
     for (const script of documentCopy.querySelectorAll('script[src]')) {
       const resource = new URL(script.getAttribute('src'), location.href);
@@ -369,7 +446,8 @@ async function interactiveDocument(page) {
         continue;
       }
       const style = documentCopy.createElement('style');
-      style.textContent = await (await fetch(resource)).text();
+      const css = await (await fetch(resource)).text();
+      style.textContent = await inlineCssResources(css, resource.href);
       link.replaceWith(style);
     }
     for (const image of documentCopy.querySelectorAll('img[src]')) {
@@ -404,30 +482,59 @@ async function interactiveDocument(page) {
     const page = await context.newPage();
     const problems = [];
     page.on('console', (message) => {
-      if (message.type() === 'error') problems.push(`console: ${message.text()}`);
+      if (message.type() === 'error' && problems.length < 8) {
+        problems.push(`console: ${message.text()}`.slice(0, 500));
+      }
     });
-    page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
+    page.on('pageerror', (error) => {
+      if (problems.length < 8) problems.push(`pageerror: ${error.message}`.slice(0, 500));
+    });
     await page.goto(url, { waitUntil: 'load' });
+    const frame = await applicationFrame(page);
     await page.waitForTimeout(700);
-    const measured = await page.evaluate(measure, AA_FLOOR);
+    const measured = await frame.evaluate(measure, AA_FLOOR);
     const shot = view.shoot ? shots[view.scheme] : '';
     if (shot) await page.screenshot({ path: shot });
     if (view.scheme === 'light' && view.width === 1440) {
-      fs.writeFileSync(interactivePath, await interactiveDocument(page));
-      const styles = await page.evaluate(() =>
-        Array.from(document.styleSheets).flatMap((sheet) => {
-          try {
-            return Array.from(sheet.cssRules).map((rule) => rule.cssText);
-          } catch {
-            return [];
+      fs.writeFileSync(interactivePath, await interactiveDocument(frame));
+      const styles = await frame.evaluate(async () => {
+        const asDataUrl = async (resource) => {
+          const blob = await (await fetch(resource)).blob();
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.addEventListener('load', () => resolve(reader.result), { once: true });
+            reader.addEventListener('error', () => reject(reader.error), { once: true });
+            reader.readAsDataURL(blob);
+          });
+        };
+        const inlineCssResources = async (css, baseUrl) => {
+          const replacements = new Map();
+          for (const match of css.matchAll(/url\(\s*(?:"([^"]+)"|'([^']+)'|([^)'"\s][^)]*?))\s*\)/g)) {
+            const value = (match[1] || match[2] || match[3]).trim();
+            if (value.startsWith('data:') || value.startsWith('blob:') || value.startsWith('#')) continue;
+            const resource = new URL(value, baseUrl);
+            if (resource.origin !== location.origin) continue;
+            replacements.set(match[0], `url("${await asDataUrl(resource)}")`);
           }
-        }).join('\n')
-      );
-      await page.addStyleTag({ content: styles });
-      await page.evaluate(() => {
+          for (const [source, replacement] of replacements) css = css.split(source).join(replacement);
+          return css;
+        };
+        const sheets = [];
+        for (const sheet of document.styleSheets) {
+          try {
+            const css = Array.from(sheet.cssRules).map((rule) => rule.cssText).join('\n');
+            sheets.push(await inlineCssResources(css, sheet.href || location.href));
+          } catch {
+            continue;
+          }
+        }
+        return sheets.join('\n');
+      });
+      await frame.addStyleTag({ content: styles });
+      await frame.evaluate(() => {
         document.querySelectorAll('script, link[rel="stylesheet"]').forEach((node) => node.remove());
       });
-      fs.writeFileSync(staticPath, await page.content());
+      fs.writeFileSync(staticPath, await frame.content());
     }
     views.push({ scheme: view.scheme, width: view.width, shot, console: problems, ...measured });
     await context.close();

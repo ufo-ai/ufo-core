@@ -69,6 +69,7 @@ class PipedreamBroker:
             slug=slug,
             description=_str(definition.get("description")),
             input_schema=_input_schema(_props(definition)),
+            read_only=_read_only(definition),
         )
 
     async def execute(
@@ -235,9 +236,15 @@ def _listed_tools(rows: tuple[dict[str, object], ...]) -> tuple[BrokerTool, ...]
                 slug=key,
                 description=_str(item.get("description")),
                 input_schema=_input_schema(_props(item)),
+                read_only=_read_only(item),
             )
         )
     return tuple(tools)
+
+
+def _read_only(definition: dict[str, object]) -> bool:
+    annotations = definition.get("annotations")
+    return isinstance(annotations, dict) and annotations.get("readOnlyHint") is True
 
 
 def _props(definition: dict[str, object]) -> list[dict[str, object]]:

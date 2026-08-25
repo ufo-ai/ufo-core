@@ -9816,6 +9816,7 @@ async def test_homepage_seed_admits_one_turn_per_agent_once(db: None) -> None:
 async def test_homepage_seed_skips_an_agent_whose_allowlist_lacks_the_site_tools(
     db: None,
 ) -> None:
+    assert web_surface.HOMEPAGE_TOOLS == ("build_ufo_application",)
     workspace_id, main_agent = await _seed_workspace()
     await _seed_member(workspace_id, "seed-allow-admin@example.com", admin=True)
     walled = uuid4()

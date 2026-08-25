@@ -131,7 +131,7 @@ def _client(
     spec: openrouter.ModelSpec = openrouter.OPENROUTER_MODEL_SPECS[0],
 ) -> openrouter.OpenRouterModelClient:
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    return openrouter.OpenRouterModelClient(client=sdk, spec=spec)
+    return openrouter.OpenRouterModelClient(client=sdk, spec=spec, key=OPENROUTER_KEY)
 
 
 def test_openrouter_slug_maps_bare_ids_and_passes_slugs_through() -> None:
@@ -152,6 +152,59 @@ async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget
     assert kwargs["model"] == "google/gemini-2.5-pro"
     assert kwargs["extra_body"] == {}
     assert kwargs["stream_options"] == {"include_usage": True}
+
+
+async def test_complete_recovers_missing_final_usage_from_the_generation() -> None:
+    requests: list[httpx.Request] = []
+
+    def generation(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "cancelled": False,
+                    "finish_reason": "tool_calls",
+                    "native_tokens_prompt": 13,
+                    "native_tokens_completion": 5,
+                    "native_tokens_cached": 8,
+                }
+            },
+        )
+
+    create = ScriptedCreate([_chunk(content="ok"), _chunk(finish="tool_calls")])
+    client = replace(
+        _client(create),
+        key=OPENROUTER_KEY,
+        generation_transport=httpx.MockTransport(generation),
+    )
+
+    events = [event async for event in client.complete(REQUEST)]
+
+    assert events[-1] == Usage(input_tokens=5, output_tokens=5, cache_read_tokens=8)
+    assert len(requests) == 1
+    assert requests[0].url == "https://openrouter.ai/api/v1/generation?id=c"
+    assert requests[0].headers["authorization"] == f"Bearer {OPENROUTER_KEY}"
+
+
+async def test_complete_does_not_recover_an_unfinished_stream() -> None:
+    requests: list[httpx.Request] = []
+
+    def generation(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    client = replace(
+        _client(ScriptedCreate([_chunk(content="partial")])),
+        key=OPENROUTER_KEY,
+        generation_transport=httpx.MockTransport(generation),
+    )
+
+    with pytest.raises(RuntimeError, match="model stream produced no usage"):
+        async for _ in client.complete(REQUEST):
+            pass
+
+    assert requests == []
 
 
 async def test_unpriced_cache_writes_remain_fresh_input() -> None:
@@ -245,7 +298,7 @@ async def test_model_without_tools_with_reasoning_omits_the_reasoning_budget() -
     assert create.calls[0]["extra_body"] == {}
 
 
-async def test_google_tool_result_with_json_reference_is_text_enveloped() -> None:
+def test_google_tool_result_with_json_reference_is_text_enveloped() -> None:
     result = json.dumps(
         {
             "$defs": {"Visibility": {"type": "string"}},
@@ -268,97 +321,69 @@ async def test_google_tool_result_with_json_reference_is_text_enveloped() -> Non
             ),
         }
     )
-    create = ScriptedCreate(
-        [_chunk(content="done"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))]
-    )
-    async for _ in _client(create).complete(request):
-        pass
-    messages = create.calls[0]["messages"]
+    kwargs = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())
+    messages = kwargs["messages"]
     assert isinstance(messages, list)
     assert json.loads(messages[-1]["content"]) == {"text": result}
 
 
-def test_non_google_and_reference_free_tool_results_keep_the_standard_shape() -> None:
-    reference = '{"properties":{"visibility":{"$ref":"#/$defs/Visibility"}}}'
-    reference_messages = (
-        Message(role="user", content="add"),
-        Message(role="assistant", content=(ToolUseBlock(id="c1", name="add", input={}),)),
-        Message(role="user", content=(ToolResultBlock(tool_use_id="c1", content=reference),)),
-    )
-    google = REQUEST.model_copy(
+def test_deep_google_tool_results_do_not_recurse() -> None:
+    result = "[" * 600 + '{"$ref":"#/$defs/Value"}' + "]" * 600
+    request = REQUEST.model_copy(
         update={
             "model": "google/gemini-3.7-flash",
             "messages": (
-                Message(role="user", content="add"),
-                Message(role="assistant", content=(ToolUseBlock(id="c1", name="add", input={}),)),
+                Message(role="user", content="inspect"),
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id="c1", name="inspect", input={}),),
+                ),
                 Message(
                     role="user",
-                    content=(ToolResultBlock(tool_use_id="c1", content='{"answer": 5}'),),
+                    content=(ToolResultBlock(tool_use_id="c1", content=result),),
                 ),
             ),
         }
     )
-    anthropic = REQUEST.model_copy(
-        update={"model": "anthropic/claude-fable-5", "messages": reference_messages}
-    )
-    client = _client(ScriptedCreate([]))
-    assert client._create_kwargs(google, frozenset())["messages"][-1]["content"] == '{"answer": 5}'
-    assert client._create_kwargs(anthropic, frozenset())["messages"][-1]["content"] == reference
+
+    messages = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
+
+    assert isinstance(messages, list)
+    assert json.loads(messages[-1]["content"])["text"] == result
 
 
-def test_google_tool_results_distinguish_reference_keys_from_text() -> None:
-    reference = '{"\\u0024dynamicRef":"#/x"}'
-    text = '{"unsupported_keyword":"$ref"}'
-    malformed = '{"$ref":"#/x"'
-    large_integer = '{"note":"costs $5","n":' + "9" * 5_000 + "}"
+def test_google_tool_results_survive_json_parser_value_refusal() -> None:
+    result = '{"$value":' + "1" * 5_000 + "}"
     messages = (
         Message(role="user", content="inspect"),
-        Message(
-            role="assistant",
-            content=(
-                ToolUseBlock(id="c1", name="reference", input={}),
-                ToolUseBlock(id="c2", name="text", input={}),
-                ToolUseBlock(id="c3", name="malformed", input={}),
-                ToolUseBlock(id="c4", name="large_integer", input={}),
-            ),
-        ),
-        Message(
-            role="user",
-            content=(
-                ToolResultBlock(tool_use_id="c1", content=reference, is_error=True),
-                ToolResultBlock(tool_use_id="c2", content=text),
-                ToolResultBlock(tool_use_id="c3", content=malformed),
-                ToolResultBlock(tool_use_id="c4", content=large_integer),
-            ),
-        ),
+        Message(role="assistant", content=(ToolUseBlock(id="c1", name="inspect", input={}),)),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="c1", content=result),)),
     )
-    request = REQUEST.model_copy(update={"model": "google/gemini-2.5-pro", "messages": messages})
+    request = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash", "messages": messages})
 
     rendered = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
 
-    assert json.loads(rendered[-4]["content"]) == {"text": f"[tool error] {reference}"}
-    assert rendered[-3]["content"] == text
-    assert rendered[-2]["content"] == malformed
-    assert json.loads(rendered[-1]["content"]) == {"text": large_integer}
+    assert isinstance(rendered, list)
+    assert json.loads(rendered[-1]["content"])["text"] == result
 
 
-def test_google_tool_results_within_the_size_cap_survive_parser_refusal() -> None:
-    reference = "[" * 9_997 + '{"$ref":"#/x"}' + "]" * 9_997
-    reference_free = "[" * 9_997 + '"costs $5"' + "]" * 9_997
+def test_google_error_results_and_dynamic_references_are_text_enveloped() -> None:
+    error_result = '{"$ref":"#/$defs/Value"}'
+    dynamic_result = '{"$dynamicRef":"#value"}'
     messages = (
         Message(role="user", content="inspect"),
         Message(
             role="assistant",
             content=(
-                ToolUseBlock(id="c1", name="reference", input={}),
-                ToolUseBlock(id="c2", name="reference_free", input={}),
+                ToolUseBlock(id="c1", name="inspect", input={}),
+                ToolUseBlock(id="c2", name="inspect", input={}),
             ),
         ),
         Message(
             role="user",
             content=(
-                ToolResultBlock(tool_use_id="c1", content=reference),
-                ToolResultBlock(tool_use_id="c2", content=reference_free),
+                ToolResultBlock(tool_use_id="c1", content=error_result, is_error=True),
+                ToolResultBlock(tool_use_id="c2", content=dynamic_result),
             ),
         ),
     )
@@ -366,8 +391,25 @@ def test_google_tool_results_within_the_size_cap_survive_parser_refusal() -> Non
 
     rendered = _client(ScriptedCreate([]))._create_kwargs(request, frozenset())["messages"]
 
-    assert json.loads(rendered[-2]["content"]) == {"text": reference}
-    assert json.loads(rendered[-1]["content"]) == {"text": reference_free}
+    assert isinstance(rendered, list)
+    assert json.loads(rendered[-2]["content"])["text"] == f"[tool error] {error_result}"
+    assert json.loads(rendered[-1]["content"])["text"] == dynamic_result
+
+
+def test_non_google_and_reference_free_tool_results_keep_the_standard_shape() -> None:
+    result = '{"answer": 5}'
+    messages = (
+        Message(role="user", content="add"),
+        Message(role="assistant", content=(ToolUseBlock(id="c1", name="add", input={}),)),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="c1", content=result),)),
+    )
+    google = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash", "messages": messages})
+    anthropic = REQUEST.model_copy(
+        update={"model": "anthropic/claude-fable-5", "messages": messages}
+    )
+    client = _client(ScriptedCreate([]))
+    assert client._create_kwargs(google, frozenset())["messages"][-1]["content"] == result
+    assert client._create_kwargs(anthropic, frozenset())["messages"][-1]["content"] == result
 
 
 def test_text_only_model_omits_tool_result_images_before_provider_call() -> None:

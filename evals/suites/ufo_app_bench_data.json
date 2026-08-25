@@ -54,7 +54,7 @@
         }
       ],
       "tools": {
-        "eval_google_drive": {
+        "google_drive": {
           "list_documents": {
             "coverage": [
               {"meeting": "Northstar renewal", "status": "notes found", "latest": "2026-08-12"},
@@ -98,7 +98,7 @@
           "calls": [
             {"provider": "eval_calendar", "tool": "list_events"},
             {"provider": "eval_email", "tool": "list_emails"},
-            {"provider": "eval_google_drive", "tool": "list_documents"},
+            {"provider": "google_drive", "tool": "list_documents"},
             {"provider": "eval_github", "tool": "list_issues"}
           ]
         },
@@ -126,7 +126,7 @@
       "emails": [],
       "events": [],
       "tools": {
-        "eval_google_drive": {
+        "google_drive": {
           "list_documents": {
             "documents": [
               {
@@ -156,7 +156,7 @@
         {
           "prompt": "Use the connected Drive transcript and current GitHub issues.",
           "calls": [
-            {"provider": "eval_google_drive", "tool": "list_documents"},
+            {"provider": "google_drive", "tool": "list_documents"},
             {"provider": "eval_github", "tool": "list_issues"}
           ]
         },
@@ -171,7 +171,7 @@
         {
           "prompt": "Rewrite the transcript into concise task copy without its meeting filler.",
           "visible": ["2 September", "support runbook"],
-          "rewrite_sources": ["/tools/eval_google_drive/list_documents/documents/0/text"],
+          "rewrite_sources": ["/tools/google_drive/list_documents/documents/0/text"],
           "absent": ["circle back and socialize these action-oriented takeaways across the stakeholder group"]
         }
       ]
@@ -216,7 +216,10 @@
         },
         {
           "prompt": "Let me review a prepared assignment in chat; do not assign an issue directly from the page.",
-          "visible_any": [["Review in chat", "Prepare assignment", "Prepared Assignment"]]
+          "visible_any": [
+            ["Prepare assignment", "Prepare an assignment", "Prepared Assignment", "Prepare note for review"],
+            ["Review in chat", "Open chat to review", "Assignments are made in chat"]
+          ]
         },
         {
           "prompt": "Use direct reader copy and do not show connector field names.",
@@ -421,7 +424,7 @@
       "emails": [],
       "events": [],
       "tools": {
-        "eval_stripe": {
+        "stripe": {
           "list_subscriptions": {
             "as_of": "2026-08-24T00:00:00+00:00",
             "basis": "active subscription monthly amounts; canceled subscriptions count toward churn only",
@@ -456,9 +459,9 @@
         {
           "prompt": "Use connected Stripe subscriptions, invoices, and balance transactions.",
           "calls": [
-            {"provider": "eval_stripe", "tool": "list_subscriptions"},
-            {"provider": "eval_stripe", "tool": "list_invoices"},
-            {"provider": "eval_stripe", "tool": "list_balance_transactions"}
+            {"provider": "stripe", "tool": "list_subscriptions"},
+            {"provider": "stripe", "tool": "list_invoices"},
+            {"provider": "stripe", "tool": "list_balance_transactions"}
           ]
         },
         {
@@ -474,7 +477,7 @@
         {
           "prompt": "Use founder-ready copy and remove abstract finance language.",
           "visible": ["Acme Labs", "Delta Goods"],
-          "rewrite_sources": ["/tools/eval_stripe/list_balance_transactions/note_raw"],
+          "rewrite_sources": ["/tools/stripe/list_balance_transactions/note_raw"],
           "absent": ["diversified monetization modalities", "revenue architecture demonstrates"]
         }
       ]
@@ -486,7 +489,7 @@
       "emails": [],
       "events": [],
       "tools": {
-        "eval_hubspot": {
+        "hubspot": {
           "list_companies": {
             "companies": [
               {"id": "co_northstar", "name": "Northstar", "owner": "Mara", "stage": "customer", "last_activity": "2026-08-21", "seats": 84},
@@ -515,9 +518,9 @@
         {
           "prompt": "Use connected HubSpot companies, deals, and support tickets.",
           "calls": [
-            {"provider": "eval_hubspot", "tool": "list_companies"},
-            {"provider": "eval_hubspot", "tool": "list_deals"},
-            {"provider": "eval_hubspot", "tool": "list_tickets"}
+            {"provider": "hubspot", "tool": "list_companies"},
+            {"provider": "hubspot", "tool": "list_deals"},
+            {"provider": "hubspot", "tool": "list_tickets"}
           ]
         },
         {
@@ -536,7 +539,7 @@
             ["Resolve invoice export", "Own the invoice mismatch", "Fix invoice export"],
             ["Contact Dana", "Call Dana"]
           ],
-          "rewrite_sources": ["/tools/eval_hubspot/list_tickets/summary_raw"],
+          "rewrite_sources": ["/tools/hubspot/list_tickets/summary_raw"],
           "absent": ["stakeholder ecosystem", "maximize retention outcomes"]
         }
       ]
@@ -548,7 +551,7 @@
       "emails": [],
       "events": [],
       "tools": {
-        "eval_greenhouse": {
+        "greenhouse": {
           "list_candidates": {
             "candidates": [
               {"id": "cand_jordan", "name": "Jordan Lee", "role": "Staff engineer", "stage": "Onsite", "source": "Referral", "next_interview": "2026-08-27T18:00:00+00:00"},
@@ -571,8 +574,8 @@
         {
           "prompt": "Use connected Greenhouse candidates and scorecards.",
           "calls": [
-            {"provider": "eval_greenhouse", "tool": "list_candidates"},
-            {"provider": "eval_greenhouse", "tool": "list_scorecards"}
+            {"provider": "greenhouse", "tool": "list_candidates"},
+            {"provider": "greenhouse", "tool": "list_scorecards"}
           ]
         },
         {
@@ -587,7 +590,7 @@
         {
           "prompt": "Use neutral evidence-led copy and remove recruiting process filler.",
           "visible": ["queue race", "constraints"],
-          "rewrite_sources": ["/tools/eval_greenhouse/list_scorecards/panel_note_raw"],
+          "rewrite_sources": ["/tools/greenhouse/list_scorecards/panel_note_raw"],
           "absent": ["calibration enablement", "talent assessment stakeholder cohort"]
         }
       ]

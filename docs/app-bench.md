@@ -9,10 +9,10 @@ creation flow. A phase passes only when its gate has recorded evidence. The stat
 | Phase | Goal | Status | Gate evidence |
 |---|---|---|---|
 | 1. House system | Give pages of ours one exact visual system. | Passed | `ufo-style` tokens, dependent skills, routing checks, and theme tests. |
-| 2. App bench | Keep three presentation controls, one rework control, and a connected data-backed app set. | Active | Run `357d81f3` records one ten-app comparison identity: 0/10 binary, 0.807 product, 0.733 process, and one Google provider failure. Exact source coverage, first-screen density, interaction, visual taste, and process report separately. |
+| 2. App bench | Keep three presentation controls, one rework control, and a connected data-backed app set. | Active | Run `357d81f3` records the final ten-app boundary: 0/10 binary, 0.807 product, 0.733 process, and one Google provider failure. Exact source coverage, first-screen density, interaction, visual taste, and process now report separately. |
 | 3. Instructions | Add only skill or tool text that the bench proves useful. | Passed | Run `159d6126` keeps the compact build contract at 0.954 product versus 0.846. The QA sentence and component guidance are rejected. |
-| 4. App agents | Test dedicated profiles and models on matched work. | Passed | The model screens record cost, quality, and process behavior. They do not change the main agent or prescribe the build topology. |
-| 5. Build pipeline | Split independent build work behind explicit artifacts. | Queued | Application source, build ownership, and acceptance are separate typed boundaries. |
+| 4. App agents | Test dedicated profiles and models on matched work. | Passed | Gemini 3.7 Flash at `medium` is the builder. Optional Luna and Fable roles lose to the monolith. Final Luna copy run `7c904a61` passes 3/7 and does not establish a stable copy stage. |
+| 5. Build pipeline | Select a production-shaped target and split work behind explicit artifacts. | Active | [The 200-case exploration campaign](app-bench-exploration.md) tests the app kit, typed contracts, owned compositions, model roles, prepared actions, and the creation flow in dependency order. |
 | 6. Creation flow | Drive intent, approval, build, preview, and publication from chat. | Queued | Realistic request to durable, usable application. |
 
 Update this table and the phase evidence in the same change that satisfies a gate. A changed case,
@@ -349,10 +349,12 @@ directly comparable with scores after it.
 
 | Part | Final choice | Evidence |
 |---|---|---|
+| Builder | Gemini 3.7 Flash, `medium` reasoning | It beats `off` on the three-case finalist screen and avoids the large time and token increase at `high`. |
+| Build form | One direct HTML, CSS, and JavaScript owner | Full shadcn, optional specialist roles, and CSS blocks do not beat the monolith. |
 | Skill guidance | One private build contract | It lists exact facts, reader copy, controls, delivery, and homepage binding before files are written. |
 | Hard verdict | All product and process gates | Easy visual quality does not excuse contrast, interaction, source, density, or QA failures. |
 | Product score | Delivery, source, density, page, interaction, visual | A single hard failure no longer hides partial product quality. |
-| Process score | Skill loading and QA efficiency | Process experiments do not change the product score. |
+| Process score | Skill, direct ownership, QA efficiency | Process experiments do not change the product score. |
 | Fixtures | Fixed, transformed connector records | GitHub facts remain exact where allowed. No app eval calls a live connector. |
 
 ### Judge boundary
@@ -371,7 +373,7 @@ status hues still fail the house palette. Deterministic AA failures remain hard 
 
 ### Final frontier
 
-For its stored comparison identity, run `357d81f3` has 0.900 delivery, 0.820 source coverage, 0.685 above-fold density, 0.775 page
+Run `357d81f3` has 0.900 delivery, 0.820 source coverage, 0.685 above-fold density, 0.775 page
 audit, 0.800 interaction, and 0.864 visual taste. Four cases use valid browser QA. The main defects
 are missing or buried facts, copied source prose, custom accent text below AA, one clipboard page
 error, and one-batch browser proof. The Google provider rejects startup metrics before its first

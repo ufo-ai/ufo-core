@@ -5,6 +5,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from gzip import compress
+from hashlib import sha256
 from io import BytesIO
 from json import dumps, loads
 from pathlib import Path
@@ -17,15 +18,23 @@ import pytest
 import sqlalchemy as sa
 from ufo_ext_eval_env.manifest import (
     APP_FIXTURE_PREFIX,
-    CALENDAR_PROVIDER,
     DRIVE_PROVIDER,
-    EMAIL_PROVIDER,
     GITHUB_PROVIDER,
     eval_env_email,
     eval_env_event,
 )
 from ufo_ext_eval_env.manifest import (
     NAME as EVAL_ENV_NAME,
+)
+from ufo_ext_sites.application_audit import (
+    APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
+    ApplicationAuditContract,
+)
+from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_DELEGATION_TOOL,
+    APPLICATION_BUILDER_QA_LIMIT_REASON,
+    APPLICATION_BUILDER_WRITE_TOOL,
+    ApplicationBuilderResult,
 )
 
 from evals.harness.artifact_checks import (
@@ -60,11 +69,15 @@ from evals.harness.scorers import (
     site_archive_scorer,
 )
 from evals.suites.ufo_app_bench import (
+    ACTION_CASES,
+    ACTION_CONTRACTS,
     APP_DATA_CONTENT,
     APP_DATA_DIGEST,
+    APP_PREVIEW,
     APP_UNIVERSE_EMAILS,
     APP_UNIVERSE_EVENTS,
     APP_UNIVERSE_TOOLS,
+    APP_WORKSPACE_FILES,
     AUDIT_CONTENT,
     AUDIT_DIGEST,
     CONNECTED_APPS,
@@ -84,23 +97,35 @@ from evals.suites.ufo_app_bench import (
     MEMBER_QUERIES,
     NARROW_HEIGHT,
     NARROW_WIDTH,
+    PROBE_PORT,
     SCHEMES,
+    SETUP_CASES,
+    SETUP_CONTRACTS,
     TASTE_CRITERIA,
     AppBenchWorkspaceProbe,
     _above_fold_scorer,
+    _action_scorer,
+    _AppActionProbe,
     _AppBenchProbe,
     _AppCopyProbe,
+    _application_audit_contract,
+    _application_builder_scorer,
+    _AppSetupProbe,
     _browser_probe_slot,
     _ConnectedApp,
     _ConnectedAppSeed,
     _copy_scorer,
     _delivery_scorer,
     _interaction_screen,
+    _json_contains,
     _measured_screen,
+    _missing_setup_terms,
     _qa_efficiency_scorer,
     _requirement_scorer,
     _rewrite_source_call,
     _score_app_report,
+    _setup_scorer,
+    _skill_scorer,
     _source_copy,
 )
 from evals.suites.ufo_app_bench import CASES as BENCH_CASES
@@ -254,10 +279,28 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     assert "document.caretRangeFromPoint" in source
     assert "renderedParts" in source
     assert "script.setAttribute('src', await asDataUrl(resource))" in source
+    assert "style.textContent = await inlineCssResources(css, resource.href)" in source
+    assert "sheets.push(await inlineCssResources(css, sheet.href || location.href))" in source
     assert "link.replaceWith(style)" in source
     assert "image.setAttribute('src', await asDataUrl(resource))" in source
-    assert "fs.writeFileSync(interactivePath, await interactiveDocument(page))" in source
-    assert "fs.writeFileSync(staticPath, await page.content())" in source
+    assert "fs.writeFileSync(interactivePath, await interactiveDocument(frame))" in source
+    assert "page.$('iframe[name=\"ufo-app\"]')" in source
+    assert "if (!element) return page;" in source
+    assert "await element.contentFrame()" in source
+    assert "frame.evaluate(measure, AA_FLOOR)" in source
+    assert "fs.writeFileSync(staticPath, await frame.content())" in source
+    assert "window.__ufoCalls || []" in source
+    assert "window.__ufoNavigations || []" in source
+    assert "paths.unshift([...path, child])" in source
+    assert "reloadStates.push" in source
+
+    preview = APP_PREVIEW.decode()
+    assert "window.__ufoCalls=[]" in preview
+    assert "window.__ufoNavigations=[]" in preview
+    assert 'message.ufo==="navigate"' in preview
+    assert 'path==="objects/eval_app_action"' in preview
+    assert 'typeof message.body==="string"?JSON.parse(message.body):message.body' in preview
+    assert "localStorage.setItem(actionKey" in preview
 
 
 def test_app_copy_capture_renders_one_static_dom_without_screenshots() -> None:
@@ -701,8 +744,6 @@ def _measured(**overrides: object) -> bytes:
             "textChecked": 40,
             "textUnderFloor": 0,
             "text": [],
-            "renderedText": "",
-            "renderedParts": [],
             "aboveFoldText": "",
             "pastViewport": [],
             "clipped": [],
@@ -723,6 +764,8 @@ def _measured(**overrides: object) -> bytes:
                     {"selector": "#first", "name": "First action"},
                     {"selector": "#second", "name": "Second action"},
                 ],
+                "calls": [],
+                "reloadStates": [],
                 "console": [],
             },
         }
@@ -835,17 +878,42 @@ async def test_interaction_screen_requires_two_accessible_visible_state_changes(
 
 
 def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
+    result = ApplicationBuilderResult(
+        status="deployed",
+        source_path="/workspace/ufo-app/app.tsx",
+        site_name="built-app",
+        site_url="https://ufo.test/built-app",
+        browser_batches=2,
+        controls_checked=("Filter", "Select"),
+    ).model_dump_json()
+    own_calls = (
+        ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+        ToolInvocation(
+            APPLICATION_BUILDER_DELEGATION_TOOL,
+            {},
+            result,
+            has_result=True,
+        ),
+    )
+    worker_calls = (
+        ToolInvocation("call_external_tool", {}, "facts", has_result=True),
+        ToolInvocation(
+            APPLICATION_BUILDER_WRITE_TOOL,
+            {"content": "const page = true;"},
+            "written",
+            has_result=True,
+        ),
+        ToolInvocation("start_server", {}, "started", has_result=True),
+        ToolInvocation("js_repl", {}, "checked", has_result=True),
+        ToolInvocation("js_repl", {}, "reviewed", has_result=True),
+        ToolInvocation("deploy_website", {}, "deployed", has_result=True),
+    )
     return CapabilityOutput(
         "Built the app.",
-        (
-            ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
-            ToolInvocation("start_server", {}, "started", has_result=True),
-            ToolInvocation("js_repl", {}, "checked", has_result=True),
-            ToolInvocation("js_repl", {}, "reviewed", has_result=True),
-            ToolInvocation("deploy_website", {}, "deployed", has_result=True),
-            ToolInvocation("set_homepage", {}, "bound", has_result=True),
-        ),
+        (*own_calls, *worker_calls),
         artifacts=tuple(SharedArtifact(name, content) for name, content in files.items()),
+        own_calls=own_calls,
+        own_tools=tuple(call.name for call in own_calls),
     )
 
 
@@ -889,10 +957,170 @@ async def test_ufo_app_bench_rework_pulls_the_source_between_deploys() -> None:
     assert "object_get" in skipped.reason
 
 
+async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
+    base = _built_screen({})
+    direct = replace(
+        base,
+        calls=tuple(
+            call for call in base.calls if call.name != APPLICATION_BUILDER_DELEGATION_TOOL
+        ),
+        own_calls=tuple(
+            call for call in base.own_calls if call.name != APPLICATION_BUILDER_DELEGATION_TOOL
+        ),
+    )
+    wrong_lane_call = ToolInvocation(
+        "spawn",
+        {"target": "website_building", "payload": {}},
+        "built",
+        has_result=True,
+    )
+    wrong_lane = replace(
+        base,
+        calls=(*base.calls, wrong_lane_call),
+        own_calls=(*base.own_calls, wrong_lane_call),
+    )
+    parent_write_call = ToolInvocation(
+        "write",
+        {"file_path": "/workspace/ufo-app/app.tsx", "content": "bad"},
+        "written",
+        has_result=True,
+    )
+    parent_edit_call = ToolInvocation(
+        "edit",
+        {"file_path": "/workspace/ufo-app/app.tsx", "old_string": "a", "new_string": "b"},
+        "edited",
+        has_result=True,
+    )
+    parent_read_call = ToolInvocation(
+        "bash",
+        {"command": "head -40 /workspace/ufo-app/app.tsx"},
+        "source",
+        has_result=True,
+    )
+    parent_write = replace(
+        base,
+        calls=(*base.calls, parent_write_call),
+        own_calls=(*base.own_calls, parent_write_call),
+    )
+    parent_edit = replace(
+        base,
+        calls=(*base.calls, parent_edit_call),
+        own_calls=(*base.own_calls, parent_edit_call),
+    )
+    parent_read = replace(
+        base,
+        calls=(*base.calls, parent_read_call),
+        own_calls=(*base.own_calls, parent_read_call),
+    )
+    no_child_write = replace(
+        base,
+        calls=tuple(call for call in base.calls if call.name != APPLICATION_BUILDER_WRITE_TOOL),
+    )
+
+    accepted = await _application_builder_scorer()(base)
+    missing = await _application_builder_scorer()(direct)
+    lane = await _application_builder_scorer()(wrong_lane)
+    authored = await _application_builder_scorer()(parent_write)
+    edited = await _application_builder_scorer()(parent_edit)
+    inspected = await _application_builder_scorer()(parent_read)
+    unwritten = await _application_builder_scorer()(no_child_write)
+
+    assert accepted.passed, accepted.reason
+    assert not missing.passed
+    assert f"did not call {APPLICATION_BUILDER_DELEGATION_TOOL}" in missing.reason
+    assert not lane.passed
+    assert "parent entered the worker loop" in lane.reason
+    assert not authored.passed
+    assert "parent entered the worker loop" in authored.reason
+    assert not edited.passed
+    assert "parent entered the worker loop" in edited.reason
+    assert not inspected.passed
+    assert "parent entered the worker loop" in inspected.reason
+    assert not unwritten.passed
+    assert APPLICATION_BUILDER_WRITE_TOOL in unwritten.reason
+
+    self_certified = replace(
+        base,
+        calls=(*base.calls, ToolInvocation("set_homepage", {}, "bound", has_result=True)),
+    )
+    certified = await _application_builder_scorer()(self_certified)
+    assert not certified.passed
+    assert "certify its own homepage" in certified.reason
+
+
+async def test_ufo_app_bench_accepts_the_worker_preloaded_skill() -> None:
+    base = _built_screen({})
+    without_parent_load = replace(
+        base,
+        calls=tuple(call for call in base.calls if call.name != "load_skill"),
+        own_calls=tuple(call for call in base.own_calls if call.name != "load_skill"),
+    )
+
+    verdict = await _skill_scorer()(without_parent_load)
+
+    assert verdict.passed, verdict.reason
+    assert "preloads 'website-building'" in verdict.reason
+
+
+async def test_ufo_app_bench_rejects_a_routine_second_delegation() -> None:
+    base = _built_screen({})
+    second = ToolInvocation(
+        APPLICATION_BUILDER_DELEGATION_TOOL,
+        {},
+        "repaired",
+        has_result=True,
+    )
+    repeated = replace(
+        base,
+        calls=(*base.calls, second),
+        own_calls=(*base.own_calls, second),
+    )
+    verdict = await _application_builder_scorer()(repeated)
+
+    assert not verdict.passed
+    assert "delegated 2 times" in verdict.reason
+
+
+async def test_ufo_app_bench_rejects_a_failed_delegation_before_a_success() -> None:
+    base = _built_screen({})
+    failed = ToolInvocation(
+        APPLICATION_BUILDER_DELEGATION_TOOL,
+        {"user_description": "unused"},
+        "invalid input",
+        has_result=True,
+        is_error=True,
+    )
+    repeated = replace(
+        base,
+        calls=(failed, *base.calls),
+        own_calls=(failed, *base.own_calls),
+    )
+    verdict = await _application_builder_scorer()(repeated)
+
+    assert not verdict.passed
+    assert "delegated 2 times" in verdict.reason
+
+
 async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     grader = _qa_efficiency_scorer()
     clean = await grader(_built_screen({}))
     assert clean.passed, clean.reason
+
+    capped = replace(
+        _built_screen({}),
+        calls=(
+            *_built_screen({}).calls,
+            ToolInvocation(
+                "js_repl",
+                {},
+                APPLICATION_BUILDER_QA_LIMIT_REASON,
+                has_result=True,
+                is_error=True,
+            ),
+        ),
+    )
+    capped_result = await grader(capped)
+    assert capped_result.passed, capped_result.reason
 
     repeated_server = replace(
         _built_screen({}),
@@ -923,9 +1151,9 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     failed_browser = replace(
         _built_screen({}),
         calls=(
-            *_built_screen({}).calls[:4],
+            *_built_screen({}).calls[:7],
             ToolInvocation("js_repl", {}, "timed out", has_result=False),
-            *_built_screen({}).calls[4:],
+            *_built_screen({}).calls[7:],
         ),
     )
     failed_batch = await grader(failed_browser)
@@ -936,10 +1164,10 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     recovered_browser = replace(
         base,
         calls=(
-            *base.calls[:4],
+            *base.calls[:5],
             ToolInvocation("js_repl", {}, "found a defect", has_result=False),
             ToolInvocation("js_repl", {}, "repair passed", has_result=True),
-            *base.calls[4:],
+            *base.calls[5:],
         ),
     )
     recovered_batch = await grader(recovered_browser)
@@ -956,7 +1184,7 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     assert not wrong_order.passed
     assert "before deploy_website" in wrong_order.reason
 
-    untested_first_deploy = replace(
+    under_tested_first_deploy = replace(
         base,
         calls=(
             base.calls[0],
@@ -968,9 +1196,9 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
             ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
         ),
     )
-    missing_initial_qa = await grader(untested_first_deploy)
+    missing_initial_qa = await grader(under_tested_first_deploy)
     assert not missing_initial_qa.passed
-    assert "0 successful browser QA batch(es) before deploy_website" in missing_initial_qa.reason
+    assert "1 successful browser QA batch(es) before deploy_website" in missing_initial_qa.reason
 
     failed_redeploy = replace(
         base,
@@ -1012,32 +1240,6 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     rework_proof = await grader(reworked)
     assert rework_proof.passed, rework_proof.reason
 
-    premature_homepage = replace(
-        base,
-        calls=(
-            *base.calls[:4],
-            base.calls[5],
-            base.calls[4],
-        ),
-    )
-    homepage_order = await grader(premature_homepage)
-    assert not homepage_order.passed
-    assert "set_homepage must run after the first deploy_website" in homepage_order.reason
-
-    late_homepage = replace(
-        base,
-        calls=(
-            *base.calls[:5],
-            ToolInvocation("js_repl", {}, "checked rework", has_result=True),
-            ToolInvocation("js_repl", {}, "reviewed rework", has_result=True),
-            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
-            base.calls[5],
-        ),
-    )
-    late_binding = await grader(late_homepage)
-    assert not late_binding.passed
-    assert "before a redeploy" in late_binding.reason
-
 
 async def test_ufo_app_bench_accepts_static_deploy_or_published_application() -> None:
     static = await _delivery_scorer()(_built_screen({}))
@@ -1049,7 +1251,6 @@ async def test_ufo_app_bench_accepts_static_deploy_or_published_application() ->
             ToolInvocation("js_repl", {}, "checked", has_result=True),
             ToolInvocation("js_repl", {}, "reviewed", has_result=True),
             ToolInvocation("publish_website", {}, "published", has_result=True),
-            ToolInvocation("set_homepage", {}, "bound", has_result=True),
         ),
     )
     app = await _delivery_scorer()(published)
@@ -1084,6 +1285,8 @@ def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() 
                         "appInteractionTotal": 1,
                         "processSkillPassed": 1,
                         "processSkillTotal": 1,
+                        "processBuilderPassed": 1,
+                        "processBuilderTotal": 1,
                         "processQaPassed": 0,
                         "processQaTotal": 1,
                     },
@@ -1108,20 +1311,50 @@ def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() 
         "density": 0.8,
         "page": 1.0,
         "interaction": 1.0,
+        "action": 1.0,
         "visual": 0.5,
     }
-    assert result.evidence["appScore"] == pytest.approx(5 / 6)
-    assert result.evidence["processScore"] == pytest.approx(1 / 2)
+    assert result.evidence["appScore"] == pytest.approx(6 / 7)
+    assert result.evidence["processScore"] == pytest.approx(2 / 3)
     assert {metric.name: metric.value for metric in scored.metrics} == {
-        "app_score": pytest.approx(5 / 6),
+        "app_score": pytest.approx(6 / 7),
         "delivery_score": 1.0,
         "source_score": 0.7,
         "density_score": 0.8,
         "page_score": 1.0,
         "interaction_score": 1.0,
+        "action_score": 1.0,
         "visual_score": 0.5,
-        "process_score": pytest.approx(1 / 2),
+        "process_score": pytest.approx(2 / 3),
     }
+
+
+def test_setup_case_action_layer_requires_action_and_setup_proof() -> None:
+    case = EvalCaseResult(
+        name="setup-issue-owner",
+        passed=False,
+        reason="setup failed",
+        evidence={
+            "selectedAttempt": 0,
+            "visualRubric": [],
+            "attempts": [
+                {
+                    "grader": {
+                        "appActionPassed": 1,
+                        "appActionTotal": 1,
+                        "appSetupPassed": 0,
+                        "appSetupTotal": 1,
+                    }
+                }
+            ],
+        },
+    )
+
+    scored = _score_app_report(
+        EvalReport(name="ufo-app-bench", suite="capability", digest="sha256:test", cases=(case,))
+    )
+
+    assert scored.cases[0].evidence["appScoreLayers"]["action"] == 0.5
 
 
 async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
@@ -1134,13 +1367,22 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         "daily-brief-rework",
     ]
     assert [case.name for case in CONNECTED_CASES] == [case.name for case in CONNECTED_APPS]
-    assert len(BENCH_CASES) == 14
-    assert all(case.judge_on_deterministic_failure for case in BENCH_CASES)
+    assert [case.name for case in ACTION_CASES] == [
+        "action-meeting-tasks",
+        "action-issue-owner",
+        "action-pr-babysitter",
+    ]
+    assert [case.name for case in SETUP_CASES] == [
+        "setup-meeting-tasks",
+        "setup-issue-owner",
+        "setup-pr-babysitter",
+    ]
+    assert len(BENCH_CASES) == 20
     assert UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS == 900.0
     for case in CONTROL_CASES[:3]:
         assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in case.digest_tag
         assert "interactive-homepage" in case.digest_tag
-        assert f"qa-total-{MAX_BROWSER_QA_CALLS}:redeploy-1" in case.digest_tag
+        assert f"qa-1x{MAX_BROWSER_QA_CALLS}" in case.digest_tag
         assert AUDIT_DIGEST[:12] in case.digest_tag
         shots = {f"{case.name}-{scheme}.png": _png() for scheme in SCHEMES}
         report = {f"{case.name}-audit.json": _measured()}
@@ -1151,18 +1393,29 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         built = await case.grader(_built_screen({**pages, **report, **shots}))
         assert built.passed, case.name
 
+        blocked = ApplicationBuilderResult(
+            status="blocked",
+            source_path="/workspace/ufo-app/app.tsx",
+            browser_batches=0,
+            blocker="The source did not compile.",
+        ).model_dump_json()
+        own_calls = (
+            ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+            ToolInvocation(
+                APPLICATION_BUILDER_DELEGATION_TOOL,
+                {},
+                blocked,
+                has_result=True,
+            ),
+        )
         unbound = replace(
             _built_screen({**pages, **report, **shots}),
-            calls=(
-                ToolInvocation(
-                    "load_skill", {"name": "website-building"}, "loaded", has_result=True
-                ),
-                ToolInvocation("deploy_website", {}, "deployed", has_result=True),
-            ),
+            calls=(*own_calls, ToolInvocation("deploy_website", {}, "deployed", has_result=True)),
+            own_calls=own_calls,
         )
         not_homepage = await case.grader(unbound)
         assert not not_homepage.passed, case.name
-        assert "set_homepage" in not_homepage.reason
+        assert "deterministic acceptance" in not_homepage.reason
 
         one_scheme = await case.grader(
             _built_screen({**pages, **report, f"{case.name}-light.png": _png()})
@@ -1178,12 +1431,20 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
 
         unmeasured = await case.grader(_built_screen({**pages, **shots}))
         assert not unmeasured.passed, case.name
-        assert "probe captured 0 .json artifacts" in unmeasured.reason
+        assert "probe captured 0 -audit.json artifacts" in unmeasured.reason
 
-        assert not case.workspace_files
+        assert {item.path for item in case.workspace_files} == {
+            "ufo-app/app.tsx",
+            "ufo-app/index.html",
+            "ufo-app/preview.html",
+        }
+        assert case.prepare is None
         assert case.artifact_probe is not None
         assert isinstance(case.artifact_probe, _AppBenchProbe)
         probe_command = case.artifact_probe._command()
+        assert "--directory /workspace/ufo-app" in probe_command
+        assert f"http://localhost:{PROBE_PORT}/preview.html" in probe_command
+        assert "rglob('*.html')" not in probe_command
         assert f'"$capture/{case.name}-interactive.html"' in probe_command
         assert f'"$capture/{case.name}-static.html"' in probe_command
         assert "artifactProbe" in case.payload()
@@ -1210,7 +1471,12 @@ def test_connected_app_prompts_have_one_to_one_proof_without_staged_data() -> No
         assert "interactive" in case.message.lower()
         assert "homepage" in case.message.lower()
         assert "Evaluation delivery" not in case.message
-        assert not case.workspace_files
+        assert {item.path for item in case.workspace_files} == {
+            "ufo-app/app.tsx",
+            "ufo-app/index.html",
+            "ufo-app/preview.html",
+        }
+        assert case.prepare is None
         assert case.seed is not None
         assert APP_DATA_DIGEST[:12] in case.digest_tag
         assert case.visual_rubric[: len(HOUSE_CRITERIA)] == HOUSE_CRITERIA
@@ -1234,6 +1500,124 @@ def test_connected_app_prompts_have_one_to_one_proof_without_staged_data() -> No
         assert hidden, spec.name
 
 
+def test_action_cases_add_only_the_connected_action_contract() -> None:
+    for contract, case in zip(ACTION_CONTRACTS, ACTION_CASES, strict=True):
+        source = CONNECTED_APPS[[item.name for item in CONNECTED_APPS].index(contract.source_case)]
+
+        assert case.name == f"action-{contract.source_case}"
+        assert case.message.startswith(MEMBER_QUERIES[contract.source_case])
+        assert "application action contract" in case.message
+        assert case.seed == _ConnectedAppSeed(source, case.message)
+        assert case.artifact_probe == _AppActionProbe(case.name, contract)
+        assert contract.kind == "eval_app_action"
+        assert contract.connector_value() == {
+            "label": contract.label,
+            "write": {
+                "function": "ufoWrite",
+                "arguments": ["eval_app_action", contract.name, contract.spec],
+            },
+            "read": {
+                "function": "ufoRead",
+                "arguments": [f"objects/eval_app_action/{contract.name}"],
+            },
+            "success_text": contract.expected_result,
+            "render": {"component": "ApplicationAction", "prop": "action"},
+        }
+
+
+def test_setup_cases_add_connected_state_and_keep_the_action_proof() -> None:
+    for action, setup, case in zip(ACTION_CONTRACTS, SETUP_CONTRACTS, SETUP_CASES, strict=True):
+        source = CONNECTED_APPS[[item.name for item in CONNECTED_APPS].index(action.source_case)]
+
+        assert case.name == f"setup-{action.source_case}"
+        assert case.message.startswith(MEMBER_QUERIES[action.source_case])
+        assert "application action contract" in case.message
+        assert "connector states" in case.message
+        assert "notification surfaces" in case.message
+        assert "Open chat when I review setup changes" in case.message
+        assert case.seed == _ConnectedAppSeed(source, case.message)
+        assert case.artifact_probe == _AppSetupProbe(case.name, action, setup)
+        assert setup.connector_value()["review"] == {
+            "label": "Review setup in chat",
+            "navigate": {"function": "ufoNavigate", "arguments": ["#/new/eval-agent"]},
+        }
+        assert "Chat as selected" not in case.message
+        assert "Slack as available" not in case.message
+        assert "iMessage as not connected" not in case.message
+
+
+async def test_action_scorer_requires_every_deterministic_acceptance_check() -> None:
+    proof = {
+        "checks": {
+            "browser": True,
+            "reload": True,
+            "applied": True,
+            "idempotent": True,
+            "refused": True,
+            "scoped": True,
+            "result": True,
+            "fixture": True,
+        }
+    }
+    accepted = await _action_scorer()(
+        _output("action-issue-owner-action-proof.json", dumps(proof).encode())
+    )
+    proof["checks"]["idempotent"] = False
+    repeated = await _action_scorer()(
+        _output("action-issue-owner-action-proof.json", dumps(proof).encode())
+    )
+
+    assert accepted.passed, accepted.reason
+    assert accepted.evidence == {"appActionPassed": 1, "appActionTotal": 1}
+    assert not repeated.passed
+    assert "idempotent" in repeated.reason
+
+
+async def test_setup_scorer_requires_visible_state_chat_and_no_direct_write() -> None:
+    proof = {
+        "checks": {
+            "visible": True,
+            "chat": True,
+            "no_direct_setup_write": True,
+        }
+    }
+    accepted = await _setup_scorer()(
+        _output("setup-issue-owner-setup-proof.json", dumps(proof).encode())
+    )
+    proof["checks"]["chat"] = False
+    direct = await _setup_scorer()(
+        _output("setup-issue-owner-setup-proof.json", dumps(proof).encode())
+    )
+
+    assert accepted.passed, accepted.reason
+    assert accepted.evidence == {"appSetupPassed": 1, "appSetupTotal": 1}
+    assert not direct.passed
+    assert "chat" in direct.reason
+
+
+def test_setup_state_accepts_reader_facing_selection_and_connection_terms() -> None:
+    setup = SETUP_CONTRACTS[2]
+    visible = (
+        "GitHub connected. Chat Active. Slack Available. iMessage Disconnected. "
+        "Review setup in chat."
+    ).casefold()
+
+    assert _missing_setup_terms(visible, setup) == ()
+    assert _missing_setup_terms(visible.replace("available", "pending"), setup) == ("available",)
+
+
+def test_action_fixture_match_is_a_recursive_subset() -> None:
+    actual = {
+        "issues": [
+            {"number": 520, "owner": "sam"},
+            {"number": 521, "owner": "alex", "project_status": "Assigned"},
+        ]
+    }
+
+    assert _json_contains(actual, {"issues": [{"number": 521, "owner": "alex"}]})
+    assert not _json_contains(actual, {"issues": [{"number": 521, "owner": "priya"}]})
+
+
 def test_connected_app_fixtures_name_their_testing_source_without_live_identifiers() -> None:
     assert {spec.name: spec.source_apps for spec in CONNECTED_APPS} == TESTING_APP_SOURCES
     fixture = APP_DATA_CONTENT.decode().casefold()
@@ -1249,6 +1633,21 @@ def test_connected_app_fixtures_name_their_testing_source_without_live_identifie
     )
 
 
+def test_issue_owner_proves_the_prepared_action_and_chat_boundary_separately() -> None:
+    spec = next(item for item in CONNECTED_APPS if item.name == "issue-owner")
+    requirement = next(item for item in spec.requirements if "prepared assignment" in item.prompt)
+
+    assert requirement.visible_any == (
+        (
+            "Prepare assignment",
+            "Prepare an assignment",
+            "Prepared Assignment",
+            "Prepare note for review",
+        ),
+        ("Review in chat", "Open chat to review", "Assignments are made in chat"),
+    )
+
+
 def test_copy_cases_reuse_connected_prompts_fixtures_and_browser_rendering() -> None:
     copied_specs = tuple(
         spec
@@ -1260,7 +1659,12 @@ def test_copy_cases_reuse_connected_prompts_fixtures_and_browser_rendering() -> 
     for spec, copy_case in zip(copied_specs, COPY_CASES, strict=True):
         connected_case = next(case for case in CONNECTED_CASES if case.name == spec.name)
         assert copy_case.message == connected_case.message == MEMBER_QUERIES[spec.name]
-        assert copy_case.seed == connected_case.seed == _ConnectedAppSeed(spec)
+        assert (
+            copy_case.seed
+            == connected_case.seed
+            == _ConnectedAppSeed(spec, MEMBER_QUERIES[spec.name])
+        )
+        assert copy_case.workspace_files == connected_case.workspace_files == APP_WORKSPACE_FILES
         assert connected_case.artifact_probe == _AppBenchProbe(spec.name)
         assert copy_case.artifact_probe == _AppCopyProbe(spec.name)
         assert "ufo-app-copy-capture.cjs" in copy_case.artifact_probe._command()
@@ -1321,8 +1725,12 @@ def _copy_output(
 ) -> CapabilityOutput:
     requirement = next(item for item in spec.requirements if item.rewrite_sources)
     expected = _rewrite_source_call(requirement.rewrite_sources[0])
-    calls = [
-        ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+    visible = " ".join(
+        (*requirement.visible, *(alternatives[0] for alternatives in requirement.visible_any))
+    )
+    rendered = _rendered_artifacts(spec.name, f"{visible} {content}")
+    built = _built_screen({artifact.name: artifact.content for artifact in rendered})
+    connector_calls = (
         ToolInvocation("list_external_tools", {}, "listed", has_result=True),
         ToolInvocation(
             "describe_external_tools",
@@ -1330,29 +1738,25 @@ def _copy_output(
             "described",
             has_result=True,
         ),
-    ]
-    if include_source_call:
-        calls.append(
-            ToolInvocation(
-                "call_external_tool",
-                {"source_id": expected.provider, "tool_name": expected.tool},
-                "called",
-                has_result=True,
+        *(
+            (
+                ToolInvocation(
+                    "call_external_tool",
+                    {"source_id": expected.provider, "tool_name": expected.tool},
+                    "called",
+                    has_result=True,
+                ),
             )
-        )
-    calls.extend(
-        (
-            ToolInvocation("deploy_website", {}, "deployed", has_result=True),
-            ToolInvocation("set_homepage", {}, "bound", has_result=True),
-        )
+            if include_source_call
+            else ()
+        ),
     )
-    visible = " ".join(
-        (*requirement.visible, *(alternatives[0] for alternatives in requirement.visible_any))
+    worker_start = next(
+        index for index, call in enumerate(built.calls) if call.name == "call_external_tool"
     )
-    return CapabilityOutput(
-        "Built app",
-        tuple(calls),
-        artifacts=_rendered_artifacts(spec.name, f"{visible} {content}"),
+    return replace(
+        built,
+        calls=(*built.calls[:worker_start], *connector_calls, *built.calls[worker_start + 1 :]),
     )
 
 
@@ -1383,7 +1787,7 @@ async def test_copy_grader_requires_source_use_and_rejects_source_copy() -> None
     assert "keeps 9/10 source words" in lightly_edited.reason
 
 
-async def test_copy_case_ignores_visual_contrast_and_browser_qa_gates() -> None:
+async def test_copy_case_uses_the_worker_without_visual_or_qa_efficiency_grading() -> None:
     spec = CONNECTED_APPS[0]
     case = COPY_CASES[0]
 
@@ -1651,13 +2055,33 @@ async def test_connected_app_seed_grants_sources_and_keeps_one_fixed_data_univer
 
     spec = CONNECTED_APPS[0]
     with ws(workspace_id):
-        blob = WorkspaceBlobStore(FilesystemBlobStore(tmp_path))
-        await asyncio.gather(
-            _ConnectedAppSeed(spec)(workspace_id, agent_id, blob),
-            _ConnectedAppSeed(CONNECTED_APPS[1])(workspace_id, agent_id, blob),
+        await _ConnectedAppSeed(spec, MEMBER_QUERIES[spec.name])(
+            workspace_id,
+            agent_id,
+            WorkspaceBlobStore(FilesystemBlobStore(tmp_path)),
         )
+        second = CONNECTED_APPS[1]
+        await _ConnectedAppSeed(second, MEMBER_QUERIES[second.name])(
+            workspace_id,
+            agent_id,
+            WorkspaceBlobStore(FilesystemBlobStore(tmp_path)),
+        )
+        action_contract = ACTION_CONTRACTS[1]
         stored = await ScopedStore(extension=EVAL_ENV_NAME).get(
             f"{APP_FIXTURE_PREFIX}{DRIVE_PROVIDER}:list_documents"
+        )
+        action_fixture = await ScopedStore(extension=EVAL_ENV_NAME).get(
+            f"{APP_FIXTURE_PREFIX}{GITHUB_PROVIDER}:{action_contract.fixture_tool}"
+        )
+        first_contract = await ScopedStore(extension="sites").get(
+            APPLICATION_AUDIT_REQUEST_CONTRACT_KEY.format(
+                request_sha256=sha256(MEMBER_QUERIES[spec.name].encode()).hexdigest()
+            )
+        )
+        second_contract = await ScopedStore(extension="sites").get(
+            APPLICATION_AUDIT_REQUEST_CONTRACT_KEY.format(
+                request_sha256=sha256(MEMBER_QUERIES[second.name].encode()).hexdigest()
+            )
         )
         async with workspace_tx() as connection:
             providers = (
@@ -1697,12 +2121,29 @@ async def test_connected_app_seed_grants_sources_and_keeps_one_fixed_data_univer
             ).scalar_one()
 
     assert sorted(providers) == [
-        CALENDAR_PROVIDER,
-        EMAIL_PROVIDER,
+        "eval_calendar",
+        "eval_email",
         GITHUB_PROVIDER,
-        DRIVE_PROVIDER,
+        "google_drive",
     ]
     assert stored == APP_UNIVERSE_TOOLS[DRIVE_PROVIDER]["list_documents"]
+    assert isinstance(action_fixture, dict)
+    assert ApplicationAuditContract.model_validate(first_contract) == _application_audit_contract(
+        spec
+    )
+    assert ApplicationAuditContract.model_validate(second_contract) == _application_audit_contract(
+        second
+    )
+    assert action_fixture["application_actions"] == [
+        contract.connector_value()
+        for contract in ACTION_CONTRACTS
+        if contract.fixture_tool == action_contract.fixture_tool
+    ]
+    assert action_fixture["application_setups"] == [
+        contract.connector_value()
+        for contract in SETUP_CONTRACTS
+        if contract.fixture_tool == action_contract.fixture_tool
+    ]
     assert isinstance(stored, dict)
     documents = stored["documents"]
     assert isinstance(documents, list)

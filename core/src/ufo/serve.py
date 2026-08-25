@@ -557,6 +557,7 @@ def _launch_jobs(
             DeliverySweep(invoker_for=invoker_for, registry=runtime.subagents),
             preview_renderer,
         ),
+        disabled=frozenset(runtime.config.serve.disabled_jobs),
     )
     JobRunner(
         bindings=bindings,

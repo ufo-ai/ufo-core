@@ -193,7 +193,12 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(serve, "PageChangeRunner", page_change_runner)
     monkeypatch.setattr(serve, "core_jobs", lambda *args: ())
-    monkeypatch.setattr(serve, "bindings_from", lambda *args: ("bindings",))
+
+    def bindings(*args: object, disabled: frozenset[str]) -> tuple[str]:
+        captured["disabled"] = disabled
+        return ("bindings",)
+
+    monkeypatch.setattr(serve, "bindings_from", bindings)
     monkeypatch.setattr(serve, "JobRunner", Runner)
     monkeypatch.setattr(
         serve, "load_manifests", lambda *args: pytest.fail("manifests loaded twice")
@@ -209,6 +214,7 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["jobs"]["registry"] is registry
     assert captured["launched"] is True
     assert captured["page"]["probes"] is captured["jobs"]["probes"]
+    assert captured["disabled"] == frozenset()
 
 
 def test_launch_jobs_hands_both_runners_the_background_jobs_model(
@@ -245,7 +251,7 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
 
     monkeypatch.setattr(serve, "PageChangeRunner", page_change_runner)
     monkeypatch.setattr(serve, "core_jobs", lambda *args: ())
-    monkeypatch.setattr(serve, "bindings_from", lambda *args: ("bindings",))
+    monkeypatch.setattr(serve, "bindings_from", lambda *args, disabled: ("bindings",))
     monkeypatch.setattr(serve, "JobRunner", Runner)
 
     serve._launch_jobs(runtime, object(), object(), object())

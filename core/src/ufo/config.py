@@ -124,6 +124,7 @@ class ServeConfig(BaseModel):
     port: int = 8710
     request_shutdown_seconds: int = Field(default=30, ge=0)
     graceful_shutdown_seconds: int = Field(default=0, ge=0)
+    disabled_jobs: tuple[str, ...] = ()
 
 
 class ConnectConfig(BaseModel):

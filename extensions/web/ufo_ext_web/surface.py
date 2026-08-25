@@ -186,12 +186,13 @@ TITLE_BATCH = 5
 HOMEPAGE_SEED_PREFIX = "homepage-seed/"
 SEED_JOB_NAME = "seed_homepages"
 SEED_JOB_SCHEDULE = "0 */5 * * * *"
-HOMEPAGE_TOOLS = ("deploy_website", "set_homepage")
+HOMEPAGE_TOOLS = ("build_ufo_application",)
 SEED_PROMPT = (
     "Build your homepage: the page members open on the agents screen. State what you are for, "
-    "what you watch, recent work, and what you need from members. Build a small static site in "
-    "the workspace, run deploy_website, then run set_homepage with the site name from the deploy "
-    "result. Update the homepage when what you report changes."
+    "what you watch, recent work, and what you need from members. Call build_ufo_application once "
+    "for the complete build. The worker owns connected data inspection, app.tsx, browser QA, "
+    "repair, and deployment. Product checks own acceptance and homepage binding. Do not inspect "
+    "or repair its work. Give one final response from its structured result."
 )
 TITLE_EXCERPT_CHARS = 1000
 TITLE_MAX_TOKENS = 100
@@ -4259,7 +4260,14 @@ async def object_write(ctx: SurfaceContext, request: Request) -> Response:
         if isinstance(agent, Response):
             return agent
         name = request.path_params["name"]
-        intent = ToolIntent(tool="object_delete", input={"kind": kind, "name": name})
+        intent = ToolIntent(
+            tool="object_delete",
+            input={
+                "kind": kind,
+                "name": name,
+                "user_description": f"Delete {kind} {name} from the application.",
+            },
+        )
     else:
         try:
             body = await request.json()
@@ -4279,7 +4287,13 @@ async def object_write(ctx: SurfaceContext, request: Request) -> Response:
             return JSONResponse(
                 {"ok": False, "name": None, "detail": "write too large"}, status_code=413
             )
-        intent = ToolIntent(tool="object_apply", input={"manifest": manifest})
+        intent = ToolIntent(
+            tool="object_apply",
+            input={
+                "manifest": manifest,
+                "user_description": f"Apply {kind} {name} from the application.",
+            },
+        )
     conversation_id = await ctx.conversation_for(
         f"intent/{agent.id}/{email}", conversation_audience(member_id), agent_id=agent.id
     )

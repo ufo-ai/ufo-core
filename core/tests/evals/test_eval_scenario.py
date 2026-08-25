@@ -31,7 +31,7 @@ from evals.harness.scenario import (
     UserSimulator,
     run_scenario_case,
 )
-from evals.harness.target import InProcessTarget
+from evals.harness.target import CapabilityTarget, InProcessTarget
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
@@ -358,10 +358,278 @@ async def test_scenario_drives_multiple_turns_on_one_conversation(db: None, tmp_
     trajectory = cast(dict[str, object], attempts[0]["trajectory"])
     assert len(cast(list[object], trajectory["messages"])) == 6
     assert attempts[0]["stopped"] is True
+    timing = cast(dict[str, object], attempts[0]["timing"])
+    assert timing["wall_ms"] >= 0
+    assert timing["error"] == "no step reader is wired"
+    assert "handoffs" in attempts[0]
     assert result.evidence["user"] == _SUM_USER.payload()
     assert result.evidence["grading"] == "the replies carry the $223 total"
     assert result.evidence["memberKey"] is None
     assert result.evidence["maxTurns"] == 4
+
+
+async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="Application created."),),
+            (
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id="build", name="build_ufo_application", input={}),),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="build", content="deployed"),),
+                ),
+                Message(role="assistant", content="Homepage ready."),
+            ),
+        ),
+    )
+    member = ScriptedMember(("Create an application.", STOP_TOKEN))
+
+    async def followup(outcome: ScenarioOutcome, target: CapabilityTarget):
+        assert outcome.followup is None
+        async with workspace_tx() as connection:
+            conversation_id = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.workspace_id == workspace_id
+                    )
+                )
+            ).scalar_one()
+        return await target.invoke(
+            conversation_id,
+            agent_id,
+            "Build the homepage.",
+            "homepage-seed",
+            on_behalf_of_member_id=uuid4(),
+            as_scheduled=True,
+        )
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        assert outcome.followup is not None
+        assert outcome.followup.response == "Homepage ready."
+        assert outcome.output.tools == ("build_ufo_application",)
+        return CapabilityVerdict(True, "creation and homepage build completed")
+
+    case = ScenarioCase(
+        "creation-journey",
+        _SUM_USER,
+        grade,
+        max_turns=2,
+        followup=followup,
+    )
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert result.passed, result.reason
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["followupTrajectory"] is not None
+    assert len(cast(list[object], attempt["followupTrajectories"])) == 1
+    assert [call["name"] for call in cast(list[dict[str, object]], attempt["calls"])] == [
+        "build_ufo_application"
+    ]
+
+
+async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="Application created."),),
+            (
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id="first", name="build_ufo_application", input={}),),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="first", content="blocked"),),
+                ),
+                Message(role="assistant", content="Build blocked."),
+            ),
+            (
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id="second", name="build_ufo_application", input={}),),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="second", content="deployed"),),
+                ),
+                Message(role="assistant", content="Homepage ready."),
+            ),
+        ),
+    )
+    member = ScriptedMember(("Create an application.", STOP_TOKEN))
+
+    async def followup(outcome: ScenarioOutcome, target: CapabilityTarget):
+        async with workspace_tx() as connection:
+            conversation_id = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.workspace_id == workspace_id
+                    )
+                )
+            ).scalar_one()
+        first = await target.invoke(
+            conversation_id,
+            agent_id,
+            "Build the homepage without authority.",
+            "homepage-seed:first",
+            on_behalf_of_member_id=None,
+            as_scheduled=True,
+        )
+        second = await target.invoke(
+            conversation_id,
+            agent_id,
+            "Repair the homepage with authority.",
+            "homepage-seed:second",
+            on_behalf_of_member_id=uuid4(),
+            as_scheduled=True,
+        )
+        return first, second
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        assert [item.response for item in outcome.followups] == [
+            "Build blocked.",
+            "Homepage ready.",
+        ]
+        assert outcome.output.tools == (
+            "build_ufo_application",
+            "build_ufo_application",
+        )
+        return CapabilityVerdict(True, "both build attempts retained")
+
+    case = ScenarioCase(
+        "repair-journey",
+        _SUM_USER,
+        grade,
+        max_turns=2,
+        followup=followup,
+    )
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert result.passed, result.reason
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert len(cast(list[object], attempt["followupTrajectories"])) == 2
+
+
+async def test_failed_scenario_followup_retains_its_evidence(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="Application created."),),
+            (
+                Message(
+                    role="assistant",
+                    content=(ToolUseBlock(id="build", name="build_ufo_application", input={}),),
+                ),
+                Message(
+                    role="user",
+                    content=(ToolResultBlock(tool_use_id="build", content="timed out"),),
+                ),
+            ),
+        ),
+        statuses=("done", "failed"),
+        error_classes=("", "TimeoutError"),
+    )
+    member = ScriptedMember(("Create an application.", STOP_TOKEN))
+
+    async def followup(outcome: ScenarioOutcome, target: CapabilityTarget):
+        async with workspace_tx() as connection:
+            conversation_id = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.workspace_id == workspace_id
+                    )
+                )
+            ).scalar_one()
+        return await target.invoke(
+            conversation_id,
+            agent_id,
+            "Build the homepage.",
+            "homepage-seed",
+            on_behalf_of_member_id=None,
+            as_scheduled=True,
+        )
+
+    case = ScenarioCase(
+        "failed-creation-journey",
+        _SUM_USER,
+        _sum_grader,
+        max_turns=2,
+        followup=followup,
+    )
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert not result.passed
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["followupTrajectory"] is not None
+    assert [call["name"] for call in cast(list[dict[str, object]], attempt["calls"])] == [
+        "build_ufo_application"
+    ]
+
+
+async def test_scenario_followup_exception_retains_the_completed_conversation(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=((Message(role="assistant", content="No application created."),),),
+    )
+    member = ScriptedMember(("Create an application.", STOP_TOKEN))
+
+    async def followup(outcome: ScenarioOutcome, target: CapabilityTarget):
+        raise RuntimeError("homepage followup requires one application")
+
+    case = ScenarioCase(
+        "missing-application-journey",
+        _SUM_USER,
+        _sum_grader,
+        max_turns=2,
+        followup=followup,
+    )
+
+    with ws(workspace_id):
+        result = await run_scenario_case(
+            case, _target(workspace_id, agent_id, blob, worker, member)
+        )
+
+    assert not result.passed
+    assert result.reason == (
+        "followup raised: RuntimeError: homepage followup requires one application"
+    )
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["response"] == "No application created."
+    assert attempt["trajectory"] is not None
 
 
 async def test_scenario_shows_the_member_only_its_scenario_and_the_replies(

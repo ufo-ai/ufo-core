@@ -1,7 +1,10 @@
 import asyncio
+import json
+import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import IO
 from uuid import UUID
 
 import asyncpg
@@ -15,6 +18,7 @@ from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
 import evals.stack as eval_stack
 from evals.stack import (
+    CREATION_DISABLED_JOBS,
     STACK_OWNER_EMAIL,
     EvalStack,
     Matrix,
@@ -25,10 +29,12 @@ from evals.stack import (
     template_config,
 )
 from evals.suites.ufo_app_prepare import (
+    APP_PARENT_TOOLS,
     HOMEPAGE_SEED_PREFIX,
     SETTLED_MARKER,
     WEB_EXTENSION,
     prepare_app_eval,
+    prepare_creation_eval,
 )
 from ufo.config import Config
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -49,7 +55,9 @@ def _close(stack: EvalStack) -> None:
         stack.otlp_probe,
         stack.seed_log,
         stack.serve_log,
+        stack.egress_log,
         stack.eval_log,
+        stack.process_log,
     ):
         if handle is not None:
             handle.close()
@@ -273,6 +281,32 @@ async def test_shutdown_leaves_sandboxes_alone_on_a_backend_that_owns_no_contain
     assert calls == []
 
 
+async def test_shutdown_records_its_signal_before_the_process_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="trace", config=template, args=("--only", "basics")),
+        root=tmp_path / "run" / "trace",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    process = await asyncio.create_subprocess_exec("sleep", "60")
+
+    await stack._shutdown(process)
+    events = [json.loads(line) for line in (stack.root / "process.log").read_text().splitlines()]
+    _close(stack)
+
+    assert [(event["action"], event["name"]) for event in events] == [
+        ("terminate", "serve"),
+        ("exited", "serve"),
+    ]
+    assert events[0]["pid"] == process.pid
+    assert events[1]["returncode"] == -15
+
+
 def test_provision_writes_the_derived_config_and_owns_the_child_argv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -285,6 +319,7 @@ def test_provision_writes_the_derived_config_and_owns_the_child_argv(
         args=("--jobbench", "snap", "--only", "jobbench"),
         env={"MCP_ATLAS_URL": "http://127.0.0.1:9000"},
         model="claude-haiku-4-5",
+        reasoning="high",
     )
     root = tmp_path / "20260717-000000" / "boundary"
 
@@ -300,6 +335,9 @@ def test_provision_writes_the_derived_config_and_owns_the_child_argv(
     assert stack.env["UFO_CREDENTIAL_KEY"]
     assert stack.env["UFO_ARTIFACT_TOKEN_SECRET"]
     assert stack.admin_database_url is None
+    assert stack.serve_binary.is_absolute()
+    assert stack.serve_binary.name == "eval-serve"
+    assert stack.serve_binary.resolve() == Path(sys.executable).with_name("ufoctl")
     args = stack._child_args()
     assert args[:4] == ("--jobbench", "snap", "--only", "jobbench")
     assert ("--out", str(tmp_path / "archive")) == args[4:6]
@@ -311,7 +349,65 @@ def test_provision_writes_the_derived_config_and_owns_the_child_argv(
         "evals@localhost",
         "--model",
         "claude-haiku-4-5",
+        "--reasoning",
+        "high",
     )
+
+
+async def test_start_serve_uses_the_stack_private_executable_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="serve-name", config=template),
+        root=tmp_path / "run" / "serve-name",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    called: list[tuple[tuple[str, ...], Path | None]] = []
+
+    class Process:
+        pid = 123
+        returncode = None
+
+    async def ufoctl(
+        self: EvalStack, *argv: str, log: IO[bytes], binary: Path | None = None
+    ) -> Process:
+        called.append((argv, binary))
+        return Process()
+
+    monkeypatch.setattr(EvalStack, "_ufoctl", ufoctl)
+
+    await stack._start_serve()
+    _close(stack)
+
+    assert called == [(("serve",), stack.serve_binary)]
+    assert "ufoctl serve" not in f"{stack.serve_binary} serve"
+
+
+def test_app_eval_uses_the_template_parent_agent_and_rejects_matrix_model_knobs(
+    tmp_path: Path,
+) -> None:
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="app", config=template, args=("--only", "ufo-app-bench")),
+        root=tmp_path / "app",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    _close(stack)
+
+    assert stack._seed_args() == ("init", "--email", "evals@localhost")
+    with pytest.raises(ValueError, match="app suites use the template parent agent"):
+        RunSpec(
+            label="varied",
+            config=template,
+            args=("--only=ufo-app-bench",),
+            model="google/gemini-3.7-flash",
+        )
 
 
 def test_provision_strips_an_ambient_owner_dsn(
@@ -402,6 +498,8 @@ def test_memory_100_spec_requires_postgres_and_a_collector_endpoint(
         )
     with pytest.raises(ValidationError, match="materialization owns the agent"):
         RunSpec(label="memory", config=postgres_template, memory_100=snapshot, model="claude")
+    with pytest.raises(ValidationError, match="materialization owns the agent"):
+        RunSpec(label="memory", config=postgres_template, memory_100=snapshot, reasoning="high")
     assert not (tmp_path / "a").exists()
     assert not (tmp_path / "b").exists()
 
@@ -443,6 +541,7 @@ async def test_app_eval_preparation_settles_each_agent_and_is_idempotent(tmp_pat
                         "prompt": "p",
                         "model": "m",
                         "is_main": index == 0,
+                        "tools": None if index == 0 else ["read"],
                         "created_at": now,
                         "updated_at": now,
                     }
@@ -467,20 +566,67 @@ async def test_app_eval_preparation_settles_each_agent_and_is_idempotent(tmp_pat
                     ).order_by(tables.ext_store.c.key)
                 )
             ).all()
+            tool_rows = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id, tables.agent.c.tools).order_by(tables.agent.c.id)
+                )
+            ).all()
     finally:
         await dispose_db()
     assert rows == [
         (WEB_EXTENSION, f"{HOMEPAGE_SEED_PREFIX}{agent_id}", SETTLED_MARKER)
         for agent_id in agent_ids
     ]
+    assert tool_rows == [(agent_ids[0], list(APP_PARENT_TOOLS)), (agent_ids[1], ["read"])]
+
+    init_db(database_url)
+    try:
+        async with workspace_tx() as connection:
+            await connection.execute(sa.delete(tables.ext_store))
+            await connection.execute(
+                sa.update(tables.agent)
+                .where(tables.agent.c.id == agent_ids[0])
+                .values(tools=["object_apply"])
+            )
+    finally:
+        await dispose_db()
+
+    await prepare_creation_eval(config)
+    await prepare_creation_eval(config)
+
+    init_db(database_url)
+    try:
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.ext_store.c.extension,
+                        tables.ext_store.c.key,
+                        tables.ext_store.c.value,
+                    ).order_by(tables.ext_store.c.key)
+                )
+            ).all()
+            tool_rows = (
+                await connection.execute(
+                    sa.select(tables.agent.c.id, tables.agent.c.tools).order_by(tables.agent.c.id)
+                )
+            ).all()
+    finally:
+        await dispose_db()
+    assert rows == [
+        (WEB_EXTENSION, f"{HOMEPAGE_SEED_PREFIX}{agent_id}", SETTLED_MARKER)
+        for agent_id in agent_ids
+    ]
+    assert tool_rows == [(agent_ids[0], ["object_apply"]), (agent_ids[1], ["read"])]
 
 
-async def test_only_app_suites_run_the_homepage_preparation(
+async def test_only_app_and_creation_suites_run_the_homepage_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     template = tmp_path / "template.toml"
     template.write_text(SQLITE_TEMPLATE)
     calls: list[tuple[str, ...]] = []
+    disabled_jobs: list[tuple[str, ...]] = []
 
     async def create(*argv: str, **_: object) -> _DoneProcess:
         calls.append(argv)
@@ -490,6 +636,7 @@ async def test_only_app_suites_run_the_homepage_preparation(
     for label, args in (
         ("copy", ("--only", "ufo-app-copy", "--case", "copy-meeting-tasks")),
         ("bench", ("--only=ufo-app-bench",)),
+        ("creation", ("--only", "new_application", "--case", "A05-guided-build")),
         ("other", ("--only", "basics")),
     ):
         stack = EvalStack.provision(
@@ -498,13 +645,35 @@ async def test_only_app_suites_run_the_homepage_preparation(
             out=tmp_path / "archive",
             repo_root=tmp_path,
         )
+        disabled_jobs.append(stack.config.serve.disabled_jobs)
         await stack._prepare_app_eval()
         _close(stack)
 
     assert [call[2] for call in calls] == [
         "evals.suites.ufo_app_prepare",
         "evals.suites.ufo_app_prepare",
+        "evals.suites.ufo_app_prepare",
     ]
+    assert calls[2][-1] == "--creation"
+    assert disabled_jobs == [(), (), CREATION_DISABLED_JOBS, ()]
+
+
+@pytest.mark.parametrize("other_suite", ("new_application", "basics"))
+def test_app_suites_require_separate_stacks(tmp_path: Path, other_suite: str) -> None:
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+
+    with pytest.raises(ValueError, match="app suites require a separate eval stack"):
+        EvalStack.provision(
+            RunSpec(
+                label="mixed-apps",
+                config=template,
+                args=("--only", "ufo-app-bench", other_suite),
+            ),
+            root=tmp_path / "mixed-apps",
+            out=tmp_path / "archive",
+            repo_root=tmp_path,
+        )
 
 
 def test_app_eval_preparation_matches_the_web_homepage_job() -> None:
@@ -617,7 +786,13 @@ def test_issue_recall_spec_needs_a_collector_endpoint_but_no_postgres(
         out=tmp_path / "archive",
         repo_root=tmp_path,
     )
-    for log in (stack.seed_log, stack.serve_log, stack.egress_log, stack.eval_log):
+    for log in (
+        stack.seed_log,
+        stack.serve_log,
+        stack.egress_log,
+        stack.eval_log,
+        stack.process_log,
+    ):
         log.close()
 
     assert not (tmp_path / "a").exists()
@@ -638,7 +813,7 @@ def test_issue_recall_seeds_a_workspace_then_materializes_and_passes_the_readine
         out=tmp_path / "archive",
         repo_root=tmp_path,
     )
-    for log in (stack.seed_log, stack.serve_log, stack.eval_log):
+    for log in (stack.seed_log, stack.serve_log, stack.eval_log, stack.process_log):
         log.close()
     ufoctl: list[tuple[str, ...]] = []
     materialized: list[tuple[str, ...]] = []
@@ -678,7 +853,7 @@ def test_memory_100_child_args_carry_the_snapshot_and_readiness(
         out=tmp_path / "archive",
         repo_root=tmp_path,
     )
-    for log in (stack.seed_log, stack.serve_log, stack.eval_log):
+    for log in (stack.seed_log, stack.serve_log, stack.eval_log, stack.process_log):
         log.close()
 
     readiness = tmp_path / "run" / "state" / "abc" / "readiness.json"
@@ -706,7 +881,13 @@ def test_memory_ingestion_seeds_and_passes_snapshot_and_readiness(
         out=tmp_path / "archive",
         repo_root=tmp_path,
     )
-    for log in (stack.seed_log, stack.serve_log, stack.egress_log, stack.eval_log):
+    for log in (
+        stack.seed_log,
+        stack.serve_log,
+        stack.egress_log,
+        stack.eval_log,
+        stack.process_log,
+    ):
         log.close()
     ufoctl: list[tuple[str, ...]] = []
     materialized: list[tuple[str, ...]] = []

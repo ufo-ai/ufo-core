@@ -222,6 +222,9 @@ def test_registry_schemas_cover_every_tool() -> None:
         "authority or capability, including admin actions; omit only for conversation-common work."
     )
 
+    speakerless = REGISTRY.schemas(include_requested_by=False)
+    assert all(REQUESTED_BY not in schema.input_schema["properties"] for schema in speakerless)
+
 
 def test_registry_reserves_the_message_authority_field() -> None:
     class CollidingInput(BaseModel):
