@@ -68,9 +68,9 @@ test("a set homepage frames the bound site beside the conversation", async () =>
   expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
   expect(frame.getAttribute("allow")).toBe("fullscreen");
   // What shows through a frame whose page is still arriving is the pane's own background, in the
-  // portal's color-scheme — never a browser's default white canvas.
+  // portal's inherited color-scheme — never the system scheme or a browser's default white canvas.
   expect(frame.className).toContain("bg-surface");
-  expect(frame.className).toContain("[color-scheme:light_dark]");
+  expect(frame.className).toContain("[color-scheme:inherit]");
   expect(frame.parentElement!.className).toContain("bg-surface");
   // The page heads itself, so the pane draws no band and no title of its own over it — only the
   // shell's two acts, floating in the page's gutter.

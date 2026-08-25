@@ -475,7 +475,7 @@ export function AgentPane({
                 onLoad={() => landed(frame.key)}
                 className={cn(
                   "absolute inset-0 size-full border-0 bg-surface",
-                  "transition-opacity duration-200 ease-out [color-scheme:light_dark]",
+                  "transition-opacity duration-200 ease-out [color-scheme:inherit]",
                   frame.loaded ? "opacity-100" : "pointer-events-none opacity-0",
                 )}
               />
