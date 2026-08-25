@@ -2,8 +2,8 @@ import { IconArrowRight, IconCheck, IconPlus } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Input } from "@/components/ui/field";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Input, Textarea } from "@/components/ui/field";
+import { ToggleGroup, ToggleGroupItem, ToggleGroupOne } from "@/components/ui/toggle-group";
 import {
   Notice,
   type NoticeState,
@@ -32,20 +32,31 @@ export type FirstRunPayload = {
   connectors: Connector[];
 };
 
-/** What the member says to open the conversation the first run hands them to: the tools they just
- *  picked, and the question the page stops at. The picks are written into the message in catalog
- *  order rather than left to a memory read, so the agent proposes against them on its first turn
- *  without asking again for what the member already answered. Which agents to set up is that
- *  conversation's work: creating one takes a speaking member, so it happens on the turns the member
- *  answers on, never on a page that never speaks.
- *
- *  It is said as the chat opens rather than left standing in the composer. The line commits
- *  nothing — it asks what the agent could do, and every act that follows is decided on a later
- *  turn the member answers — so a member who has just pressed through the whole setup arrives at a
- *  reply rather than at a box holding words they have to press again. */
-function opening(labels: string[]): string {
-  const ask = "What could you set up for us?";
-  return labels.length ? "We use " + labels.join(", ") + ". " + ask : ask;
+const GOAL_STEP = "goal";
+
+const GOALS = [
+  {
+    name: "product-development",
+    label: "Faster product dev",
+    prompt: "develop products faster",
+  },
+  { name: "revenue", label: "More revenue", prompt: "increase revenue" },
+  { name: "operations", label: "Automate ops", prompt: "automate operations" },
+  { name: "product-market-fit", label: "Find PMF", prompt: "find product-market fit" },
+] as const;
+
+type Goal = (typeof GOALS)[number]["name"];
+
+function opening(goal: Goal | "", detail: string, labels: string[]): string {
+  const selected = GOALS.find((option) => option.name === goal);
+  const context = detail.trim().replace(/[.!?]+$/, "");
+  if (!selected) {
+    const tools = labels.length ? " We use " + labels.join(", ") + "." : "";
+    return "I want an agent to help with this goal: " + context + "." + tools;
+  }
+  const tools = labels.length ? ", and we use " + labels.join(", ") : "";
+  const more = context ? " More context: " + context + "." : "";
+  return "I want to " + selected.prompt + tools + "." + more;
 }
 
 /** The connector catalog and the workspace's two installs — the read behind both selectors. The
@@ -98,6 +109,10 @@ const INVITE_ROWS = 3;
 /** What each step asks, keyed by the step's own name — which for a connector is the connector's
  *  slug, so a step and the copy over it cannot drift apart. */
 const STEP_COPY: Record<string, { title: string; note: string }> = {
+  [GOAL_STEP]: {
+    title: "What do you want an agent to do for you today?",
+    note: "Pick one goal or describe another.",
+  },
   [TOOLS_STEP]: {
     title: "What your team uses",
     note: "Picks are recorded in memory, and the app reads them on every later turn.",
@@ -157,25 +172,6 @@ function Frame({
   );
 }
 
-/** The first run, one step at a time: the member states what their team uses, and that pick decides
- *  what the page asks next. Picking a connector reveals its install step, so the two connectors
- *  that put the agent where the team already works are asked for in place, by the member who just
- *  named them; picking neither leaves the page asking only who else belongs in the workspace.
- *  One step stands at a time: an answered step leaves the page, so what is on screen is always the
- *  one decision being asked for. The last act opens the main agent's new chat on the opening
- *  message, said.
- *
- *  The head states the acts the step actually has. Back is absent on the first step, because there
- *  is nothing behind it. Continue commits the step and is held closed until the step's act is
- *  done — so a step that asks for an install says plainly that it is still waiting — and every
- *  step that can be left undone carries Skip beside it, because a closed Continue with no way past
- *  it is a dead end rather than a question.
- *
- *  An install lands on the provider's pages, not this one, so a connect step watches for it and
- *  passes itself when it arrives: the member finishes over there, comes back, and reads the next
- *  question rather than a step they already answered with a Continue standing under it. A connector
- *  the workspace already held when the step opened is not that — the member never left, so it
- *  states it is connected and waits to be read. */
 export function FirstRun({
   agent,
   member,
@@ -186,6 +182,8 @@ export function FirstRun({
   onOpenChat: () => void;
 }) {
   const state = usePanelRead<FirstRunPayload>(FIRST_RUN_READ);
+  const [goal, setGoal] = useState<Goal | "">("");
+  const [detail, setDetail] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
   const [recorded, setRecorded] = useState<string[] | null>(null);
   const [connected, setConnected] = useState<string[]>([]);
@@ -219,7 +217,7 @@ export function FirstRun({
     }
     setNotice(QUIET);
     setRecorded(picked);
-    setAt(1);
+    setAt(at + 1);
   }
 
   return (
@@ -240,8 +238,8 @@ export function FirstRun({
         const chosen = payload.connectors.filter((row) => (recorded ?? []).includes(row.name));
         const revealed =
           recorded === null
-            ? [TOOLS_STEP]
-            : [TOOLS_STEP, ...chosen.map((row) => row.name), TEAM_STEP];
+            ? [GOAL_STEP, TOOLS_STEP]
+            : [GOAL_STEP, TOOLS_STEP, ...chosen.map((row) => row.name), TEAM_STEP];
         const step = revealed[at];
         const connector = chosen.filter((row) => row.name === step)[0];
         const held = connector ? connector.installed || connected.includes(step) : false;
@@ -249,6 +247,8 @@ export function FirstRun({
           setPendingAsk(
             agent.id,
             opening(
+              goal,
+              detail,
               payload.providers
                 .filter((tile) => (recorded ?? []).includes(tile.name))
                 .map((tile) => tile.label),
@@ -292,7 +292,7 @@ export function FirstRun({
                     Back
                   </Button>
                 ) : null}
-                {step === TOOLS_STEP ? null : (
+                {step === GOAL_STEP || step === TOOLS_STEP ? null : (
                   <Button size="bar" onClick={advance}>
                     Skip
                   </Button>
@@ -313,7 +313,10 @@ export function FirstRun({
                     variant="send"
                     size="bar"
                     busy={busy}
-                    disabled={connector !== undefined && !held}
+                    disabled={
+                      (step === GOAL_STEP && !goal && !detail.trim()) ||
+                      (connector !== undefined && !held)
+                    }
                     onClick={step === TOOLS_STEP ? record : advance}
                   >
                     Continue
@@ -323,6 +326,35 @@ export function FirstRun({
             }
           >
             <OutcomeNotice state={notice} />
+            {step === GOAL_STEP ? (
+              <div className="mx-auto flex w-full max-w-form flex-col gap-xl">
+                <ToggleGroupOne
+                  className="grid grid-cols-2 gap-lg"
+                  value={goal}
+                  onValueChange={(value) => setGoal(value as Goal | "")}
+                >
+                  {GOALS.map((option) => (
+                    <ToggleGroupItem
+                      key={option.name}
+                      value={option.name}
+                      className={cn(
+                        "min-h-(--size-touch) rounded-panel border border-edge px-xl py-lg",
+                        "text-start text-ui hover:bg-fill data-[state=on]:border-ink data-[state=on]:bg-fill",
+                      )}
+                    >
+                      {option.label}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroupOne>
+                <Textarea
+                  aria-label="Add context"
+                  placeholder="Add context or another goal"
+                  value={detail}
+                  onChange={(event) => setDetail(event.target.value)}
+                  className="min-h-24 max-w-none font-sans text-subtitle"
+                />
+              </div>
+            ) : null}
             {step === TOOLS_STEP ? (
               <ToggleGroup
                 className="flex flex-wrap justify-center gap-lg"

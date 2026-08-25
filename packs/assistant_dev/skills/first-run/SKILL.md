@@ -1,56 +1,49 @@
 ---
 name: first-run
-description: "Load when a member starts a workspace: this is our first app, what should I do first, help me get set up, what could you set up for us, connect Slack and show my team, or an opening message where nothing is connected."
+description: "Load when a member starts a workspace, including a first-run handoff that states what they want an agent to do and which tools they use. Do not load for later work in an established workspace."
 ---
 
 # First run
 
-Offer four proven applications, then start the one the member selects.
+Turn the selected goal and tools into a useful plan. Do not assume the plan needs a new application.
 
 ## Read the workspace
 
-Read tools named in the opening message. Search memory for the company's domain, work, goals, and
-tools. Call `object_list(kind="agent")` so you do not repeat an application. The member's words
-override intake or memory. Check connector availability only when it changes what you can build.
-If the company or its work is unclear, and one open-web fact would make a recipe specific, make one
-small search.
+Read the goal, free-text context, and tools in the opening message. Search memory for the company's
+work, goals, and current state. Call `object_list(kind="agent")` so the plan uses applications the
+workspace already has. The member's words override intake or memory. Check connector availability
+only when it changes the plan.
 
-Write memory only for new domain facts found by research. Connector availability, kickoff choices,
-and created applications already have their own records; do not mirror them into memory.
+Do not copy kickoff choices or connector state into memory. They already have records.
 
-## Offer four
+## Discover
 
-Use one single-select `ask_user` question with these options, in this order:
+Read only the reference for the selected goal:
 
-| Label | Description |
-|---|---|
-| AI news review | Finds material AI changes, explains why they matter here, and cites each source. |
-| Pull request babysitter | Posts current pull-request blockers to Slack. Requires GitHub and Slack. |
-| Competitive intel digest | Reports verified product, pricing, positioning, hiring, and funding changes. |
-| What we learned | Turns work in available tools into decisions, lessons, friction, and open questions. |
+- Faster product development: [references/faster-product-development.md](references/faster-product-development.md)
+- More revenue: [references/more-revenue.md](references/more-revenue.md)
+- Automate operations: [references/automate-operations.md](references/automate-operations.md)
+- Find product-market fit: [references/find-product-market-fit.md](references/find-product-market-fit.md)
 
-Do not use a multi-select. Do not offer more applications. Do not offer an application that already
-exists. If the opening message selects one recipe, skip this question.
+For a free-text goal that does not match these choices, do not read a reference. Apply the same
+discovery rules to that goal.
 
-## Start it
+Use one `ask_user` call with two to four unanswered questions from that reference. Ask about the
+current state, the main constraint, and a measurable result. Do not ask what the company does when
+memory or the opening message already says it. If the member already supplied enough detail, skip
+the questions.
 
-Read only the selected recipe:
+## Plan
 
-- AI news review: [references/recipes/ai-news-review.md](references/recipes/ai-news-review.md)
-- Pull request babysitter: [references/recipes/pull-request-babysitter.md](references/recipes/pull-request-babysitter.md)
-- Competitive intel digest: [references/recipes/competitive-intel.md](references/recipes/competitive-intel.md)
-- What we learned: [references/recipes/what-we-learned.md](references/recipes/what-we-learned.md)
+After the answers, state the target and the current facts, then give three to five ordered steps.
+Name the first measurable action, missing access, and where a person must decide. Prefer the main
+assistant, an existing application, or a connected tool when it can do the work.
 
-Load `create-application` and follow its interview and create rules. The recipe settles the job, so
-go straight to the interview. Prefill the job. Add the recipe's one setup question when memory and
-the opening message do not answer it. Ask no proposal question, open no guided-build board, and show
-no multi-select.
+Create an application only when a repeatable job needs its own instructions, access, schedule, or
+homepage. Present the plan first. If the member asks to build that application, load
+`create-application` on their next turn and follow its interview. Do not create an application from
+the first-run handoff.
 
-## Move forward
-
-After the application is created, state what it does and what access it still needs. Offer one next
-act through one single-select `ask_user` question with two choices: do it, or finish. Prefer making
-the new application usable by attaching or connecting its required account. If it needs no repair,
-offer the next best application from the remaining context.
-
-Stop first-run behavior when the member starts real work.
+End the plan with one single-select `ask_user` question: start the first step, or change the plan.
+After the tool returns, write the full plan in the reply. Stop first-run behavior when the member
+starts real work.

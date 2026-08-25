@@ -131,18 +131,17 @@ def test_the_assistant_skills_reach_every_pack_that_composes_it() -> None:
         assert set(assistant.SKILL_NAMES) <= set(loadable), name
 
 
-def test_the_first_run_skill_ships_only_the_four_app_recipes() -> None:
+def test_the_first_run_skill_ships_only_the_four_goal_references() -> None:
     skill = next(
         entry
         for entry in discovered_packs()[assistant.NAME].skills
         if entry.path.name == "first-run"
     )
-    assert not (skill.path / "references" / "agent-ideas.md").exists()
-    assert {path.name for path in (skill.path / "references" / "recipes").iterdir()} == {
-        "ai-news-review.md",
-        "competitive-intel.md",
-        "pull-request-babysitter.md",
-        "what-we-learned.md",
+    assert {path.name for path in (skill.path / "references").iterdir()} == {
+        "automate-operations.md",
+        "faster-product-development.md",
+        "find-product-market-fit.md",
+        "more-revenue.md",
     }
 
 

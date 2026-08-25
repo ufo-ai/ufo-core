@@ -6368,7 +6368,7 @@ async def test_a_message_the_turn_takes_up_restamps_the_status_and_posts_no_prog
         assert time.monotonic() < deadline, "the picked-up status never reached Slack"
         await hub.publish(turn_id, Absorbed(arrivals=(uuid4(),)))
         await asyncio.sleep(0.01)
-    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
+    await _finish_turn(turn_id, "hi")
     await asyncio.gather(status_task, progress_task)
 
     assert len(slack.STATUS_PICKED_UP_TEXT) <= SLACK_LOADING_MESSAGE_LIMIT

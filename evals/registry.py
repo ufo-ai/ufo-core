@@ -156,7 +156,12 @@ TASKS: tuple[EvalTask, ...] = (
         serial=True,
     ),
     capability_task("app_builder", app_builder.CASES),
-    capability_task("first_run", first_run.CASES, packs=first_run.FIRST_RUN_PACKS),
+    capability_task(
+        "first_run",
+        first_run.CASES,
+        judge_model=SEMANTIC_JUDGE_MODEL,
+        packs=first_run.FIRST_RUN_PACKS,
+    ),
     capability_task("connector_refs", connector_refs.CASES),
     capability_task(
         "writing_subagent",

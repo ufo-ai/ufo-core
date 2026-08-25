@@ -18,7 +18,7 @@ from evals.skill_loading.runner import SkillLoadCase
 SKILL_LOADING_PACKS = ("assistant_hosted",)
 """The pack these cases route against. `first-run` is a pack-level skill: `assistant` and
 `assistant_hosted` carry it, no extension does, and `assistant_eval` passes no `skills=` at all — so
-on that pack the five `first-run` cases can only self-exclude, and the two cases that forbid
+on that pack the eight `first-run` cases can only self-exclude, and the two cases that forbid
 `first-run` name a distractor no agent could pick. Binding the suite to the hosted arm is the
 narrower of the two available fixes: it moves these cases to a pack the sweep already runs, and
 leaves every other suite alone. Giving `assistant_eval` the assistant pack's skills instead would
@@ -1143,7 +1143,7 @@ CASES: tuple[SkillLoadCase, ...] = (
     ),
     SkillLoadCase(
         "first-run-panel-handoff",
-        "We use Gmail, Linear. What could you set up for us?",
+        "I want to develop products faster, and we use GitHub and Linear.",
         expected="first-run",
     ),
     SkillLoadCase(
@@ -1153,7 +1153,25 @@ CASES: tuple[SkillLoadCase, ...] = (
     ),
     SkillLoadCase(
         "first-run-first-app",
-        "This is our first app. We use Slack and GitHub. Set up the pull request babysitter.",
+        "This is our first workspace. I want to automate operations, and we use Slack and Gmail.",
+        expected="first-run",
+        forbidden=("create-application",),
+    ),
+    SkillLoadCase(
+        "first-run-revenue-goal",
+        "I just set up this workspace. I want to increase revenue, and we use HubSpot and Stripe.",
+        expected="first-run",
+        forbidden=("create-application",),
+    ),
+    SkillLoadCase(
+        "first-run-pmf-goal",
+        "Nothing is set up yet. I want to find product-market fit, and we use Gmail and Meet.",
+        expected="first-run",
+        forbidden=("create-application",),
+    ),
+    SkillLoadCase(
+        "first-run-custom-goal",
+        "This is our first workspace. I want an agent to reduce support response time.",
         expected="first-run",
         forbidden=("create-application",),
     ),

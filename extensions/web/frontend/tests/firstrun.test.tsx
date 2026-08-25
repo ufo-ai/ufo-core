@@ -75,8 +75,15 @@ function recorder(outcomes: Record<string, unknown> = {}): {
   };
 }
 
+async function chooseGoal(goal = "Faster product dev", context = "") {
+  await userEvent.click(await screen.findByRole("radio", { name: goal }));
+  if (context) await userEvent.type(screen.getByLabelText("Add context"), context);
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+}
+
 /** Records the picks and lands on the step that follows them. */
 async function record(...picks: string[]) {
+  await chooseGoal();
   for (const pick of picks) await userEvent.click(await screen.findByRole("button", { name: pick }));
   await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 }
@@ -105,7 +112,9 @@ test("the card's query lands on the first run's own address", async () => {
   open();
 
   await waitFor(() => expect(location.hash).toBe("#/first-run"));
-  await screen.findByRole("button", { name: "Notion" });
+  await screen.findByRole("heading", {
+    name: "What do you want an agent to do for you today?",
+  });
   expect(screen.queryByPlaceholderText("Message the app…")).toBeNull();
 });
 
@@ -114,24 +123,46 @@ test("the address opens the first run on its own, with no query at all", async (
   location.hash = "#/first-run";
   open();
 
-  await screen.findByRole("button", { name: "Notion" });
+  await screen.findByRole("radio", { name: "Find PMF" });
   expect(location.hash).toBe("#/first-run");
 });
 
 test("the page draws no shell around the step", async () => {
   open();
 
-  await screen.findByRole("heading", { name: "What your team uses" });
+  await screen.findByRole("heading", {
+    name: "What do you want an agent to do for you today?",
+  });
   expect(screen.queryByRole("banner")).toBeNull();
   expect(screen.queryByRole("button", { name: "Menu" })).toBeNull();
 });
 
-test("the tiles are the whole first step: no later step stands until the picks are recorded", async () => {
+test("the goal is the whole first step", async () => {
   open();
 
-  await screen.findByRole("button", { name: "Slack" });
+  const choices = await screen.findAllByRole("radio");
+  expect(choices.map((choice) => choice.textContent)).toEqual([
+    "Faster product dev",
+    "More revenue",
+    "Automate ops",
+    "Find PMF",
+  ]);
+  expect(choices[0].parentElement?.className).toContain("grid-cols-2");
+  expect(screen.getByLabelText("Add context")).toBeTruthy();
+  expect(commit().disabled).toBe(true);
+  expect(screen.queryByRole("button", { name: "Slack" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "The app answers in Slack" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "Invite your team" })).toBeNull();
+});
+
+test("free text can state another goal", async () => {
+  open();
+
+  await userEvent.type(await screen.findByLabelText("Add context"), "Reduce support response time");
+  expect(commit().disabled).toBe(false);
+  await userEvent.click(commit());
+
+  await screen.findByRole("heading", { name: "What your team uses" });
 });
 
 test("the picks are recorded through the intent lane, and only what was picked is asked for", async () => {
@@ -185,10 +216,10 @@ test("the foot carries only the acts the step has", async () => {
   const posted = recorder();
   open({ "/intents": posted.route });
 
-  await screen.findByRole("button", { name: "Notion" });
+  await screen.findByRole("radio", { name: "Faster product dev" });
   expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
-  expect(commit().disabled).toBe(false);
+  expect(commit().disabled).toBe(true);
 
   await record("Slack");
 
@@ -344,6 +375,9 @@ test("a step passed while the tab stayed open is settled before the page's own r
   });
   const settle = () => act(async () => void (await vi.advanceTimersByTimeAsync(0)));
 
+  await settle();
+  fireEvent.click(screen.getByRole("radio", { name: "Faster product dev" }));
+  fireEvent.click(commit());
   await settle();
   fireEvent.click(screen.getByRole("button", { name: "Slack" }));
   fireEvent.click(screen.getByRole("button", { name: "GitHub" }));
@@ -547,7 +581,9 @@ test("every address written is added on one press, and then the chat opens", asy
       { verb: "add_member", email: "alex@work.com", admin: false },
     ]),
   );
-  await waitFor(() => expect(sent).toEqual(["We use Notion. What could you set up for us?"]));
+  await waitFor(() =>
+    expect(sent).toEqual(["I want to develop products faster, and we use Notion."]),
+  );
 });
 
 test("a refused invite states the refusal and adds nobody", async () => {
@@ -579,19 +615,25 @@ test("the last act says the picks and the question into the agent's new chat", a
 
   // Picked out of catalog order: the message states them in the order the tiles are offered, so
   // one pick set produces one message however the member clicked it.
-  await record("Notion", "Gmail");
+  await chooseGoal("Find PMF", "Help us recruit the right interviewees");
+  await userEvent.click(await screen.findByRole("button", { name: "Notion" }));
+  await userEvent.click(screen.getByRole("button", { name: "Gmail" }));
+  await userEvent.click(commit());
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
 
   await waitFor(() => expect(sent.length).toBe(1));
   expect(sent[0].url).toBe("/surface/web/agents/" + AGENT_ID + "/chat?conversation=new");
-  expect(sent[0].body).toBe("We use Gmail, Notion. What could you set up for us?");
+  expect(sent[0].body).toBe(
+    "I want to find product-market fit, and we use Gmail, Notion. " +
+      "More context: Help us recruit the right interviewees.",
+  );
   const box = await screen.findByPlaceholderText("Message the app…");
   expect((box as HTMLTextAreaElement).value).toBe("");
   // The page creates no agent: creating one takes a speaking member, and the page never speaks.
   expect(intents(posted.calls)).toEqual([toolingIntent("notion", "gmail")]);
 });
 
-test("picking nothing records nothing and still says the same question", async () => {
+test("picking no connector records nothing and still sends the goal", async () => {
   const sent: string[] = [];
   const posted = recorder();
   open({
@@ -602,11 +644,35 @@ test("picking nothing records nothing and still says the same question", async (
     },
   });
 
+  await chooseGoal("More revenue");
   await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Invite your team" });
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
-  await waitFor(() => expect(sent).toEqual(["What could you set up for us?"]));
+  await waitFor(() => expect(sent).toEqual(["I want to increase revenue."]));
+  expect(intents(posted.calls)).toEqual([]);
+});
+
+test("free text becomes the initial prompt", async () => {
+  const sent: string[] = [];
+  const posted = recorder();
+  open({
+    "/intents": posted.route,
+    "/chat": (_url, init) => {
+      sent.push(String(init?.body));
+      return json(OPENED);
+    },
+  });
+
+  await userEvent.type(await screen.findByLabelText("Add context"), "Reduce support response time.");
+  await userEvent.click(commit());
+  await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { name: "Invite your team" });
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+
+  await waitFor(() =>
+    expect(sent).toEqual(["I want an agent to help with this goal: Reduce support response time."]),
+  );
   expect(intents(posted.calls)).toEqual([]);
 });
 

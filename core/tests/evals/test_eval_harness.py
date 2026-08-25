@@ -359,6 +359,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["writing_launch_thread"].simulator_model is None
     assert tasks["report_digest"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["report_digest"].simulator_model is None
+    assert tasks["first_run"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["first_run"].simulator_model is None
     assert tasks["slack_silence"].judge_model == DEFAULT_AMBIENT_REPLY_MODEL
     assert tasks["slack_silence"].simulator_model is None
     assert tasks["asd_writing"].judge_model == SEMANTIC_JUDGE_MODEL
@@ -390,6 +392,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "writing_launch_thread",
             "credential_handoff",
             "report_digest",
+            "first_run",
         }
     )
 
