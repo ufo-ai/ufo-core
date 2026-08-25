@@ -275,9 +275,7 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
     sandbox_container: tuple[str, Path],
 ) -> None:
     container, workspace = sandbox_container
-    (workspace / "app-audit.cjs").write_bytes(AUDIT_CONTENT)
-    (workspace / "fixture.html").write_text(
-        """
+    fixture_html = b"""
         <style>
           body { overflow-x: hidden }
           .flex { display: flex }
@@ -300,6 +298,19 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
           <p class="below">below-fold fact</p>
         </main>
         """
+    subprocess.run(
+        ("docker", "exec", "-i", container, "tee", "/workspace/app-audit.cjs"),
+        input=AUDIT_CONTENT,
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    subprocess.run(
+        ("docker", "exec", "-i", container, "tee", "/workspace/fixture.html"),
+        input=fixture_html,
+        check=True,
+        capture_output=True,
+        timeout=120,
     )
     command = """
 python3 -m http.server 8765 --bind 127.0.0.1 --directory /workspace >/tmp/audit-http.log 2>&1 &
