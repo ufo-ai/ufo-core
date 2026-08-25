@@ -974,6 +974,28 @@ CASES: tuple[SkillLoadCase, ...] = (
         workspace_files=(PROJ_MAIN, PROJ_README),
     ),
     SkillLoadCase(
+        "sandbox-cli-model",
+        "Use the one-shot model command installed in the sandbox to ask a second model for a "
+        "three-word response.",
+        expected="sandbox",
+        forbidden=("website-building",),
+    ),
+    SkillLoadCase(
+        "sandbox-cli-object-bridge",
+        "From a shell script in /workspace, inspect and call an object tool through the sandbox's "
+        "command-line JSON interface.",
+        expected="sandbox",
+        forbidden=("create-application",),
+    ),
+    SkillLoadCase(
+        "sandbox-shell-snippet-only",
+        "Show me a five-line Bash snippet that prints the numbers one through five. Put it in "
+        "your reply only; do not run it or create any files.",
+        expected="",
+        forbidden=("sandbox",),
+        expects_no_load=True,
+    ),
+    SkillLoadCase(
         "schedule-daily-escalations",
         "Every weekday at 8:30 AM, send me a summary of new high-priority support escalations.",
         expected="task-scheduling",

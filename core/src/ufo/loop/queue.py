@@ -119,6 +119,7 @@ from ufo.skills.selection import (
     prompt_index,
     select_top_k,
 )
+from ufo.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
 from ufo.tools.context import Spawn, UnknownSubagentProfile
 from ufo.tools.registry import ToolDef, ToolRegistry
 from ufo.turns.activity import SKILL_LOAD_TOOL, SKILL_SEARCH_TOOL
@@ -218,6 +219,7 @@ def _agent_tools(
     all_tools: tuple[ToolDef, ...],
     allowed: tuple[str, ...] | None,
     admission: TurnAdmissionSource,
+    speaker_member_id: UUID | None = None,
 ) -> tuple[ToolDef, ...]:
     """The tool set a turn runs with, intersected with the live registry so a name no active
     extension answers is simply absent.
@@ -231,12 +233,12 @@ def _agent_tools(
     exactly as a subagent profile's does — a loader without its search would be directed at names
     it cannot reach.
 
-    An allowlist governs what a model may call, so it does not reach a prepared intent, which takes
-    no model round: the panel's verb dispatches verbatim under the submitting member's authority,
-    admitted through the panel's own gate. Filtering that lane would refuse every panel mutation on
-    an agent that carries an allowlist — including the `connect_account` and `request_credentials`
-    that give it authority in the first place."""
-    if allowed is None or admission == INTENT_ADMISSION:
+    An allowlist governs what a model may call, so it does not reach a speaking prepared intent,
+    which takes no model round: the panel's verb dispatches verbatim under the submitting member's
+    authority, admitted through the panel's own gate. A speakerless intent comes from the sandbox
+    tool bridge and remains inside the agent's allowlist because the model reaches it through
+    `bash`."""
+    if allowed is None or (admission == INTENT_ADMISSION and speaker_member_id is not None):
         return tuple(tool for tool in all_tools if not tool.profile_only)
     names = set(allowed)
     if SKILL_LOAD_TOOL in names:
@@ -572,7 +574,14 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         member_skill_block = ""
         if turn.subagent_profile is None:
             resolved = agent.model_copy(update={"model": runtime.registry.resolve(agent.model)})
-            tools = ToolRegistry(_agent_tools(all_tools, agent.tools, turn.admission_source))
+            tools = ToolRegistry(
+                _agent_tools(
+                    all_tools,
+                    agent.tools,
+                    turn.admission_source,
+                    turn.speaker_member_id,
+                )
+            )
             waiting = await setup_skill(
                 turn.agent_id, agent.is_main, turn.speaker_member_id is not None
             )
@@ -1066,6 +1075,7 @@ async def _open_sandbox(
             run_tokens.encode(run),
             {
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
+                TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL,
                 **_git_config_env(
                     (
                         *GIT_PROXY_AUTH_CONFIG,

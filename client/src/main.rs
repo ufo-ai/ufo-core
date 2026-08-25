@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
 
 use ufo::clipboard::{self, Clip};
+use ufo::cmd::{fscli, llm, tools};
 #[cfg(unix)]
 use ufo::interrupt;
 use ufo::ops::{self, OpRuntime};
@@ -17,7 +18,7 @@ use ufo::ui::picker::{PickOutcome, Picker};
 use ufo::ui::plain::Plain;
 use ufo::ui::{self, App, ClipEntry, Reply};
 use ufo::wire::{Directive, OpRequest, PostBody, SendLane, SentAck, Session, Stop};
-use ufo::{config, fscli, jsonio, llm, pr};
+use ufo::{config, jsonio, pr};
 
 const HELP: &str = "\
 Opens a conversation with your workspace assistant.
@@ -26,12 +27,14 @@ Usage: ufo [--resume [id]] [--json] [message...]
        ufo login | logout
        ufo fs {read|write|edit|grep|glob|changes} <json>
        ufo llm [--model MODEL] [--max-tokens N] PROMPT
+       ufo tool TOOL [--describe]
 
 Commands:
   login          Sign in again.
   logout         Sign out.
   fs             Run one file op inside a sandbox and print its JSON result.
   llm            Ask a model one question through the sandbox's egress proxy.
+  tool           Describe or call an object or connector tool with JSON.
 
 Options:
   --resume [id]  Resume a conversation; bare --resume picks from this machine's list.
@@ -49,9 +52,15 @@ const SEND_RETRY: Duration = Duration::from_millis(500);
 const RESUME_ROWS: usize = 12;
 
 fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("fs") => process::exit(fscli::main(&args[1..])),
+        Some("llm") => process::exit(llm::main(&args[1..])),
+        Some("tool") => process::exit(tools::main(&args[1..])),
+        _ => {}
+    }
     #[cfg(unix)]
     adopt_tty_stdin();
-    let args: Vec<String> = env::args().skip(1).collect();
     let home = config::Home::resolve();
     let mut rest: &[String] = &args;
     let mut resumed: Option<String> = None;
@@ -73,13 +82,6 @@ fn main() {
                 home.clear_signin();
                 rest = &rest[1..];
             }
-            // Both sandbox verbs return here rather than falling through: they run as an
-            // unprivileged user with no config, no login and no control plane to reach, so nothing
-            // below them may touch the client's home, the wire, or a terminal. The Windows build
-            // carries no ops behind `fs` and answers the verb's usage error there, rather than
-            // sending the op name as a message.
-            Some("fs") => process::exit(fscli::main(&rest[1..])),
-            Some("llm") => process::exit(llm::main(&rest[1..])),
             Some("--json") => {
                 json = true;
                 rest = &rest[1..];

@@ -34,6 +34,8 @@ struct ControlState {
     generation: i64,
     rules_json: String,
     forward_json: String,
+    bridge_json: String,
+    bridge_requests: Mutex<Vec<serde_json::Value>>,
     meter_records: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -45,6 +47,8 @@ impl ControlState {
             generation: 0,
             rules_json: rules_json.to_string(),
             forward_json: String::new(),
+            bridge_json: String::new(),
+            bridge_requests: Mutex::new(Vec::new()),
             meter_records: Mutex::new(Vec::new()),
         })
     }
@@ -92,6 +96,11 @@ async fn spawn_control(state: Arc<ControlState>) -> String {
                     (200, "{}".to_string())
                 } else if path.ends_with("/forward") {
                     (200, state.forward_json.clone())
+                } else if path.ends_with("/tool-bridge") {
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
+                        state.bridge_requests.lock().unwrap().push(value);
+                    }
+                    (200, state.bridge_json.clone())
                 } else {
                     (404, "{}".to_string())
                 };
@@ -321,8 +330,9 @@ async fn mitm_request(proxy: &Proxy, sock: TcpStream, host: &str, request: &[u8]
     let mut chunk = [0u8; 1024];
     loop {
         match tls.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(n) => response.extend_from_slice(&chunk[..n]),
+            Err(error) => panic!("MITM response ended with a TLS error: {error}"),
         }
     }
     String::from_utf8_lossy(&response).to_string()
@@ -630,6 +640,34 @@ async fn a_forward_sentinel_request_executes_through_the_broker() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_bridge_request_reaches_core_with_the_proxy_run_authority() {
+    let state = Arc::new(ControlState {
+        bridge_json: r#"{"ok":true,"result":{"objects":[]}}"#.to_string(),
+        ..control_defaults(
+            r#"[{"kind":"service","host":"tools.ufo.internal","daemon_prefix":null}]"#,
+        )
+    });
+    let proxy = start_proxy(state.clone()).await;
+    let auth = basic(&run_token(Some(Uuid::from_u128(0x3333))));
+    let (sock, head) = connect(&proxy, "tools.ufo.internal:443", Some(&auth)).await;
+    assert_eq!(status_of(&head), 200, "bridge CONNECT was refused: {head}");
+    let body = r#"{"request_id":"00000000-0000-0000-0000-000000004444","action":"get_schema","tool_name":"object_list","arguments":{}}"#;
+    let request = format!(
+        "POST /request HTTP/1.1\r\nhost: tools.ufo.internal\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let response = mitm_request(&proxy, sock, "tools.ufo.internal", request.as_bytes()).await;
+    assert!(
+        response.ends_with(r#"{"ok":true,"result":{"objects":[]}}"#),
+        "bridge response missing: {response}"
+    );
+    let requests = state.bridge_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["proxy_auth"], auth);
+    assert_eq!(requests[0]["request"]["tool_name"], "object_list");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
     let (cache, cached) = spawn_daemon("packed refs").await;
     let (preview, rendered) = spawn_daemon("png bytes").await;
@@ -780,6 +818,8 @@ fn control_defaults(rules_json: &str) -> ControlState {
         generation: 0,
         rules_json: rules_json.to_string(),
         forward_json: String::new(),
+        bridge_json: String::new(),
+        bridge_requests: Mutex::new(Vec::new()),
         meter_records: Mutex::new(Vec::new()),
     }
 }

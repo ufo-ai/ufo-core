@@ -20,7 +20,7 @@ date: 2026-08-12
 |---|---|
 | The carrier seam: create/attach/exec/write/read/dial | `core/src/ufo/sandbox/session.py:206` |
 | Every file tool goes through one in-sandbox CLI | `core/src/ufo/sandbox/session.py:382` (`run_ufo_fs`) |
-| That CLI was 1190 lines of Python — pdf/pptx/image reads, multi-edit, `changes` over git. It is now the `ufo fs` verb on the compiled client | `client/src/fscli.rs` |
+| That CLI was 1190 lines of Python — pdf/pptx/image reads, multi-edit, `changes` over git. It is now the `ufo fs` verb on the compiled client | `client/src/cmd/fscli.rs` |
 | One carrier per process, chosen by `[sandbox] backend` | `core/src/ufo/sandbox/select.py:13` |
 | The turn builds its session off that one carrier | `core/src/ufo/loop/queue.py:367` |
 | A conversation's workspace is `workspace_root/<conversation-id>` | `core/src/ufo/sandbox/conversation.py:121` |

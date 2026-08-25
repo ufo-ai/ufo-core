@@ -143,6 +143,7 @@ from ufo.schema.records import (
 from ufo.search import SearchProvider
 from ufo.seats import SEAT_REVOKED_MESSAGE, Seats
 from ufo.skills.runtime import CORE_SKILL_REGISTRY, LoadedRef, LoadedSkill, SkillRegistry
+from ufo.tools.bridge import ToolBridgeIntent
 from ufo.tools.context import (
     ImageContent,
     Spawn,
@@ -1224,20 +1225,12 @@ class TurnEngine:
             await context.cleanup.drain()
 
     async def run_intent(self) -> TerminalFrame | None:
-        """Run a prepared-intent turn: dispatch the one tool call the inbound envelope names,
-        verbatim, and commit its result — no model round, so the submitted values apply exactly or
-        the kind's refusal returns, never a paraphrase. A successful `connect_account` dispatch
-        leaves its private OAuth handoff on the terminal exactly as a chat round does, so the
-        panel's stream mints the member's URL the same way. The dispatch is the same guarded step a
-        model call takes: `pre_tool_use` may deny or fold arguments, `post_tool_use`/
-        `post_tool_use_failure` fire on the result, member authority binds through the founding
-        message, and the step memoizes across crash recovery. The turn-shaped hooks do not fire —
-        `user_prompt_submit` polices member prose and the inbound is a machine envelope; `stop`
-        observes a model's answer and none exists; the compaction pair has no window. Spend is
-        enforced at admission, where a capped member's intent parks — a running intent makes no
-        model call, so it never crosses the per-round check. Arrivals cannot exist: an intent
-        admission never folds into a live turn, so this turn's queue is empty by construction and
-        the per-conversation partition runs a member's intents one at a time in order."""
+        """Run an intent turn: dispatch its one typed tool call verbatim and commit the result.
+
+        A speaking intent is a prepared panel mutation and binds authority through its founding
+        member message. A speakerless intent is a sandbox bridge call and carries the authority of
+        the live parent run on `on_behalf_of_member_id`. Both take the same guarded, memoized
+        dispatch as a model call, with no model round or turn-shaped prompt hooks."""
         meter = _TurnMeter(started=time.monotonic(), profile=self.profile)
         emit_metric("turn_started_total", profile=self.profile)
         log(
@@ -1276,17 +1269,26 @@ class TurnEngine:
         try:
             if not await self._mark_running():
                 return await self._resolve_unclaimed()
-            intent = ToolIntent.model_validate_json(self.turn.inbound)
-            call = ToolUseBlock(
-                id=f"intent-{self.turn.id.hex[:12]}",
-                name=intent.tool,
-                input={**intent.input, REQUESTED_BY: str(self.turn.id)},
-            )
-            requesters = {
-                self.turn.id: ActiveMessage(
-                    member_id=self.turn.speaker_member_id, rendered=self.turn.inbound
+            if self.turn.speaker_member_id is None:
+                bridge = ToolBridgeIntent.model_validate_json(self.turn.inbound)
+                call = ToolUseBlock(
+                    id=f"bridge-{bridge.request_id.hex[:12]}",
+                    name=bridge.tool,
+                    input=bridge.input,
                 )
-            }
+                requesters: dict[UUID, ActiveMessage] = {}
+            else:
+                intent = ToolIntent.model_validate_json(self.turn.inbound)
+                call = ToolUseBlock(
+                    id=f"intent-{self.turn.id.hex[:12]}",
+                    name=intent.tool,
+                    input={**intent.input, REQUESTED_BY: str(self.turn.id)},
+                )
+                requesters = {
+                    self.turn.id: ActiveMessage(
+                        member_id=self.turn.speaker_member_id, rendered=self.turn.inbound
+                    )
+                }
             bound = await self._bind_or_error(context, call, requesters)
             result = await self._dispatch_step(bound)
             if result.is_error:

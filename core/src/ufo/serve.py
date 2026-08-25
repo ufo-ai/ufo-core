@@ -119,6 +119,7 @@ from ufo.loop.delivery import DeliverySweep
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
 from ufo.loop.subagents import SubagentRegistry
+from ufo.loop.tool_bridge import ToolBridge
 from ufo.media.document_renderer import DocumentRenderer
 from ufo.media.preview_renderer import PREVIEW_SERVICE_URL_ENV, PREVIEW_TOKEN_ENV, PreviewRenderer
 from ufo.media.site_previewer import SitePreviewer
@@ -186,6 +187,7 @@ from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.surfaces.cli import CONNECT_CALLBACK_PATH, callback_router
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.surfaces.stop import MemberStop
+from ufo.tools.bridge import bridge_tools
 from ufo.turns.ambient_reply import AMBIENT_REPLY_JOB, AmbientReplyClassifier
 from ufo.workspace import init_workspace_credentials, ws
 
@@ -254,6 +256,7 @@ def run() -> None:
     index = index_backend(manifests, config.memory.index_backend, credentials)
     memory = memory_search(manifests, credentials, index, embed)
     subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests)))
+    subagent_grants = turn_subagent_grants(manifests)
     skills = skill_registry(manifests, (model_catalog_skill(registry),))
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
@@ -277,6 +280,14 @@ def run() -> None:
         return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
 
     app = FastAPI(lifespan=_serve_lifespan)
+    tailer = HubTailer(hub=hub, billing_url=billing_url)
+    tool_bridge = ToolBridge(
+        dbos=dbos_client,
+        tailer=tailer,
+        tools=bridge_tools(manifests),
+        subagents=subagents,
+        subagent_grants=subagent_grants,
+    )
     runtime = Runtime(
         config=config,
         blob=blob,
@@ -287,7 +298,14 @@ def run() -> None:
             resume_carriers=carriers.resume,
             image_ref=SANDBOX_IMAGE_REF,
             proxy=_proxy_endpoint(
-                app, config, manifests, credentials, registry.pricing, run_tokens, blob_backend
+                app,
+                config,
+                manifests,
+                credentials,
+                registry.pricing,
+                run_tokens,
+                blob_backend,
+                tool_bridge,
             ),
             workspace_root=config.sandbox.workspace_root,
             terminals=_select_terminal_transport(config, manifests, fleet_blob),
@@ -301,7 +319,7 @@ def run() -> None:
         dbos=dbos_client,
         invoker_for=invoker_for,
         subagents=subagents,
-        subagent_grants=turn_subagent_grants(manifests),
+        subagent_grants=subagent_grants,
         manifests=manifests,
         registry=registry,
         skills=skills,
@@ -322,7 +340,7 @@ def run() -> None:
         ),
         billing_url=billing_url,
         home_surface=browser_home,
-        tailer=HubTailer(hub=hub, billing_url=billing_url),
+        tailer=tailer,
     )
     init_runtime(runtime)
     install_connect_flow(
@@ -1236,6 +1254,7 @@ def _proxy_endpoint(
     pricing: Pricing,
     run_tokens: RunTokenCodec,
     blob: FilesystemBlobStore | S3BlobStore,
+    bridge: ToolBridge | None,
 ) -> ProxyEndpoint:
     """The egress endpoint the carrier threads into every sandbox, plus the egress-control RPC the
     standalone Rust `ufo-egress` proxy calls back into. The wire is that separate process, local and
@@ -1297,6 +1316,7 @@ def _proxy_endpoint(
         clis=clis,
         pricing=pricing,
         run_tokens=run_tokens,
+        bridge=bridge,
     )
     app.include_router(control.router())
     app.include_router(control.git_credential_router())

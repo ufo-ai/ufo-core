@@ -8,6 +8,8 @@ use serde::Deserialize;
 
 use crate::types::{ForwardedResponse, MeterRecord, Rule};
 
+const MAX_TOOL_BRIDGE_RESPONSE_BYTES: usize = 2 * 1_048_576;
+
 #[derive(Clone)]
 pub struct Control {
     base: String,
@@ -97,6 +99,41 @@ impl Control {
         Ok(ForwardedResponse {
             status: response.status,
             headers: response.headers,
+            body,
+        })
+    }
+
+    /// Dispatch one authenticated sandbox request through core's live-turn tool bridge.
+    pub async fn tool_bridge(
+        &self,
+        proxy_auth: &str,
+        body: &[u8],
+    ) -> anyhow::Result<ForwardedResponse> {
+        let request: serde_json::Value = serde_json::from_slice(body)?;
+        let response = self
+            .http
+            .post(format!("{}/internal/egress/tool-bridge", self.base))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "proxy_auth": proxy_auth,
+                "request": request,
+            }))
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_TOOL_BRIDGE_RESPONSE_BYTES as u64)
+        {
+            anyhow::bail!("tool bridge response exceeds its body cap");
+        }
+        let body = response.bytes().await?.to_vec();
+        if body.len() > MAX_TOOL_BRIDGE_RESPONSE_BYTES {
+            anyhow::bail!("tool bridge response exceeds its body cap");
+        }
+        Ok(ForwardedResponse {
+            status,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
             body,
         })
     }

@@ -65,6 +65,7 @@ from ufo.sandbox.session import (
 from ufo.sandbox.terminal import TerminalCarrier, TerminalGone, Terminals
 from ufo.schema import tables
 from ufo.schema.records import Turn
+from ufo.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
 from ufo.turns.audience import SHARED_AUDIENCE
 from ufo.workspace import ws
 
@@ -74,9 +75,12 @@ GIT_PROXY_AUTH_ENV = _git_config_env(GIT_PROXY_AUTH_CONFIG)
 
 
 def _derived_env(spec: SandboxSpec) -> Mapping[str, str]:
-    """The env a turn's credentials derive, with the conversation-identity export every open carries
-    dropped, so each test asserts exactly its own subject."""
-    return {key: value for key, value in spec.env.items() if key != CONVERSATION_ID_ENV}
+    """The env a turn's credentials derive, without the fixed exports every open carries."""
+    return {
+        key: value
+        for key, value in spec.env.items()
+        if key not in {CONVERSATION_ID_ENV, TOOL_BRIDGE_URL_ENV}
+    }
 
 
 async def _conversation(
@@ -636,8 +640,11 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
     assert followup.id != turn.id
     assert carrier.specs[0].env["UFO_CONVERSATION_ID"] == str(conversation_id)
     assert carrier.specs[1].env["UFO_CONVERSATION_ID"] == str(conversation_id)
+    assert carrier.specs[0].env[TOOL_BRIDGE_URL_ENV] == TOOL_BRIDGE_URL
+    assert carrier.specs[1].env[TOOL_BRIDGE_URL_ENV] == TOOL_BRIDGE_URL
     assert authorized.handle.run_token != common_token
     assert authorized.handle.egress_env["UFO_CONVERSATION_ID"] == str(conversation_id)
+    assert authorized.handle.egress_env[TOOL_BRIDGE_URL_ENV] == TOOL_BRIDGE_URL
 
 
 async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(

@@ -1,7 +1,7 @@
 //! The egress proxy wire: accept CONNECTs, verify the token, gate on the control authorize RPC,
 //! resolve rules (cached by generation), and dispatch — opaque tunnel, TLS-terminated MITM (inject
-//! or broker-forward), or cache-daemon relay — metering off the relay path. This is the whole data
-//! plane; every policy decision comes from `Control`.
+//! or broker-forward), cache-daemon relay, or live-turn tool bridge — metering off the relay path.
+//! This is the whole data plane; every policy decision comes from `Control`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -52,6 +52,7 @@ const CACHE_GIT_HOSTS: [&str; 1] = ["github.com"];
 /// The preview service's host, the other end of core's `sandbox/preview.py` constant: the one
 /// `Service` rule the preview daemon owns. Every other service host is the cache's.
 const PREVIEW_HOST: &str = "preview.ufo.internal";
+const TOOL_BRIDGE_HOST: &str = "tools.ufo.internal";
 
 const SERVICE_STRIPPED: [&[u8]; 7] = [
     b"x-ufo-workspace",
@@ -401,6 +402,10 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
     // an absent one answers 502 inside the tunnel rather than falling through to a public dispatch
     // that would refuse the CONNECT. The cache fronts real origins, so with no cache daemon there is
     // no service path at all and its host dispatches as ordinary egress.
+    if host == TOOL_BRIDGE_HOST && find_service(&rules, &host).is_some() {
+        tool_bridge(&shared, stream, &host, &proxy_auth).await;
+        return;
+    }
     if let Some(daemon_prefix) = find_service(&rules, &host) {
         let injections = injections_for(&rules, &host);
         if host == PREVIEW_HOST {
@@ -800,6 +805,7 @@ async fn forward_broker(
             tracing::info!(host = %host, status = refusal.status, "egress.forward_refused");
             let _ = respond(&mut client, refusal.status, &refusal.message).await;
             drain_refused(&mut client, refusal.pending).await;
+            let _ = client.shutdown().await;
             return;
         }
     };
@@ -824,10 +830,71 @@ async fn forward_broker(
         Err(error) => {
             tracing::info!(host = %host, error = %error, "egress.forward_failed");
             let _ = respond(&mut client, 502, "broker forward failed").await;
+            let _ = client.shutdown().await;
             return;
         }
     };
     let _ = client.write_all(&forward_response_bytes(&response)).await;
+    let _ = client.shutdown().await;
+}
+
+async fn tool_bridge(shared: &Arc<Shared>, stream: TcpStream, host: &str, proxy_auth: &str) {
+    let server_config = match shared.leaves.server_config(host).await {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(error = %error, "egress.tool_bridge_leaf_failed");
+            return;
+        }
+    };
+    let mut stream = stream;
+    if stream
+        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut client = match TlsAcceptor::from(server_config).accept(stream).await {
+        Ok(tls) => tls,
+        Err(_) => return,
+    };
+    let (line, headers, leftover) = match read_head(&mut client).await {
+        ReadHead::Ok {
+            line,
+            headers,
+            leftover,
+        } => (line, headers, leftover),
+        ReadHead::Refuse { status, message } => {
+            let _ = respond(&mut client, status, message).await;
+            return;
+        }
+        ReadHead::Closed => return,
+    };
+    if line != b"POST /request HTTP/1.1" {
+        let _ = respond(&mut client, 404, "tool bridge route not found").await;
+        let _ = client.shutdown().await;
+        return;
+    }
+    let body = match read_request_body(&mut client, &headers, leftover).await {
+        Ok(body) => body,
+        Err(refusal) => {
+            let _ = respond(&mut client, refusal.status, &refusal.message).await;
+            drain_refused(&mut client, refusal.pending).await;
+            let _ = client.shutdown().await;
+            return;
+        }
+    };
+    let response = match shared.control.tool_bridge(proxy_auth, &body).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::info!(error = %error, "egress.tool_bridge_failed");
+            let _ = respond(&mut client, 502, "tool bridge failed").await;
+            let _ = client.shutdown().await;
+            return;
+        }
+    };
+    let _ = client.write_all(&forward_response_bytes(&response)).await;
+    let _ = client.shutdown().await;
 }
 
 enum ServiceTarget {

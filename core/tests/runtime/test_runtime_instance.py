@@ -19,7 +19,12 @@ from ufo.runtime.runtime_instance import (
     record_fleet_seat,
 )
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame
+from ufo.schema.records import (
+    INTENT_ADMISSION,
+    MEMBER_ADMISSION,
+    TerminalFrame,
+    TurnAdmissionSource,
+)
 
 
 async def _workspace() -> UUID:
@@ -208,6 +213,7 @@ async def _turn(
     profile: str | None = "general_purpose",
     attempt: str | None = None,
     idle_seconds: float = 0,
+    admission_source: TurnAdmissionSource = MEMBER_ADMISSION,
 ) -> UUID:
     conversation_id, turn_id = uuid4(), uuid4()
     terminal = None if status in ("queued", "running", "parked") else TerminalFrame(status=status)
@@ -234,6 +240,7 @@ async def _turn(
                 status=status,
                 subagent_profile=None if parent_id is None else profile,
                 inbound="x",
+                admission_source=admission_source,
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 parent_turn_id=parent_id,
                 running_attempt=attempt,
@@ -316,6 +323,24 @@ async def test_cancel_never_crosses_an_agent_child_boundary(db: None) -> None:
     assert await _turn_status(tied) == "cancelled"
     assert await _turn_status(peer) == "running"
     assert set(client.cancelled) == {str(tied)}
+
+
+async def test_cancel_reconciler_cancels_an_intent_child_of_a_plain_agent_turn(db: None) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _agent(workspace_id)
+    cancelled_parent = await _turn(workspace_id, agent_id, "cancelled", None)
+    bridge_child = await _turn(
+        workspace_id,
+        agent_id,
+        "running",
+        cancelled_parent,
+        profile=None,
+        admission_source=INTENT_ADMISSION,
+    )
+    client = _RecordingClient()
+    await CancelReconciler(client=client).sweep()
+    assert await _turn_status(bridge_child) == "cancelled"
+    assert client.cancelled == [str(bridge_child)]
 
 
 _AGED = STRANDED_TURN_GRACE_SECONDS + 60

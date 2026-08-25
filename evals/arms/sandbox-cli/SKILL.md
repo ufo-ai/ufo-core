@@ -33,11 +33,10 @@ bridge call with the corresponding direct tool.
 
 - One prompt-to-text Anthropic model call: `ufo llm [--model MODEL] [--max-tokens N] 'PROMPT'`.
   stdout is the response text. This is turn-time generation, not a website runtime API.
-- Object or connector tool: run `ufo tool --list` for the names and descriptions available to this
-  agent, then run `ufo tool TOOL --describe` for the chosen input schema. Pipe one JSON object to
-  the call, including every schema-required field: `printf '%s' '{"kind":"agent","user_description":"List agent objects"}' | ufo tool object_list`. Every response is one JSON stdout envelope:
-  `{"ok":true,"result":...}` or `{"ok":false,"error":"..."}`; failure exits nonzero. Only listed
-  tools are callable.
+- Object or connector tool: first run `ufo tool TOOL --describe`. Then pipe one JSON object to the
+  call, including every schema-required field: `printf '%s' '{"kind":"agent","user_description":"List agent objects"}' | ufo tool object_list`. Every response is one JSON stdout envelope:
+  `{"ok":true,"result":...}` or `{"ok":false,"error":"..."}`; failure exits nonzero. Only tools
+  available to the current agent are callable.
 
 ## Handing a result back
 

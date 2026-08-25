@@ -24,7 +24,7 @@ from dbos import error as dbos_error
 from ufo.db import owner_tx
 from ufo.o11y import log
 from ufo.schema import tables
-from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, RUNNING
+from ufo.schema.records import CANCELLED, INTENT_ADMISSION, NON_TERMINAL_STATUSES, RUNNING
 from ufo.turns.cancellation import cancel_one_turn
 from ufo.workspace import ws
 
@@ -208,15 +208,15 @@ class CancelReconciler:
 
         The climb never crosses an agent-child boundary (parent linkage without a profile): a
         spawned agent is an independent peer, so cancelling its spawner leaves it and everything
-        beneath it running, while cancelling the agent child itself still reaps its own subtree.
-        Bounded by the live-turn count and depth; it stops climbing once a cancelled ancestor is
-        hit."""
+        beneath it running. A prepared intent remains attached to its parent even without a
+        profile, so a bridge call ends with the turn that dispatched it. Bounded by the live-turn
+        count and depth; the climb stops once a cancelled ancestor is hit."""
         turn = tables.turn
         chain = (
             sa.select(
                 turn.c.id.label("orphan"),
                 turn.c.workspace_id.label("orphan_workspace"),
-                self._profile_child_parent(turn).label("ancestor_parent"),
+                self._dependent_parent(turn).label("ancestor_parent"),
                 turn.c.status.label("ancestor_status"),
             )
             .where(turn.c.status.in_(NON_TERMINAL_STATUSES))
@@ -227,7 +227,7 @@ class CancelReconciler:
             sa.select(
                 chain.c.orphan,
                 chain.c.orphan_workspace,
-                self._profile_child_parent(ancestor),
+                self._dependent_parent(ancestor),
                 ancestor.c.status,
             )
             .select_from(chain.join(ancestor, ancestor.c.id == chain.c.ancestor_parent))
@@ -242,8 +242,17 @@ class CancelReconciler:
             .distinct()
         )
 
-    def _profile_child_parent(self, turn: sa.Table | sa.FromClause) -> sa.ColumnElement:
-        return sa.case((turn.c.subagent_profile.is_(None), sa.null()), else_=turn.c.parent_turn_id)
+    def _dependent_parent(self, turn: sa.Table | sa.FromClause) -> sa.ColumnElement:
+        return sa.case(
+            (
+                sa.or_(
+                    turn.c.subagent_profile.is_not(None),
+                    turn.c.admission_source == INTENT_ADMISSION,
+                ),
+                turn.c.parent_turn_id,
+            ),
+            else_=sa.null(),
+        )
 
 
 @dataclass(frozen=True)

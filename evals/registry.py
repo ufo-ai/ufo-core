@@ -47,6 +47,7 @@ from evals.suites import (
     report_digest,
     response_formatting,
     response_register,
+    sandbox_cli,
     scenario_smoke,
     semantic_quality,
     site_build,
@@ -80,6 +81,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("skill_routing", skill_routing.CASES),
     capability_task("tool_calling", tool_calling.CASES),
+    capability_task("sandbox_cli", sandbox_cli.CASES),
     capability_task("problem_report", problem_report.CASES),
     capability_task(
         "authority_handoff",

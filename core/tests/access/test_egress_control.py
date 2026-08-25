@@ -38,6 +38,11 @@ from ufo.sandbox.session import (
     RunTokenCodec,
 )
 from ufo.schema import tables
+from ufo.tools.bridge import (
+    TOOL_BRIDGE_HOST,
+    ToolBridgeRequest,
+    ToolBridgeSuccess,
+)
 from ufo.workspace import ws
 
 CONTROL_TOKEN = "egress-control-secret"
@@ -78,8 +83,19 @@ class _FakeForwarder:
         return ForwardedResponse(status=201, headers={"x-echo": "pong"}, body=b"broker body")
 
 
+@dataclass
+class _Bridge:
+    received: list[tuple[RunToken, ToolBridgeRequest]] = field(default_factory=list)
+
+    async def request(self, run: RunToken, request: ToolBridgeRequest) -> ToolBridgeSuccess:
+        self.received.append((run, request))
+        return ToolBridgeSuccess(result={"name": request.tool_name})
+
+
 def _control(
-    resolver: PerAgentRules, clis: dict[str, CliCredential] | None = None
+    resolver: PerAgentRules,
+    clis: dict[str, CliCredential] | None = None,
+    bridge: object | None = None,
 ) -> EgressControl:
     return EgressControl(
         control_token=CONTROL_TOKEN,
@@ -88,6 +104,7 @@ def _control(
         clis=clis or {},
         pricing=CORE_PRICING,
         run_tokens=RUN_TOKENS,
+        bridge=bridge,
     )
 
 
@@ -249,6 +266,51 @@ async def test_authorize_admits_a_probe_until_its_deadline(db: None) -> None:
     assert refused.json() == {"authorized": False, "generation": None}
 
 
+async def test_tool_bridge_passes_only_a_run_principal_to_the_bridge(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    bridge = _Bridge()
+    resolver = PerAgentRules(base=(), grants=None)
+    request_id = uuid4()
+    request = {
+        "request_id": str(request_id),
+        "action": "get_schema",
+        "tool_name": "object_list",
+        "arguments": {},
+    }
+    run = RunToken(seeded.workspace_id, seeded.turn_id, seeded.member_id)
+    probe = ProbeToken(
+        seeded.workspace_id,
+        seeded.conversation_id,
+        uuid4(),
+        int(datetime.now(UTC).timestamp()) + 300,
+        seeded.member_id,
+    )
+    async with _client(_control(resolver, bridge=bridge)) as client:
+        admitted = await client.post(
+            "/internal/egress/tool-bridge",
+            headers=_auth(),
+            json={"proxy_auth": _basic(RUN_TOKENS.encode(run)), "request": request},
+        )
+        refused = await client.post(
+            "/internal/egress/tool-bridge",
+            headers=_auth(),
+            json={"proxy_auth": _basic(PROBE_TOKENS.encode(probe)), "request": request},
+        )
+    assert admitted.json() == {"ok": True, "result": {"name": "object_list"}}
+    assert refused.status_code == 403
+    assert bridge.received == [
+        (
+            run,
+            ToolBridgeRequest(
+                request_id=request_id,
+                action="get_schema",
+                tool_name="object_list",
+            ),
+        )
+    ]
+
+
 async def test_resolve_returns_the_seeded_grant_and_forward_rules(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
@@ -326,6 +388,7 @@ async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_poli
             },
         )
     preview = {"kind": "service", "host": PREVIEW_HOST, "daemon_prefix": None}
+    tool_bridge = {"kind": "service", "host": TOOL_BRIDGE_HOST, "daemon_prefix": None}
     injection = {
         "kind": "injection",
         "host": PREVIEW_HOST,
@@ -333,10 +396,11 @@ async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_poli
         "sentinel": PREVIEW_SENTINEL,
         "real": "preview-real",
     }
-    assert narrowed.json() == {"rules": [preview, injection]}
+    assert narrowed.json() == {"rules": [tool_bridge, preview, injection]}
     assert unnarrowed.json() == {
         "rules": [
             {"kind": "internet"},
+            tool_bridge,
             {"kind": "service", "host": CACHE_HOST, "daemon_prefix": None},
             {
                 "kind": "service",

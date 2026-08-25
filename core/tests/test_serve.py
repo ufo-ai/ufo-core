@@ -438,7 +438,7 @@ def test_proxy_endpoint_is_built_from_config_and_the_shared_ca(
     monkeypatch.setenv(serve.EGRESS_CONTROL_TOKEN_ENV, CONTROL_TOKEN)
     app = FastAPI()
     endpoint = serve._proxy_endpoint(
-        app, _hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob()
+        app, _hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob(), None
     )
     assert (endpoint.port, endpoint.ca_cert, endpoint.public_url) == (
         9443,
@@ -455,7 +455,7 @@ def test_proxy_endpoint_fails_loud_without_the_shared_ca(
     monkeypatch.delenv(EGRESS_CA_CERT_ENV, raising=False)
     with pytest.raises(RuntimeError, match=EGRESS_CA_CERT_ENV):
         serve._proxy_endpoint(
-            FastAPI(), _hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob()
+            FastAPI(), _hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob(), None
         )
 
 
@@ -469,7 +469,7 @@ def test_proxy_endpoint_fails_loud_without_the_control_token(
     monkeypatch.delenv(serve.EGRESS_CONTROL_TOKEN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=serve.EGRESS_CONTROL_TOKEN_ENV):
         serve._proxy_endpoint(
-            FastAPI(), _hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob()
+            FastAPI(), _hosted_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob(), None
         )
 
 
@@ -493,7 +493,7 @@ def test_proxy_endpoint_fails_loud_when_the_cache_is_on_without_its_token(
         ),
     )
     with pytest.raises(RuntimeError, match=serve.CACHE_CONTROL_TOKEN_ENV):
-        serve._proxy_endpoint(FastAPI(), config, (), None, CORE_PRICING, RUN_TOKENS, _blob())
+        serve._proxy_endpoint(FastAPI(), config, (), None, CORE_PRICING, RUN_TOKENS, _blob(), None)
 
 
 def test_preview_settings_pair_the_service_with_its_real_token(
@@ -535,7 +535,7 @@ def test_proxy_endpoint_boots_a_local_serve_without_a_shared_ca(
     monkeypatch.delenv(serve.EGRESS_CONTROL_TOKEN_ENV, raising=False)
     app = FastAPI()
     endpoint = serve._proxy_endpoint(
-        app, _local_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob()
+        app, _local_config(), (), None, CORE_PRICING, RUN_TOKENS, _blob(), None
     )
     assert endpoint.port == 0
     assert "BEGIN CERTIFICATE" in endpoint.ca_cert
@@ -601,7 +601,7 @@ def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     config = _local_config()
     serve._proxy_endpoint(
-        FastAPI(), config, (manifest,), credentials, CORE_PRICING, RUN_TOKENS, _blob()
+        FastAPI(), config, (manifest,), credentials, CORE_PRICING, RUN_TOKENS, _blob(), None
     )
     assert captured["credentials"] is credentials
     assert captured["slots"] == (slot,)
@@ -630,7 +630,9 @@ def test_the_proxy_resolver_base_admits_the_s3_artifact_store_host(
     monkeypatch.setattr(serve, "PerAgentRules", rules)
     store = S3BlobStore(bucket="ufo-blobs", region="us-east-1")
 
-    serve._proxy_endpoint(FastAPI(), _local_config(), (), None, CORE_PRICING, RUN_TOKENS, store)
+    serve._proxy_endpoint(
+        FastAPI(), _local_config(), (), None, CORE_PRICING, RUN_TOKENS, store, None
+    )
 
     assert ScopeRule(allowed_hosts=frozenset({"ufo-blobs.s3.amazonaws.com"})) in captured["base"]
 

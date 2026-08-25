@@ -30,6 +30,7 @@ from ufo.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTI
 from ufo.sandbox.session import SENTINEL_MODEL_KEY, ProbeToken, RunToken
 from ufo.schema import tables
 from ufo.schema.records import RUNNING
+from ufo.tools.bridge import TOOL_BRIDGE_HOST
 from ufo.workspace import ws
 
 EgressPrincipal = RunToken | ProbeToken
@@ -92,6 +93,8 @@ class PerAgentRules:
                 rules = (
                     (*self.base, *self.internet) if authority.internet_access_allowed else self.base
                 )
+                if isinstance(principal, RunToken):
+                    rules = (*rules, ServiceRule(host=TOOL_BRIDGE_HOST))
                 if self.cache_host is not None and authority.internet_access_allowed:
                     rules = (
                         *rules,

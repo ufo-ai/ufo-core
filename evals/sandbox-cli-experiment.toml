@@ -1,0 +1,31 @@
+name = "sandbox-cli-skill"
+base = "8a7c496f9"
+suites = ["sandbox_cli", "skill_loading"]
+cases = [
+  "sandbox-ufo-llm",
+  "sandbox-ufo-tool",
+  "sandbox-cli-model",
+  "sandbox-cli-object-bridge",
+  "sandbox-shell-snippet-only",
+]
+repeats = 4
+concurrency = 2
+max_stacks = 1
+budget_usd = 10.0
+est_usd_per_case = 0.10
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "gpt-5.4-mini" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "sandbox-cli"
+[arm.files]
+"core/src/ufo/skills/sandbox/SKILL.md" = "arms/sandbox-cli/SKILL.md"

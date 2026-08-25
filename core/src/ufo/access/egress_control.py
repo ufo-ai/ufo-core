@@ -9,7 +9,8 @@ key, and every ledger write stay here, where `PerAgentRules`, the connector forw
 The routes live under `/internal/egress/`, gated by `Authorization: Bearer <control_token>` — a
 shared secret the proxy holds, refused before any work. The run or probe token rides each body as
 the raw `Proxy-Authorization` value; `EgressControl` verifies its signature with the deploy's token
-codec and scopes every read to its workspace under the normal RLS-scoped role."""
+codec and scopes every read to its workspace under the normal RLS-scoped role. The tool bridge
+accepts run tokens only and reuses the same authority for its host-side dispatch."""
 
 from base64 import b64decode, b64encode
 from collections.abc import Mapping
@@ -45,6 +46,7 @@ from ufo.o11y import emit_metric, warn
 from ufo.sandbox.session import ProbeToken, ProbeTokenCodec, RunToken, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import Usage
+from ufo.tools.bridge import ToolBridgeRequest, ToolBridgeRequester, ToolBridgeResponse
 from ufo.workspace import ws
 
 EgressPrincipal = RunToken | ProbeToken
@@ -139,6 +141,11 @@ class ForwardResponse(BaseModel):
     body_b64: str
 
 
+class ToolBridgeControlRequest(BaseModel):
+    proxy_auth: str
+    request: ToolBridgeRequest
+
+
 class GitCredentialRequest(BaseModel):
     workspace_id: UUID | None = None
     host: str | None = None
@@ -151,7 +158,8 @@ class EgressControl:
     rule set, and its generation reader keys the proxy's rule cache. `clis` forwards a
     sentinel-carrying request through the broker under a granted account. `pricing` prices the model
     usage the proxy tees off the wire. `run_tokens` verifies the deploy-signed token each body
-    carries; probe tokens verify against the same secret.
+    carries; probe tokens verify against the same secret. `bridge` dispatches the bounded JSON
+    interface under a live run.
 
     Two secrets, two routers: `control_token` gates `/internal/egress/*`, the secrets-and-metering
     tier the proxy holds; `cache_control_token` gates `/internal/git-credential` alone, the route
@@ -165,6 +173,7 @@ class EgressControl:
     clis: Mapping[str, CliCredential]
     pricing: Pricing
     run_tokens: RunTokenCodec
+    bridge: ToolBridgeRequester | None = None
 
     def router(self) -> APIRouter:
         router = APIRouter(prefix="/internal/egress", dependencies=[Depends(self._guard)])
@@ -172,6 +181,7 @@ class EgressControl:
         router.add_api_route("/resolve", self._resolve, methods=["POST"])
         router.add_api_route("/meter", self._meter, methods=["POST"])
         router.add_api_route("/forward", self._forward, methods=["POST"])
+        router.add_api_route("/tool-bridge", self._tool_bridge, methods=["POST"])
         return router
 
     def git_credential_router(self) -> APIRouter:
@@ -313,6 +323,13 @@ class EgressControl:
             headers=list(response.headers.items()),
             body_b64=b64encode(response.body).decode(),
         )
+
+    async def _tool_bridge(self, body: ToolBridgeControlRequest) -> ToolBridgeResponse:
+        principal = self._principal(body.proxy_auth)
+        if not isinstance(principal, RunToken) or self.bridge is None:
+            raise HTTPException(status_code=403, detail="forbidden")
+        with ws(principal.workspace_id):
+            return await self.bridge.request(principal, body.request)
 
     async def _git_credential(self, body: GitCredentialRequest) -> dict[str, object]:
         """The cache daemon's git-credential callback, moved off the proxy pod onto core `serve`.

@@ -267,6 +267,15 @@ process-wide connection ceiling bounds proxy state; a per-workspace share keeps 
 consuming it. Meter records cross a bounded, backpressured queue and write aggregated per run in
 workspace-scoped transactions, so one failed run cannot roll back another.
 
+The sandbox exports `UFO_TOOL_BRIDGE_URL` for `ufo tool`: a JSON stdin/stdout interface to the five
+object verbs and the connector broker's list/describe/search/call verbs. Its synthetic HTTPS host
+terminates only at the egress proxy; the proxy forwards the signed run authority to `serve`, never
+into the request body. A schema read and a call both require the parent turn to remain live and the
+verb to belong to that agent or subagent's tool set. A call runs as an intent child on its own queue
+partition while sharing the parent's sandbox, so a `bash` dispatch can wait without deadlocking its
+own conversation; the ordinary guarded tool step supplies validation, hooks, idempotency, result
+walls, metering, and a terminal audit record.
+
 A conversation born in a connected CLI terminal binds instead to the `client` carrier: its
 `/workspace` is the member's own `$PWD`, and its ops run as the member's own subprocesses on the
 member's machine. This is not isolation and does not claim to be — the agent acts as the member,

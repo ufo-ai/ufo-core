@@ -167,6 +167,7 @@ from ufo.skills.runtime import (
     SkillRegistry,
     loaded_context,
 )
+from ufo.tools.bridge import ToolBridgeIntent
 from ufo.tools.builtins import (
     BUILTIN_TOOLS,
     RequestCredentialsInput,
@@ -2805,6 +2806,38 @@ async def test_a_prepared_intent_turn_meters_its_wall_clock_and_no_rounds(
         "",
     )
     assert "ufo.turn_rounds_total" not in points
+
+
+async def test_a_tool_bridge_intent_dispatches_under_its_inherited_member(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION, acts_on_behalf=True)
+    request_id = uuid4()
+    intent = ToolBridgeIntent(request_id=request_id, tool="object_list", input={})
+    turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
+    seen: list[tuple[UUID | None, UUID | None]] = []
+
+    async def object_list(ctx: ToolContext, args: _NoArgs) -> ToolResult:
+        seen.append((ctx.speaker_member_id, ctx.acting_member_id))
+        return ToolResult(content=(TextContent(text='{"objects":[]}'),))
+
+    engine = replace(
+        _engine(turn, object(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="object_list",
+                    description="list objects",
+                    input_model=_NoArgs,
+                    handler=object_list,
+                ),
+            )
+        ),
+    )
+    frame = await engine.run_intent()
+    assert frame is not None and frame.status == "done"
+    assert frame.text == '{"objects":[]}'
+    assert seen == [(None, turn.on_behalf_of_member_id)]
 
 
 async def test_an_interrupted_intent_turn_names_what_interrupted_it(

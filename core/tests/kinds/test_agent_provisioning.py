@@ -507,8 +507,13 @@ def test_a_prepared_intent_runs_past_the_allowlist() -> None:
     gate, with no model round for an allowlist to govern. An agent that carries one would otherwise
     refuse every panel mutation on itself, `connect_account` and `request_credentials` included —
     the two that would give it an account or a key."""
-    selected = _agent_tools(TOOLS, ("checkout_code_review",), INTENT_ADMISSION)
+    selected = _agent_tools(TOOLS, ("checkout_code_review",), INTENT_ADMISSION, uuid4())
     assert [tool.name for tool in selected] == ["read", "load_skill", "skill_search"]
+
+
+def test_a_tool_bridge_intent_stays_inside_the_allowlist() -> None:
+    selected = _agent_tools(TOOLS, ("read",), INTENT_ADMISSION)
+    assert [tool.name for tool in selected] == ["read"]
 
 
 async def _conversation(workspace_id: UUID, agent_id: UUID) -> UUID:
