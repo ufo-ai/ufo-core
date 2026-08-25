@@ -164,8 +164,7 @@ RUN_A_COMMAND = "run a command"
 """The inbound that makes the stand-in call `bash` before it answers — what a turn that reaches its
 sandbox looks like, since a sandbox is created for the first operation that needs one and a turn
 answering out of its context creates none."""
-WAKE_DEADLINE_SECONDS = 30.0
-WAKE_POLL_SECONDS = 0.05
+WORKFLOW_POLL_SECONDS = 0.05
 
 
 class ExtendInput(BaseModel):
@@ -1619,6 +1618,10 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: 
     (finished,) = await subagents.wait((child_id,))
     assert finished.status == "done"
 
+    handle = await runtime.dbos.retrieve_workflow_async(str(child_id))
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        assert await handle.get_result(polling_interval_sec=WORKFLOW_POLL_SECONDS) == "done"
+
     async def _woken() -> list[sa.Row[tuple[int, str, str]]]:
         async with workspace_tx() as connection:
             return list(
@@ -1638,11 +1641,7 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: 
                 ).all()
             )
 
-    deadline = asyncio.get_running_loop().time() + WAKE_DEADLINE_SECONDS
     woken = await _woken()
-    while not woken and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(WAKE_POLL_SECONDS)
-        woken = await _woken()
     assert [row.seq for row in woken] == [2]
     assert woken[0].admission_source == "internal"
     assert f'spawn_id="{child_id}"' in woken[0].inbound

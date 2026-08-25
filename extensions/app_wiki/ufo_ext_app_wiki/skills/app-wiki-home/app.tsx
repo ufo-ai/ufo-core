@@ -37,6 +37,7 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMainAgent,
   usePageHead,
   usePanelRead,
   useRef,
@@ -171,6 +172,14 @@ type MemberRow = {
 };
 
 type MembersPayload = { objects: MemberRow[] };
+
+function useRoster(reloads: number) {
+  const main = useMainAgent();
+  return usePanelRead<MembersPayload>(
+    main === null ? null : "/objects/" + MEMBER_KIND + "?agent=" + main.id,
+    reloads,
+  );
+}
 
 /** Which records a page is built from. The read answers the viewer's own subjects and no one
  *  else's, so the workspace's own knowledge and the viewer's private knowledge arrive together and
@@ -437,10 +446,7 @@ function Workspace({
   const [reloads, setReloads] = useState(0);
   const { present, report, updated } = usePresence();
   const summary = usePanelRead<ObjectsPayload>(OVERVIEW_READ, reloads);
-  const members = usePanelRead<MembersPayload>(
-    "/objects/" + MEMBER_KIND,
-    reloads,
-  );
+  const members = useRoster(reloads);
   const roster =
     members.phase === "ready" ? distinct(members.payload.objects) : [];
   const entries: Entry[] = [
@@ -573,10 +579,7 @@ function Member({
 }) {
   const [reloads, setReloads] = useState(0);
   const { present, report, updated } = usePresence();
-  const members = usePanelRead<MembersPayload>(
-    "/objects/" + MEMBER_KIND,
-    reloads,
-  );
+  const members = useRoster(reloads);
   const summary = usePanelRead<ObjectsPayload>(OVERVIEW_READ, reloads);
   const found =
     members.phase === "ready"

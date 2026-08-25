@@ -41,7 +41,8 @@ from ufo.sandbox.ingress_serve import (
     NO_SITE_HERE,
     NOT_FOUND,
     SESSION_ENDED_PAGE,
-    SHIPPED_ASSET_CACHE,
+    SHIPPED_CACHE,
+    SHIPPED_VERSION_PARAM,
     SITE_GONE,
     SITE_HAS_NO_SOCKET,
     SITE_NOT_ANSWERING,
@@ -2094,6 +2095,7 @@ async def _open_shipped(
     )
     got = await client.get(f"{_origin(anchor, port)}{INGRESS_VIEW_PATH}/{token}")
     assert got.status_code == 303, got.text
+    assert got.headers["location"] == f"/?{SHIPPED_VERSION_PARAM}={digest}"
 
 
 async def test_a_shipped_bundle_serves_row_less_from_the_fleet_store(db, stored_ingress) -> None:
@@ -2111,25 +2113,28 @@ async def test_a_shipped_bundle_serves_row_less_from_the_fleet_store(db, stored_
     await _seed_shipped_bundle(blobs, SHIPPED_DIGEST, SHIPPED_FILES)
     await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
 
-    index = await client.get(f"{_origin(anchor)}/")
+    index = await client.get(f"{_origin(anchor)}/?{SHIPPED_VERSION_PARAM}={SHIPPED_DIGEST}")
     assert index.status_code == 200
     assert index.content == SHIPPED_INDEX
     assert index.headers["content-type"].startswith("text/html")
     assert index.headers["content-length"] == str(len(SHIPPED_INDEX))
     assert index.headers["etag"] == SHIPPED_ETAG
-    assert index.headers["cache-control"] == STORED_SITE_CACHE
+    assert index.headers["cache-control"] == SHIPPED_CACHE
     assert index.headers["x-content-type-options"] == "nosniff"
     assert index.headers[CONTENT_SECURITY_POLICY].startswith(FRAME_ANCESTORS_DIRECTIVE)
+
+    unversioned = await client.get(f"{_origin(anchor)}/")
+    assert unversioned.headers["cache-control"] == STORED_SITE_CACHE
 
     app = await client.get(f"{_origin(anchor)}/assets/app.7c2b.js")
     assert (app.status_code, app.content) == (200, SHIPPED_APP)
     assert app.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
-    assert app.headers["cache-control"] == SHIPPED_ASSET_CACHE
+    assert app.headers["cache-control"] == SHIPPED_CACHE
 
     kit = await client.get(f"{_origin(anchor)}/assets/kit.4a9e.js")
     assert (kit.status_code, kit.content) == (200, SHIPPED_KIT)
     assert kit.headers["content-type"].split(";")[0] in JAVASCRIPT_MEDIA_TYPES
-    assert kit.headers["cache-control"] == SHIPPED_ASSET_CACHE
+    assert kit.headers["cache-control"] == SHIPPED_CACHE
 
 
 async def test_a_shipped_bundle_unknown_path_is_404(db, stored_ingress) -> None:
@@ -2148,7 +2153,10 @@ async def test_a_shipped_bundle_revalidates_by_digest(db, stored_ingress) -> Non
     anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
     await _seed_shipped_bundle(blobs, SHIPPED_DIGEST, SHIPPED_FILES)
     await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
-    fresh = await client.get(f"{_origin(anchor)}/", headers={"if-none-match": SHIPPED_ETAG})
+    fresh = await client.get(
+        f"{_origin(anchor)}/?{SHIPPED_VERSION_PARAM}={SHIPPED_DIGEST}",
+        headers={"if-none-match": SHIPPED_ETAG},
+    )
     assert fresh.status_code == 304
     assert fresh.content == b""
 
@@ -2159,7 +2167,9 @@ async def test_a_shipped_bundle_manifest_is_fixed_by_its_digest(db, stored_ingre
     anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
     await _seed_shipped_bundle(blobs, SHIPPED_DIGEST, SHIPPED_FILES)
     await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
-    assert (await client.get(f"{_origin(anchor)}/")).status_code == 200
+    assert (
+        await client.get(f"{_origin(anchor)}/?{SHIPPED_VERSION_PARAM}={SHIPPED_DIGEST}")
+    ).status_code == 200
 
     late = b"not part of the content-addressed tree"
     await blobs.put(f"apps/{SHIPPED_DIGEST}/assets/late.1234.js", late)

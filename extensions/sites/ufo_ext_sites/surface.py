@@ -21,14 +21,16 @@ for a token the viewer does not have.
 
 The bytes are not served here. A site's permanent link renders an `<iframe>` at the site's own
 ingress origin; a portal homepage link redirects the portal's sandboxed iframe there after the same
-gate. That address is minted per visit and never stored: it carries a view token the ingress trades
-for the origin's own session cookie. That token is a bearer credential until its TTL passes, not a
-single use, and the origin session it buys consults no `hosted_site` row — so narrowing a site's
-visibility or deleting it stops new viewers, not one already inside. The site's own origin keeps its
-scripts away from the selector, the portal session cookie, and every app route. The permanent
-link's `sandbox` and the portal homepage iframe each keep model-authored bytes from navigating the
-member's tab away; the visibility `POST` still carries a CSRF token bound to the viewer's own
-session, so a cross-site form cannot flip a site the creator owns.
+gate. A deploy-wide app bundle uses the same stable redirect only to select its slug and digest; its
+code is public and takes no viewer or agent gate. The ingress address is minted per visit and never
+stored: it carries a view token the ingress trades for the origin's own session cookie. That token
+is a bearer credential until its TTL passes, not a single use, and the origin session it buys
+consults no `hosted_site` row — so narrowing a site's visibility or deleting it stops new viewers,
+not one already inside. The site's own origin keeps its scripts away from the selector, the portal
+session cookie, and every app route. The permanent link's `sandbox` and the portal homepage iframe
+each keep model-authored bytes from navigating the member's tab away; the visibility `POST` still
+carries a CSRF token bound to the viewer's own session, so a cross-site form cannot flip a site the
+creator owns.
 
 The head carries a share card, so a link pasted into a chat unfurls as a picture rather than one
 bare line. The site's own name reaches that head only when the site is public: the crawler that
@@ -74,7 +76,6 @@ CONVERSATION_CLAIM = "conversation"
 NAME_CLAIM = "name"
 SLUG_CLAIM = "slug"
 DIGEST_CLAIM = "digest"
-AGENT_CLAIM = "agent"
 CSRF_CLAIM = "csrf"
 PORTAL_EMBED_CLAIM = "portal_embed"
 PORTAL_EMBED_VALUE = "1"
@@ -184,29 +185,23 @@ def site_url(
 
 @dataclass(frozen=True)
 class ShippedAddress:
-    """What a shipped-frame token names: the workspace to bind, the app agent to gate on, the app
-    slug whose deploy-wide bundle serves, and the bundle digest that bundle is."""
+    """What a shipped-frame token names: its workspace, app slug, and bundle digest."""
 
     workspace_id: UUID
-    agent_id: UUID
     slug: str
     digest: str
 
 
 def shipped_homepage_url(
-    public_base_url: str | None, workspace_id: UUID, agent_id: UUID, slug: str, digest: str
+    public_base_url: str | None, workspace_id: UUID, slug: str, digest: str
 ) -> str | None:
-    """The portal embed link for a workspace's shipped app page: the sites route carrying the app
-    address and the portal-iframe claim whole. The agent gates each visit; the slug and digest
-    resolve the deploy-wide bytes without a `hosted_site` row. None when the deploy configures no
-    `[connect] public_base_url`, so the homepage read answers as if no page exists."""
+    """The stable portal embed link for a workspace's deploy-wide app bundle."""
     if not public_base_url:
         return None
     token = mint_surface_token(
         SURFACE_SITES,
         {
             WORKSPACE_CLAIM: str(workspace_id),
-            AGENT_CLAIM: str(agent_id),
             SLUG_CLAIM: slug,
             DIGEST_CLAIM: digest,
             PORTAL_EMBED_CLAIM: PORTAL_EMBED_VALUE,
@@ -217,7 +212,7 @@ def shipped_homepage_url(
 
 def shipped_address(token: str) -> ShippedAddress | None:
     """The shipped address a token proves, or None when its signature, surface, or claims do not
-    hold — a normal site token (no `agent`/`slug`/`digest`) reads as None here, and a shipped one
+    hold — a normal site token (no `slug` or `digest`) reads as None here, and a shipped one
     reads as None in `site_address`, so the two token shapes never collide."""
     claims = verify_surface_token(SURFACE_SITES, token)
     if claims is None or claims.get(PORTAL_EMBED_CLAIM) != PORTAL_EMBED_VALUE:
@@ -225,7 +220,6 @@ def shipped_address(token: str) -> ShippedAddress | None:
     try:
         return ShippedAddress(
             workspace_id=UUID(claims[WORKSPACE_CLAIM]),
-            agent_id=UUID(claims[AGENT_CLAIM]),
             slug=claims[SLUG_CLAIM],
             digest=claims[DIGEST_CLAIM],
         )
@@ -306,8 +300,8 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
     origin and are reachable from outside no other way. A deep link proves no more than the bare
     one: both pass the same gate — the agent's visibility for a homepage, the row's own for any
     other site. A bound homepage redirects the portal's iframe to its ingress origin; every other
-    site renders its own frame page. A shipped app page's token carries no row and redirects through
-    `_shipped_frame`, gated the same way as a bound homepage."""
+    site renders its own frame page. A shipped app page's token carries no row and redirects its
+    public bundle through `_shipped_frame`."""
     token = request.path_params[TOKEN_PARAM]
     shipped = shipped_address(token)
     if shipped is not None:
@@ -372,26 +366,8 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
 async def _shipped_frame(
     ctx: SurfaceContext, request: Request, shipped: ShippedAddress
 ) -> Response:
-    """Open a workspace's shipped app page: no `hosted_site` row, gated on the app agent's
-    visibility exactly as a bound homepage is, and redirected to the deploy-wide bundle in the fleet
-    store rather than any workspace's own source. The origin is the synthetic per-workspace anchor,
-    so the page keeps its own cookies and storage and a later fork lands on the same origin.
-
-    A shipped page follows its agent and has no public level of its own, so an unauthenticated
-    viewer is always sent to sign in, and the head names the brand's generic card, not the page."""
+    """Open a workspace's deploy-wide app bundle at its stable workspace origin."""
     share = _share_tags(None, None, None)
-    viewer = await _viewer(ctx, request)
-    if viewer is None:
-        return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE, share))
-    agent = next((a for a in await ctx.list_agents() if a.id == shipped.agent_id), None)
-    if agent is None:
-        return _not_found()
-    if (
-        agent.visibility != "workspace"
-        and viewer != agent.owner_member_id
-        and not await _viewer_is_admin(ctx, viewer)
-    ):
-        return _not_found()
     anchor = shipped_anchor(shipped.workspace_id, shipped.slug)
     embedded = ctx.ingress_url(
         anchor,
@@ -402,7 +378,7 @@ async def _shipped_frame(
     )
     if embedded is not None and _is_portal_iframe_request(request):
         return RedirectResponse(embedded, status_code=303)
-    return HTMLResponse(_homepage_frame_page(agent.name, embedded, share))
+    return HTMLResponse(_homepage_frame_page(shipped.slug.title(), embedded, share))
 
 
 def _is_portal_iframe_request(request: Request) -> bool:

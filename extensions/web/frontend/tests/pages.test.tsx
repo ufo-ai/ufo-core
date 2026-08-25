@@ -156,13 +156,16 @@ test("the tasks page mounts and draws both of its listings", async () => {
 });
 
 test("the wiki page mounts and draws the workspace article", async () => {
-  await runPage("wiki", {
+  const { calls } = await runPage("wiki", {
     "/objects/memory": () => json({ objects: [] }),
     "/objects/member": () => json({ objects: [] }),
   });
   expect(await screen.findByRole("heading", { name: "Wiki" })).toBeTruthy();
   expect(await screen.findByRole("heading", { name: "People" })).toBeTruthy();
   expect(await screen.findByText("Everyone in this workspace.")).toBeTruthy();
+  const rosterCalls = calls.filter((url) => url.includes("/objects/member"));
+  expect(rosterCalls.length).toBeGreaterThan(0);
+  expect(rosterCalls.every((url) => url.endsWith("/objects/member?agent=" + AGENT.id))).toBe(true);
 });
 
 /** A page standing one step deeper than the shell's trail draws that step as its crumb, so where the
@@ -170,7 +173,7 @@ test("the wiki page mounts and draws the workspace article", async () => {
  *  app's own address; shutting the page is the band's own act beside it. */
 test("the wiki page heads one member under the crumb the shell handed it", async () => {
   const email = "colleague@example.com";
-  await runPage(
+  const { calls } = await runPage(
     "wiki",
     {
       "/workspace/memory": () => json({ available: true, matches: [] }),
@@ -193,6 +196,9 @@ test("the wiki page heads one member under the crumb the shell handed it", async
     new URL(agentHash(AGENT.id), location.origin + BASE).href,
   );
   expect(screen.getByRole("button", { name: "Close " + email })).toBeTruthy();
+  const rosterCalls = calls.filter((url) => url.includes("/objects/member"));
+  expect(rosterCalls.length).toBeGreaterThan(0);
+  expect(rosterCalls.every((url) => url.endsWith("/objects/member?agent=" + AGENT.id))).toBe(true);
 });
 
 test("the artifacts page mounts and draws the empty shelf with its search", async () => {

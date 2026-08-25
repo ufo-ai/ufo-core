@@ -45,6 +45,23 @@ resource "cloudflare_zone_setting" "always_use_https" {
   depends_on = [cloudflare_ruleset.flyingobject_redirect]
 }
 
+resource "cloudflare_ruleset" "shipped_app_cache" {
+  zone_id = data.cloudflare_zone.ufo_ai.id
+  name    = "Cache shipped app documents"
+  kind    = "zone"
+  phase   = "http_request_cache_settings"
+
+  rules = [{
+    ref         = "cache_shipped_app_documents"
+    description = "Cache content-addressed shipped app documents"
+    expression  = "http.host wildcard r\"*.ufo.ai\" and http.request.uri.path eq \"/\" and http.request.uri.query wildcard r\"ufo-app=*\""
+    action      = "set_cache_settings"
+    action_parameters = {
+      cache = true
+    }
+  }]
+}
+
 module "prod" {
   source = "../../modules/edge"
 

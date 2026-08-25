@@ -4332,9 +4332,8 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
     own column is dormant while bound) and this handler applies the agent rule itself; a binding
     that no longer resolves and an agent that never bound one answer the same absent state.
 
-    Two states: `set` once a page is bound or shipped, and `none` where none exists yet — the pane
-    draws its conversation over `none` and polls until a page arrives, so a first build in flight is
-    simply a page not there yet, never a state of its own."""
+    Two states: `set` once a page is bound or shipped, and `none` where none exists yet. A first
+    build in flight is simply a page not there yet, never a state of its own."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -4354,13 +4353,11 @@ async def _homepage_state(
     it has no page — a first page still building is simply `none` until it registers, and a page
     being rebuilt keeps its prior version (the forked row's url and generation, or the bundle still
     serving) so it answers `set` throughout. The boot index carries it on the agent object, so a
-    screen paints the page from what boot resolved; the granular `/homepage` route answers the same
-    shape for the pane's own poll, which lands a redeploy's new generation or a first page's arrival
-    within one poll. The agent rule gates it — a
-    private agent's page answers `none` to anyone but its owner and an admin — the same rule the
-    frame gates each visit on, so the read never hands out a link that renders a refusal. A shipped
-    page's `deploy_generation` is the digest folded to a JS-safe int, so the frame's identity moves
-    onto the new bundle across the next boot."""
+    screen paints the page from what boot resolved; the granular route begins polling after its
+    first interval, avoiding a duplicate initial read while still landing a deployment without a
+    reload. The agent rule gates the read — a private agent's page answers `none` to anyone but its
+    owner and an admin. A shipped page's `deploy_generation` is the digest folded to a JS-safe int,
+    so the frame's identity moves onto the new bundle across the next answer."""
     if summary.visibility != "workspace" and member_id != summary.owner_member_id and not admin:
         return {"state": "none"}
     page = await ctx.list_member_objects(
@@ -4390,7 +4387,6 @@ async def _homepage_state(
         url = shipped_homepage_url(
             ctx.public_base_url,
             ctx.workspace_id,
-            summary.id,
             slug,
             bundle.digest,
         )

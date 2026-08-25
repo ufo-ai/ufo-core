@@ -624,7 +624,9 @@ jobs:
             LOCK=false
           fi
           terraform plan -input=false -no-color -lock="$LOCK" -lock-timeout=10m \
-            -target=module.testing -out="$RUNNER_TEMP/edge.tfplan"
+            -target=cloudflare_ruleset.shipped_app_cache \
+            -target=module.testing \
+            -out="$RUNNER_TEMP/edge.tfplan"
 
       - name: Reject destructive changes
         working-directory: infra/envs/edge
@@ -638,6 +640,7 @@ jobs:
         run: |
           terraform plan -input=false -no-color -lock=false \
             -target=cloudflare_ruleset.flyingobject_redirect \
+            -target=cloudflare_ruleset.shipped_app_cache \
             -target=cloudflare_zone_setting.always_use_https \
             -target=module.prod \
             -out="$RUNNER_TEMP/production-edge-review.tfplan"

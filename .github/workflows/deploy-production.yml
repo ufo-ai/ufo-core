@@ -451,6 +451,7 @@ jobs:
         run: |
           terraform plan -input=false -no-color -lock-timeout=10m \
             -target=cloudflare_ruleset.flyingobject_redirect \
+            -target=cloudflare_ruleset.shipped_app_cache \
             -target=cloudflare_zone_setting.always_use_https \
             -out="$RUNNER_TEMP/shared-edge.tfplan"
 

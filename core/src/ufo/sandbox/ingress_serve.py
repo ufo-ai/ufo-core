@@ -145,10 +145,11 @@ have what a dialed site's never do: a digest. The viewer's own browser may hold 
 revalidate on every use, the `etag` answer runs the same session gate as a full response — so a
 held copy never outlives its authorization — and the digest moves on every redeploy, so the same
 URL never serves retired bytes."""
-SHIPPED_ASSET_CACHE = "private, max-age=31536000, immutable"
-"""What a shipped app's Vite-hashed assets carry. The bytes are deploy-wide code rather than
-workspace data, and a changed byte gets a changed `/assets/` name, so the viewer's browser can use
-the copy it already authorized and fetched without asking ingress again."""
+SHIPPED_CACHE = "public, max-age=31536000, immutable"
+"""What a shipped app's versioned document and Vite-hashed assets carry. The bytes are deploy-wide
+code rather than workspace data, and a changed byte changes either the document's digest query or
+the asset's `/assets/` name, so browsers and shared caches keep them without serving stale code."""
+SHIPPED_VERSION_PARAM = "ufo-app"
 STORED_SITE_METHODS = ("GET", "HEAD")
 STORED_SITE_INDEX = "index.html"
 WEBSOCKET_HANDSHAKE_HEADERS = frozenset(
@@ -384,9 +385,10 @@ class IngressServe:
             replace(claims, expires_at=int(now.timestamp()) + INGRESS_SESSION_TTL_SECONDS),
             INGRESS_SESSION_KIND,
         )
-        response = RedirectResponse(
-            f"/{quote(entry_path, safe=PATH_SAFE_CHARACTERS)}", status_code=303
-        )
+        target = f"/{quote(entry_path, safe=PATH_SAFE_CHARACTERS)}"
+        if claims.shipped is not None:
+            target = f"{target}?{SHIPPED_VERSION_PARAM}={claims.shipped.digest}"
+        response = RedirectResponse(target, status_code=303)
         set_session_cookie(response, INGRESS_SESSION_COOKIE, session, samesite="lax")
         return response
 
@@ -613,12 +615,12 @@ class IngressServe:
         it misses. GET and HEAD are the whole protocol a directory of files speaks; anything else
         is refused rather than forwarded, because there is nothing behind this to forward to.
 
-        The session gate has already run when this is reached, so a 304 is exactly as authorized
-        as a 200 — which is what lets these bytes say `no-cache` where the dial path must say
-        `no-store`: every revalidation runs the cookie check, and the digest it revalidates
-        against moves on every redeploy. A blob the manifest names but the store no longer holds
-        is the window where a redeploy retired the root between the row read and this read, and it
-        answers 404 for the refresh to heal rather than erroring mid-stream."""
+        A stored workspace site's 304 is exactly as authorized as its 200 because the session gate
+        has already run, so its private browser copy revalidates through that gate. A deploy-wide
+        app's versioned document and hashed assets are public immutable code; only its data calls
+        cross the portal's authenticated bridge. A blob the manifest names but the store no longer
+        holds is the window where a redeploy retired the root between the row read and this read,
+        and it answers 404 for the refresh to heal rather than erroring mid-stream."""
         if request.method not in STORED_SITE_METHODS:
             return Response(status_code=405, headers={"allow": ", ".join(STORED_SITE_METHODS)})
         trimmed = path.strip("/")
@@ -633,8 +635,12 @@ class IngressServe:
         etag = f'"{stored.sha256}"'
         headers = {
             "cache-control": (
-                SHIPPED_ASSET_CACHE
-                if claims.shipped is not None and name.startswith("assets/")
+                SHIPPED_CACHE
+                if claims.shipped is not None
+                and (
+                    name.startswith("assets/")
+                    or request.query_params.get(SHIPPED_VERSION_PARAM) == claims.shipped.digest
+                )
                 else STORED_SITE_CACHE
             ),
             "etag": etag,

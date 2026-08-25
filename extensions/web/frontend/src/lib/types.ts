@@ -1,8 +1,7 @@
-/** An app's homepage: the frame link of the page it stands on, or the answer that it has none — a
- *  page not yet built is simply none until it arrives. It rides the agent object for the pane's
- *  instant paint, and a background poll of the same shape keeps it live. `deploy_generation` bumps
- *  with the page's (re)deploy, so the frame's identity moves with a redeploy within one poll; an
- *  older payload without it reads as 0. */
+/** An app's homepage: the frame link of the page it stands on, or the answer that it has none. It
+ *  rides the agent object so opening an app paints from the boot read without another request.
+ *  The granular poll begins after its first interval and keeps it live thereafter.
+ *  `deploy_generation` changes with the page's deployment, so a fresh answer remounts it. */
 export type Homepage =
   | { state: "set"; url: string; deploy_generation?: number }
   | { state: "none" };

@@ -2931,39 +2931,30 @@ def test_a_homepage_embed_url_preserves_the_site_address_and_marks_the_portal_fr
 
 
 def test_a_shipped_homepage_url_round_trips_and_never_collides_with_a_site_token() -> None:
-    """The shipped frame link carries its whole address in the token — workspace, app agent, slug,
-    digest — and reads back as exactly that. A shipped token is not a site token and a site token is
-    not a shipped one, so the two frame paths never resolve each other's address. No public base,
-    no link."""
-    ws_id, agent_id = uuid4(), uuid4()
-    url = shipped_homepage_url(PUBLIC_BASE_URL, ws_id, agent_id, "radar", SHIPPED_DIGEST)
+    """The shipped frame link carries its bundle address and never parses as a hosted-site link."""
+    ws_id = uuid4()
+    url = shipped_homepage_url(PUBLIC_BASE_URL, ws_id, "radar", SHIPPED_DIGEST)
     assert url is not None and url.startswith(f"{PUBLIC_BASE_URL}{FRAME_PATH}/")
     token = url.rpartition("/")[2]
-    assert shipped_address(token) == ShippedAddress(ws_id, agent_id, "radar", SHIPPED_DIGEST)
+    assert shipped_address(token) == ShippedAddress(ws_id, "radar", SHIPPED_DIGEST)
     assert site_address(token) is None
     assert shipped_address(site_token(ws_id, uuid4(), "dash")) is None
-    assert shipped_homepage_url(None, ws_id, agent_id, "radar", SHIPPED_DIGEST) is None
+    assert shipped_homepage_url(None, ws_id, "radar", SHIPPED_DIGEST) is None
 
 
-async def test_a_shipped_app_frame_gates_on_the_agent_and_redirects_to_the_fleet_bundle(
+async def test_a_shipped_app_frame_redirects_without_viewer_or_agent_reads(
     deployment: Deployment,
 ) -> None:
-    """A shipped app page has no hosted_site row: the frame resolves the agent from the token, gates
-    on its visibility exactly as a bound homepage does, and redirects to the deploy-wide
-    bundle from the fleet store — the ingress view token it mints carries the shipped claim and the
-    synthetic per-workspace anchor, and an unconfigured ingress renders a refusal rather than
-    redirecting nowhere."""
+    """A deploy-wide app page is public code routed to its workspace-specific origin."""
     client, workspace = deployment.client, deployment.workspace
     _other_id, other_token = await _seed_member(workspace, OTHER_EMAIL)
-    _admin_id, admin_token = await _seed_member(workspace, ADMIN_EMAIL, is_admin=True)
     app_agent = await _seed_app_agent(workspace, "radar")
-    url = shipped_homepage_url(PUBLIC_BASE_URL, workspace.id, app_agent, "radar", SHIPPED_DIGEST)
+    url = shipped_homepage_url(PUBLIC_BASE_URL, workspace.id, "radar", SHIPPED_DIGEST)
     assert url is not None
 
     anonymous = await client.get(url)
     assert anonymous.status_code == 200
-    assert "not signed in to the workspace" in anonymous.text
-    assert "<iframe" not in anonymous.text
+    assert INGRESS_HOST in _embedded(anonymous.text)
 
     standalone = await client.get(url, headers=_cookie(other_token))
     assert standalone.status_code == 200
@@ -2987,10 +2978,9 @@ async def test_a_shipped_app_frame_gates_on_the_agent_and_redirects_to_the_fleet
             .where(tables.agent.c.id == app_agent)
             .values(visibility="private")
         )
-    assert (await client.get(url, headers=_iframe_cookie(other_token))).status_code == 404
-    assert (await client.get(url, headers=_iframe_cookie(admin_token))).status_code == 303
+    assert (await client.get(url, headers=_iframe_cookie(other_token))).status_code == 303
 
-    unhosted = await deployment.unhosted.get(url, headers=_iframe_cookie(admin_token))
+    unhosted = await deployment.unhosted.get(url, headers=_iframe_cookie(other_token))
     assert unhosted.status_code == 200
     assert "<iframe" not in unhosted.text
     assert UNCONFIGURED_BODY in unhosted.text

@@ -213,7 +213,10 @@ the etag every file of the tree answers with. The frame link the homepage read h
 slug + digest, and the ingress serves the tree at the frame origin's root — a file inside the
 claim's slug directory answers a root-relative request (`<slug>/index.html` is `/`), a file outside
 it answers at its own path (`assets/x` is `/assets/x`) — so one copy of the chunks and the fonts
-serves all five pages.
+serves all five pages. The ingress redirects the document onto a query carrying that digest and
+serves that versioned document and every hashed asset as `public, max-age=31536000, immutable`.
+Cloudflare makes only that digest-query root document eligible for edge caching; the app's data is
+absent from those bytes and crosses only the authenticated portal bridge.
 
 **A member's own page.** On its first change, the app's agent copies `app.tsx` and `index.html` from
 its home skill. On later changes, `object_get` materialises the last deployed source under the
@@ -227,7 +230,7 @@ Where the build diverged from the intended design (the code is authoritative):
 | Design | As built | Why |
 |---|---|---|
 | the extension mints the shipped ingress token | the **producer lives in core**: `SurfaceContext.ingress_url` gains `shipped_slug`/`shipped_digest` | the SDK gate (`gates.py`) forbids an extension importing `ufo.sandbox.ingress_token`, so the token can only be minted through a core surface. `WorkspaceAgent.provisioned_by` identifies the app extension |
-| shipped url resolves direct-to-ingress | the homepage read hands a **portal embed link** (`shipped_homepage_url` → a `SURFACE_SITES` token carrying `{ws, agent, slug, digest, portal_embed}`); the sites surface recognizes it, gates on the app agent's visibility, and redirects an iframe request to a minted shipped-claim ingress URL | a stable sites link re-mints a fresh 900s view token per visit (a baked view URL would 403 on a reload past its TTL) and re-gates every visit; Fetch Metadata takes the direct path, the wrapper self-redirects when a framed client omits it, and ingress `frame-ancestors` admits only the portal and the workspace's app origins |
+| shipped url resolves direct-to-ingress | the homepage read hands a **portal embed link** (`shipped_homepage_url` → a `SURFACE_SITES` token carrying `{ws, slug, digest, portal_embed}`); the sites surface uses it without a viewer or agent read to mint the shipped-claim ingress URL | the stable sites link refreshes the 900s routing token per visit; the digest becomes the document's cache key, the versioned document and hashed assets are public immutable code, and ingress `frame-ancestors` admits only the portal and the workspace's app origins |
 | a `current` pointer file names the live tree | **no pointer** — the digest travels in the frame token, and the fleet keys are the whole record | a pointer with no reader is a declared surface with one end; the digest a page's link carries is what says which tree serves it |
 | fork = anchor-continuity upsert; reset = delete row | `deploy_website` builds and persists the page's source, `set_homepage` binds it, and `object_get` materialises that source for another edit; object-`delete` unhosts the row back to the built page | the standing tools own the fork and reset; a first fork uses its deploying conversation's origin |
 | the five manifests' first-turn prompt lines go | **gone**, and each prompt now names the home skill for a change a member asks for; seeding is off mechanically too — `seed_homepages` marks an app agent `shipped` (settled, no turn), so the candidate query settles | a shipped page needs no build turn, so a prompt directing one describes work that does not exist |

@@ -202,6 +202,51 @@ test("an app page draws its homepage from the boot agent, without pulling its co
   // does not pull the app's conversation index for a set page with nothing open.
   const region = await screen.findByRole("region", { name: /radar homepage/i });
   expect(region.querySelector("iframe")?.getAttribute("src")).toBe("https://ingress.test/site");
+  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/homepage"))).toBe(false);
+  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
+});
+
+test("a shipped compose screen skips homepage and conversation reads", async () => {
+  const SITE = { state: "set", url: "https://ingress.test/chat", deploy_generation: 3 };
+  const CHAT = {
+    ...AGENT,
+    id: SECOND_ID,
+    name: "chat",
+    main: false,
+    app: "chat",
+    icon: "aten",
+    homepage: SITE,
+  };
+  const { calls } = wire({
+    "/api/agents": () => boot([AGENT, CHAT], ADMIN),
+  });
+  location.hash = "#/agents/" + SECOND_ID + "?open=compose";
+  render(<Portal />);
+
+  const region = await screen.findByRole("region", { name: /chat homepage/i });
+  expect(region.querySelector("iframe")?.getAttribute("src")).toBe("https://ingress.test/chat");
+  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/homepage"))).toBe(false);
+  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
+});
+
+test("a compose screen without a shipped page opens the portal composer without an index", async () => {
+  const CHAT = {
+    ...AGENT,
+    id: SECOND_ID,
+    name: "chat",
+    main: false,
+    app: "chat",
+    icon: "aten",
+    homepage: { state: "none" },
+  };
+  const { calls } = wire({
+    "/api/agents": () => boot([AGENT, CHAT], ADMIN),
+  });
+  location.hash = "#/agents/" + SECOND_ID + "?open=compose";
+  render(<Portal />);
+
+  expect(await screen.findByLabelText("Message the app")).toBeTruthy();
+  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/homepage"))).toBe(false);
   expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
 });
 

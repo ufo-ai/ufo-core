@@ -67,6 +67,7 @@ REGENERABLE_TYPE_DELETIONS = (
     ("module.platform.aws_security_group_rule.rds_from_nodes", "aws_security_group_rule"),
     ("module.prod.cloudflare_queue_consumer.waitlist_email", "cloudflare_queue_consumer"),
     ("cloudflare_ruleset.flyingobject_redirect", "cloudflare_ruleset"),
+    ("cloudflare_ruleset.shipped_app_cache", "cloudflare_ruleset"),
     ("module.prod.cloudflare_workers_route.edge", "cloudflare_workers_route"),
     ("module.prod.cloudflare_workers_script.edge", "cloudflare_workers_script"),
     ("cloudflare_zone_setting.always_use_https", "cloudflare_zone_setting"),

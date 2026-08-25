@@ -18,7 +18,13 @@ import {
   conversationTitle,
   subject,
 } from "@/views/Conversations";
-import { mergePlace, serializePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
+import {
+  COMPOSE,
+  mergePlace,
+  serializePlace,
+  type PlaceStep,
+  type WorkspacePlace,
+} from "@/lib/route";
 import { agentCrumb } from "@/lib/title";
 import type { Agent, Conversation, Homepage, Member } from "@/lib/types";
 
@@ -37,6 +43,7 @@ const FRESH = "new";
  *  replaced frame is kept mounted under it. The page it swaps in has already fired `load`, so the
  *  fade is the whole wait — nothing here delays the swap past the paint it exists to smooth. */
 const FRAME_SWAP_MS = 200;
+const HOMEPAGE_POLL_MS = 30_000;
 
 const HOMEPAGE_SANDBOX =
   "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock";
@@ -102,15 +109,17 @@ export function AgentPane({
   const viewer = useViewer();
   const agents = useAgents();
   const target = place.opens?.[0];
-  // The boot read paints the page the instant an app opens, so switching apps never blocks on a
-  // homepage round-trip — the sidebar entry already knows the page. A background poll of only this
-  // app's page then keeps it live: a redeploy's new generation, or a first page arriving where
-  // there was none, lands within one poll rather than on the member's next reload, swapping the
-  // page the member has for the next one. An app with no page draws its conversation, never a
-  // placeholder — a page still building has simply not arrived, and the member talks to the app
-  // until it does.
   const boot: Homepage = agent.homepage ?? { state: "none" };
-  const site = usePanelRead<Homepage>("/agents/" + agent.id + "/homepage", settles);
+  const [homepagePolling, setHomepagePolling] = useState(false);
+  useEffect(() => {
+    const start = window.setTimeout(() => setHomepagePolling(true), HOMEPAGE_POLL_MS);
+    return () => window.clearTimeout(start);
+  }, []);
+  const site = usePanelRead<Homepage>(
+    homepagePolling ? "/agents/" + agent.id + "/homepage" : null,
+    settles,
+    HOMEPAGE_POLL_MS,
+  );
   const home: Homepage = site.phase === "ready" ? site.payload : boot;
   // Two reads, each authoritative for a different question. The index says which conversations the
   // app has at all — every surface it has ever spoken on — and which external ones accept comments.
@@ -122,7 +131,7 @@ export function AgentPane({
   // none of it, so switching between apps does not pull each one's conversation history; the chat
   // toggle resumes the editing conversation from the rail the shell already holds.
   const listed = usePanelRead<{ conversations: Conversation[] }>(
-    target !== undefined || home.state !== "set"
+    target !== COMPOSE && (target !== undefined || home.state !== "set")
       ? "/agents/" + agent.id + "/conversations"
       : null,
     settles,
@@ -152,9 +161,11 @@ export function AgentPane({
   // portal-side: the page is the screen that knows how to stand on it. An address naming nothing
   // opens the newest conversation the member can speak in, so arriving lands on the work rather
   // than on a list of it, and on an app they have only ever read, on the composer.
+  const composeFallback = target === COMPOSE && home.state !== "set";
   const conversational =
-    target !== undefined && (target === FRESH || rows.some((entry) => entry.id === target));
-  const held = conversational ? target : undefined;
+    composeFallback ||
+    (target !== undefined && (target === FRESH || rows.some((entry) => entry.id === target)));
+  const held = composeFallback ? FRESH : conversational ? target : undefined;
   const wanted = held === FRESH;
   const named =
     held !== undefined && !wanted ? (rows.find((entry) => entry.id === held) ?? null) : null;

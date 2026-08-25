@@ -582,10 +582,11 @@ exempt.
 
 The agents screen shows one agent's pane whole — the bare route shows the main agent — and
 switching agents is the sidebar's Applications flyout, which lists every app with its live status
-and whose pins place rows in the sidebar. The pane is the agent's homepage — the hosted site its
-binding names, admitted through the sites surface's per-visit agent-visibility gate and redirected
-into the portal's sandboxed iframe — headed by the agent's name, the way out to the page, its
-settings, and a chat toggle that opens the conversation beside the page. That conversation column
+and whose pins place rows in the sidebar. The pane is the agent's homepage — a hosted-site binding
+admitted through the sites surface's per-visit agent-visibility gate, or a deploy-wide app page
+whose public immutable code is routed to a workspace-specific origin — inside the portal's
+sandboxed iframe, with its settings and a chat toggle that opens the conversation beside the page.
+That conversation column
 opens on the conversation that moved last and carries the composer where the portal founded that
 conversation or where Slack or terminal holds a commentable one, a read-only transcript for every
 other readable conversation, and the acknowledgement gate where the member has not opened it;
@@ -596,9 +597,11 @@ an agent's first homepage is still working, drawn as the shape a page takes; `se
 bound; and `none`, where the pane draws the conversation column alone. Five applications are pages
 the deploy carries: the chat, radar, tasks, artifacts, and wiki extensions ship one page source
 each, and the portal's build compiles the five into one static tree of shared hashed chunks,
-published under the digest of its own bytes and served at the frame origin's root. Such a page needs
-no workspace row, no sandbox, and no seed turn, so a workspace that has not edited its copy tracks
-the deploy. A page's whole dependency surface is one module — the portal's own components and reads,
+published under the digest of its own bytes. The versioned document and hashed assets are public
+immutable responses at the frame's workspace-specific origin; every data read and mutation still
+crosses the portal's authenticated bridge. Such a page needs no workspace row, no sandbox, and no
+seed turn, so a workspace that has not edited its copy tracks the deploy. A page's whole dependency
+surface is one module — the portal's own components and reads,
 with the JSX runtime inside it — built beside the pages as the SDK a member's own copy compiles
 against: the app's agent takes the page project and that SDK into its sandbox, edits the one source
 file, builds it there, and deploys the result through the standing site tools, so the workspace then
@@ -607,12 +610,13 @@ owns its copy at its own origin and unbinding it returns the app to the page the
 Beside chat, each selected agent
 carries read projections shaped by the same contracts chat enforces: its homepage (the frame link
 of the hosted site `set_homepage` bound — a background job seeds one homepage-build turn per
-agent, ever, in the acting member's own room; the homepage's audience IS the agent's, resolved at
+agent, ever, in the acting member's own room; a bound site's audience IS the agent's, resolved at
 every read and frame visit from the agent's `visibility` rather than copied onto the site row, so
 a private agent's homepage answers its owner and admins, a workspace agent's answers every
 member, and flipping the agent is what moves the page — the bind itself is the re-gating act, so
 it takes the site's creator acting and a live speaker unless the same turn deployed the site,
-the seed's deploy-and-bind shape), its
+the seed's deploy-and-bind shape; a deploy-wide page's code is public and its agent's audience
+decides only whether the portal offers it), its
 loadable skills (the
 composition a turn loads), its conversations, and its settings
 (prompt, spec, bound surfaces, the deploy's ceilings — answering the agent's whole web audience,

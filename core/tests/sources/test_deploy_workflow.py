@@ -1352,7 +1352,7 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
         (
             "deploy.yml",
             "edge",
-            ("module.testing",),
+            ("cloudflare_ruleset.shipped_app_cache", "module.testing"),
             "edge",
             "Reject destructive changes",
             "Terraform apply",
@@ -1575,6 +1575,7 @@ def test_production_shared_edge_uses_current_main() -> None:
     assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
     assert tuple(re.findall(r"-target=(\S+)", plan["run"])) == (
         "cloudflare_ruleset.flyingobject_redirect",
+        "cloudflare_ruleset.shipped_app_cache",
         "cloudflare_zone_setting.always_use_https",
     )
     assert '-out="$RUNNER_TEMP/shared-edge.tfplan"' in plan["run"]
@@ -1624,6 +1625,7 @@ def test_pull_requests_guard_the_production_edge_plan() -> None:
         "run": (
             "terraform plan -input=false -no-color -lock=false \\\n"
             "  -target=cloudflare_ruleset.flyingobject_redirect \\\n"
+            "  -target=cloudflare_ruleset.shipped_app_cache \\\n"
             "  -target=cloudflare_zone_setting.always_use_https \\\n"
             "  -target=module.prod \\\n"
             '  -out="$RUNNER_TEMP/production-edge-review.tfplan"\n'
