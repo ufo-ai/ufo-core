@@ -12,5 +12,7 @@ spreadsheet access to calculate the baseline. State missing data instead of fill
 industry assumption.
 
 Plan from the largest supported constraint: lead volume, qualification, conversion, deal size,
-retention, or expansion. Give the first experiment a metric and a decision date. Use an application
-only for repeated monitoring, follow-up, or reporting after the constraint and process are known.
+retention, or expansion. Give the first experiment a metric and a decision date. Repeated revenue
+monitoring and reporting is an application case. Offer a metrics application as the recurring
+review point, with a daily Slack or iMessage update that reports metric movement, blockers, and the
+next action. Do not replace the application with only a scheduled message.

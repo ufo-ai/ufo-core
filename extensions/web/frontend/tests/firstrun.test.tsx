@@ -582,7 +582,9 @@ test("every address written is added on one press, and then the chat opens", asy
     ]),
   );
   await waitFor(() =>
-    expect(sent).toEqual(["I want to develop products faster, and we use Notion."]),
+    expect(sent).toEqual([
+      "I just set up this workspace. I want to develop products faster, and we use Notion.",
+    ]),
   );
 });
 
@@ -624,7 +626,8 @@ test("the last act says the picks and the question into the agent's new chat", a
   await waitFor(() => expect(sent.length).toBe(1));
   expect(sent[0].url).toBe("/surface/web/agents/" + AGENT_ID + "/chat?conversation=new");
   expect(sent[0].body).toBe(
-    "I want to find product-market fit, and we use Gmail, Notion. " +
+    "I just set up this workspace. " +
+      "I want to find product-market fit, and we use Gmail, Notion. " +
       "More context: Help us recruit the right interviewees.",
   );
   const box = await screen.findByPlaceholderText("Message the app…");
@@ -649,7 +652,9 @@ test("picking no connector records nothing and still sends the goal", async () =
   await screen.findByRole("heading", { name: "Invite your team" });
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
-  await waitFor(() => expect(sent).toEqual(["I want to increase revenue."]));
+  await waitFor(() =>
+    expect(sent).toEqual(["I just set up this workspace. I want to increase revenue."]),
+  );
   expect(intents(posted.calls)).toEqual([]);
 });
 
@@ -671,7 +676,10 @@ test("free text becomes the initial prompt", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
   await waitFor(() =>
-    expect(sent).toEqual(["I want an agent to help with this goal: Reduce support response time."]),
+    expect(sent).toEqual([
+      "I just set up this workspace. " +
+        "I want an agent to help with this goal: Reduce support response time.",
+    ]),
   );
   expect(intents(posted.calls)).toEqual([]);
 });

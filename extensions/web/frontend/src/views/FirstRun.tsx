@@ -50,13 +50,14 @@ type Goal = (typeof GOALS)[number]["name"];
 function opening(goal: Goal | "", detail: string, labels: string[]): string {
   const selected = GOALS.find((option) => option.name === goal);
   const context = detail.trim().replace(/[.!?]+$/, "");
+  const setup = "I just set up this workspace. ";
   if (!selected) {
     const tools = labels.length ? " We use " + labels.join(", ") + "." : "";
-    return "I want an agent to help with this goal: " + context + "." + tools;
+    return setup + "I want an agent to help with this goal: " + context + "." + tools;
   }
   const tools = labels.length ? ", and we use " + labels.join(", ") : "";
   const more = context ? " More context: " + context + "." : "";
-  return "I want to " + selected.prompt + tools + "." + more;
+  return setup + "I want to " + selected.prompt + tools + "." + more;
 }
 
 /** The connector catalog and the workspace's two installs — the read behind both selectors. The

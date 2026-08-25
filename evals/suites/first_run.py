@@ -41,8 +41,8 @@ GOALS = (
     GoalCase(
         name="faster-product-development",
         message=(
-            "I want to develop products faster, and we use Slack, GitHub, and Linear. "
-            "More context: Cut cycle time from issue to production."
+            "I just set up this workspace. I want to develop products faster, and we use Slack, "
+            "GitHub, and Linear. More context: Cut cycle time from issue to production."
         ),
         answer=(
             "The main delay is review and unclear acceptance criteria. We ship a B2B web product "
@@ -59,6 +59,8 @@ GOALS = (
             "The answer gives a short plan tied to the stated two-day delivery target.",
             "The plan uses the existing coding, code-review, GitHub, and issue-tracking "
             "capabilities when useful instead of assuming a new application is required.",
+            "The plan offers to measure the current and next issue-to-production cycle time from "
+            "GitHub and Linear instead of asking the member to calculate it.",
             "The plan names a first measurable action and does not claim that an application was "
             "created.",
         ),
@@ -66,8 +68,8 @@ GOALS = (
     GoalCase(
         name="more-revenue",
         message=(
-            "I want to increase revenue, and we use HubSpot, Stripe, Gmail, and Google Sheets. "
-            "More context: I need to know where to focus first."
+            "I just set up this workspace. I want to increase revenue, and we use HubSpot, Stripe, "
+            "Gmail, Google Sheets, and Slack. More context: I need to know where to focus first."
         ),
         answer=(
             "We sell a $12,000 annual B2B subscription to support leaders. Most leads come from "
@@ -76,15 +78,18 @@ GOALS = (
         ),
         reference="more-revenue.md",
         question_terms=(
-            ("customer", "buyer", "segment"),
-            ("revenue", "pricing", "business model"),
-            ("funnel", "pipeline", "conversion", "sales"),
-            ("target", "goal", "baseline"),
+            ("customer", "buyer", "segment", "whom"),
+            ("revenue", "pricing", "price", "business model", "sell"),
+            ("funnel", "pipeline", "conversion", "sales", "deal", "paid"),
+            ("target", "goal", "baseline", "number", "when"),
         ),
         rubric=(
-            "The answer starts with a factual business and funnel baseline from the member's data.",
+            "The answer states a factual business and funnel baseline from the member's data "
+            "before the ordered plan.",
             "The plan identifies the main revenue constraint before it proposes automation or a "
             "new application.",
+            "The plan offers a metrics application as the recurring review point and a daily "
+            "progress cadence through Slack.",
             "The plan names a measurable first action and does not claim that an application was "
             "created.",
         ),
@@ -92,8 +97,8 @@ GOALS = (
     GoalCase(
         name="automate-operations",
         message=(
-            "I want to automate operations, and we use Slack, Gmail, Notion, and HubSpot. "
-            "More context: Start with the work that wastes the most time."
+            "I just set up this workspace. I want to automate operations, and we use Slack, Gmail, "
+            "Notion, and HubSpot. More context: Start with the work that wastes the most time."
         ),
         answer=(
             "Customer onboarding is the worst workflow. An operator copies signed deals from "
@@ -118,8 +123,9 @@ GOALS = (
     GoalCase(
         name="find-product-market-fit",
         message=(
-            "I want to find product-market fit, and we use Gmail, Google Calendar, Google Meet, "
-            "HubSpot, and Notion. More context: Help us learn from the right users."
+            "I just set up this workspace. I want to find product-market fit, and we use Gmail, "
+            "Google Calendar, Google Meet, HubSpot, and Notion. More context: Help us learn from "
+            "the right users."
         ),
         answer=(
             "Our hypothesis is that support leaders at 50 to 200 person SaaS companies need faster "
@@ -136,8 +142,12 @@ GOALS = (
         rubric=(
             "The answer states the current hypothesis and evidence gap before it proposes more "
             "work.",
-            "The plan covers finding suitable interview candidates, scheduling interviews, taking "
-            "notes from meetings, synthesizing evidence, and a decision rule for the hypothesis.",
+            "The plan sets a target of speaking with 10 to 20 suitable people and offers to draft "
+            "and send approved outreach that puts meetings on Google Calendar.",
+            "The plan prepares a brief with product-market-fit questions for each meeting and "
+            "offers to turn granted Google Meet transcripts into notes.",
+            "The plan synthesizes the interview evidence and gives a decision rule for the "
+            "hypothesis.",
             "The plan names a measurable first action and does not claim that an application was "
             "created.",
         ),
