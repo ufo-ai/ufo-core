@@ -6,6 +6,11 @@ carries nothing but the state the connect tool sealed, so the page can address t
 just happened. It says that, and the one thing left to do. Every return leg draws it: the
 connector callback core serves, the Slack install, the GitHub App install.
 
+`CLOSE_THIS_PAGE` is the line any leg may say, because a return leg is often finished from a browser
+with no conversation behind it at all — an install link opened from an email, a deploy that wires no
+resumption. `CONVERSATION_CONTINUES` names a conversation on top of it, so only a leg that has
+already told one may draw it.
+
 It carries no stylesheet and no font, because the member is waiting on it in a browser they opened
 for this one moment, often on a phone off a Slack thread. The mark is the one thing it fetches —
 core's own copy, from the same origin every return leg is reached on, on the connection already
@@ -28,7 +33,8 @@ from string import Template
 from ufo.sdk.http import HTMLResponse
 
 CONNECT_LOGO_PATH = "/v1/connect/logo.svg"
-CLOSE_THIS_PAGE = "You can close this page. The conversation continues."
+CLOSE_THIS_PAGE = "You can close this page."
+CONVERSATION_CONTINUES = f"{CLOSE_THIS_PAGE} The conversation continues."
 CALLBACK_PAGE_MAX_BYTES = 1_024
 CLOSE_AFTER_MS = 2_000
 CLOSE_SCRIPT = f"<script>setTimeout(()=>window.close(),{CLOSE_AFTER_MS})</script>"

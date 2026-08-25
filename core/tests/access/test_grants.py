@@ -56,6 +56,7 @@ from ufo.sdk.callback_page import (
     CALLBACK_PAGE_MAX_BYTES,
     CLOSE_THIS_PAGE,
     CONNECT_LOGO_PATH,
+    CONVERSATION_CONTINUES,
     PageLink,
     callback_page,
 )
@@ -1011,7 +1012,7 @@ def test_the_callback_page_is_small_and_fetches_only_its_own_mark() -> None:
     assert page.count("src=") == 1 and CONNECT_LOGO_PATH in page
     # It answers in the reader's own theme without a media query, which is the cheapest way to.
     assert "color-scheme:light dark" in page
-    # This page's other variant sends the member back to ask the agent, so it must stay put.
+    # A page that still asks the member for something must stay put, so it carries no script.
     assert "<script" not in page
 
 
@@ -1085,8 +1086,8 @@ async def test_a_connect_from_a_portal_panel_leaves_the_intent_lane_alone(db: No
     skips the lane — while holding the lane's single partition until it ended, so the member's next
     panel submit would wait behind it and time out.
 
-    The grant still lands. Only the resume is declined, and the page then tells the member to ask
-    for the work in a conversation they can actually read."""
+    The grant still lands. Only the resume is declined, and the page then states what landed and
+    that the member may close it — there is no conversation here to send them back to."""
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
@@ -1148,6 +1149,19 @@ async def test_a_connect_from_a_portal_panel_leaves_the_intent_lane_alone(db: No
     # The seeded intent turn and nothing else, and the grant landed all the same.
     assert turns == 1
     assert granted == 1
+
+    install_connect_flow(flow)
+    app = FastAPI()
+    app.include_router(callback_router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://surface") as client:
+        page = (
+            await client.get("/v1/connect/callback", params={"state": state, "code": "the-code"})
+        ).text
+    # Nothing waits on this connect, so the page names no conversation and no agent — it states the
+    # outcome and the one generic thing left to do, and takes the window away itself.
+    assert CLOSE_THIS_PAGE in page and CONVERSATION_CONTINUES not in page
+    assert "conversation" not in page and "agent" not in page
+    assert "window.close()" in page
 
 
 async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker(
@@ -1212,10 +1226,10 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
             assert done.status_code == 200
             # No session stands behind this page — a Slack member finishes consent in a browser
             # that has never signed in — so it addresses them by what just happened and names the
-            # one thing left to do. The turn already resumed, so nothing here needs the member:
-            # the page closes the window the portal opened for it, and the line stays for the tab
-            # no script owns.
-            assert CLOSE_THIS_PAGE in done.text
+            # one thing left to do. The turn already resumed, so this is the one branch that may
+            # name the conversation: the page closes the window the portal opened for it, and the
+            # line stays for the tab no script owns.
+            assert CONVERSATION_CONTINUES in done.text
             assert "window.close()" in done.text
 
     # The conversation that asked for the account is told, as the granting member, so the turn

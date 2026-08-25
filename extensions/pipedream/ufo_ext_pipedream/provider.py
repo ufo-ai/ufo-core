@@ -99,7 +99,7 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
         return Response(
             status_code=FAILED_CONSENT_STATUS,
             content=f"connector consent did not complete (outcome {outcome!r}) — "
-            "return to chat and ask the agent to connect again",
+            "the account was not connected. You can close this page.",
         )
     bridge = f"{_origin(callback)}{OAUTH_ROUTE_MOUNT}"
     ride_through = {"provider": provider, "state": state, "callback": callback}

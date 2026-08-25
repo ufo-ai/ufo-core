@@ -80,7 +80,7 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
         return Response(
             status_code=FAILED_CONSENT_STATUS,
             content=f"connector consent did not complete (status {status!r}) — "
-            "return to chat and ask the agent to connect again",
+            "the account was not connected. You can close this page.",
         )
     provider = params.get("provider", "")
     if not provider:

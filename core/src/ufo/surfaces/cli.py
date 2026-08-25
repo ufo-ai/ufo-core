@@ -1,11 +1,12 @@
 """The provider-facing OAuth callback the shared fleet mounts.
 
 The connector handoff's own return leg, drawn by the page every return leg shares
-(`ufo.sdk.callback_page`). It says the one thing left to do: close the tab when the agent already
-has the work, ask for it when the message did not reach the conversation. Only the first of those
-takes the window away — the portal opened it, so this page can close it, and the member is back on
-the conversation that already carried on. The other half is a thing the member has to go and do, and
-a page that closed itself would take its own instruction with it.
+(`ufo.sdk.callback_page`). It states what landed and then that the member may close the page. It
+never sends them off to prod an agent: consent is finished in a browser that carries only the sealed
+state, and there is not always a conversation or an agent waiting behind it. Where the message did
+reach the conversation the page adds that the conversation carries on, since that is the one case
+this code knows a conversation is there to carry on. Either way the page asks the member for
+nothing, so it takes the window away where the browser permits it.
 
 The mark is the portal's own file, byte for byte, and core serves it here because this page is
 reached with no session and no frontend build behind it. It was hand-minified once and drew
@@ -24,12 +25,11 @@ from ufo.access.grants import (
     UnknownProvider,
     installed_connect_flow,
 )
-from ufo.sdk.callback_page import CLOSE_THIS_PAGE, callback_page
+from ufo.sdk.callback_page import CLOSE_THIS_PAGE, CONVERSATION_CONTINUES, callback_page
 
 CONNECT_CALLBACK_PATH = "/v1/connect/callback"
 CONNECT_LOGO_FILE = Path(__file__).parent / "assets" / "ufo-logo.svg"
 CONNECT_LOGO_CACHE = "public, max-age=31536000, immutable"
-ASK_TO_CONTINUE = "Return to your conversation and ask the agent to continue."
 
 callback_router = APIRouter(prefix="/v1")
 
@@ -59,8 +59,8 @@ async def connect_callback(state: str = "", code: str = "") -> HTMLResponse:
     )
     return callback_page(
         headline=f"{named} connected.",
-        detail=CLOSE_THIS_PAGE if recorded.resumed else ASK_TO_CONTINUE,
-        close=recorded.resumed,
+        detail=CONVERSATION_CONTINUES if recorded.resumed else CLOSE_THIS_PAGE,
+        close=True,
     )
 
 

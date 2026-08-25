@@ -252,6 +252,8 @@ async def test_a_deploy_with_no_browser_home_says_to_close_the_tab() -> None:
     assert response.status_code == 200
     assert "<a " not in page
     assert CLOSE_THIS_PAGE in page
+    # An App install leaves a conversation to install on an organization, so the page promises none.
+    assert "conversation" not in page
 
 
 async def test_an_installation_the_member_does_not_reach_is_refused() -> None:
