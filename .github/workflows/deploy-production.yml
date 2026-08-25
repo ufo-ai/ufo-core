@@ -244,6 +244,10 @@ jobs:
         with:
           ref: ${{ env.TARGET_SHA }}
 
+      - uses: ./.github/actions/client-gh
+        with:
+          target: x86_64-unknown-linux-musl
+
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"

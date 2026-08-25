@@ -75,6 +75,9 @@ def test_supported_local_builds_produce_the_client() -> None:
     assert "cargo build --manifest-path client/Cargo.toml --locked" in makefile
     assert "COPY --from=client /usr/local/bin/ufo /usr/local/bin/ufo" in dockerfile
     assert "cargo build --release --locked --bin ufo" in dockerfile
+    assert "FROM golang:1.27.0-bookworm AS gh" in dockerfile
+    assert "github.com/cli/cli/v2/cmd/gh@v2.97.0" in dockerfile
+    assert "UFO_GH_ARCHIVE=/tmp/ufo-gh.gz" in dockerfile
 
 
 async def _descendant_pid(workspace: Path) -> int:

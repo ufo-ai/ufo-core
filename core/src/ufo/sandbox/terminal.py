@@ -628,7 +628,8 @@ class TerminalCarrier:
         store into one bundle and points each CA variable there, since only the client knows both a
         path on its own disk and the roots the member already trusts — the container carriers reach
         the same bundle by installing the CA into the system store, which a member's machine is
-        never asked to accept."""
+        never asked to accept. A `gh` operation uses the client's embedded Go 1.27 build, whose
+        verifier reads that bundle without changing the member's certificate store."""
         root = _root(handle)
         return await self._exec(handle, host_argv(argv, root), timeout_s)
 

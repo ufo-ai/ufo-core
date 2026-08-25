@@ -98,6 +98,9 @@ jobs:
       CODSPEED_TOKEN: ${{ secrets.CODSPEED_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/client-gh
+        with:
+          target: x86_64-unknown-linux-musl
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -138,6 +141,9 @@ jobs:
         working-directory: client
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/client-gh
+        with:
+          target: ${{ matrix.target }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

@@ -274,7 +274,9 @@ guarded by nothing the member's own shell is not, so it is offered only to a ter
 themselves connected, never a deploy default. The ops travel down the surface's held stream and
 their results return as the client's next request (the rendezvous, §Extension surfaces); egress
 metering is cooperative there, since a command that ignores the proxy env reaches the member's own
-network, but the model sentinel is never exported, so no key leaks. A client-bound conversation
+network, but the model sentinel is never exported, so no key leaks. The client gives each operation
+a merged CA bundle; an operation that invokes `gh` uses the client's embedded build whose verifier
+reads that bundle without changing the member's certificate store. A client-bound conversation
 with no connected terminal is unreachable — its turns and its file browser fail loud rather than
 running somewhere the member cannot see. The op logic runs natively in the client binary the
 deploy builds and serves, held to the server's op contracts by the client's own tests; a stale

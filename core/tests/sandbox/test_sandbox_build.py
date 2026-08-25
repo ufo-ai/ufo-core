@@ -19,7 +19,8 @@ from ufo_ext_daytona import snapshot_map
 import sandbox.build_template as build_template
 from sandbox.build_template import (
     APT_PACKAGES,
-    CLIENT_MANIFESTS,
+    CLIENT_ROOT_FILES,
+    CLIENT_SOURCE_DIRS,
     CLIENT_STAGE_PATH,
     DAYTONA_TIERS,
     GH_INSTALL_COMMAND,
@@ -200,14 +201,23 @@ def test_the_baked_client_moves_the_drift_digest_with_its_source(monkeypatch, tm
     file ops from a binary the host no longer ships. The binary's own bytes are not hashed — a
     release build is not reproducible — so the crate's sources stand in for it."""
     crate = tmp_path / "client"
-    (crate / "src").mkdir(parents=True)
-    for name in CLIENT_MANIFESTS:
+    for directory in CLIENT_SOURCE_DIRS:
+        (crate / directory).mkdir(parents=True)
+    for name in CLIENT_ROOT_FILES:
         (crate / name).write_text('version = "0.1.30"\n')
     (crate / "src" / "main.rs").write_text("fn main() {}\n")
+    (crate / "licenses" / "github-cli.txt").write_text("MIT\n")
+    (crate / "scripts" / "build-gh.sh").write_text("go build\n")
     monkeypatch.setattr(build_template, "CLIENT_SOURCE_DIR", crate)
-    before = build_definition_digest(None)
-    (crate / "src" / "main.rs").write_text("fn main() { ported() }\n")
-    assert build_definition_digest(None) != before
+    for path in (
+        crate / "src" / "main.rs",
+        crate / "build.rs",
+        crate / "licenses" / "github-cli.txt",
+        crate / "scripts" / "build-gh.sh",
+    ):
+        before = build_definition_digest(None)
+        path.write_text(path.read_text() + "changed\n")
+        assert build_definition_digest(None) != before
 
 
 def test_the_baked_client_target_is_covered_by_the_drift_digest(monkeypatch) -> None:

@@ -80,10 +80,10 @@ CLIENT_STAGE_DIR = ROOT / "sandbox" / "artifacts"
 CLIENT_STAGE_PATH = CLIENT_STAGE_DIR / CLIENT_BINARY_NAME
 # Inside the repository because the build context is the repository root and `.dockerignore`
 # excludes `**/target`, so the crate's own output directory cannot be COPY'd from.
-# What the binary is built from, and so what the image's digest moves with: the crate manifests and
-# `src/`. `target/` is this machine's build state and `tests/` never reaches the binary.
-CLIENT_MANIFESTS = ("Cargo.toml", "Cargo.lock")
-CLIENT_CODE_DIR = "src"
+# What the binary is built from, and so what the image's digest moves with. `target/` is this
+# machine's build state and `tests/` never reaches the binary.
+CLIENT_ROOT_FILES = ("Cargo.toml", "Cargo.lock", "build.rs")
+CLIENT_SOURCE_DIRS = ("src", "licenses", "scripts")
 
 E2B_BASE_TEMPLATE = "code-interpreter-v1"
 
@@ -283,9 +283,13 @@ def client_definition() -> dict[str, str]:
     what goes into it moves — and `client/Cargo.lock` is in the set, so a dependency bump moves it
     too."""
     digest = hashlib.sha256()
-    code = (CLIENT_SOURCE_DIR / CLIENT_CODE_DIR).rglob("*")
+    code = (
+        path
+        for directory in CLIENT_SOURCE_DIRS
+        for path in (CLIENT_SOURCE_DIR / directory).rglob("*")
+    )
     sources = sorted(
-        [CLIENT_SOURCE_DIR / name for name in CLIENT_MANIFESTS]
+        [CLIENT_SOURCE_DIR / name for name in CLIENT_ROOT_FILES]
         + [path for path in code if path.is_file()]
     )
     for path in sources:

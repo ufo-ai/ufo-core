@@ -1,19 +1,30 @@
 //! The exec primitive: one command as the member's own subprocess.
 
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::fs::File;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use flate2::read::GzDecoder;
 
 const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
 const TRUST_BUNDLE_FILE: &str = "trust-bundle.pem";
 const PEM_LINE_BYTES: usize = 64;
+const X509_OVERRIDE: &str = "x509sslcertoverrideplatform";
+#[cfg(windows)]
+const GH_FILE: &str = "gh.exe";
+#[cfg(not(windows))]
+const GH_FILE: &str = "gh";
+const GH_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gh.gz"));
+const GH_LICENSE: &str = include_str!("../../licenses/github-cli.txt");
+const GH_LICENSE_FILE: &str = "gh-LICENSE";
 // The CA-bundle env vars the toolchains read. libcurl tools (git, cargo) ignore CURL_CA_BUNDLE when
 // they set their own CAINFO, so each needs its own override or a MITM'd host (a cache-fronted
 // registry, or git rewritten to the cache) fails with "unable to get local issuer certificate".
@@ -50,9 +61,17 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
     let Some(program) = parsed.argv.first() else {
         return Err("exec argv is empty".into());
     };
+    let gh = invokes_gh(&parsed.argv)
+        .then(|| materialize_gh(workdir))
+        .transpose()?;
+    let executable = if is_gh(program) {
+        gh.as_deref().unwrap_or_else(|| Path::new(program))
+    } else {
+        Path::new(program)
+    };
     let out_path = workdir.join("run.out");
     let err_path = workdir.join("run.err");
-    let mut command = Command::new(program);
+    let mut command = Command::new(executable);
     command
         .args(&parsed.argv[1..])
         .current_dir(cwd)
@@ -66,6 +85,20 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
         }
         command.env(name, value);
     }
+    if gh.is_some() {
+        let current = parsed
+            .env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| env::var_os("PATH"))
+            .unwrap_or_default();
+        let path = env::join_paths(
+            std::iter::once(workdir.to_path_buf())
+                .chain(env::split_paths(&current).filter(|path| !path.as_os_str().is_empty())),
+        )
+        .map_err(|error| format!("could not prepare gh PATH: {error}"))?;
+        command.env("PATH", path);
+    }
     if let Some(cert) = parsed.env.get(CA_CERT_ENV) {
         let bundle = workdir.join(TRUST_BUNDLE_FILE);
         fs::write(&bundle, trust_bundle(cert)?)
@@ -73,6 +106,12 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
         for name in CA_CERT_CONSUMERS {
             command.env(name, &bundle);
         }
+        let current_godebug = parsed
+            .env
+            .get("GODEBUG")
+            .cloned()
+            .or_else(|| std::env::var("GODEBUG").ok());
+        command.env("GODEBUG", godebug(current_godebug.as_deref()));
     }
     #[cfg(unix)]
     {
@@ -128,6 +167,82 @@ fn pem(certificate: &[u8]) -> String {
     }
     out.push_str("-----END CERTIFICATE-----\n");
     out
+}
+
+fn godebug(current: Option<&str>) -> String {
+    current
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .filter(|setting| {
+            !setting.is_empty()
+                && setting
+                    .split_once('=')
+                    .is_none_or(|(name, _)| name != X509_OVERRIDE)
+        })
+        .chain(std::iter::once("x509sslcertoverrideplatform=1"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn materialize_gh(workdir: &Path) -> Result<PathBuf, String> {
+    let path = workdir.join(GH_FILE);
+    fs::write(workdir.join(GH_LICENSE_FILE), GH_LICENSE)
+        .map_err(|error| format!("could not write bundled gh license: {error}"))?;
+    let mut file =
+        File::create(&path).map_err(|error| format!("could not create bundled gh: {error}"))?;
+    io::copy(&mut GzDecoder::new(GH_ARCHIVE), &mut file)
+        .map_err(|error| format!("could not unpack bundled gh: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("could not mark bundled gh executable: {error}"))?;
+    }
+    Ok(path)
+}
+
+fn is_gh(word: &str) -> bool {
+    Path::new(word)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("gh") || name.eq_ignore_ascii_case("gh.exe"))
+}
+
+fn invokes_gh(argv: &[String]) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    if is_gh(program) {
+        return true;
+    }
+    let shell = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if !matches!(
+        shell.to_ascii_lowercase().as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "cmd"
+            | "cmd.exe"
+            | "powershell"
+            | "powershell.exe"
+            | "pwsh"
+            | "pwsh.exe"
+    ) {
+        return false;
+    }
+    argv.iter().skip(1).any(|arg| {
+        arg.split(|character: char| {
+            character.is_ascii_whitespace()
+                || matches!(
+                    character,
+                    '\'' | '"' | ';' | '|' | '&' | '(' | ')' | '<' | '>'
+                )
+        })
+        .any(|word| word.eq_ignore_ascii_case("gh") || word.eq_ignore_ascii_case("gh.exe"))
+    })
 }
 
 fn sink(path: &Path) -> Result<File, String> {
@@ -304,6 +419,81 @@ mod tests {
     }
 
     #[test]
+    fn go_uses_the_operation_bundle_without_dropping_other_debug_settings() {
+        assert_eq!(
+            godebug(Some("http2debug=1,x509sslcertoverrideplatform=0")),
+            "http2debug=1,x509sslcertoverrideplatform=1"
+        );
+        assert_eq!(godebug(None), "x509sslcertoverrideplatform=1");
+    }
+
+    #[test]
+    fn finds_gh_in_the_terminal_shell_command() {
+        let argv = vec![
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            r#"cd /workspace && gh api graphql -f query='{repository(owner:\"metalcraftai\",name:\"ufo\"){issues(first:25){nodes{number}}}}'"#.to_string(),
+        ];
+        assert!(invokes_gh(&argv));
+        assert!(!invokes_gh(&[
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            "git status".to_string()
+        ]));
+        assert!(invokes_gh(&["gh.exe".to_string()]));
+        assert!(invokes_gh(&["/usr/local/bin/gh".to_string()]));
+        assert!(!invokes_gh(&[
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            "echo /usr/local/bin/gh".to_string()
+        ]));
+        assert!(!invokes_gh(&["rg".to_string(), "gh".to_string()]));
+    }
+
+    #[cfg(all(unix, debug_assertions))]
+    #[test]
+    fn shell_uses_bundled_gh_with_the_operation_bundle() {
+        let dir = scratch("gh");
+        let reply = run(
+            r#"{"argv":["/bin/sh","-c","printf '%s\\n' \"$(command -v gh)\"; gh"],"env":{"GODEBUG":"http2debug=1","UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
+            &dir,
+            Path::new("/tmp"),
+            30,
+        )
+        .unwrap();
+        let result = parsed(&reply);
+        assert_eq!(result["exit_code"], 0);
+        let stdout = String::from_utf8(decoded(&result, "stdout_b64")).unwrap();
+        assert_eq!(
+            stdout,
+            format!(
+                "{}\nufo-gh-test:http2debug=1,x509sslcertoverrideplatform=1",
+                dir.join("gh").display()
+            )
+        );
+        assert!(fs::read_to_string(dir.join(GH_LICENSE_FILE))
+            .unwrap()
+            .contains("Copyright (c) 2019 GitHub Inc."));
+    }
+
+    #[cfg(all(unix, not(debug_assertions)))]
+    #[test]
+    fn release_contains_runnable_gh() {
+        let reply = run(
+            r#"{"argv":["/bin/sh","-c","command -v gh; gh version"],"env":{}}"#,
+            &scratch("release-gh"),
+            Path::new("/tmp"),
+            30,
+        )
+        .unwrap();
+        let result = parsed(&reply);
+        assert_eq!(result["exit_code"], 0);
+        let stdout = String::from_utf8(decoded(&result, "stdout_b64")).unwrap();
+        assert!(stdout.contains("/gh\n"));
+        assert!(stdout.contains("gh version 2.97.0"));
+    }
+
+    #[test]
     fn every_root_encodes_as_a_readable_certificate() {
         let roots = rustls_native_certs::load_native_certs().unwrap();
         for root in &roots {
@@ -326,7 +516,7 @@ mod tests {
         // The `test` guards prove git and cargo see the same bundle as curl/openssl; if either var
         // is unset or points elsewhere the `cat` is skipped and the certificate assertions fail.
         let reply = run(
-            r#"{"argv":["/bin/sh","-c","test \"$GIT_SSL_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$CARGO_HTTP_CAINFO\" = \"$SSL_CERT_FILE\" && cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
+            r#"{"argv":["/bin/sh","-c","test \"$GIT_SSL_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$CARGO_HTTP_CAINFO\" = \"$SSL_CERT_FILE\" && test \"$GODEBUG\" = \"http2debug=1,x509sslcertoverrideplatform=1\" && cat \"$SSL_CERT_FILE\"; printf %s \"${UFO_EGRESS_CA_CERT:-unset}\""],"env":{"GODEBUG":"http2debug=1,x509sslcertoverrideplatform=0","UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
             &dir,
             Path::new("/tmp"),
             30,

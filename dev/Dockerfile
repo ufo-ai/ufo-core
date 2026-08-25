@@ -11,13 +11,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked --bin ufo-control \
     && cp target/release/ufo-control /usr/local/bin/ufo-control
 
+FROM golang:1.27.0-bookworm AS gh
+RUN GOTOOLCHAIN=local CGO_ENABLED=0 \
+    go install -trimpath -ldflags='-s -w' github.com/cli/cli/v2/cmd/gh@v2.97.0 \
+    && gzip -9 /go/bin/gh
+
 FROM rust:1-bookworm AS client
 WORKDIR /client
 # Cargo validates every target the manifest declares before it selects one, so the benches the
 # manifest names are copied even though this stage builds only the binary.
 COPY client/Cargo.toml client/Cargo.lock ./
+COPY client/build.rs ./
+COPY client/licenses ./licenses
 COPY client/src ./src
 COPY client/benches ./benches
+COPY --from=gh /go/bin/gh.gz /tmp/ufo-gh.gz
+ENV UFO_GH_ARCHIVE=/tmp/ufo-gh.gz
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/client/target \
     cargo build --release --locked --bin ufo \

@@ -1,0 +1,26 @@
+name: Build client gh
+description: Build the gh payload embedded in the terminal client.
+inputs:
+  target:
+    description: Rust release target.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v6
+      with:
+        go-version: 1.27.0
+        cache: false
+    - shell: bash
+      run: |
+        root="$RUNNER_TEMP"
+        if [ "$RUNNER_OS" = Windows ]; then
+          root=$(cygpath -u "$root")
+        fi
+        archive="$root/ufo-gh-${{ inputs.target }}.gz"
+        client/scripts/build-gh.sh "${{ inputs.target }}" "$archive"
+        value="$archive"
+        if [ "$RUNNER_OS" = Windows ]; then
+          value=$(cygpath -w "$value")
+        fi
+        echo "UFO_GH_ARCHIVE=$value" >> "$GITHUB_ENV"

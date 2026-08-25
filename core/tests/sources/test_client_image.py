@@ -2,10 +2,23 @@ import re
 import tomllib
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).parents[3]
 MANIFEST = ROOT / "client" / "Cargo.toml"
 DOCKERFILE = ROOT / "dev" / "Dockerfile"
+ACTION = ROOT / ".github" / "actions" / "client-gh" / "action.yml"
+GH_SCRIPT = ROOT / "client" / "scripts" / "build-gh.sh"
+BUILD_SCRIPT = ROOT / "client" / "build.rs"
 DECLARED = ("bench", "test", "example", "bin")
+RELEASE_JOBS = {
+    "ci.yaml": ("sandbox-client",),
+    "client.yml": ("bench", "build"),
+    "deploy-production.yml": ("deploy",),
+    "deploy.yml": ("client",),
+    "integration.yaml": ("integration",),
+    "sandbox-image.yml": ("publish",),
+}
 
 
 def _client_stage() -> str:
@@ -40,3 +53,37 @@ def test_the_image_carries_every_target_the_manifest_declares() -> None:
                 f"client/Cargo.toml declares the {kind} {target['name']} at {declared}, "
                 f"which dev/Dockerfile's client stage never copies"
             )
+    assert "build.rs" in copied
+    assert "licenses" in copied
+
+
+def test_every_release_job_builds_the_gh_payload_first() -> None:
+    for filename, jobs in RELEASE_JOBS.items():
+        workflow = yaml.safe_load((ROOT / ".github" / "workflows" / filename).read_text())
+        for name in jobs:
+            steps = workflow["jobs"][name]["steps"]
+            releases = [
+                index
+                for index, step in enumerate(steps)
+                if "cargo build --release" in step.get("run", "")
+                or "cargo codspeed build" in step.get("run", "")
+            ]
+            assert releases
+            for index in releases:
+                assert any(
+                    step.get("uses") == "./.github/actions/client-gh" for step in steps[:index]
+                )
+
+
+def test_gh_payload_is_pinned_to_the_runtime_that_reads_the_bundle() -> None:
+    action = yaml.safe_load(ACTION.read_text())
+    setup = action["runs"]["steps"][0]
+    assert setup["uses"] == "actions/setup-go@v6"
+    assert setup["with"]["go-version"] == "1.27.0"
+    script = GH_SCRIPT.read_text()
+    assert "github.com/cli/cli/v2/cmd/gh@v2.97.0" in script
+    assert "GOTOOLCHAIN=local" in script
+    assert "gzip -9" in script
+    assert "cargo:rerun-if-changed=" in BUILD_SCRIPT.read_text()
+    assert action["runs"]["steps"][1]["shell"] == "bash"
+    assert "cygpath -w" in action["runs"]["steps"][1]["run"]

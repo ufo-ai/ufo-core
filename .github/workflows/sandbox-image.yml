@@ -39,6 +39,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/client-gh
+        with:
+          target: x86_64-unknown-linux-musl
       # Same reclaim the integration job needs: the image is ~6-7 GB and its build peaks near the
       # runner's ~14 GB free disk.
       - name: Reclaim runner disk for the sandbox image build

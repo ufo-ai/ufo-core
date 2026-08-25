@@ -25,7 +25,7 @@ client keeps the credential and the workspace it was given under `$UFO_HOME` (`~
 
 ## Run it in development
 
-Prerequisite: a stable Rust toolchain.
+Prerequisite: a stable Rust toolchain. Release builds also need Go 1.27.0.
 
 ```bash
 cd client
@@ -41,8 +41,14 @@ gateway URL it serves) and keep its credentials out of your real ones:
 UFO_HOME=/tmp/ufo-dev UFO_URL=http://ufo-1.localhost:18080 cargo run -- "hello"
 ```
 
-`cargo build --release` produces the shipped binary; CI builds that release for each supported
-platform.
+The release embeds `gh` for its target:
+
+```bash
+scripts/build-gh.sh aarch64-apple-darwin /tmp/ufo-gh.gz
+UFO_GH_ARCHIVE=/tmp/ufo-gh.gz cargo build --release
+```
+
+CI builds that release for each supported platform.
 
 | Variable | What it does |
 |---|---|
