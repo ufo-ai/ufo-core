@@ -68,6 +68,7 @@ from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.serve import (
     _connect_flow,
+    _connector_entries,
     _mount_ext_routes,
     _mount_shared_surfaces,
     _select_auth_proxy,
@@ -350,6 +351,10 @@ def test_dev_mode_activates_every_discovered_extension() -> None:
     proving discovery and manifest load for every installed extension without a hardcoded roster."""
     assert INSTALLED
     assert {manifest.name for manifest in load_manifests()} == set(INSTALLED)
+
+
+def test_dev_mode_connector_providers_are_unique() -> None:
+    assert _connector_entries(load_manifests())
 
 
 @pytest.mark.parametrize("name", sorted(INSTALLED))

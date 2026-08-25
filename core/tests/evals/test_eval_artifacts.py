@@ -1,16 +1,31 @@
 """Deterministic artifact graders inspect delivered bytes, not filenames or claims."""
 
 import asyncio
+import sys
 from dataclasses import replace
 from gzip import compress
 from io import BytesIO
 from json import dumps, loads
+from pathlib import Path
 from tarfile import TarInfo
 from tarfile import open as open_tar
-from uuid import UUID
+from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
+import sqlalchemy as sa
+from ufo_ext_eval_env.manifest import (
+    APP_FIXTURE_PREFIX,
+    CALENDAR_PROVIDER,
+    DRIVE_PROVIDER,
+    EMAIL_PROVIDER,
+    GITHUB_PROVIDER,
+    eval_env_email,
+    eval_env_event,
+)
+from ufo_ext_eval_env.manifest import (
+    NAME as EVAL_ENV_NAME,
+)
 
 from evals.harness.artifact_checks import (
     JPEG_MAGIC,
@@ -26,7 +41,13 @@ from evals.harness.artifact_checks import (
     valid_pdf,
     valid_png,
 )
-from evals.harness.capability import CapabilityOutput, SharedArtifact, ToolInvocation
+from evals.harness.capability import (
+    CapabilityOutput,
+    ProbeCommandResult,
+    SharedArtifact,
+    ToolInvocation,
+)
+from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.scorers import (
     board_presentation_scorer,
     forecast_workbook_scorer,
@@ -38,11 +59,20 @@ from evals.harness.scorers import (
     site_archive_scorer,
 )
 from evals.suites.ufo_app_bench import (
+    APP_DATA_CONTENT,
+    APP_DATA_DIGEST,
+    APP_UNIVERSE_EMAILS,
+    APP_UNIVERSE_EVENTS,
+    APP_UNIVERSE_TOOLS,
     AUDIT_CONTENT,
+    CONNECTED_APPS,
+    CONNECTED_CASES,
+    CONTROL_CASES,
+    COPY_CAPTURE_CONTENT,
+    COPY_CASES,
     DESKTOP_HEIGHT,
     DESKTOP_WIDTH,
     HOUSE_CRITERIA,
-    INFORMATION_FACT_COUNTS,
     INTERACTION_MIN_CONTROLS,
     INTERACTION_MIN_SUCCESSES,
     MAX_BROWSER_QA_CALLS,
@@ -51,23 +81,58 @@ from evals.suites.ufo_app_bench import (
     MEMBER_QUERIES,
     NARROW_HEIGHT,
     NARROW_WIDTH,
-    PALETTE_STEPS,
     SCHEMES,
+    TASTE_CRITERIA,
     AppBenchWorkspaceProbe,
+    _above_fold_scorer,
     _AppBenchProbe,
-    _declarations,
-    _direct_application_build_scorer,
+    _AppCopyProbe,
+    _browser_probe_slot,
+    _ConnectedApp,
+    _ConnectedAppSeed,
+    _copy_scorer,
+    _delivery_scorer,
     _interaction_screen,
     _measured_screen,
     _qa_efficiency_scorer,
+    _requirement_scorer,
+    _rewrite_source_call,
+    _score_app_report,
+    _source_copy,
+    _visible_parts,
 )
 from evals.suites.ufo_app_bench import CASES as BENCH_CASES
 from evals.suites.ufo_app_bench import (
     WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS,
 )
-from ufo.skills.runtime import CORE_SKILLS_BY_NAME
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.schema import tables
+from ufo.sdk.context import ScopedStore
+from ufo.workspace import ws
 
 REVENUE = (120, 135, 142, 160)
+TESTING_APP_SOURCES = {
+    "pre-meeting-briefs": ("meeting-briefs",),
+    "meeting-tasks": ("meeting-scribe-home",),
+    "issue-owner": ("intake-watcher-homepage", "issue-fixer-home"),
+    "issue-planner": ("issue-fixer-home",),
+    "code-review-queue": ("code-review-home", "ufo-review-homepage"),
+    "engineering-metrics": ("investor-update-home", "pr-babysitter-homepage"),
+    "pr-babysitter": ("pr-babysitter-homepage",),
+    "startup-metrics": ("investor-update-home",),
+    "account-health": (),
+    "candidate-review": (),
+}
+READER_REWRITES = {
+    "pre-meeting-briefs": "Confirm the SSO date before the renewal call.",
+    "meeting-tasks": "Create the agreed tasks and confirm their owners and dates.",
+    "issue-planner": "Show the Stripe failure code and a clear explanation.",
+    "engineering-metrics": "Pull requests merged 10 hours faster this month.",
+    "startup-metrics": "Enterprise supplies 57% of monthly revenue.",
+    "account-health": "Resolve the invoice export before Beacon Health renews.",
+    "candidate-review": "Noor's scorecard is missing. Sam gave no rollback plan.",
+}
 
 
 async def test_app_bench_workspace_probe_runs_in_the_conversation_container(monkeypatch) -> None:
@@ -102,14 +167,141 @@ async def test_app_bench_workspace_probe_runs_in_the_conversation_container(monk
     ]
 
 
+async def test_app_bench_workspace_probe_serializes_browser_work(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[object, ...]] = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, position: int) -> None:
+            self.position = position
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            if self.position == 0:
+                first_started.set()
+                await release_first.wait()
+            return b"captured", b""
+
+    async def create(*args, **kwargs) -> Process:
+        calls.append(args)
+        return Process(len(calls) - 1)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(
+        "evals.suites.ufo_app_bench.BROWSER_PROBE_LOCK", tmp_path / "browser-probe.lock"
+    )
+    first = asyncio.create_task(AppBenchWorkspaceProbe(UUID(int=1)).run("first"))
+    await first_started.wait()
+    second = asyncio.create_task(AppBenchWorkspaceProbe(UUID(int=2)).run("second"))
+    await asyncio.sleep(0.1)
+
+    assert len(calls) == 1
+
+    release_first.set()
+    results = await asyncio.gather(first, second)
+
+    assert [result.stdout for result in results] == ["captured", "captured"]
+    assert len(calls) == 2
+
+
+async def test_app_bench_browser_probe_lock_spans_processes(monkeypatch, tmp_path) -> None:
+    lock_path = tmp_path / "browser-probe.lock"
+    monkeypatch.setattr("evals.suites.ufo_app_bench.BROWSER_PROBE_LOCK", lock_path)
+    holder = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        (
+            "import fcntl,sys; "
+            "lock=open(sys.argv[1], 'a'); "
+            "fcntl.flock(lock, fcntl.LOCK_EX); "
+            "print('held', flush=True); "
+            "sys.stdin.readline()"
+        ),
+        str(lock_path),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    assert holder.stdout is not None
+    assert holder.stdin is not None
+    assert await holder.stdout.readline() == b"held\n"
+    entered = asyncio.Event()
+
+    async def enter() -> None:
+        async with _browser_probe_slot():
+            entered.set()
+
+    task = asyncio.create_task(enter())
+    try:
+        await asyncio.sleep(0.1)
+        assert not entered.is_set()
+    finally:
+        holder.stdin.write(b"\n")
+        await holder.stdin.drain()
+        await holder.wait()
+
+    await asyncio.wait_for(task, 1)
+    assert entered.is_set()
+
+
 def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     source = AUDIT_CONTENT.decode()
 
+    assert "document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)" in source
+    assert "box.right <= 0" in source
+    assert "style.overflowX !== 'visible'" in source
+    assert "document.body.innerText.replace(/\\s+/g, ' ').trim()" in source
     assert "script.setAttribute('src', await asDataUrl(resource))" in source
     assert "link.replaceWith(style)" in source
     assert "image.setAttribute('src', await asDataUrl(resource))" in source
     assert "fs.writeFileSync(interactivePath, await interactiveDocument(page))" in source
     assert "fs.writeFileSync(staticPath, await page.content())" in source
+
+
+def test_app_copy_capture_renders_one_static_dom_without_screenshots() -> None:
+    source = COPY_CAPTURE_CONTENT.decode()
+
+    assert "await page.goto(url, { waitUntil: 'load' })" in source
+    assert "fs.writeFileSync(staticPath, await page.content())" in source
+    assert "page.screenshot" not in source
+    assert "interactionAudit" not in source
+
+
+def test_visible_parts_preserve_inline_tokens_and_collapse_source_space() -> None:
+    content = b"""
+        <main>
+          <p>$<span>48,000</span> and <strong>78</strong>% at <code>2.4</code>x.</p>
+          <button>Review in <b>chat</b></button>
+          <div>Product design
+            sync</div>
+          <script>hidden fact</script>
+        </main>
+    """
+
+    assert "".join(_visible_parts(content)) == (
+        "$48,000 and 78% at 2.4x. Review in chat Product design sync"
+    )
+
+
+async def test_app_copy_probe_returns_only_the_browser_rendered_dom(tmp_path: Path) -> None:
+    class Probe:
+        async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
+            assert "ufo-app-copy-capture.cjs" in command
+            assert timeout_s == 120
+            directory = tmp_path / ".eval-output" / "meeting-tasks"
+            directory.mkdir(parents=True)
+            (directory / "meeting-tasks-static.html").write_bytes(b"<main>Rendered</main>")
+            return ProbeCommandResult(0, "", "")
+
+    result = await _AppCopyProbe("meeting-tasks")(
+        CapabilityOutput("", (), workspace_dir=tmp_path), Probe()
+    )
+
+    assert result.error == ""
+    assert result.artifacts == (
+        SharedArtifact("meeting-tasks-static.html", b"<main>Rendered</main>"),
+    )
 
 
 def _output(name: str, content: bytes) -> CapabilityOutput:
@@ -439,6 +631,7 @@ def _measured(**overrides: object) -> bytes:
             "textChecked": 40,
             "textUnderFloor": 0,
             "text": [],
+            "aboveFoldText": "",
             "pastViewport": [],
             "clipped": [],
             "console": [],
@@ -600,6 +793,8 @@ async def test_ufo_app_bench_rework_pulls_the_source_between_deploys() -> None:
         calls=(
             *base.calls,
             ToolInvocation("object_get", {"kind": "site"}, "read", has_result=True),
+            ToolInvocation("js_repl", {}, "checked repair", has_result=True),
+            ToolInvocation("js_repl", {}, "reviewed repair", has_result=True),
             ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
         ),
     )
@@ -622,25 +817,6 @@ async def test_ufo_app_bench_rework_pulls_the_source_between_deploys() -> None:
     assert "object_get" in skipped.reason
 
 
-async def test_ufo_app_bench_rejects_a_second_whole_site_build() -> None:
-    base = _built_screen({})
-    delegated = replace(
-        base,
-        calls=(
-            base.calls[0],
-            ToolInvocation("build_website", {}, "built and deployed", has_result=True),
-            *base.calls[1:],
-        ),
-    )
-
-    direct = await _direct_application_build_scorer()(_built_screen({}))
-    repeated = await _direct_application_build_scorer()(delegated)
-
-    assert direct.passed, direct.reason
-    assert not repeated.passed
-    assert "build the application directly" in repeated.reason
-
-
 async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     grader = _qa_efficiency_scorer()
     clean = await grader(_built_screen({}))
@@ -660,11 +836,12 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     repeated_browser = replace(
         _built_screen({}),
         calls=(
-            *_built_screen({}).calls,
+            *_built_screen({}).calls[:4],
             *(
                 ToolInvocation("js_repl", {}, "extra check", has_result=True)
                 for _ in range(MAX_BROWSER_QA_CALLS - 1)
             ),
+            *_built_screen({}).calls[4:],
         ),
     )
     too_many_batches = await grader(repeated_browser)
@@ -674,8 +851,9 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     failed_browser = replace(
         _built_screen({}),
         calls=(
-            *_built_screen({}).calls,
+            *_built_screen({}).calls[:4],
             ToolInvocation("js_repl", {}, "timed out", has_result=False),
+            *_built_screen({}).calls[4:],
         ),
     )
     failed_batch = await grader(failed_browser)
@@ -706,21 +884,191 @@ async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
     assert not wrong_order.passed
     assert "before deploy_website" in wrong_order.reason
 
+    untested_first_deploy = replace(
+        base,
+        calls=(
+            base.calls[0],
+            base.calls[1],
+            base.calls[4],
+            base.calls[5],
+            base.calls[2],
+            base.calls[3],
+            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
+        ),
+    )
+    missing_initial_qa = await grader(untested_first_deploy)
+    assert not missing_initial_qa.passed
+    assert "0 successful browser QA batch(es) before deploy_website" in missing_initial_qa.reason
+
+    failed_redeploy = replace(
+        base,
+        calls=(
+            *base.calls,
+            ToolInvocation("js_repl", {}, "checked repair", has_result=True),
+            ToolInvocation("js_repl", {}, "reviewed repair", has_result=True),
+            ToolInvocation("deploy_website", {}, "failed", has_result=True, is_error=True),
+        ),
+    )
+    deployment_failure = await grader(failed_redeploy)
+    assert not deployment_failure.passed
+    assert "final application deployment failed" in deployment_failure.reason
+
+    repaired_then_reworked = replace(
+        base,
+        calls=(
+            *base.calls[:4],
+            ToolInvocation("js_repl", {}, "found a defect", has_result=False),
+            ToolInvocation("js_repl", {}, "repair passed", has_result=True),
+            *base.calls[4:],
+            ToolInvocation("js_repl", {}, "checked rework", has_result=True),
+            ToolInvocation("js_repl", {}, "reviewed rework", has_result=True),
+            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
+        ),
+    )
+    over_budget = await grader(repaired_then_reworked)
+    assert not over_budget.passed
+    assert f"at most {MAX_BROWSER_QA_CALLS}" in over_budget.reason
+
+    reworked = replace(
+        base,
+        calls=(
+            *base.calls,
+            ToolInvocation("js_repl", {}, "reviewed rework", has_result=True),
+            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
+        ),
+    )
+    rework_proof = await grader(reworked)
+    assert rework_proof.passed, rework_proof.reason
+
+    premature_homepage = replace(
+        base,
+        calls=(
+            *base.calls[:4],
+            base.calls[5],
+            base.calls[4],
+        ),
+    )
+    homepage_order = await grader(premature_homepage)
+    assert not homepage_order.passed
+    assert "set_homepage must run after the first deploy_website" in homepage_order.reason
+
+    late_homepage = replace(
+        base,
+        calls=(
+            *base.calls[:5],
+            ToolInvocation("js_repl", {}, "checked rework", has_result=True),
+            ToolInvocation("js_repl", {}, "reviewed rework", has_result=True),
+            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
+            base.calls[5],
+        ),
+    )
+    late_binding = await grader(late_homepage)
+    assert not late_binding.passed
+    assert "before a redeploy" in late_binding.reason
+
+
+async def test_ufo_app_bench_accepts_static_deploy_or_published_application() -> None:
+    static = await _delivery_scorer()(_built_screen({}))
+    published = replace(
+        _built_screen({}),
+        calls=(
+            ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+            ToolInvocation("start_server", {}, "started", has_result=True),
+            ToolInvocation("js_repl", {}, "checked", has_result=True),
+            ToolInvocation("js_repl", {}, "reviewed", has_result=True),
+            ToolInvocation("publish_website", {}, "published", has_result=True),
+            ToolInvocation("set_homepage", {}, "bound", has_result=True),
+        ),
+    )
+    app = await _delivery_scorer()(published)
+    qa = await _qa_efficiency_scorer()(published)
+
+    assert static.passed, static.reason
+    assert app.passed, app.reason
+    assert qa.passed, qa.reason
+    assert app.evidence == {"appDeliveryPassed": 2, "appDeliveryTotal": 2}
+
+
+def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() -> None:
+    case = EvalCaseResult(
+        name="meeting-tasks",
+        passed=False,
+        reason="one hard gate failed",
+        evidence={
+            "selectedAttempt": 0,
+            "visualRubric": ["one", "two"],
+            "attempts": [
+                {
+                    "grader": {
+                        "appDeliveryPassed": 2,
+                        "appDeliveryTotal": 2,
+                        "appSourcePassed": 7,
+                        "appSourceTotal": 10,
+                        "appDensityPassed": 8,
+                        "appDensityTotal": 10,
+                        "appPagePassed": 4,
+                        "appPageTotal": 4,
+                        "appInteractionPassed": 1,
+                        "appInteractionTotal": 1,
+                        "processSkillPassed": 1,
+                        "processSkillTotal": 1,
+                        "processQaPassed": 0,
+                        "processQaTotal": 1,
+                    },
+                    "judge": [
+                        {"criterion": "one", "passed": True, "reason": "yes"},
+                        {"criterion": "two", "passed": False, "reason": "no"},
+                    ],
+                }
+            ],
+        },
+    )
+    scored = _score_app_report(
+        EvalReport(name="ufo-app-bench", suite="capability", digest="sha256:test", cases=(case,))
+    )
+
+    result = scored.cases[0]
+    assert not result.passed
+    assert result.tier == 3
+    assert result.evidence["appScoreLayers"] == {
+        "delivery": 1.0,
+        "source": 0.7,
+        "density": 0.8,
+        "page": 1.0,
+        "interaction": 1.0,
+        "visual": 0.5,
+    }
+    assert result.evidence["appScore"] == pytest.approx(5 / 6)
+    assert result.evidence["processScore"] == pytest.approx(1 / 2)
+    assert {metric.name: metric.value for metric in scored.metrics} == {
+        "app_score": pytest.approx(5 / 6),
+        "delivery_score": 1.0,
+        "source_score": 0.7,
+        "density_score": 0.8,
+        "page_score": 1.0,
+        "interaction_score": 1.0,
+        "visual_score": 0.5,
+        "process_score": pytest.approx(1 / 2),
+    }
+
 
 async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
     page = b"<main>Built app</main>"
 
-    assert [case.name for case in BENCH_CASES] == [
+    assert [case.name for case in CONTROL_CASES] == [
         "kanban-board",
         "call-notes",
         "daily-brief",
         "daily-brief-rework",
     ]
+    assert [case.name for case in CONNECTED_CASES] == [case.name for case in CONNECTED_APPS]
+    assert len(BENCH_CASES) == 14
     assert all(case.judge_on_deterministic_failure for case in BENCH_CASES)
     assert UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS == 900.0
-    for case in BENCH_CASES[:3]:
+    for case in CONTROL_CASES[:3]:
         assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in case.digest_tag
         assert "interactive-homepage" in case.digest_tag
+        assert f"qa-total-{MAX_BROWSER_QA_CALLS}:redeploy-1" in case.digest_tag
         shots = {f"{case.name}-{scheme}.png": _png() for scheme in SCHEMES}
         report = {f"{case.name}-audit.json": _measured()}
         pages = {
@@ -769,11 +1117,10 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         assert case.visual_rubric[: len(HOUSE_CRITERIA)] == HOUSE_CRITERIA
         assert len(case.visual_rubric) == len(HOUSE_CRITERIA) + 1
         information = case.visual_rubric[-1]
-        facts = INFORMATION_FACT_COUNTS[case.name]
-        assert f"at least {facts} distinct requested facts" in information
         assert f"{DESKTOP_WIDTH} x {DESKTOP_HEIGHT}" in information
         assert "above the fold" in information
         assert "oversized title" in information
+        assert "not an exact fact count" in information
         assert case.message == MEMBER_QUERIES[case.name]
         assert len(case.message.split()) <= 12
         assert "interactive" in case.message.lower()
@@ -783,19 +1130,552 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         assert not leaked & set(case.message.lower().split())
 
 
-def test_ufo_app_bench_rubric_reads_the_shipped_tokens() -> None:
-    """The visual rubric quotes the tokens rather than restating them, so the judge grades the
-    screenshot against the look the product ships; a token the skill no longer declares raises."""
-    tokens = dict(CORE_SKILLS_BY_NAME["ufo-style"].files)["references/tokens.css"].decode()
-    palette = HOUSE_CRITERIA[0]
+def test_connected_app_prompts_have_one_to_one_proof_without_staged_data() -> None:
+    for spec, case in zip(CONNECTED_APPS, CONNECTED_CASES, strict=True):
+        assert case.message == MEMBER_QUERIES[case.name]
+        assert case.message.startswith(spec.request)
+        assert "interactive" in case.message.lower()
+        assert "homepage" in case.message.lower()
+        assert "Evaluation delivery" not in case.message
+        assert not case.workspace_files
+        assert case.seed is not None
+        assert APP_DATA_DIGEST[:12] in case.digest_tag
+        assert case.visual_rubric[: len(HOUSE_CRITERIA)] == HOUSE_CRITERIA
+        assert case.judge_on_deterministic_failure
+        taste_start = len(HOUSE_CRITERIA)
+        taste_end = taste_start + len(TASTE_CRITERIA)
+        assert case.visual_rubric[taste_start:taste_end] == TASTE_CRITERIA
+        assert taste_end == len(case.visual_rubric) - 1
+        assert len(case.visual_rubric) <= 12
+        assert all(item.prompt in case.message for item in spec.requirements)
+        assert all(
+            item.calls or item.visible or item.visible_any or item.rewrite_sources or item.absent
+            for item in spec.requirements
+        )
+        hidden = {
+            fact.casefold()
+            for item in spec.requirements
+            for fact in (*item.visible, *(group[0] for group in item.visible_any))
+            if fact.casefold() not in case.message.casefold()
+        }
+        assert hidden, spec.name
+
+
+def test_connected_app_fixtures_name_their_testing_source_without_live_identifiers() -> None:
+    assert {spec.name: spec.source_apps for spec in CONNECTED_APPS} == TESTING_APP_SOURCES
+    fixture = APP_DATA_CONTENT.decode().casefold()
+    assert all(
+        identifier not in fixture
+        for identifier in (
+            "metalcraftai",
+            "flyingobject.ai",
+            "marshall-ufo",
+            "alexg-ufo",
+            "marshall@metalcraft.ai",
+        )
+    )
+
+
+def test_copy_cases_reuse_connected_prompts_fixtures_and_browser_rendering() -> None:
+    copied_specs = tuple(
+        spec
+        for spec in CONNECTED_APPS
+        if any(requirement.rewrite_sources for requirement in spec.requirements)
+    )
+
+    assert [case.name for case in COPY_CASES] == [f"copy-{spec.name}" for spec in copied_specs]
+    for spec, copy_case in zip(copied_specs, COPY_CASES, strict=True):
+        connected_case = next(case for case in CONNECTED_CASES if case.name == spec.name)
+        assert copy_case.message == connected_case.message == MEMBER_QUERIES[spec.name]
+        assert copy_case.seed == connected_case.seed == _ConnectedAppSeed(spec)
+        assert connected_case.artifact_probe == _AppBenchProbe(spec.name)
+        assert copy_case.artifact_probe == _AppCopyProbe(spec.name)
+        assert "ufo-app-copy-capture.cjs" in copy_case.artifact_probe._command()
+        assert ".png" not in copy_case.artifact_probe._command()
+        assert copy_case.visual_rubric == ()
+        assert copy_case.artifact_rubric == ()
+        assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in copy_case.digest_tag
+        assert APP_DATA_DIGEST[:12] in copy_case.digest_tag
+
+
+def _copy_output(
+    spec: _ConnectedApp,
+    content: str,
+    *,
+    include_source_call: bool = True,
+) -> CapabilityOutput:
+    requirement = next(item for item in spec.requirements if item.rewrite_sources)
+    expected = _rewrite_source_call(requirement.rewrite_sources[0])
+    calls = [
+        ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+        ToolInvocation("list_external_tools", {}, "listed", has_result=True),
+        ToolInvocation(
+            "describe_external_tools",
+            {"source_id": expected.provider},
+            "described",
+            has_result=True,
+        ),
+    ]
+    if include_source_call:
+        calls.append(
+            ToolInvocation(
+                "call_external_tool",
+                {"source_id": expected.provider, "tool_name": expected.tool},
+                "called",
+                has_result=True,
+            )
+        )
+    calls.extend(
+        (
+            ToolInvocation("deploy_website", {}, "deployed", has_result=True),
+            ToolInvocation("set_homepage", {}, "bound", has_result=True),
+        )
+    )
+    visible = " ".join(
+        (*requirement.visible, *(alternatives[0] for alternatives in requirement.visible_any))
+    )
+    return CapabilityOutput(
+        "Built app",
+        tuple(calls),
+        artifacts=(
+            SharedArtifact(
+                f"{spec.name}-static.html", f"<main>{visible} {content}</main>".encode()
+            ),
+        ),
+    )
+
+
+async def test_copy_grader_requires_source_use_and_rejects_source_copy() -> None:
+    spec = CONNECTED_APPS[0]
+    requirement = next(item for item in spec.requirements if item.rewrite_sources)
+    source = spec._source_text(requirement.rewrite_sources[0])
+    grader = _copy_scorer(spec)
+
+    rewritten = await grader(_copy_output(spec, READER_REWRITES[spec.name]))
+    missing_source = await grader(
+        _copy_output(spec, READER_REWRITES[spec.name], include_source_call=False)
+    )
+    copied = await grader(_copy_output(spec, source))
+    lightly_edited = await grader(
+        _copy_output(
+            spec,
+            "Please leverage cross functional alignment to support the renewal motion.",
+        )
+    )
+
+    assert rewritten.passed, rewritten.reason
+    assert not missing_source.passed
+    assert "eval_email.list_emails proof" in missing_source.reason
+    assert not copied.passed
+    assert "copies source text" in copied.reason
+    assert not lightly_edited.passed
+    assert "keeps 9/10 source words" in lightly_edited.reason
+
+
+async def test_copy_case_ignores_visual_contrast_and_browser_qa_gates() -> None:
+    spec = CONNECTED_APPS[0]
+    case = COPY_CASES[0]
+
+    verdict = await case.grader(_copy_output(spec, READER_REWRITES[spec.name]))
+
+    assert verdict.passed, verdict.reason
+
+
+def _connected_requirement_output(
+    spec: _ConnectedApp, *, omit_call: bool = False, copy_source: bool = False
+) -> CapabilityOutput:
+    required = tuple(call for item in spec.requirements for call in item.calls)
+    calls = [ToolInvocation("list_external_tools", {}, "listed", has_result=True)]
+    for expected in required:
+        calls.append(
+            ToolInvocation(
+                "describe_external_tools",
+                {"source_id": expected.provider},
+                "described",
+                has_result=True,
+            )
+        )
+        calls.append(
+            ToolInvocation(
+                "call_external_tool",
+                {"source_id": expected.provider, "tool_name": expected.tool},
+                "called",
+                has_result=True,
+            )
+        )
+    if omit_call:
+        calls.pop()
+    visible = " ".join(
+        fact
+        for item in spec.requirements
+        for fact in (*item.visible, *(group[0] for group in item.visible_any))
+    )
+    if copy_source:
+        visible = f"{visible} {next(item for req in spec.requirements for item in req.absent)}"
+    return CapabilityOutput(
+        "Built app",
+        tuple(calls),
+        artifacts=(SharedArtifact(f"{spec.name}-static.html", f"<main>{visible}</main>".encode()),),
+    )
+
+
+async def test_connected_app_requirement_grader_checks_calls_facts_and_copy() -> None:
+    spec = CONNECTED_APPS[0]
+    grader = _requirement_scorer(spec)
+
+    passed = await grader(_connected_requirement_output(spec))
+    missing_call = await grader(_connected_requirement_output(spec, omit_call=True))
+    copied = await grader(_connected_requirement_output(spec, copy_source=True))
+    combined = await grader(_connected_requirement_output(spec, omit_call=True, copy_source=True))
+
+    assert passed.passed, passed.reason
+    assert passed.evidence["appSourcePassed"] == passed.evidence["appSourceTotal"]
+    assert not missing_call.passed
+    assert missing_call.evidence["appSourcePassed"] < missing_call.evidence["appSourceTotal"]
+    assert "proof" in missing_call.reason
+    assert not copied.passed
+    assert "copies source text" in copied.reason
+    assert not combined.passed
+    assert "proof" in combined.reason
+    assert "copies source text" in combined.reason
+
+
+async def test_connected_app_density_grader_checks_exact_facts_in_both_desktop_views() -> None:
+    spec = CONNECTED_APPS[0]
+    facts = tuple(
+        fact
+        for requirement in spec.requirements
+        for fact in (*requirement.visible, *(group[0] for group in requirement.visible_any))
+    )
+    report = loads(_measured())
+    for view in report["views"]:
+        if view["width"] == DESKTOP_WIDTH:
+            view["aboveFoldText"] = " ".join(facts)
+    output = CapabilityOutput(
+        "Built app",
+        (),
+        artifacts=(SharedArtifact(f"{spec.name}-audit.json", dumps(report).encode()),),
+    )
+
+    passed = await _above_fold_scorer(spec)(output)
+    assert passed.passed, passed.reason
+    assert passed.evidence["appDensityPassed"] == passed.evidence["appDensityTotal"]
+
+    missing_fact = facts[0]
+    report["views"][1]["aboveFoldText"] = report["views"][1]["aboveFoldText"].replace(
+        missing_fact, ""
+    )
+    failed = await _above_fold_scorer(spec)(
+        replace(
+            output,
+            artifacts=(SharedArtifact(f"{spec.name}-audit.json", dumps(report).encode()),),
+        )
+    )
+    assert not failed.passed
+    assert f"dark desktop lacks {missing_fact}" in failed.reason
+    assert failed.evidence["appDensityPassed"] < failed.evidence["appDensityTotal"]
+
+
+def test_source_copy_proof_catches_a_light_edit_and_allows_a_reader_rewrite() -> None:
+    source = "Please leverage cross-functional alignment to operationalize the renewal motion."
+    markers = ("leverage cross-functional alignment to operationalize the renewal motion",)
+
+    copied = _source_copy(
+        source,
+        markers,
+        ("Please leverage cross functional alignment to support the renewal motion.",),
+    )
+    rewritten = _source_copy(
+        source,
+        markers,
+        ("Confirm the SSO date before the renewal call.",),
+    )
+
+    assert copied == (source, 9, 10)
+    assert rewritten is None
+
+
+def test_every_copy_source_fails_and_every_reader_rewrite_passes() -> None:
+    checked = set()
+    for spec in CONNECTED_APPS:
+        for requirement in spec.requirements:
+            for path in requirement.rewrite_sources:
+                source = spec._source_text(path)
+                assert _source_copy(source, requirement.absent, (source,)) is not None
+                assert (
+                    _source_copy(source, requirement.absent, (READER_REWRITES[spec.name],)) is None
+                )
+                checked.add(spec.name)
+
+    assert checked == set(READER_REWRITES)
+
+
+async def test_connected_app_requirement_grader_rejects_a_light_source_edit() -> None:
+    spec = CONNECTED_APPS[0]
+    output = _connected_requirement_output(spec)
+    page = output.artifacts[0]
+    edited = (
+        page.content
+        + b"<p>Please leverage cross functional alignment to support the renewal motion.</p>"
+    )
+
+    verdict = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(SharedArtifact(page.name, edited),),
+        )
+    )
+
+    assert not verdict.passed
+    assert "keeps 9/10 source words" in verdict.reason
+
+
+async def test_connected_app_requirement_grader_accepts_one_visible_format() -> None:
+    spec = CONNECTED_APPS[0]
+    output = _connected_requirement_output(spec)
+    page = output.artifacts[0]
+    content = page.content.replace(b"12 August", b"Aug 12").replace(b"21 August", b"Aug 21")
+
+    verdict = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(SharedArtifact(page.name, content),),
+        )
+    )
+
+    assert verdict.passed, verdict.reason
+
+    missing = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(
+                SharedArtifact(
+                    page.name,
+                    page.content.replace(b"12 August", b"").replace(b"21 August", b""),
+                ),
+            ),
+        )
+    )
+    assert not missing.passed
+    assert "12 August or Aug 12" in missing.reason
+
+
+async def test_code_review_requirement_accepts_reader_safe_thread_count_copy() -> None:
+    spec = next(item for item in CONNECTED_APPS if item.name == "code-review-queue")
+    output = _connected_requirement_output(spec)
+    page = output.artifacts[0]
+    content = page.content.replace(b"2 unresolved", b"2 open threads")
+
+    verdict = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(SharedArtifact(page.name, content),),
+        )
+    )
+
+    assert verdict.passed, verdict.reason
+
+
+async def test_code_review_requirement_accepts_failed_check_and_labeled_thread_count() -> None:
+    spec = next(item for item in CONNECTED_APPS if item.name == "code-review-queue")
+    output = _connected_requirement_output(spec)
+    page = output.artifacts[0]
+    content = page.content.replace(b"failing", b"Failed").replace(
+        b"2 unresolved", b"Threads \xc2\xb7 Issue 2 \xc2\xb7 #602"
+    )
+
+    verdict = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(SharedArtifact(page.name, content),),
+        )
+    )
+
+    assert verdict.passed, verdict.reason
+
+
+async def test_issue_planner_requirement_accepts_reader_safe_intent_copy() -> None:
+    spec = next(item for item in CONNECTED_APPS if item.name == "issue-planner")
+    output = _connected_requirement_output(spec)
+    page = output.artifacts[0]
+    content = page.content.replace(b"Needs product", b"Product Decisions").replace(
+        b"Review plan in chat", b"Prepare Chat Intent"
+    )
+
+    verdict = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(SharedArtifact(page.name, content),),
+        )
+    )
+
+    assert verdict.passed, verdict.reason
+
+
+async def test_startup_metrics_requirement_accepts_stated_customer_churn() -> None:
+    spec = next(item for item in CONNECTED_APPS if item.name == "startup-metrics")
+    output = _connected_requirement_output(spec)
+    page = output.artifacts[0]
+    content = page.content.replace(b"16%", b"25.0%").replace(b"4 subscriptions", b"4 total")
+
+    verdict = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(SharedArtifact(page.name, content),),
+        )
+    )
+
+    assert verdict.passed, verdict.reason
+
+
+async def test_engineering_metrics_requirement_accepts_compact_hour_copy() -> None:
+    spec = next(item for item in CONNECTED_APPS if item.name == "engineering-metrics")
+    output = _connected_requirement_output(spec)
+    page = output.artifacts[0]
+    content = page.content.replace(b"10 hours", b"10h")
+
+    verdict = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(SharedArtifact(page.name, content),),
+        )
+    )
+
+    assert verdict.passed, verdict.reason
+
+
+async def test_account_health_requirement_accepts_direct_action_copy() -> None:
+    spec = next(item for item in CONNECTED_APPS if item.name == "account-health")
+    output = _connected_requirement_output(spec)
+    page = output.artifacts[0]
+    content = page.content.replace(b"Resolve invoice export", b"Own the invoice mismatch").replace(
+        b"Contact Dana", b"Call Dana"
+    )
+
+    verdict = await _requirement_scorer(spec)(
+        CapabilityOutput(
+            output.response,
+            output.calls,
+            artifacts=(SharedArtifact(page.name, content),),
+        )
+    )
+
+    assert verdict.passed, verdict.reason
+
+
+async def test_connected_app_seed_grants_sources_and_keeps_one_fixed_data_universe(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = uuid4()
+    member_id = uuid4()
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@evalco.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="google/gemini-3.7-flash",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    spec = CONNECTED_APPS[0]
+    with ws(workspace_id):
+        blob = WorkspaceBlobStore(FilesystemBlobStore(tmp_path))
+        await asyncio.gather(
+            _ConnectedAppSeed(spec)(workspace_id, agent_id, blob),
+            _ConnectedAppSeed(CONNECTED_APPS[1])(workspace_id, agent_id, blob),
+        )
+        stored = await ScopedStore(extension=EVAL_ENV_NAME).get(
+            f"{APP_FIXTURE_PREFIX}{DRIVE_PROVIDER}:list_documents"
+        )
+        async with workspace_tx() as connection:
+            providers = (
+                (
+                    await connection.execute(
+                        sa.select(tables.connection.c.provider).where(
+                            tables.connection.c.workspace_id == workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            fixture_rows = (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.ext_store)
+                    .where(
+                        tables.ext_store.c.workspace_id == workspace_id,
+                        tables.ext_store.c.extension == EVAL_ENV_NAME,
+                    )
+                )
+            ).scalar_one()
+            email_rows = (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(eval_env_email)
+                    .where(eval_env_email.c.workspace_id == workspace_id)
+                )
+            ).scalar_one()
+            event_rows = (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(eval_env_event)
+                    .where(eval_env_event.c.workspace_id == workspace_id)
+                )
+            ).scalar_one()
+
+    assert sorted(providers) == [
+        CALENDAR_PROVIDER,
+        EMAIL_PROVIDER,
+        GITHUB_PROVIDER,
+        DRIVE_PROVIDER,
+    ]
+    assert stored == APP_UNIVERSE_TOOLS[DRIVE_PROVIDER]["list_documents"]
+    assert isinstance(stored, dict)
+    documents = stored["documents"]
+    assert isinstance(documents, list)
+    assert len(documents) == sum(
+        len(case.tools.get(DRIVE_PROVIDER, {}).get("list_documents", {}).get("documents", []))
+        for case in CONNECTED_APPS
+    )
+    assert fixture_rows == sum(
+        len(APP_UNIVERSE_TOOLS[provider]) for provider in (DRIVE_PROVIDER, GITHUB_PROVIDER)
+    )
+    assert email_rows == len(APP_UNIVERSE_EMAILS)
+    assert event_rows == len(APP_UNIVERSE_EVENTS)
+
+
+def test_ufo_app_bench_rubric_asks_only_for_visible_design_judgments() -> None:
     assert all("legible" not in criterion for criterion in HOUSE_CRITERIA)
     assert all("clipped" not in criterion for criterion in HOUSE_CRITERIA)
-
-    for step in PALETTE_STEPS:
-        declared = _declarations(step)
-        assert declared in palette
-        assert declared.partition(": ")[2] in tokens
-
-    assert _declarations("--radius") == "--radius: 0.25rem"
-    with pytest.raises(KeyError):
-        _declarations("--bkgd-400")
+    assert all("tokens.css" not in criterion for criterion in HOUSE_CRITERIA)
+    assert all("licensed" not in criterion for criterion in HOUSE_CRITERIA)
+    assert any("Judge each image independently" in criterion for criterion in HOUSE_CRITERIA)
+    assert any("minor radius differences" in criterion for criterion in HOUSE_CRITERIA)

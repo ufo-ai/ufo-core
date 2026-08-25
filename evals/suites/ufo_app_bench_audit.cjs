@@ -119,6 +119,63 @@ function measure(floor) {
     });
   }
 
+  const visibleAboveFold = (element, box) => {
+    if (
+      box.width === 0 ||
+      box.height === 0 ||
+      box.bottom <= 0 ||
+      box.top >= window.innerHeight ||
+      box.right <= 0 ||
+      box.left >= window.innerWidth
+    ) {
+      return false;
+    }
+    const closedDetails = element.closest('details:not([open])');
+    if (closedDetails) {
+      const summary = element.closest('summary');
+      if (!summary || summary.parentElement !== closedDetails) return false;
+    }
+    for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+      const style = getComputedStyle(ancestor);
+      const ancestorBox = ancestor.getBoundingClientRect();
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+      if (style.contentVisibility === 'hidden') return false;
+      if (parseFloat(style.opacity) < 0.15) return false;
+      if (visuallyHidden(ancestor, style, ancestorBox)) return false;
+      if (
+        style.overflowX !== 'visible' &&
+        (box.right <= ancestorBox.left || box.left >= ancestorBox.right)
+      ) {
+        return false;
+      }
+      if (
+        style.overflowY !== 'visible' &&
+        (box.bottom <= ancestorBox.top || box.top >= ancestorBox.bottom)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const hiddenText = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const element = node.parentElement;
+    if (!element) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const box = range.getBoundingClientRect();
+    if (!visibleAboveFold(element, box)) hiddenText.push([node, node.data]);
+  }
+  for (const [node] of hiddenText) node.data = '';
+  let aboveFoldText;
+  try {
+    aboveFoldText = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 40000);
+  } finally {
+    for (const [node, value] of hiddenText) node.data = value;
+  }
+
   const wider = [];
   const clipped = [];
   for (const element of document.querySelectorAll('*')) {
@@ -146,6 +203,7 @@ function measure(floor) {
     textChecked: checked,
     textUnderFloor: underFloor,
     text,
+    aboveFoldText,
     pastViewport: wider.slice(0, 12),
     clipped: clipped.slice(0, 8),
   };

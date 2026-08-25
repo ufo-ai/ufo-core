@@ -1,7 +1,7 @@
 # ufo application QA
 
-Use this path for a direct HTML, CSS, and JavaScript application homepage. It keeps full browser
-proof in a small number of model turns. Read `12-playwright-interactive.md` as well only when the
+Use this path for an application homepage. It keeps full browser proof in a small number of model
+turns. Read `12-playwright-interactive.md` as well only when the
 application has multi-page routing, authentication, realtime behavior, or motion that needs its
 extended checks.
 

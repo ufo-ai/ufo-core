@@ -76,6 +76,14 @@ ALL_GRANTS = (
     (env.CODE_PROVIDER, env.CODE_HOST),
 )
 
+APP_GRANTS = (
+    (env.DRIVE_PROVIDER, env.DRIVE_HOST),
+    (env.GITHUB_PROVIDER, env.GITHUB_HOST),
+    (env.STRIPE_PROVIDER, env.STRIPE_HOST),
+    (env.HUBSPOT_PROVIDER, env.HUBSPOT_HOST),
+    (env.GREENHOUSE_PROVIDER, env.GREENHOUSE_HOST),
+)
+
 
 def _ctx(workspace_id: UUID, grants: tuple[tuple[str, str], ...] = ALL_GRANTS) -> ToolContext:
     return ToolContext(
@@ -289,6 +297,52 @@ async def test_describe_exposes_the_catalog_schemas() -> None:
     )
     schema = _payload(result)["schemas"]["send_email"]
     assert set(schema["input_schema"]["properties"]) == {"to", "subject", "body"}
+
+
+async def test_app_providers_return_only_the_seeded_tool_response(db: None) -> None:
+    workspace_id = await _workspace()
+    fixture = {"issues": [{"number": 42, "title": "Fix billing export"}]}
+    with ws(workspace_id):
+        await ScopedStore(extension=env.NAME).put(
+            f"{env.APP_FIXTURE_PREFIX}{env.GITHUB_PROVIDER}:list_issues", fixture
+        )
+        result = await call_external_tool(
+            _ctx(workspace_id, APP_GRANTS),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name="list_issues",
+                source_id=env.GITHUB_PROVIDER,
+                arguments={},
+            ),
+        )
+
+    assert _payload(result) == fixture
+
+
+async def test_an_unseeded_app_tool_fails_loud(db: None) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id), pytest.raises(ValueError, match="no app fixture is seeded"):
+        await call_external_tool(
+            _ctx(workspace_id, APP_GRANTS),
+            CallExternalToolInput(
+                user_description=TOOL_NARRATION,
+                tool_name="list_pull_requests",
+                source_id=env.GITHUB_PROVIDER,
+                arguments={},
+            ),
+        )
+
+
+def test_app_provider_catalog_covers_every_fixture_source() -> None:
+    providers = {connector.oauth.provider for connector in env.manifest().connectors}
+
+    assert {
+        "eval_google_drive",
+        "eval_github",
+        "eval_stripe",
+        "eval_hubspot",
+        "eval_greenhouse",
+    } <= providers
 
 
 async def test_call_without_a_grant_fails_loud() -> None:

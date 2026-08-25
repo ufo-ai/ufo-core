@@ -339,9 +339,11 @@ def test_ufo_application_homepages_bind_only_after_browser_proof_and_deploy() ->
     assert PLAYWRIGHT_GUIDANCE not in application
     assert "set_homepage" in application
     assert application.index("browser QA") < application.index("deploy_website")
+    assert "each requested fact" in application
+    assert "initial and changed state" in application
+    assert "Do not put the contract in the page or a separate file" in application
     assert application.index("deploy_website") < application.index("set_homepage")
     assert "visible state" in application
-    assert "Do not call `build_website`" in application
 
 
 def test_interactive_internal_homepages_route_to_the_application_workflow() -> None:

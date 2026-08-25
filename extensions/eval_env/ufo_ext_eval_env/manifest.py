@@ -1,15 +1,13 @@
-"""The deterministic eval environment: a mailbox, a calendar, and a code index the agent reaches
+"""The deterministic eval environment: fixed workplace services the agent reaches
 only through the real connector dispatch (`list_external_tools` → `describe_external_tools` →
 `call_external_tool`), backed by the extension's own workspace-scoped storage. Evals seed that
 storage, run a conversation, and assert the end state on the same rows the broker mutated — a
 controllable domain over the production seam, never a mock of it. The providers ride the
 `assistant_eval` pack only; a product pack never lists them.
 
-The mailbox and calendar own tables because a case mutates them. The code index owns none: a search
-response is read-only, and what a case under test turns on is the response's exact bytes — which
-side of the inline budget it lands on, and where the offload preview cuts — so the eval authors the
-whole response and seeds it under its query. It cannot ride the call's arguments instead: no agent
-types 30 KB of JSON to make a tool call."""
+The mailbox and calendar own tables because a case mutates them. Read-only provider responses live
+in the scoped store under exact provider and tool keys. A missing response fails loud, so an eval
+cannot pass against data it did not seed."""
 
 from __future__ import annotations
 
@@ -46,6 +44,22 @@ CODE_PROVIDER = "eval_code_search"
 CODE_LABEL = "Code Search (eval)"
 CODE_HOST = "code.evalenv.test"
 CODE_FIXTURE_PREFIX = "code_search:"
+DRIVE_PROVIDER = "eval_google_drive"
+DRIVE_LABEL = "Google Drive (eval)"
+DRIVE_HOST = "drive.evalenv.test"
+GITHUB_PROVIDER = "eval_github"
+GITHUB_LABEL = "GitHub (eval)"
+GITHUB_HOST = "github.evalenv.test"
+STRIPE_PROVIDER = "eval_stripe"
+STRIPE_LABEL = "Stripe (eval)"
+STRIPE_HOST = "stripe.evalenv.test"
+HUBSPOT_PROVIDER = "eval_hubspot"
+HUBSPOT_LABEL = "HubSpot (eval)"
+HUBSPOT_HOST = "hubspot.evalenv.test"
+GREENHOUSE_PROVIDER = "eval_greenhouse"
+GREENHOUSE_LABEL = "Greenhouse (eval)"
+GREENHOUSE_HOST = "greenhouse.evalenv.test"
+APP_FIXTURE_PREFIX = "app_fixture:"
 ACCOUNT_ID = "eval-env-account"
 OWN_ADDRESS = "assistant@evalco.test"
 MAX_LIST_LIMIT = 50
@@ -165,6 +179,81 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             input_schema=SearchCodeArgs.model_json_schema(),
         ),
     ),
+    DRIVE_PROVIDER: (
+        BrokerTool(
+            slug="list_documents",
+            description="List the connected Drive documents with their text content.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+    ),
+    GITHUB_PROVIDER: (
+        BrokerTool(
+            slug="list_issues",
+            description="List repository issues with labels, owners, status, and source links.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        BrokerTool(
+            slug="list_pull_requests",
+            description="List pull requests with review, check, issue, and merge state.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        BrokerTool(
+            slug="list_members",
+            description="List repository members with ownership areas and current load.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        BrokerTool(
+            slug="get_delivery_metrics",
+            description="Get pull-request delivery metrics and their reporting window.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+    ),
+    STRIPE_PROVIDER: (
+        BrokerTool(
+            slug="list_subscriptions",
+            description="List subscriptions with customer, status, amount, and interval.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        BrokerTool(
+            slug="list_invoices",
+            description="List invoices with amount, status, customer, and billing date.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        BrokerTool(
+            slug="list_balance_transactions",
+            description="List balance transactions with net amount, fee, type, and date.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+    ),
+    HUBSPOT_PROVIDER: (
+        BrokerTool(
+            slug="list_companies",
+            description="List customer companies with owner, lifecycle stage, and activity.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        BrokerTool(
+            slug="list_deals",
+            description="List customer deals with amount, stage, close date, and company.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        BrokerTool(
+            slug="list_tickets",
+            description="List customer tickets with priority, state, age, and company.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+    ),
+    GREENHOUSE_PROVIDER: (
+        BrokerTool(
+            slug="list_candidates",
+            description="List candidates with role, stage, interviews, and source.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        BrokerTool(
+            slug="list_scorecards",
+            description="List submitted interview scorecards with ratings and evidence.",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+    ),
 }
 
 
@@ -242,6 +331,20 @@ class EvalEnvBroker:
                     )
         if provider == CODE_PROVIDER and slug == "search_code":
             return await self._search_code(SearchCodeArgs.model_validate(arguments))
+        if provider in {
+            DRIVE_PROVIDER,
+            GITHUB_PROVIDER,
+            STRIPE_PROVIDER,
+            HUBSPOT_PROVIDER,
+            GREENHOUSE_PROVIDER,
+        }:
+            if arguments:
+                raise ValueError(f"{provider}.{slug} accepts no arguments")
+            await self.schema(workspace_id, provider, slug)
+            seeded = await ScopedStore(extension=NAME).get(f"{APP_FIXTURE_PREFIX}{provider}:{slug}")
+            if not isinstance(seeded, dict):
+                raise ValueError(f"no app fixture is seeded for {provider}.{slug}")
+            return dict(seeded)
         raise UnknownBrokerTool(slug)
 
     async def _search_code(self, args: SearchCodeArgs) -> dict[str, object]:
@@ -444,6 +547,31 @@ def manifest() -> Manifest:
             ConnectorProvider(
                 oauth=_EvalEnvOAuth(CODE_PROVIDER, CODE_HOST),
                 label=CODE_LABEL,
+                broker=broker,
+            ),
+            ConnectorProvider(
+                oauth=_EvalEnvOAuth(DRIVE_PROVIDER, DRIVE_HOST),
+                label=DRIVE_LABEL,
+                broker=broker,
+            ),
+            ConnectorProvider(
+                oauth=_EvalEnvOAuth(GITHUB_PROVIDER, GITHUB_HOST),
+                label=GITHUB_LABEL,
+                broker=broker,
+            ),
+            ConnectorProvider(
+                oauth=_EvalEnvOAuth(STRIPE_PROVIDER, STRIPE_HOST),
+                label=STRIPE_LABEL,
+                broker=broker,
+            ),
+            ConnectorProvider(
+                oauth=_EvalEnvOAuth(HUBSPOT_PROVIDER, HUBSPOT_HOST),
+                label=HUBSPOT_LABEL,
+                broker=broker,
+            ),
+            ConnectorProvider(
+                oauth=_EvalEnvOAuth(GREENHOUSE_PROVIDER, GREENHOUSE_HOST),
+                label=GREENHOUSE_LABEL,
                 broker=broker,
             ),
         ),

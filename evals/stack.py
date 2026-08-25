@@ -44,6 +44,7 @@ from ufo.sandbox.session import (
 RUNS_ROOT = Path(".local/evals")
 DEFAULT_OUT = Path("eval-reports")
 STACK_OWNER_EMAIL = "evals@localhost"
+APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy"})
 POSTGRES_NAME_LIMIT = 63
 READY_DEADLINE_SECONDS = 180.0
 READY_POLL_SECONDS = 0.5
@@ -286,6 +287,7 @@ class EvalStack:
             await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
             await self._preflight()
             readiness = await self._seed()
+            await self._prepare_app_eval()
             serve: asyncio.subprocess.Process | None = None
             egress: asyncio.subprocess.Process | None = None
             try:
@@ -366,6 +368,23 @@ class EvalStack:
         )
         stdout, _ = await materialize.communicate()
         return materialize_readiness(materialize.returncode, stdout, self._log_path("seed"))
+
+    async def _prepare_app_eval(self) -> None:
+        only = argparse.ArgumentParser(add_help=False)
+        only.add_argument("--only", nargs="*", default=())
+        selected, _ = only.parse_known_args(self.spec.args)
+        if APP_SUITES.isdisjoint(selected.only):
+            return
+        prepare = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "evals.suites.ufo_app_prepare",
+            cwd=self.repo_root,
+            env=self.env,
+            stdout=self.seed_log,
+            stderr=self.seed_log,
+        )
+        await self._checked(prepare, "seed")
 
     def _seed_args(self) -> tuple[str, ...]:
         argv = ["init", "--email", STACK_OWNER_EMAIL]

@@ -1,13 +1,16 @@
 import asyncio
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 import asyncpg
 import pytest
+import sqlalchemy as sa
 import tomli_w
 from pydantic import ValidationError
 from sqlalchemy import make_url
+from ufo_testsupport.migrations import apply_cached_migrations
 from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
 import evals.stack as eval_stack
@@ -21,8 +24,16 @@ from evals.stack import (
     materialize_readiness,
     template_config,
 )
+from evals.suites.ufo_app_prepare import (
+    HOMEPAGE_SEED_PREFIX,
+    SETTLED_MARKER,
+    WEB_EXTENSION,
+    prepare_app_eval,
+)
 from ufo.config import Config
+from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.proxy_serve import OWNER_DSN_ENV
+from ufo.schema import tables
 
 
 class _ExitedProcess:
@@ -402,6 +413,177 @@ class _DoneProcess:
 
     async def wait(self) -> int:
         return 0
+
+
+async def test_app_eval_preparation_settles_each_agent_and_is_idempotent(tmp_path: Path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'ufo.db'}"
+    apply_cached_migrations(database_url)
+    config = Config.model_validate(
+        tomllib.loads(SQLITE_TEMPLATE.replace("sqlite+aiosqlite:///ufo.db", database_url))
+    )
+    workspace_id = UUID("11111111-2222-3333-4444-555555555555")
+    agent_ids = (
+        UUID("aaaaaaaa-1111-2222-3333-444444444444"),
+        UUID("bbbbbbbb-1111-2222-3333-444444444444"),
+    )
+    init_db(database_url)
+    try:
+        now = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(id=workspace_id, created_at=now, updated_at=now)
+            )
+            await connection.execute(
+                sa.insert(tables.agent),
+                [
+                    {
+                        "id": agent_id,
+                        "workspace_id": workspace_id,
+                        "name": f"agent-{index}",
+                        "prompt": "p",
+                        "model": "m",
+                        "is_main": index == 0,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                    for index, agent_id in enumerate(agent_ids)
+                ],
+            )
+    finally:
+        await dispose_db()
+
+    await prepare_app_eval(config)
+    await prepare_app_eval(config)
+
+    init_db(database_url)
+    try:
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.ext_store.c.extension,
+                        tables.ext_store.c.key,
+                        tables.ext_store.c.value,
+                    ).order_by(tables.ext_store.c.key)
+                )
+            ).all()
+    finally:
+        await dispose_db()
+    assert rows == [
+        (WEB_EXTENSION, f"{HOMEPAGE_SEED_PREFIX}{agent_id}", SETTLED_MARKER)
+        for agent_id in agent_ids
+    ]
+
+
+async def test_only_app_suites_run_the_homepage_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    calls: list[tuple[str, ...]] = []
+
+    async def create(*argv: str, **_: object) -> _DoneProcess:
+        calls.append(argv)
+        return _DoneProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+    for label, args in (
+        ("copy", ("--only", "ufo-app-copy", "--case", "copy-meeting-tasks")),
+        ("bench", ("--only=ufo-app-bench",)),
+        ("other", ("--only", "basics")),
+    ):
+        stack = EvalStack.provision(
+            RunSpec(label=label, config=template, args=args),
+            root=tmp_path / label,
+            out=tmp_path / "archive",
+            repo_root=tmp_path,
+        )
+        await stack._prepare_app_eval()
+        _close(stack)
+
+    assert [call[2] for call in calls] == [
+        "evals.suites.ufo_app_prepare",
+        "evals.suites.ufo_app_prepare",
+    ]
+
+
+def test_app_eval_preparation_matches_the_web_homepage_job() -> None:
+    from ufo_ext_web import surface as web_surface
+
+    assert WEB_EXTENSION == "web"
+    assert HOMEPAGE_SEED_PREFIX == web_surface.HOMEPAGE_SEED_PREFIX
+
+
+async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="app", config=template, args=("--only", "ufo-app-copy")),
+        root=tmp_path / "app",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    events: list[str] = []
+
+    async def no_databases(self: EvalStack) -> None:
+        return None
+
+    async def done_ufoctl(self: EvalStack, *argv: str, log: object) -> _DoneProcess:
+        return _DoneProcess()
+
+    async def preflight(self: EvalStack) -> None:
+        return None
+
+    async def seed(self: EvalStack) -> None:
+        events.append("seed")
+
+    async def prepare(self: EvalStack) -> None:
+        events.append("prepare")
+
+    async def serve(self: EvalStack) -> _DoneProcess:
+        events.append("serve")
+        return _DoneProcess()
+
+    async def egress(self: EvalStack, binary: Path) -> _DoneProcess:
+        return _DoneProcess()
+
+    async def ready(self: EvalStack, process: _DoneProcess) -> None:
+        return None
+
+    async def drive(
+        self: EvalStack,
+        serve_process: _DoneProcess,
+        egress_process: _DoneProcess,
+        readiness: Path | None,
+    ) -> int:
+        return 0
+
+    async def shutdown(
+        self: EvalStack,
+        serve_process: _DoneProcess,
+        egress_process: _DoneProcess | None = None,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(eval_stack, "_egress_binary", lambda _: tmp_path / "ufo-egress")
+    monkeypatch.setattr(EvalStack, "_create_databases", no_databases)
+    monkeypatch.setattr(EvalStack, "_ufoctl", done_ufoctl)
+    monkeypatch.setattr(EvalStack, "_preflight", preflight)
+    monkeypatch.setattr(EvalStack, "_seed", seed)
+    monkeypatch.setattr(EvalStack, "_prepare_app_eval", prepare)
+    monkeypatch.setattr(EvalStack, "_start_serve", serve)
+    monkeypatch.setattr(EvalStack, "_start_egress", egress)
+    monkeypatch.setattr(EvalStack, "_ready", ready)
+    monkeypatch.setattr(EvalStack, "_egress_ready", ready)
+    monkeypatch.setattr(EvalStack, "_drive", drive)
+    monkeypatch.setattr(EvalStack, "_shutdown", shutdown)
+
+    result = await stack.run(asyncio.Lock())
+
+    assert result.passed
+    assert events == ["seed", "prepare", "serve"]
 
 
 def test_issue_recall_spec_needs_a_collector_endpoint_but_no_postgres(

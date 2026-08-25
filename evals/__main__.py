@@ -182,12 +182,13 @@ MCP_ATLAS_JOB = "evals:mcp_atlas"
 MCP_ATLAS_URL_ENV = "MCP_ATLAS_URL"
 MCP_ATLAS_EXTERNAL_URL_ENV = "MCP_ATLAS_EXTERNAL_URL"
 MCP_ATLAS_TIMEOUT_SECONDS = 1_800.0
+UFO_APP_TASKS = ("ufo-app-bench", "ufo-app-copy")
 
 
 def _task_workflow_wait_seconds(tasks: tuple[EvalTask, ...]) -> float:
     if tasks and all(task.name == "document_visual" for task in tasks):
         return DOCUMENT_VISUAL_WORKFLOW_WAIT_SECONDS
-    if tasks and all(task.name == "ufo-app-bench" for task in tasks):
+    if tasks and all(task.name in UFO_APP_TASKS for task in tasks):
         return UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
     return WORKFLOW_WAIT_SECONDS
 
@@ -584,11 +585,11 @@ def main(argv: list[str] | None = None) -> None:
             f"handbook grades the conversation workspace on the host, so it requires "
             f"[sandbox] backend in {HANDBOOK_BACKENDS}, found {config.sandbox.backend!r}"
         )
-    if any(task.name == "ufo-app-bench" for task in tasks) and (
+    if any(task.name in UFO_APP_TASKS for task in tasks) and (
         config.sandbox.backend not in UFO_APP_BENCH_BACKENDS
     ):
         parser.error(
-            f"ufo-app-bench requires [sandbox] backend in {UFO_APP_BENCH_BACKENDS}, "
+            f"ufo app suites require [sandbox] backend in {UFO_APP_BENCH_BACKENDS}, "
             f"found {config.sandbox.backend!r}"
         )
     for task in tasks:
@@ -855,7 +856,7 @@ async def _run(
                     workspace_probe_for=(
                         AppBenchWorkspaceProbe
                         if config.sandbox.backend in UFO_APP_BENCH_BACKENDS
-                        and any(task.name == "ufo-app-bench" for task in tasks)
+                        and any(task.name in UFO_APP_TASKS for task in tasks)
                         else None
                     ),
                 )

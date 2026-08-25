@@ -53,12 +53,14 @@ Show what the application does, what it watches, its recent work, and what it ne
 Give the primary workflow at least two accessible controls. Each control must produce a visible
 state change with the supplied or clearly synthetic data.
 
-Use the house style and direct HTML, CSS, and JavaScript unless the homepage needs a backend. Read
-`shared/13-ufo-application-qa.md`, run its batched browser QA, and fix failures until each action
-produces its expected visible state without a console error or horizontal overflow.
+Before writing files, make one compact build contract in working memory. List each requested fact
+with its exact supplied value, each supplied passage that needs reader copy, each control with its
+initial and changed state, and the deployment and homepage-binding steps. Audit the rendered page
+against the contract before browser QA. Do not put the contract in the page or a separate file.
 
-Build this workflow directly. Do not call `build_website`: that profile repeats the complete build,
-browser QA, deployment, and homepage binding that remain yours.
+Use the house style. Read `shared/13-ufo-application-qa.md`, run its batched browser QA, and fix
+failures until each action produces its expected visible state without a console error or
+horizontal overflow.
 
 After browser QA passes, run `deploy_website`. For the first homepage, pass the exact site object
 name from that result to `set_homepage`. To update the bound homepage, deploy the same site name;

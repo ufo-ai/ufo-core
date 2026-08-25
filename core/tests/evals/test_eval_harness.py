@@ -287,11 +287,12 @@ def test_first_run_refuses_to_run_outside_a_pack_that_carries_the_skill(
     )
 
 
-def test_ufo_app_bench_is_explicit_and_refuses_the_local_sandbox(
+def test_ufo_app_suites_are_explicit_and_refuse_the_local_sandbox(
     tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert "ufo-app-bench" not in {task.name for task in selected_run_tasks()}
+    assert not {"ufo-app-bench", "ufo-app-copy"} & {task.name for task in selected_run_tasks()}
     assert [task.name for task in selected_run_tasks(("ufo-app-bench",))] == ["ufo-app-bench"]
+    assert [task.name for task in selected_run_tasks(("ufo-app-copy",))] == ["ufo-app-copy"]
     monkeypatch.setattr(
         "evals.__main__.load_config",
         lambda: SimpleNamespace(
@@ -304,7 +305,15 @@ def test_ufo_app_bench_is_explicit_and_refuses_the_local_sandbox(
         eval_main(["--only", "ufo-app-bench", "--out", str(tmp_path)])
 
     assert (
-        "ufo-app-bench requires [sandbox] backend in ('docker',), found 'local'"
+        "ufo app suites require [sandbox] backend in ('docker',), found 'local'"
+        in capsys.readouterr().err
+    )
+
+    with pytest.raises(SystemExit):
+        eval_main(["--only", "ufo-app-copy", "--out", str(tmp_path)])
+
+    assert (
+        "ufo app suites require [sandbox] backend in ('docker',), found 'local'"
         in capsys.readouterr().err
     )
 
@@ -328,6 +337,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["document_visual"].simulator_model is None
     assert tasks["ufo-app-bench"].judge_model == VISUAL_JUDGE_MODEL
     assert tasks["ufo-app-bench"].simulator_model is None
+    assert tasks["ufo-app-copy"].judge_model is None
+    assert tasks["ufo-app-copy"].simulator_model is None
     assert tasks["response_register"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["response_register"].simulator_model is None
     assert tasks["response_formatting"].judge_model == SEMANTIC_JUDGE_MODEL
@@ -368,6 +379,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "new_application",
             "document_visual",
             "ufo-app-bench",
+            "ufo-app-copy",
             "response_register",
             "response_formatting",
             "delegated_response_register",
@@ -387,6 +399,13 @@ def test_ufo_app_bench_uses_its_screen_build_wait_bound() -> None:
 
     assert _task_workflow_wait_seconds((tasks["ufo-app-bench"],)) == (
         UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
+    )
+    assert _task_workflow_wait_seconds((tasks["ufo-app-copy"],)) == (
+        UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
+    )
+    assert (
+        _task_workflow_wait_seconds((tasks["ufo-app-bench"], tasks["ufo-app-copy"]))
+        == UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
     )
     assert _task_workflow_wait_seconds((tasks["ufo-app-bench"], tasks["basics"])) == (
         DEFAULT_WORKFLOW_WAIT_SECONDS

@@ -1,0 +1,596 @@
+{
+  "cases": [
+    {
+      "name": "pre-meeting-briefs",
+      "source_apps": ["meeting-briefs"],
+      "request": "Build an interactive pre-meeting briefs homepage for my next three meetings.",
+      "emails": [
+        {
+          "folder": "inbox",
+          "sender": "maya@northstar.example",
+          "recipients": ["member@evalco.test"],
+          "subject": "Northstar renewal and SSO",
+          "body": "We can renew at $48,000 if SSO is committed by 18 September. Jordan owns the security review. Please leverage cross-functional alignment to operationalize the renewal motion.",
+          "sent_at": "2026-08-21T16:20:00+00:00"
+        },
+        {
+          "folder": "inbox",
+          "sender": "dana@evalco.test",
+          "recipients": ["member@evalco.test"],
+          "subject": "Design sync decisions",
+          "body": "The team moved the first-run launch to 14 September. The personal-domain login issue still needs a decision.",
+          "sent_at": "2026-08-21T18:10:00+00:00"
+        },
+        {
+          "folder": "inbox",
+          "sender": "investor@transpose.example",
+          "recipients": ["member@evalco.test"],
+          "subject": "Monday update review",
+          "body": "Please cover the 100-person waitlist, weekly burn, and what changed in activation.",
+          "sent_at": "2026-08-20T20:00:00+00:00"
+        }
+      ],
+      "events": [
+        {
+          "title": "Northstar renewal",
+          "start": "2026-08-24T16:00:00+00:00",
+          "end": "2026-08-24T16:30:00+00:00",
+          "attendees": ["maya@northstar.example", "jordan@northstar.example"],
+          "status": "confirmed"
+        },
+        {
+          "title": "Product design sync",
+          "start": "2026-08-24T18:00:00+00:00",
+          "end": "2026-08-24T18:50:00+00:00",
+          "attendees": ["dana@evalco.test", "priya@evalco.test"],
+          "status": "confirmed"
+        },
+        {
+          "title": "Investor update review",
+          "start": "2026-08-24T21:00:00+00:00",
+          "end": "2026-08-24T21:30:00+00:00",
+          "attendees": ["investor@transpose.example"],
+          "status": "confirmed"
+        }
+      ],
+      "tools": {
+        "eval_google_drive": {
+          "list_documents": {
+            "coverage": [
+              {"meeting": "Northstar renewal", "status": "notes found", "latest": "2026-08-12"},
+              {"meeting": "Product design sync", "status": "notes found", "latest": "2026-08-21"},
+              {"meeting": "Investor update review", "status": "no prior meeting notes", "latest": null}
+            ],
+            "documents": [
+              {
+                "id": "doc-northstar",
+                "title": "Northstar call notes - 12 August",
+                "updated_at": "2026-08-12T17:00:00+00:00",
+                "text": "Maya needs SSO before renewal. Jordan will send the security checklist. We promised an implementation date at the next call.",
+                "source": "Meet transcript",
+                "summary_status": "available"
+              },
+              {
+                "id": "doc-design",
+                "title": "Product design sync - 21 August",
+                "updated_at": "2026-08-21T19:00:00+00:00",
+                "text": "Decision: move the new application button to the page foot. Open: personal-domain login policy.",
+                "source": "Meeting notes",
+                "summary_status": "available"
+              }
+            ]
+          }
+        },
+        "eval_github": {
+          "list_issues": {
+            "repository": "evalco/app",
+            "issues": [
+              {"number": 2040, "title": "Decide personal-domain login policy", "state": "open", "owner": "member"},
+              {"number": 2042, "title": "Move new application button to page foot", "state": "closed", "owner": "dana"},
+              {"number": 2077, "title": "Northstar SSO security review", "state": "open", "owner": "priya"}
+            ]
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use the connected calendar, email, Drive, and GitHub accounts as the sources.",
+          "calls": [
+            {"provider": "eval_calendar", "tool": "list_events"},
+            {"provider": "eval_email", "tool": "list_emails"},
+            {"provider": "eval_google_drive", "tool": "list_documents"},
+            {"provider": "eval_github", "tool": "list_issues"}
+          ]
+        },
+        {
+          "prompt": "For each meeting, show the time, attendees, prior context, live work, and three useful points to raise.",
+          "visible": ["Northstar renewal", "Product design sync", "Investor update review", "$48,000", "18 September", "#2040", "#2042", "100-person waitlist"]
+        },
+        {
+          "prompt": "Make source age and missing or uncertain information clear.",
+          "visible": ["Drive", "GitHub"],
+          "visible_any": [["12 August", "Aug 12"], ["21 August", "Aug 21"]]
+        },
+        {
+          "prompt": "Rewrite source notes into short reader language instead of copying internal business phrasing.",
+          "visible": ["SSO", "renewal"],
+          "rewrite_sources": ["/emails/0/body"],
+          "absent": ["leverage cross-functional alignment to operationalize the renewal motion"]
+        }
+      ]
+    },
+    {
+      "name": "meeting-tasks",
+      "source_apps": ["meeting-scribe-home"],
+      "request": "Build an interactive meeting-tasks homepage from the latest call transcript.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_google_drive": {
+          "list_documents": {
+            "documents": [
+              {
+                "id": "transcript-aug-24",
+                "title": "Customer launch review transcript",
+                "updated_at": "2026-08-24T17:05:00+00:00",
+                "text": "Dana: The billing cutover date is 2 September. I will post it by Tuesday. Priya: I will update the support runbook by Friday 28 August. Jordan: I need the final SSO scope before I can finish the checklist. Decision: the launch remains 14 September. We should circle back and socialize these action-oriented takeaways across the stakeholder group.",
+                "source": "Google Meet transcript",
+                "duration_minutes": 47,
+                "speakers": ["Dana", "Priya", "Jordan"]
+              }
+            ]
+          }
+        },
+        "eval_github": {
+          "list_issues": {
+            "repository": "evalco/app",
+            "issues": [
+              {"number": 410, "title": "Publish billing cutover date", "state": "open", "owner": "dana"},
+              {"number": 412, "title": "Confirm SSO launch scope", "state": "open", "owner": "jordan"},
+              {"number": 399, "title": "Update old support contacts", "state": "closed", "owner": "priya"}
+            ]
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use the connected Drive transcript and current GitHub issues.",
+          "calls": [
+            {"provider": "eval_google_drive", "tool": "list_documents"},
+            {"provider": "eval_github", "tool": "list_issues"}
+          ]
+        },
+        {
+          "prompt": "Separate decisions, matched existing issues, and proposed new issues with owner, due date, and transcript evidence.",
+          "visible": ["14 September", "#410", "#412", "Dana", "Priya", "Friday 28 August", "billing cutover", "support runbook", "SSO scope"]
+        },
+        {
+          "prompt": "Let me approve or skip proposed issues, but do not create issues outside chat approval.",
+          "visible": ["Approve", "Skip", "chat"]
+        },
+        {
+          "prompt": "Rewrite the transcript into concise task copy without its meeting filler.",
+          "visible": ["2 September", "support runbook"],
+          "rewrite_sources": ["/tools/eval_google_drive/list_documents/documents/0/text"],
+          "absent": ["circle back and socialize these action-oriented takeaways across the stakeholder group"]
+        }
+      ]
+    },
+    {
+      "name": "issue-owner",
+      "source_apps": ["intake-watcher-homepage", "issue-fixer-home"],
+      "request": "Build an interactive issue-owner homepage for newly opened GitHub issues.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_github": {
+          "list_issues": {
+            "repository": "evalco/app",
+            "captured_at": "2026-08-24T18:00:00+00:00",
+            "issues": [
+              {"number": 521, "title": "Webhook retries lose delivery order", "labels": ["platform", "urgent"], "state": "open", "owner": null, "age_hours": 19, "project_status": "Triage"},
+              {"number": 522, "title": "Billing export omits refund fees", "labels": ["billing"], "state": "open", "owner": null, "age_hours": 7, "project_status": "Triage"},
+              {"number": 523, "title": "Mobile settings spacing", "labels": ["frontend"], "state": "open", "owner": "dana", "age_hours": 3}
+            ]
+          },
+          "list_members": {
+            "members": [
+              {"login": "alex", "areas": ["platform", "queues"], "open_issues": 2, "timezone": "America/Los_Angeles"},
+              {"login": "priya", "areas": ["billing", "payments"], "open_issues": 1, "timezone": "America/New_York"},
+              {"login": "dana", "areas": ["frontend", "design systems"], "open_issues": 6, "timezone": "Europe/London"}
+            ]
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use connected GitHub issues and repository-member ownership data.",
+          "calls": [
+            {"provider": "eval_github", "tool": "list_issues"},
+            {"provider": "eval_github", "tool": "list_members"}
+          ]
+        },
+        {
+          "prompt": "Show each unassigned issue, age, area, suggested owner, current load, and a short assignment reason.",
+          "visible": ["#521", "#522", "19", "7", "platform", "billing", "alex", "priya", "2 open", "1 open"]
+        },
+        {
+          "prompt": "Let me review a prepared assignment in chat; do not assign an issue directly from the page.",
+          "visible_any": [["Review in chat", "Prepare assignment", "Prepared Assignment"]]
+        },
+        {
+          "prompt": "Use direct reader copy and do not show connector field names.",
+          "visible": ["Webhook retries", "refund fees"],
+          "absent": ["age_hours", "open_issues"]
+        }
+      ]
+    },
+    {
+      "name": "issue-planner",
+      "source_apps": ["issue-fixer-home"],
+      "request": "Build an interactive issue-planning homepage for approved GitHub work.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_github": {
+          "list_issues": {
+            "repository": "evalco/app",
+            "issues": [
+              {"number": 601, "title": "Export audit log by workspace", "labels": ["human-approved", "backend"], "state": "open", "owner": "alex", "project_status": "In Progress", "approved_at": "2026-08-23T16:10:00+00:00", "body": "Add a scoped CSV export. Preserve row-level security and record the export in audit history."},
+              {"number": 602, "title": "Show failed invoice reason", "labels": ["human-approved", "billing"], "state": "open", "owner": "priya", "project_status": "Todo", "approved_at": "2026-08-24T09:40:00+00:00", "body": "Expose the Stripe failure code and a reader-safe message."},
+              {"number": 603, "title": "Replace account picker", "labels": ["needs-product"], "state": "open", "owner": "dana", "project_status": "Todo", "approved_at": null, "body": "The current picker has too many steps."}
+            ]
+          },
+          "list_pull_requests": {
+            "pull_requests": [
+              {"number": 880, "title": "Add workspace audit query", "state": "open", "draft": true, "linked_issues": [601], "checks": "passing", "head_sha": "9d31f72", "test_proof": ["workspace scope", "audit record"]},
+              {"number": 874, "title": "Billing error vocabulary", "state": "merged", "draft": false, "linked_issues": [], "checks": "passing", "head_sha": "44ac108", "test_proof": ["failure-code mapping"]}
+            ]
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use connected GitHub issues and pull requests.",
+          "calls": [
+            {"provider": "eval_github", "tool": "list_issues"},
+            {"provider": "eval_github", "tool": "list_pull_requests"}
+          ]
+        },
+        {
+          "prompt": "Show approved work, linked implementation, plan steps, owner, risks, test proof, and approval state.",
+          "visible": ["#601", "#602", "#880", "alex", "priya", "row-level security", "Stripe", "tests", "Approved"]
+        },
+        {
+          "prompt": "Keep product-decision work separate and let plan approval prepare a chat intent instead of starting implementation.",
+          "visible": ["#603"],
+          "visible_any": [["Needs product", "Product decision", "Product Decisions"], ["Review plan in chat", "Prepare Chat Intent", "Review in chat"]]
+        },
+        {
+          "prompt": "Rewrite issue bodies into compact plan language without copying internal process prose.",
+          "visible": ["CSV export", "failure code"],
+          "rewrite_sources": ["/tools/eval_github/list_issues/issues/1/body"],
+          "absent": ["reader-safe message"]
+        }
+      ]
+    },
+    {
+      "name": "code-review-queue",
+      "source_apps": ["code-review-home", "ufo-review-homepage"],
+      "request": "Build an interactive code-review queue homepage for the engineering team.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_github": {
+          "list_pull_requests": {
+            "repository": "evalco/app",
+            "pull_requests": [
+              {"number": 701, "title": "Bound webhook delivery retries", "author": "alex", "age_hours": 31, "head_sha": "e1c028a", "draft": false, "checks": "failing", "review": "approved", "unresolved_threads": 0, "linked_issues": [521], "ready_at": "2026-08-23T08:00:00+00:00", "blocker": "required integration check failed"},
+              {"number": 702, "title": "Add invoice failure detail", "author": "priya", "age_hours": 18, "head_sha": "a60e43b", "draft": false, "checks": "passing", "review": "changes_requested", "unresolved_threads": 2, "linked_issues": [602], "ready_at": "2026-08-23T15:00:00+00:00", "blocker": "two review threads remain"},
+              {"number": 703, "title": "Tighten mobile settings grid", "author": "dana", "age_hours": 9, "head_sha": "72f510c", "draft": false, "checks": "passing", "review": "approved", "unresolved_threads": 0, "linked_issues": [], "ready_at": "2026-08-24T01:00:00+00:00", "blocker": "missing linked issue"}
+            ]
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use the live connected GitHub pull-request state.",
+          "calls": [{"provider": "eval_github", "tool": "list_pull_requests"}]
+        },
+        {
+          "prompt": "Group ready, blocked, and waiting reviews with author, age, checks, review state, unresolved threads, and linked issue coverage.",
+          "visible": ["#701", "#702", "#703", "alex", "priya", "dana", "31", "18", "changes requested", "#521", "#602"],
+          "visible_any": [["failing", "failed"], ["2 unresolved", "2 open threads", "2 unresolved discussion threads", "2 open reviewer discussion threads", "2 open · #602", "Threads · Issue 2 · #602"]]
+        },
+        {
+          "prompt": "Put the most urgent blocker first and let reviewers filter the queue and open details.",
+          "visible": ["Blocked", "Ready", "Waiting", "Webhook delivery retries"]
+        },
+        {
+          "prompt": "Use short review copy instead of exposing raw API field names.",
+          "visible": ["Checks", "Review"],
+          "absent": ["unresolved_threads", "ready_at"]
+        }
+      ]
+    },
+    {
+      "name": "engineering-metrics",
+      "source_apps": ["investor-update-home", "pr-babysitter-homepage"],
+      "request": "Build an interactive engineering-delivery metrics homepage.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_github": {
+          "get_delivery_metrics": {
+            "window": "2026-07-25 through 2026-08-23",
+            "ready_to_merged_cycles": 2.4,
+            "ready_to_merged_hours": 41,
+            "open_to_merge_hours": 29,
+            "linked_issue_percent": 78,
+            "merged_pull_requests": 32,
+            "reverted_pull_requests": 2,
+            "measurement_basis": "merged pull requests; ready time is the first non-draft event",
+            "by_week": [
+              {"week": "27 July", "open_to_merge_hours": 34, "merged": 6},
+              {"week": "3 August", "open_to_merge_hours": 31, "merged": 8},
+              {"week": "10 August", "open_to_merge_hours": 27, "merged": 9},
+              {"week": "17 August", "open_to_merge_hours": 24, "merged": 9}
+            ],
+            "summary_raw": "We are leveraging throughput optimization vectors to operationalize a best-in-class developer velocity posture."
+          },
+          "list_pull_requests": {
+            "pull_requests": [
+              {"number": 681, "title": "Retry source sync", "opened_at": "2026-08-18T10:00:00+00:00", "ready_at": "2026-08-18T18:00:00+00:00", "merged_at": "2026-08-20T12:00:00+00:00", "linked_issues": [490]},
+              {"number": 682, "title": "Usage history table", "opened_at": "2026-08-19T09:00:00+00:00", "ready_at": "2026-08-19T13:00:00+00:00", "merged_at": "2026-08-20T09:00:00+00:00", "linked_issues": []}
+            ]
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use connected GitHub delivery metrics and pull-request records.",
+          "calls": [
+            {"provider": "eval_github", "tool": "get_delivery_metrics"},
+            {"provider": "eval_github", "tool": "list_pull_requests"}
+          ]
+        },
+        {
+          "prompt": "Show ready-to-merged cycles and latency, open-to-merge latency, linked-issue rate, merged count, reversions, reporting window, and weekly trend.",
+          "visible": ["2.4", "41", "29", "78%", "32", "2", "34", "24"],
+          "visible_any": [["27 July", "27 Jul"], ["17 August", "17 Aug"]]
+        },
+        {
+          "prompt": "Use charts only where they make the trend easier to compare, and keep exact values available.",
+          "visible": ["Open to merge", "Merged"],
+          "visible_any": [["Linked issues", "Linked-Issue", "linked issue"]]
+        },
+        {
+          "prompt": "Replace executive filler with a direct account of what changed.",
+          "visible": ["faster"],
+          "visible_any": [["10 hours", "10h"]],
+          "rewrite_sources": ["/tools/eval_github/get_delivery_metrics/summary_raw"],
+          "absent": ["leveraging throughput optimization vectors", "best-in-class developer velocity posture"]
+        }
+      ]
+    },
+    {
+      "name": "pr-babysitter",
+      "source_apps": ["pr-babysitter-homepage"],
+      "request": "Build an interactive PR-babysitter homepage for the repository.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_github": {
+          "list_pull_requests": {
+            "repository": "evalco/app",
+            "window": "30 minutes through 24 hours old",
+            "captured_at": "2026-08-24T18:00:00+00:00",
+            "pull_requests": [
+              {"number": 741, "title": "Repair calendar source cursor", "author": "alex", "created_at": "2026-08-23T12:00:00+00:00", "head_sha": "a83cd9f", "draft": false, "mergeable": false, "checks": "passing", "review": "approved", "unresolved_threads": 0, "babysitter": {"enabled": true, "model": "Gemini 3.7 Flash", "state": "resolving conflict"}},
+              {"number": 742, "title": "Show billing failure reason", "author": "priya", "created_at": "2026-08-23T15:00:00+00:00", "head_sha": "fe2107a", "draft": false, "mergeable": true, "checks": "running", "review": "approved", "unresolved_threads": 0, "babysitter": {"enabled": true, "model": "GPT-5.6 Terra", "state": "waiting for checks"}},
+              {"number": 743, "title": "Update account health copy", "author": "dana", "created_at": "2026-08-23T18:00:00+00:00", "head_sha": "0b91e8c", "draft": false, "mergeable": true, "checks": "failing", "review": "changes_requested", "unresolved_threads": 1, "babysitter": {"enabled": false, "model": null, "state": "off"}}
+            ]
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Read current pull-request state from connected GitHub.",
+          "calls": [{"provider": "eval_github", "tool": "list_pull_requests"}]
+        },
+        {
+          "prompt": "Show each active pull request, exact head, checks, review state, blocker, babysitter state, and selected model.",
+          "visible": ["#741", "#742", "#743", "a83cd9f", "fe2107a", "0b91e8c", "resolving conflict", "waiting for checks", "Gemini 3.7 Flash", "GPT-5.6 Terra"]
+        },
+        {
+          "prompt": "Let me filter status and prepare a chat intent to turn babysitting on or off or change its model.",
+          "visible": ["On", "Off", "Model"],
+          "visible_any": [["Review in chat", "Prepare Chat Intent"]]
+        },
+        {
+          "prompt": "Write blockers in direct language and do not expose GitHub response field names.",
+          "visible": ["Conflict", "Checks running", "Changes requested"],
+          "absent": ["unresolved_threads", "mergeable"]
+        }
+      ]
+    },
+    {
+      "name": "startup-metrics",
+      "source_apps": ["investor-update-home"],
+      "request": "Build an interactive startup core-metrics homepage from Stripe.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_stripe": {
+          "list_subscriptions": {
+            "as_of": "2026-08-24T00:00:00+00:00",
+            "basis": "active subscription monthly amounts; canceled subscriptions count toward churn only",
+            "subscriptions": [
+              {"id": "sub_acme", "customer": "Acme Labs", "status": "active", "amount_monthly": 12000, "plan": "Enterprise"},
+              {"id": "sub_beacon", "customer": "Beacon Health", "status": "active", "amount_monthly": 6000, "plan": "Growth"},
+              {"id": "sub_cinder", "customer": "Cinder Works", "status": "active", "amount_monthly": 3000, "plan": "Growth"},
+              {"id": "sub_delta", "customer": "Delta Goods", "status": "canceled", "amount_monthly": 4000, "plan": "Enterprise", "canceled_at": "2026-08-09"}
+            ]
+          },
+          "list_invoices": {
+            "window": "2026-08-01 through 2026-08-24",
+            "invoices": [
+              {"id": "in_901", "customer": "Acme Labs", "amount": 12000, "status": "paid", "date": "2026-08-01"},
+              {"id": "in_902", "customer": "Beacon Health", "amount": 6000, "status": "paid", "date": "2026-08-03"},
+              {"id": "in_903", "customer": "Cinder Works", "amount": 3000, "status": "past_due", "date": "2026-08-05"}
+            ]
+          },
+          "list_balance_transactions": {
+            "available_balance": 8120,
+            "currency": "USD",
+            "transactions": [
+              {"date": "2026-08-01", "type": "charge", "net": 11640, "fee": 360},
+              {"date": "2026-08-03", "type": "charge", "net": 5820, "fee": 180},
+              {"date": "2026-08-07", "type": "refund", "net": -1000, "fee": 0}
+            ],
+            "note_raw": "Revenue architecture demonstrates diversified monetization modalities across enterprise and growth cohorts."
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use connected Stripe subscriptions, invoices, and balance transactions.",
+          "calls": [
+            {"provider": "eval_stripe", "tool": "list_subscriptions"},
+            {"provider": "eval_stripe", "tool": "list_invoices"},
+            {"provider": "eval_stripe", "tool": "list_balance_transactions"}
+          ]
+        },
+        {
+          "prompt": "Show MRR, ARR run rate, churn, active customer count, revenue mix, invoice risk, net Stripe activity, and available Stripe balance.",
+          "visible": ["$21,000", "$252,000", "3 active", "Cinder Works", "Past due", "$16,460", "$8,120"],
+          "visible_any": [["16%", "16.0%", "25%", "25.0%"], ["57%", "57.1%"], ["29%", "29.0%", "42.9%", "43%"]]
+        },
+        {
+          "prompt": "Make the period, source limits, and calculation basis visible.",
+          "visible": ["Stripe", "Monthly", "3 invoices"],
+          "visible_any": [["4 subscriptions", "4 total", "Total Subscriptions Ever (4)"]]
+        },
+        {
+          "prompt": "Use founder-ready copy and remove abstract finance language.",
+          "visible": ["Acme Labs", "Delta Goods"],
+          "rewrite_sources": ["/tools/eval_stripe/list_balance_transactions/note_raw"],
+          "absent": ["diversified monetization modalities", "revenue architecture demonstrates"]
+        }
+      ]
+    },
+    {
+      "name": "account-health",
+      "source_apps": [],
+      "request": "Build an interactive customer account-health homepage.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_hubspot": {
+          "list_companies": {
+            "companies": [
+              {"id": "co_northstar", "name": "Northstar", "owner": "Mara", "stage": "customer", "last_activity": "2026-08-21", "seats": 84},
+              {"id": "co_beacon", "name": "Beacon Health", "owner": "Dana", "stage": "customer", "last_activity": "2026-08-15", "seats": 41},
+              {"id": "co_cinder", "name": "Cinder Works", "owner": "Mara", "stage": "customer", "last_activity": "2026-08-22", "seats": 18}
+            ]
+          },
+          "list_deals": {
+            "deals": [
+              {"company": "Northstar", "amount": 48000, "stage": "renewal", "close_date": "2026-09-30"},
+              {"company": "Beacon Health", "amount": 24000, "stage": "renewal", "close_date": "2026-09-12"},
+              {"company": "Cinder Works", "amount": 12000, "stage": "active", "close_date": "2027-02-01"}
+            ]
+          },
+          "list_tickets": {
+            "tickets": [
+              {"company": "Northstar", "title": "SSO configuration blocked", "priority": "high", "state": "open", "age_days": 5},
+              {"company": "Beacon Health", "title": "Invoice export mismatch", "priority": "urgent", "state": "open", "age_days": 9},
+              {"company": "Cinder Works", "title": "Invite copy question", "priority": "low", "state": "closed", "age_days": 1}
+            ],
+            "summary_raw": "Strategically engage the account stakeholder ecosystem to maximize retention outcomes."
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use connected HubSpot companies, deals, and support tickets.",
+          "calls": [
+            {"provider": "eval_hubspot", "tool": "list_companies"},
+            {"provider": "eval_hubspot", "tool": "list_deals"},
+            {"provider": "eval_hubspot", "tool": "list_tickets"}
+          ]
+        },
+        {
+          "prompt": "Rank accounts by risk and show owner, renewal value and date, activity, seats, open issue, age, and a concrete next step.",
+          "visible": ["Beacon Health", "Northstar", "Cinder Works", "Dana", "Mara", "$24,000", "$48,000", "9 days", "41 seats", "Seats"],
+          "visible_any": [["12 September", "Sep 12", "2026-09-12"], ["30 September", "Sep 30", "2026-09-30"], ["5 days", "5d"], ["84 seats", "84"]]
+        },
+        {
+          "prompt": "Put the urgent renewal risk first and let me filter by health and open account detail.",
+          "visible": ["Urgent", "Invoice export mismatch"],
+          "visible_any": [["At risk", "Needs Attention"]]
+        },
+        {
+          "prompt": "Turn CRM language into a direct action and do not copy its strategy filler.",
+          "visible_any": [
+            ["Resolve invoice export", "Own the invoice mismatch", "Fix invoice export"],
+            ["Contact Dana", "Call Dana"]
+          ],
+          "rewrite_sources": ["/tools/eval_hubspot/list_tickets/summary_raw"],
+          "absent": ["stakeholder ecosystem", "maximize retention outcomes"]
+        }
+      ]
+    },
+    {
+      "name": "candidate-review",
+      "source_apps": [],
+      "request": "Build an interactive candidate-review homepage for the hiring panel.",
+      "emails": [],
+      "events": [],
+      "tools": {
+        "eval_greenhouse": {
+          "list_candidates": {
+            "candidates": [
+              {"id": "cand_jordan", "name": "Jordan Lee", "role": "Staff engineer", "stage": "Onsite", "source": "Referral", "next_interview": "2026-08-27T18:00:00+00:00"},
+              {"id": "cand_sam", "name": "Sam Rivera", "role": "Staff engineer", "stage": "Hiring manager", "source": "Inbound", "next_interview": "2026-08-26T16:00:00+00:00"},
+              {"id": "cand_noor", "name": "Noor Patel", "role": "Product designer", "stage": "Portfolio review", "source": "Sourcing", "next_interview": "2026-08-28T17:00:00+00:00"}
+            ]
+          },
+          "list_scorecards": {
+            "scorecards": [
+              {"candidate_id": "cand_jordan", "interviewer": "Dana", "competency": "Systems", "rating": "Strong yes", "evidence": "Scoped failure domains and found the queue race."},
+              {"candidate_id": "cand_jordan", "interviewer": "Priya", "competency": "Collaboration", "rating": "Yes", "evidence": "Asked for constraints before choosing a design."},
+              {"candidate_id": "cand_sam", "interviewer": "Alex", "competency": "Systems", "rating": "Mixed", "evidence": "Good API shape; no migration rollback plan."},
+              {"candidate_id": "cand_noor", "interviewer": "Mara", "competency": "Product craft", "rating": "Pending", "evidence": "Scorecard not submitted."}
+            ],
+            "panel_note_raw": "Drive calibration enablement across the talent assessment stakeholder cohort."
+          }
+        }
+      },
+      "requirements": [
+        {
+          "prompt": "Use connected Greenhouse candidates and scorecards.",
+          "calls": [
+            {"provider": "eval_greenhouse", "tool": "list_candidates"},
+            {"provider": "eval_greenhouse", "tool": "list_scorecards"}
+          ]
+        },
+        {
+          "prompt": "Show role, stage, next interview, source, scorecard coverage, ratings, and evidence without inventing a hiring decision.",
+          "visible": ["Jordan Lee", "Sam Rivera", "Noor Patel", "Staff engineer", "Product designer", "Onsite", "Portfolio review", "Strong yes", "Mixed", "Pending"],
+          "visible_any": [["27 August", "Aug 27"], ["26 August", "Aug 26"], ["28 August", "Aug 28"]]
+        },
+        {
+          "prompt": "Put missing scorecards and split evidence first, with filters for role and stage and a detail view.",
+          "visible": ["Missing scorecard", "No migration rollback plan", "Scorecard not submitted"]
+        },
+        {
+          "prompt": "Use neutral evidence-led copy and remove recruiting process filler.",
+          "visible": ["queue race", "constraints"],
+          "rewrite_sources": ["/tools/eval_greenhouse/list_scorecards/panel_note_raw"],
+          "absent": ["calibration enablement", "talent assessment stakeholder cohort"]
+        }
+      ]
+    }
+  ]
+}

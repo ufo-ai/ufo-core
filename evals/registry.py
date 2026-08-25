@@ -6,6 +6,7 @@ from evals.harness.registry import (
     EvalTask,
     arc_task,
     capability_task,
+    rewrapped,
     scenario_task,
     selected_tasks,
 )
@@ -103,7 +104,11 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
-    capability_task("ufo-app-bench", ufo_app_bench.CASES, judge_model=VISUAL_JUDGE_MODEL),
+    rewrapped(
+        capability_task("ufo-app-bench", ufo_app_bench.CASES, judge_model=VISUAL_JUDGE_MODEL),
+        ufo_app_bench._scored_task,
+    ),
+    capability_task("ufo-app-copy", ufo_app_bench.COPY_CASES),
     capability_task("document_read", document_read.CASES),
     capability_task(
         "app_home_change",
