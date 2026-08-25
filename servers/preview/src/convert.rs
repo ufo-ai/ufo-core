@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use pulldown_cmark::{Options, Parser};
+
 use crate::admit::Kind;
 use crate::child::{self, ChildError, Limits};
 use crate::config::Config;
@@ -141,9 +143,13 @@ async fn copy_profile(source: &Path, profile: &Path) -> Result<(), Refusal> {
 /// Renders markdown into a standalone HTML document soffice can load as its conversion source.
 pub fn markdown_to_html(text: &str) -> String {
     let mut body = String::new();
-    pulldown_cmark::html::push_html(&mut body, pulldown_cmark::Parser::new(text));
+    pulldown_cmark::html::push_html(&mut body, Parser::new_ext(text, Options::ENABLE_TABLES));
+    let body = body.replace(
+        "<table>",
+        "<table border=\"1\" cellspacing=\"0\" width=\"100%\">",
+    );
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"></head><body style=\"font-family: sans-serif; margin: 48px;\">{body}</body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>h1{{font:bold 32pt/120% Arial,Helvetica;margin:0 0 .5em}}h2{{font:bold 24pt/120% Arial,Helvetica;margin:1em 0 .35em}}h3,h4,h5,h6{{font:bold 20pt/120% Arial,Helvetica;margin:1em 0 .35em}}p{{margin:.65em 0}}a{{color:#4dabf7}}code,pre{{font:16pt/140% 'Courier New',monospace}}table{{border-collapse:collapse;border-color:#323535}}th,td{{padding:4px 8px;border-color:#323535;text-align:left;vertical-align:top}}</style></head><body style=\"margin:0;background:#262929;color:#f5f5f5;font:18pt/140% Arial,Helvetica\">{body}</body></html>"
     )
 }
 
@@ -308,6 +314,28 @@ mod tests {
         assert!(html.contains("<h1>Title</h1>"));
         assert!(html.contains("<strong>bold</strong>"));
         assert!(html.starts_with("<!doctype html>"));
+    }
+
+    #[test]
+    fn markdown_uses_the_portal_dark_page_and_reading_size() {
+        let html = super::markdown_to_html("# Title\n\nbody `code`\n");
+        assert!(html.contains("background:#262929;color:#f5f5f5"));
+        assert!(html.contains("font:18pt/140% Arial,Helvetica"));
+        assert!(html.contains("h1{font:bold 32pt/120% Arial,Helvetica"));
+        assert!(html.contains("code,pre{font:16pt/140% 'Courier New',monospace"));
+    }
+
+    #[test]
+    fn markdown_table_becomes_an_html_table() {
+        let html = super::markdown_to_html(
+            "| Name | City |\n| --- | --- |\n| Alice | Boston |\n| Bob | Reno |\n",
+        );
+        assert!(html.contains("<table"));
+        assert!(html.contains("<th>Name</th>"));
+        assert!(html.contains("<th>City</th>"));
+        assert!(html.contains("<td>Alice</td>"));
+        assert!(html.contains("<td>Reno</td>"));
+        assert!(html.contains("<table border=\"1\" cellspacing=\"0\" width=\"100%\">"));
     }
 
     #[test]

@@ -311,6 +311,43 @@ async fn pdf_inline_round_trip() {
 
 #[tokio::test]
 #[ignore]
+async fn markdown_inline_uses_the_compact_dark_page() {
+    let base = serve_app(config(None)).await;
+    let markdown = b"# Preview\n\n| Name | State |\n| --- | --- |\n| Review | Passed |\n";
+    let response = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(
+            req_json("md", 1),
+            Some(("preview.md", markdown.to_vec())),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let bytes = response.bytes().await.unwrap();
+    let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+    assert_eq!(image.get_pixel(0, 0).0, [38, 41, 41, 255]);
+    let background = image.get_pixel(0, 0).0;
+    let (mut min_x, mut min_y) = image.dimensions();
+    for (x, y, pixel) in image.enumerate_pixels() {
+        if pixel
+            .0
+            .iter()
+            .zip(background)
+            .any(|(channel, background)| channel.abs_diff(background) > 8)
+        {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+        }
+    }
+    assert!((1..=24).contains(&min_x), "left inset is {min_x}px");
+    assert!((1..=24).contains(&min_y), "top inset is {min_y}px");
+    assert!(image.width() < image.height());
+}
+
+#[tokio::test]
+#[ignore]
 async fn site_inline_round_trip() {
     let cross_origin_requested = Arc::new(AtomicBool::new(false));
     let requested = cross_origin_requested.clone();

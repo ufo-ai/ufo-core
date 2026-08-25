@@ -67,10 +67,6 @@ impl Kind {
     pub fn is_video(&self) -> bool {
         matches!(self, Kind::Mp4 | Kind::Mov | Kind::Webm | Kind::Mkv)
     }
-
-    pub fn is_spreadsheet(&self) -> bool {
-        matches!(self, Kind::Csv | Kind::Xlsx)
-    }
 }
 
 #[cfg(test)]

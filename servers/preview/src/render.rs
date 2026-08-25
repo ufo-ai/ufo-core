@@ -11,6 +11,7 @@ use crate::convert;
 use crate::fetch;
 use crate::refusal::Refusal;
 use crate::site;
+use crate::worker::CropMode;
 
 const WORKER_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 const WORKER_FILE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
@@ -99,7 +100,7 @@ struct RasterRequest<'a> {
     max_height: u32,
     start_page: u32,
     pages: u32,
-    crop: bool,
+    crop: CropMode,
 }
 
 /// The render workflow: admit → obtain bytes → convert → rasterize → package. One instance
@@ -184,7 +185,11 @@ impl Render {
                 max_height: max_h,
                 start_page,
                 pages,
-                crop: kind.is_spreadsheet(),
+                crop: match kind {
+                    Kind::Csv | Kind::Xlsx => CropMode::Content,
+                    Kind::Md => CropMode::PageMargins,
+                    _ => CropMode::None,
+                },
             })
             .await?;
         self.package(
@@ -254,7 +259,7 @@ impl Render {
             .arg(request.max_height.to_string())
             .arg(request.start_page.to_string())
             .arg(request.pages.to_string())
-            .arg(if request.crop { "1" } else { "0" })
+            .arg(request.crop.argument())
             .current_dir(request.workdir);
         let limits = Limits {
             deadline: self.cfg.raster_timeout,
