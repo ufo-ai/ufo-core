@@ -26,7 +26,7 @@ class DeployCarriers:
 def select_carriers(config: Config, manifests: tuple[Manifest, ...]) -> DeployCarriers:
     """Build the deploy's carriers from `[sandbox] backend` and `[sandbox] resume_backends`: core's
     default `local` carrier plus every carrier an extension contributes via its `carriers` Manifest
-    point (`docker`, `e2b`, `daytona`). An extension name that collides with the built-in or
+    point (`docker`, `e2b`). An extension name that collides with the built-in or
     another extension fails loud, a name no carrier registers fails loud, and a resume backend
     repeating the default fails loud — so every configured name resolves to exactly one factory,
     built once here and held for the process's life. A remote backend with no `[sandbox]

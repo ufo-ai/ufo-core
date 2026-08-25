@@ -13,7 +13,6 @@ DEPLOYMENT_ID_ENV = "TESTING_DEPLOYMENT_ID"
 SECRET_ID_ENV = "TESTING_API_KEYS_SECRET_ID"
 SECRET_INPUTS = {
     "anthropic-api-key": "ANTHROPIC_API_KEY",
-    "daytona-api-key": "DAYTONA_API_KEY",
     "perplexity-api-key": "PERPLEXITY_API_KEY",
     "spectrum-project-id": "SPECTRUM_PROJECT_ID",
     "spectrum-project-secret": "SPECTRUM_PROJECT_SECRET",

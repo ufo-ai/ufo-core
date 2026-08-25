@@ -38,7 +38,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0038](0038-invitation-delivery.md) | Invitation delivery — one mail API, our words | accepted |
 | [0038](0038-skill-retrieval.md) | Skill retrieval — routing cards, tiered visibility, and retrieval proven in shadow | implemented |
 | [0039](0039-first-class-apps.md) | First-class apps | proposed |
-| [0040](0040-daytona-carrier.md) | Daytona carrier — a second cloud backend, provider-routed | implemented |
+| [0040](0040-daytona-carrier.md) | Daytona carrier — a second cloud backend, provider-routed | superseded |
 | [0041](0041-core-rust-port.md) | Core in Rust, extensions as components | proposed |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays

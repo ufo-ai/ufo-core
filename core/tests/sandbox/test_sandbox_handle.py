@@ -397,7 +397,7 @@ async def test_open_routes_a_resume_backends_handle_to_its_own_carrier(
     fresh = _ResumeRecordingCarrier(container_id="never-created")
     sandboxes = _sandboxes(
         fresh,
-        "daytona",
+        "docker",
         tmp_path,
         resume={
             "e2b": (
@@ -427,7 +427,7 @@ async def test_existing_routes_a_resume_backends_handle_to_its_own_carrier(
     fresh = _ResumeRecordingCarrier(container_id="never-created")
     sandboxes = _sandboxes(
         fresh,
-        "daytona",
+        "docker",
         tmp_path,
         resume={
             "e2b": (

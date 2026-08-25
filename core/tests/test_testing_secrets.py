@@ -24,7 +24,6 @@ def _environment() -> dict[str, str]:
         DEPLOYMENT_ID_ENV: "run-1-attempt-1",
         SECRET_ID_ENV: "ufo/ufo-testing/api-keys",
         "ANTHROPIC_API_KEY": "anthropic-value",
-        "DAYTONA_API_KEY": "daytona-value",
         "PERPLEXITY_API_KEY": "perplexity-value",
         "SPECTRUM_PROJECT_ID": "spectrum-project-id-value",
         "SPECTRUM_PROJECT_SECRET": "spectrum-project-secret-value",
@@ -41,7 +40,6 @@ def test_testing_secret_write_preserves_the_live_document() -> None:
     assert json.loads(write.payload) == _SEEDED | {
         "existing-api-key": "existing-value",
         "anthropic-api-key": "anthropic-value",
-        "daytona-api-key": "daytona-value",
         "perplexity-api-key": "perplexity-value",
         "spectrum-project-id": "spectrum-project-id-value",
         "spectrum-project-secret": "spectrum-project-secret-value",
@@ -59,7 +57,6 @@ def test_testing_secret_write_preserves_the_live_document() -> None:
     (
         (_environment() | {DEPLOYMENT_ID_ENV: ""}, _document(), DEPLOYMENT_ID_ENV),
         (_environment() | {"ANTHROPIC_API_KEY": ""}, _document(), "ANTHROPIC_API_KEY"),
-        (_environment() | {"DAYTONA_API_KEY": ""}, _document(), "DAYTONA_API_KEY"),
         (_environment() | {"PERPLEXITY_API_KEY": ""}, _document(), "PERPLEXITY_API_KEY"),
         (_environment() | {"SPECTRUM_PROJECT_ID": ""}, _document(), "SPECTRUM_PROJECT_ID"),
         (
@@ -138,7 +135,6 @@ def test_main_reads_and_writes_through_stdin(
     assert json.loads(calls[1]["stdin"]) == _SEEDED | {
         "existing-api-key": "existing-value",
         "anthropic-api-key": "anthropic-value",
-        "daytona-api-key": "daytona-value",
         "perplexity-api-key": "perplexity-value",
         "spectrum-project-id": "spectrum-project-id-value",
         "spectrum-project-secret": "spectrum-project-secret-value",

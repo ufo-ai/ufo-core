@@ -46,7 +46,6 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           DD_API_KEY: ${{ secrets.DD_API_KEY }}
           DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
-          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -56,7 +55,7 @@ jobs:
           TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
         run: |
           missing=false
-          for name in ANTHROPIC_API_KEY BROWSERBASE_API_KEY CLOUDFLARE_API_TOKEN DD_API_KEY DD_APP_KEY DAYTONA_API_KEY E2B_API_KEY PERPLEXITY_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY SPECTRUM_PROJECT_ID SPECTRUM_PROJECT_SECRET TURBOPUFFER_API_KEY; do
+          for name in ANTHROPIC_API_KEY BROWSERBASE_API_KEY CLOUDFLARE_API_TOKEN DD_API_KEY DD_APP_KEY E2B_API_KEY PERPLEXITY_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY SPECTRUM_PROJECT_ID SPECTRUM_PROJECT_SECRET TURBOPUFFER_API_KEY; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is required"
               missing=true
@@ -277,18 +276,6 @@ jobs:
           test -n "$E2B_TEMPLATES"
           echo "E2B_TEMPLATES=$E2B_TEMPLATES" >> "$GITHUB_ENV"
 
-      # The production daytona organization holds no ufo-sbx snapshots either; the promoted commit
-      # publishes its own under the production key (digest-named, so an unchanged definition
-      # creates nothing).
-      - name: Select daytona snapshots
-        env:
-          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
-        run: |
-          uv run python sandbox/build_template.py --daytona
-          DAYTONA_SNAPSHOTS=$(uv run python sandbox/build_template.py --daytona-refs)
-          test -n "$DAYTONA_SNAPSHOTS"
-          echo "DAYTONA_SNAPSHOTS=$DAYTONA_SNAPSHOTS" >> "$GITHUB_ENV"
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
@@ -317,7 +304,6 @@ jobs:
             -target=module.platform.aws_secretsmanager_secret.api_keys \
             -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \
             -var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" \
-            -var "daytona_snapshots=$DAYTONA_SNAPSHOTS" \
             -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Reject destructive foundation changes
@@ -332,7 +318,7 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" -var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" -var "daytona_snapshots=$DAYTONA_SNAPSHOTS" -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+        run: terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" -var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
       - name: Reject destructive changes
         working-directory: ${{ env.TF_DIR }}
@@ -342,7 +328,6 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
-          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

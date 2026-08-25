@@ -532,10 +532,6 @@ spec:
               valueFrom:
                 secretKeyRef: {name: ufo-platform-secrets, key: E2B_API_KEY}
             - {name: E2B_TEMPLATES, value: "${e2b_templates}"}
-            - name: DAYTONA_API_KEY
-              valueFrom:
-                secretKeyRef: {name: ufo-platform-secrets, key: DAYTONA_API_KEY}
-            - {name: DAYTONA_SNAPSHOTS, value: "${daytona_snapshots}"}
           resources:
             requests: {cpu: 250m, memory: 384Mi}
             limits: {cpu: "2", memory: 768Mi}
@@ -717,7 +713,6 @@ spec:
           env:
             - {name: AWS_REGION, value: "${region}"}
             - {name: E2B_TEMPLATES, value: "${e2b_templates}"}
-            - {name: DAYTONA_SNAPSHOTS, value: "${daytona_snapshots}"}
             # The terminal client version this deploy serves — the ufo surface tells a stale
             # x-ufo-script to install.
             - {name: UFO_CLIENT_VERSION, value: "${client_version}"}

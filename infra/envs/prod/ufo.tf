@@ -258,7 +258,6 @@ data "kubectl_file_documents" "hosted" {
     bundle_image                     = local.bundle_image
     client_version                   = local.client_version
     e2b_templates                    = var.e2b_templates
-    daytona_snapshots                = var.daytona_snapshots
     serve_role_arn                   = module.platform.app_s3_role_arn
     ingress_role_arn                 = module.platform.ingress_s3_role_arn
     workload_ha                      = true

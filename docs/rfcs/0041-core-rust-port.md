@@ -224,10 +224,10 @@ asserts member identity, so isolating it buys nothing — it is the trust bounda
 The boundary gate survives, translated: a static extension crate may depend only on `ufo-sdk` and
 external crates, checked from `cargo metadata`.
 
-### The split — all 49
+### The split — all 48
 
-**Static tier (25):** `ufo`, `web` (backend), `slack`, `imessage`, `debugger`, `sites`; `docker`,
-`e2b`, `daytona`; `redis_hub`; `index_default`, `turbopuffer`; `embed_openai`; `bedrock`,
+**Static tier (24):** `ufo`, `web` (backend), `slack`, `imessage`, `debugger`, `sites`; `docker`,
+`e2b`; `redis_hub`; `index_default`, `turbopuffer`; `embed_openai`; `bedrock`,
 `openrouter`; `perplexity`; `browser`, `sandbox_chrome`, `browserbase`; `memory`; `connectors`,
 `composio`, `pipedream`, `eval_env`, `mcp`. Each holds a backend seam, a privileged surface, or a
 live session the component boundary would cut.

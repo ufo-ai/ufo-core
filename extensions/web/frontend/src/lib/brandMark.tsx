@@ -18,7 +18,6 @@ export const BRAND_MARKS: ReadonlySet<string> = new Set([
   "contentful",
   "crowdin",
   "dart",
-  "daytona",
   "dialpad",
   "discord",
   "discordbot",

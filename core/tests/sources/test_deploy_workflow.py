@@ -635,7 +635,6 @@ def test_testing_deploy_writes_provider_credentials_before_apply() -> None:
         "if": "github.event_name != 'pull_request'",
         "env": {
             "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
-            "DAYTONA_API_KEY": "${{ secrets.DAYTONA_API_KEY }}",
             "PERPLEXITY_API_KEY": "${{ secrets.PERPLEXITY_API_KEY }}",
             "SPECTRUM_PROJECT_ID": "${{ secrets.TESTING_SPECTRUM_PROJECT_ID }}",
             "SPECTRUM_PROJECT_SECRET": "${{ secrets.TESTING_SPECTRUM_PROJECT_SECRET }}",
@@ -1671,17 +1670,10 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
     assert "id" not in sandbox_template
     assert "E2B_TEMPLATES=$(uv run python sandbox/build_template.py)" in sandbox_template["run"]
     assert "GITHUB_OUTPUT" not in sandbox_template["run"]
-    daytona_snapshots = next(
-        step for step in rollout_steps if step.get("name") == "Select daytona snapshots"
-    )
-    assert "uv run python sandbox/build_template.py --daytona\n" in daytona_snapshots["run"]
-    assert "$(uv run python sandbox/build_template.py --daytona-refs)" in daytona_snapshots["run"]
-
     production = jobs["production"]
     assert isinstance(production, dict)
     assert production["env"] == {
         "E2B_TEMPLATES": "small=ufo-sbx-small,medium=ufo-sbx-medium,large=ufo-sbx-large",
-        "DAYTONA_SNAPSHOTS": "small=plan-only,medium=plan-only,large=plan-only",
         "TF_DIR": "infra/envs/prod",
     }
     steps = production["steps"]
@@ -1703,7 +1695,6 @@ def test_pull_requests_plan_production_foundation_without_applying() -> None:
         "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
         '  -var "e2b_templates=$E2B_TEMPLATES" \\\n'
-        '  -var "daytona_snapshots=$DAYTONA_SNAPSHOTS" \\\n'
         '  -var "deployment_id=plan"\n'
     )
 
@@ -2013,17 +2004,13 @@ def test_hosted_runtime_receives_the_selected_sandbox_template() -> None:
             if re.search(rf"^kind: Deployment\nmetadata:\n  name: {name}$", document, re.MULTILINE)
         )
         assert '- {name: E2B_TEMPLATES, value: "${e2b_templates}"}' in deployment
-        assert '- {name: DAYTONA_SNAPSHOTS, value: "${daytona_snapshots}"}' in deployment
     for environment in DEPLOY_ENVIRONMENTS:
         root = ROOT / "infra" / "envs" / environment
         ufo_tf = (root / "ufo.tf").read_text()
         assert "e2b_templates                    = var.e2b_templates" in ufo_tf
-        assert "daytona_snapshots                = var.daytona_snapshots" in ufo_tf
         variables = (root / "variables.tf").read_text()
         assert 'variable "e2b_templates"' in variables
         assert 'condition     = var.e2b_templates != ""' in variables
-        assert 'variable "daytona_snapshots"' in variables
-        assert 'condition     = var.daytona_snapshots != ""' in variables
 
 
 @pytest.mark.parametrize(
@@ -2103,7 +2090,6 @@ def test_rollout_plan_pins_the_selected_artifacts() -> None:
     script = _step("rollout", "Terraform plan")["run"]
     assert '-var "image_tag=$IMAGE_TAG"' in script
     assert '-var "e2b_templates=$E2B_TEMPLATES"' in script
-    assert '-var "daytona_snapshots=$DAYTONA_SNAPSHOTS"' in script
 
 
 @pytest.mark.parametrize(
@@ -2357,10 +2343,6 @@ def test_production_publishes_its_own_sandbox_templates(tmp_path: Path) -> None:
     assert isinstance(steps, list)
     select = _step("deploy", "Select sandbox template", "deploy-production.yml")
     assert select["env"] == {"E2B_API_KEY": "${{ secrets.E2B_API_KEY }}"}
-    daytona_select = _step("deploy", "Select daytona snapshots", "deploy-production.yml")
-    assert daytona_select["env"] == {"DAYTONA_API_KEY": "${{ secrets.DAYTONA_API_KEY }}"}
-    assert "uv run python sandbox/build_template.py --daytona\n" in daytona_select["run"]
-    assert "$(uv run python sandbox/build_template.py --daytona-refs)" in daytona_select["run"]
     promoted = steps[1]
     uv = next(step for step in steps if step.get("uses") == "astral-sh/setup-uv@v5")
     credentials = next(
@@ -2624,7 +2606,6 @@ def test_production_secrets_fail_before_aws_changes() -> None:
         "CLOUDFLARE_API_TOKEN",
         "DD_API_KEY",
         "DD_APP_KEY",
-        "DAYTONA_API_KEY",
         "E2B_API_KEY",
         "PERPLEXITY_API_KEY",
         "OPENAI_API_KEY",
@@ -3066,7 +3047,6 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         "  -target=module.platform.aws_secretsmanager_secret.api_keys \\\n"
         "  -target=module.platform.aws_secretsmanager_secret.gateway_slack_connect \\\n"
         '  -var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" \\\n'
-        '  -var "daytona_snapshots=$DAYTONA_SNAPSHOTS" \\\n'
         '  -var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"\n'
     )
     assert foundation_guard["run"] == (
@@ -3081,7 +3061,6 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
         "env": {
             "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}",
             "BROWSERBASE_API_KEY": "${{ secrets.BROWSERBASE_API_KEY }}",
-            "DAYTONA_API_KEY": "${{ secrets.DAYTONA_API_KEY }}",
             "E2B_API_KEY": "${{ secrets.E2B_API_KEY }}",
             "PERPLEXITY_API_KEY": "${{ secrets.PERPLEXITY_API_KEY }}",
             "OPENAI_API_KEY": "${{ secrets.OPENAI_API_KEY }}",
@@ -3102,7 +3081,6 @@ def test_production_deploy_applies_guarded_foundation_then_runtime() -> None:
     assert runtime_plan["run"] == (
         'terraform plan -input=false -no-color -out="$RUNNER_TEMP/production.tfplan" '
         '-var "image_tag=$IMAGE_TAG" -var "e2b_templates=$E2B_TEMPLATES" '
-        '-var "daytona_snapshots=$DAYTONA_SNAPSHOTS" '
         '-var "deployment_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"'
     )
     assert runtime_guard["run"] == (
@@ -3249,15 +3227,12 @@ def test_the_template_publish_takes_the_client_binary_a_pipeline_already_built()
     steps = rollout["steps"]
     assert isinstance(steps, list)
     named = "${{ env.SANDBOX_CLIENT_BINARY }}"
-    for name in ("Select sandbox template", "Select daytona snapshots"):
-        publish = _step("rollout", name)
-        assert publish["env"]["UFO_CLIENT_BINARY"] == named
-        assert steps.index(publish) > steps.index(
-            next(step for step in steps if step.get("uses") == "actions/download-artifact@v4")
-        )
-        assert steps.index(publish) > steps.index(
-            _step("rollout", "Reuse the pushed client binaries")
-        )
+    publish = _step("rollout", "Select sandbox template")
+    assert publish["env"]["UFO_CLIENT_BINARY"] == named
+    assert steps.index(publish) > steps.index(
+        next(step for step in steps if step.get("uses") == "actions/download-artifact@v4")
+    )
+    assert steps.index(publish) > steps.index(_step("rollout", "Reuse the pushed client binaries"))
     assert not any("cargo build" in step.get("run", "") for step in steps)
 
     production = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]

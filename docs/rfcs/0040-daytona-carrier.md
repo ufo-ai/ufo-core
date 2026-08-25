@@ -1,7 +1,7 @@
 ---
 rfc: 0040
 title: "Daytona carrier — a second cloud backend, provider-routed"
-status: implemented
+status: superseded
 date: 2026-08-23
 ---
 
