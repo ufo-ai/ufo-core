@@ -36,7 +36,7 @@ help: ## List targets
 	@grep -hE '^[a-z][a-z-]*:.*## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*## "}{printf "  %-16s %s\n", $$1, $$2}'
 
-install: $(WEB)/node_modules $(DEBUGGER)/node_modules ## Sync Python deps, npm trees, git hooks
+install: $(WEB)/node_modules $(DEBUGGER)/node_modules ## Sync Python deps, pnpm trees, git hooks
 	uv sync
 	uv run pre-commit install
 
@@ -45,15 +45,15 @@ reinstall: ## Rebuild the wheel into the venv — single-file extensions are cop
 
 build: $(WEB)/node_modules $(DEBUGGER)/node_modules ## Build the client, portal, app pages and SDK, and debugger
 	cargo build --manifest-path client/Cargo.toml --locked
-	npm --prefix $(WEB) run build
-	npm --prefix $(DEBUGGER) run build
+	pnpm -C $(WEB) run build
+	pnpm -C $(DEBUGGER) run build
 
-$(WEB)/node_modules: $(WEB)/package-lock.json
-	npm --prefix $(WEB) ci
+$(WEB)/node_modules: $(WEB)/pnpm-lock.yaml
+	pnpm -C $(WEB) install --frozen-lockfile
 	@touch $@
 
-$(DEBUGGER)/node_modules: $(DEBUGGER)/package-lock.json
-	npm --prefix $(DEBUGGER) ci
+$(DEBUGGER)/node_modules: $(DEBUGGER)/pnpm-lock.yaml
+	pnpm -C $(DEBUGGER) install --frozen-lockfile
 	@touch $@
 
 init: ## Write ufo.toml, apply the schema, onboard the workspace (EMAIL=you@example.com)
@@ -173,7 +173,7 @@ check-client: ## Run the client crate's static gates — fmt and clippy
 	cd client && cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 test-web: $(WEB)/node_modules ## Run the portal's vitest suite
-	npm --prefix $(WEB) test
+	pnpm -C $(WEB) test
 
 test-integration: ## Run the serial, docker, and live-dependency pass (needs Docker and Postgres); SHARD=1/3 runs one slice
 	UFO_INTEGRATION_REQUIRED=1 uv run pytest -rs -m "serial or integration or docker" $(if $(SHARD),--shard $(SHARD))

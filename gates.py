@@ -284,7 +284,7 @@ def _is_skill_content(path: Path) -> bool:
 
 
 def _vendored(path: Path) -> bool:
-    """A dependency tree checked out inside a source root — a python virtualenv or an npm install
+    """A dependency tree checked out inside a source root — a python virtualenv or a pnpm install
     a frontend build needs. Its files are nobody's code to gate."""
     return bool({".venv", "node_modules"}.intersection(path.parts))
 

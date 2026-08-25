@@ -167,13 +167,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
+          cache: pnpm
           cache-dependency-path: |
-            extensions/debugger/frontend/package-lock.json
-            extensions/web/frontend/package-lock.json
+            extensions/debugger/frontend/pnpm-lock.yaml
+            extensions/web/frontend/pnpm-lock.yaml
 
       - name: Build + push bundle image
         env:
@@ -183,10 +186,10 @@ jobs:
           if aws ecr describe-images --repository-name ufo --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
             echo "ufo:$IMAGE_TAG already pushed — skipping"
           else
-            npm --prefix extensions/debugger/frontend ci
-            npm --prefix extensions/debugger/frontend run build
-            npm --prefix extensions/web/frontend ci
-            npm --prefix extensions/web/frontend run build
+            pnpm -C extensions/debugger/frontend install --frozen-lockfile
+            pnpm -C extensions/debugger/frontend run build
+            pnpm -C extensions/web/frontend install --frozen-lockfile
+            pnpm -C extensions/web/frontend run build
             # A fault Datadog reports against a recorded session reads as source rather than as
             # minified frames. The maps upload under the service and version the page records with,
             # then leave the tree: nothing serves a `.map`, and the image carries none.

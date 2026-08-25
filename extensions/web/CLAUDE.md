@@ -18,8 +18,8 @@ export FRONTEND="$UFO_REPO/extensions/web/frontend"
 
 ```bash
 uv sync
-npm --prefix "$FRONTEND" ci
-npm --prefix "$FRONTEND" run build
+pnpm -C "$FRONTEND" install --frozen-lockfile
+pnpm -C "$FRONTEND" run build
 
 mkdir -p "$UFO_DEV_DIR" && cd "$UFO_DEV_DIR"
 export UFO_ANTHROPIC_API_KEY=...
@@ -43,7 +43,7 @@ uv run --project "$UFO_REPO" ufoctl serve
 Frontend, reloading on every source change:
 
 ```bash
-npm --prefix "$FRONTEND" run dev -- --host ufo.localhost
+pnpm -C "$FRONTEND" run dev -- --host ufo.localhost
 ```
 
 Run `uv run --project "$UFO_REPO" ufoctl portal` once from `$UFO_DEV_DIR` to land the session
@@ -63,8 +63,8 @@ Two of these running at once need different `[serve] port` values in their `$UFO
   print(ufo_ext_web.__file__)"` prints the repo, not the venv. A Python edit needs a `serve`
   restart and nothing else. `uv sync` earns a re-run when `pyproject.toml` moves an entry point or
   a dependency, never after an edit.
-- `npm ci` earns a re-run when `package-lock.json` changes.
-- `npm run build` earns a re-run only for something that reads the built tree: `docker compose`,
+- `pnpm install` earns a re-run when `pnpm-lock.yaml` changes.
+- `pnpm run build` earns a re-run only for something that reads the built tree: `docker compose`,
   the five `test_ext_web.py` tests below, and `tests/agenticon.test.tsx`, which reads the built
   page and serves the icon sprites out of `static/assets`.
 
@@ -76,7 +76,7 @@ while iterating:
 
 ```bash
 uv run pytest extensions/web/tests/test_ext_web.py -k "sqlite and <name>"   # ~9s
-npm --prefix "$FRONTEND" test -- tests/chat.test.tsx                        # ~2s
+pnpm -C "$FRONTEND" test -- tests/chat.test.tsx                             # ~2s
 ```
 
 The whole of `test_ext_web.py` is ~45s; save it for the finished change. Five of its tests read

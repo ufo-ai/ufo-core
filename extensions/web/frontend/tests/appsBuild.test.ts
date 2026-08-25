@@ -17,7 +17,7 @@ const BABEL = "availablePresets";
 
 const readFrom = (root: string, ...parts: string[]): string => {
   const file = join(root, ...parts);
-  if (!existsSync(file)) throw new Error(`${file} is unbuilt: npm run build`);
+  if (!existsSync(file)) throw new Error(`${file} is unbuilt: pnpm run build`);
   return readFileSync(file, "utf8");
 };
 

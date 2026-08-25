@@ -3083,7 +3083,7 @@ def test_the_kit_archive_holds_the_deploys_whole_sdk_under_the_alias_it_resolves
     member is a regular file, which is what lets the unpack refuse anything else."""
     with tarfile.open(fileobj=BytesIO(PAGE_KIT_ARCHIVE)) as archive:
         members = archive.getmembers()
-    assert members, f"{KIT_DIR} is unbuilt: npm run build"
+    assert members, f"{KIT_DIR} is unbuilt: pnpm run build"
     assert all(member.isfile() for member in members)
     held = {member.name for member in members}
     assert held == {

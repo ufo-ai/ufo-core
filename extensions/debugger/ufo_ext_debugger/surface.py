@@ -55,7 +55,7 @@ APP_HTML = APP_FILE.read_text() if APP_FILE.is_file() else None
 async def app_page(ctx: SurfaceContext, request: Request) -> Response:
     if APP_HTML is None:
         raise RuntimeError(
-            "debugger app is not built — run `npm run build` in extensions/debugger/frontend"
+            "debugger app is not built — run `pnpm run build` in extensions/debugger/frontend"
         )
     return HTMLResponse(APP_HTML)
 

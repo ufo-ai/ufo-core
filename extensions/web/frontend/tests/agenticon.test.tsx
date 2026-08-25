@@ -41,7 +41,7 @@ function servesSprites(): string[] {
     vi.fn(async (url: string) => {
       asked.push(url);
       const file = join(STATIC, url.replace(import.meta.env.BASE_URL, ""));
-      if (!existsSync(file)) throw new Error(file + " is unbuilt: npm run build");
+      if (!existsSync(file)) throw new Error(file + " is unbuilt: pnpm run build");
       return new Response(readFileSync(file, "utf8"), {
         headers: { "content-type": "image/svg+xml" },
       });

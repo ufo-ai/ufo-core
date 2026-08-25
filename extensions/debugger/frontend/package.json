@@ -1,6 +1,7 @@
 {
   "name": "ufo-debugger",
   "private": true,
+  "packageManager": "pnpm@11.23.0",
   "version": "0.1.0",
   "type": "module",
   "scripts": {

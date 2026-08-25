@@ -16,7 +16,7 @@ Extensions supply all other functions: connectors, data sources, tools, subagent
 
 This mode runs as one process. It uses SQLite and local files. It does not need Docker.
 
-1. Run `make install`. This installs the Python and npm dependencies and the git hooks.
+1. Run `make install`. This installs the Python and pnpm dependencies and the git hooks.
 2. Run `make setup`. This creates `.env`. It does not change an existing `.env`.
 3. Set `UFO_ANTHROPIC_API_KEY` and `UFO_OPENAI_API_KEY` in `.env`.
 4. Run `make init EMAIL=you@example.com`. This writes `ufo.toml`.
@@ -94,7 +94,7 @@ adds 100 to each port. To change the host ports, set `UFO_PG_PORT`, `UFO_GATEWAY
 
 ### Notes
 
-- Always start a slot with `make stack`, not with `docker compose up`. npm builds the portal, and
+- Always start a slot with `make stack`, not with `docker compose up`. pnpm builds the portal, and
   git does not track the output. `make stack` does that build first. A direct `docker compose up`
   does not, and it does not apply the validated local-secret boundary.
 - A worktree needs a copy of `.env` from the repo root.
