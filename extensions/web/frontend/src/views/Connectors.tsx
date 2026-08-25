@@ -21,6 +21,7 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { Facts, type Fact } from "@/components/ui/facts";
+import { Sheet } from "@/components/ui/sheet";
 import {
   BAR_CONTROL,
   Select,
@@ -31,7 +32,7 @@ import {
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
 import type { Placement } from "@/kernel/pager";
-import { PageToolbar, RecordPanel, usePageSearch } from "@/kernel/pane";
+import { PageToolbar, usePageSearch } from "@/kernel/pane";
 import {
   Notice,
   type NoticeState,
@@ -45,7 +46,7 @@ import {
   usePanelRead,
 } from "@/kernel/panel";
 import { rowControl } from "@/kernel/row";
-import { appended, beside, closed, opened, useSlot } from "@/kernel/slots";
+import { appended, beside, closed, opened } from "@/kernel/slots";
 import { DataTable, OPEN } from "@/kernel/table";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
@@ -56,7 +57,6 @@ import { BASE, getJson, postIntent, type Fetched } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { ProviderGlyph } from "@/lib/providerGlyph";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
-import type { Crumb } from "@/lib/title";
 import type { Agent } from "@/lib/types";
 import {
   CONNECT_VERB,
@@ -94,16 +94,10 @@ const ATTACH_AGENT = "attach-agent";
 export const CONNECT_REFUSED =
   "No connection request was opened. Ask in chat to connect the account.";
 
-/** What names the account to the member: the label the provider gave it, else the address it is
- *  held under. The broker's id names neither, so it stands only where the connection carries
- *  nothing else — the record that opens beside the table is where it is read. */
 function accountName(entry: Connection): string {
   return entry.account_label ?? entry.owner_email ?? entry.account_id ?? "—";
 }
 
-/** What the record standing beside the table is headed by. A member holding two accounts on one
- *  provider tells them apart by the account, so that is the name; a connection the provider named
- *  no account for is the provider itself. */
 function connectionName(entry: Connection): string {
   return entry.account_label ?? entry.account_id ?? entry.provider;
 }
@@ -227,15 +221,7 @@ const EVERY_CATEGORY = "all";
 
 const COVERAGE = "github-coverage";
 
-/** What the library is called where a lane standing beside it has to say where it came from. Every
- *  lane on this screen is opened from that one list, so every crumb on it reads the same. */
-const LIBRARY = "Connectors";
-
-/** What a connection's slot is named in the track, so the address a member shares carries the
- *  grant itself rather than a word that means one thing on one screen. */
 const CONNECTION = "connection/";
-
-const ADD_CONNECTOR = "add-connector";
 
 const GITHUB = "github";
 
@@ -361,17 +347,7 @@ function joined(
   };
 }
 
-/** The workspace's connector library: every account already reachable, then every tool the catalog
- *  still offers under the group headings it carries. A connected row opens its own record in a slot
- *  beside the list, which is where a grant is attached, shared or revoked; a second row leads there
- *  instead, and a modifier or the middle button is how a member stands two accounts side by side.
- *  The track is the address, so a link to this screen carries the records standing on it and a
- *  reload finds them again. A workspace install dispatches
- *  its own admin-gated verb and the outcome carries the install link; every other row opens the
- *  broker's per-member consent through the main agent, with the URL riding the turn's stream. Both
- *  open the consent window on the press itself, so one press is the whole act. While a press waits
- *  on the provider's pages, both reads re-read at the watch cadence and the row moves up the moment
- *  the account lands. */
+/** The workspace's available and connected accounts. */
 export function WorkspaceConnectors({
   place,
   onPlace,
@@ -491,7 +467,7 @@ export function WorkspaceConnectors({
         ]
       : [];
 
-  const track = opens.map((id) => {
+  const sheet = opens.slice(-1).map((id) => {
     if (id === COVERAGE) return <CoverageRecord key={id} legs={legs} onClose={() => shut(id)} />;
     const entry = pooled.find((one) => CONNECTION + one.grant === id);
     if (!entry) return null;
@@ -502,7 +478,6 @@ export function WorkspaceConnectors({
         viewer={viewer}
         attachTo={agents}
         holders={entry.agents ?? []}
-        crumb={{ label: LIBRARY }}
         onDone={(outcome) => {
           setNotice(outcome);
           setReloads((count) => count + 1);
@@ -688,7 +663,7 @@ export function WorkspaceConnectors({
           );
         }}
       </Panel>
-      {track}
+      {sheet}
       <Dialog open={removing !== null} onOpenChange={(next) => !next && setRemoving(null)}>
         {removing?.entry && agent ? (
           <RemoveConnection
@@ -763,15 +738,6 @@ const MARK_TILE = cn(
   "rounded-control bg-fill",
 );
 
-/** One tool of the library, drawn as a row: the product's own mark, its name and either what the
- *  agent does with it or the account it already stands on, and the one act left on it at the right
- *  edge. A row holding a grant is the control that opens that grant's record, and a press landing
- *  on the act itself never also opens it.
- *
- *  A plain press leads the list to one record; a press carrying a modifier, or the middle button,
- *  stands that record beside the one already open. Both are the same row control, so the nested
- *  acts are guarded once. `current` marks the row the standing record was opened from, which is
- *  what makes the list read as the path back rather than as a record that arrived from nowhere. */
 function Row({
   name,
   label,
@@ -812,38 +778,19 @@ function Row({
   );
 }
 
-/** What the GitHub row opens in the track. The three legs are GitHub's alone, so they are read
- *  where every other detail of a connector is read — its own record — rather than as a block on the
- *  page's ground under a heading that names no provider. */
 function CoverageRecord({ legs, onClose }: { legs: Fact[]; onClose: () => void }) {
-  return useSlot(
-    <RecordPanel>
+  return (
+    <Sheet open title="GitHub" onClose={onClose}>
       <Facts rows={legs} />
-    </RecordPanel>,
-    {
-      id: COVERAGE,
-      kind: "panel",
-      title: "GitHub",
-      crumb: { label: LIBRARY },
-      onClose,
-    },
+    </Sheet>
   );
 }
 
-/** One connection, standing in a slot beside whatever list opened it: the connection's own facts
- *  and every act on it. The library and an app's own settings open the same record, so a member
- *  reads one sentence per act wherever they came from — and the acts belong to the member who holds
- *  the connection, which is why nobody else's record carries them.
- *
- *  `holders` are the apps already reaching the connection: the first is the lane a share rides, and
- *  a revoke walks them all. `attachTo` are the apps this record may attach it to, and it is empty
- *  where the screen carries the attach act in its own bar — one act says its name once. */
 function ConnectionRecord({
   entry,
   viewer,
   attachTo,
   holders,
-  crumb,
   onDone,
   onClose,
 }: {
@@ -851,8 +798,6 @@ function ConnectionRecord({
   viewer: string | null;
   attachTo: Agent[];
   holders: { id: string; name: string }[];
-  /** The listing this record was opened out of, where it stands one lane to a screen. */
-  crumb?: Crumb;
   onDone: (notice: NoticeState) => void;
   onClose: () => void;
 }) {
@@ -863,8 +808,8 @@ function ConnectionRecord({
     onDone(outcomeNotice(await postIntent(lane, envelope)));
   }
 
-  return useSlot(
-    <RecordPanel>
+  return (
+    <Sheet open title={connectionName(entry)} onClose={onClose}>
       <Facts rows={connectionFacts(entry, viewer)} />
       {entry.own ? (
         <>
@@ -948,14 +893,7 @@ function ConnectionRecord({
           </div>
         </>
       ) : null}
-    </RecordPanel>,
-    {
-      id: CONNECTION + entry.grant,
-      kind: "panel",
-      title: connectionName(entry),
-      crumb,
-      onClose,
-    },
+    </Sheet>
   );
 }
 
@@ -1082,9 +1020,8 @@ function ConnectorList({
     setReloads((count) => count + 1);
   }
 
-  const connecting = useSlot(
-    adding ? (
-      <RecordPanel>
+  const connecting = adding ? (
+    <Sheet open title="Add connector" onClose={close}>
         <OutcomeNotice state={refusal} />
         <form onSubmit={connect} className="flex flex-col gap-xl">
           <Field
@@ -1115,10 +1052,8 @@ function ConnectorList({
             </Button>
           </div>
         </form>
-      </RecordPanel>
-    ) : null,
-    { id: ADD_CONNECTOR, kind: "panel", title: "Add connector", onClose: close },
-  );
+    </Sheet>
+  ) : null;
 
   const shown = record ? (
     <ConnectionRecord
@@ -1205,7 +1140,14 @@ function ConnectorList({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
-            <Button variant="send" size="bar" onClick={() => setAdding(true)}>
+            <Button
+              variant="send"
+              size="bar"
+              onClick={() => {
+                setStanding("");
+                setAdding(true);
+              }}
+            >
               Add connector
             </Button>
           </>
@@ -1225,7 +1167,10 @@ function ConnectorList({
                   : "No account is connected to " + agentName(agent.name) + " yet."
               }
               note={query ? "No connected account matches this search." : undefined}
-              open={(entry) => () => setStanding(entry.grant)}
+              open={(entry) => () => {
+                setAdding(false);
+                setStanding(entry.grant);
+              }}
               act={() => OPEN}
             >
               {(entry) => (
@@ -1244,4 +1189,3 @@ function ConnectorList({
     </>
   );
 }
-

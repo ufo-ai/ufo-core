@@ -184,10 +184,9 @@ test("the GitHub row opens the coverage its install stands on", async () => {
 
   await pressItem("GitHub");
 
-  const lane = await screen.findByRole("region", { name: "GitHub" });
-  expect(within(lane).getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
-    "Connectors/GitHub",
-  );
+  const sheet = await screen.findByRole("dialog", { name: "GitHub" });
+  const header = sheet.querySelector("[data-slot=sheet-header]");
+  expect(header?.firstElementChild).toBe(within(sheet).getByRole("button", { name: "Close" }));
   expect(fact("API")).toBe("Connected");
   expect(fact("Git push")).toBe("Connected");
   expect(fact("Sources")).toBe("Not connected");
@@ -201,44 +200,44 @@ test("a second connector row replaces the first, and the address carries one", a
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await pressItem("GitHub");
-  expect(await screen.findByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "GitHub" })).toBeTruthy();
 
   await pressItem("Notion");
 
-  expect(await screen.findByRole("region", { name: "Notion team" })).toBeTruthy();
-  await waitFor(() => expect(screen.queryByRole("region", { name: "GitHub" })).toBeNull());
+  expect(await screen.findByRole("dialog", { name: "Notion team" })).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull());
   expect(track()).toEqual(["connection/g1"]);
 });
 
 /** Two accounts read side by side is a deliberate act, and it is the browser's own gesture for
  *  opening beside rather than in place. */
-test("a modifier press stands a second connector record beside the first", async () => {
+test("a modifier press keeps one connector sheet visible over the path", async () => {
   location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await pressItem("GitHub");
-  expect(await screen.findByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "GitHub" })).toBeTruthy();
 
   await besideItem("Notion");
 
-  expect(await screen.findByRole("region", { name: "Notion team" })).toBeTruthy();
-  expect(screen.getByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Notion team" })).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull();
   expect(track()).toEqual(["github-coverage", "connection/g1"]);
 });
 
-test("the middle button stands a record beside rather than in place of the one open", async () => {
+test("the middle button keeps one connector sheet visible over the path", async () => {
   location.hash = sectionHash("connectors");
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await pressItem("GitHub");
-  expect(await screen.findByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "GitHub" })).toBeTruthy();
 
   await userEvent.pointer({ target: item("Notion"), keys: "[MouseMiddle]" });
 
-  expect(await screen.findByRole("region", { name: "Notion team" })).toBeTruthy();
-  expect(screen.getByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Notion team" })).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull();
   expect(track()).toEqual(["github-coverage", "connection/g1"]);
 });
 
@@ -250,12 +249,12 @@ test("pressing the row whose record already stands changes nothing", async () =>
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await pressItem("Notion");
-  const record = await screen.findByRole("region", { name: "Notion team" });
+  const record = await screen.findByRole("dialog", { name: "Notion team" });
   const steps = history.length;
 
   await pressItem("Notion");
 
-  expect(screen.getByRole("region", { name: "Notion team" })).toBe(record);
+  expect(screen.getByRole("dialog", { name: "Notion team" })).toBe(record);
   expect(track()).toEqual(["connection/g1"]);
   expect(history.length).toBe(steps);
 });
@@ -268,33 +267,36 @@ test("the row the standing record was opened from is marked", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await pressItem("Notion");
-  await screen.findByRole("region", { name: "Notion team" });
+  await screen.findByRole("dialog", { name: "Notion team" });
 
   expect(item("Notion").getAttribute("aria-current")).toBe("true");
   expect(item("Notion").className).toContain("bg-fill");
   expect(item("GitHub").getAttribute("aria-current")).toBeNull();
 });
 
-test("a link carrying a track opens every record it names", async () => {
+test("a link carrying a path shows only its last record", async () => {
   location.hash = sectionHash("connectors", { opens: ["github-coverage", "connection/g1"] });
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("region", { name: "Notion team" })).toBeTruthy();
-  expect(screen.getByRole("region", { name: "GitHub" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Notion team" })).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull();
 });
 
 /** A record opened from another means nothing without it, so shutting a lane shuts what stands
  *  after it. Shutting the last one leaves everything before it standing. */
-test("closing a record shuts the records opened after it", async () => {
+test("closing through a path exposes one sheet at a time", async () => {
   location.hash = sectionHash("connectors", { opens: ["github-coverage", "connection/g1"] });
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Close GitHub" }));
+  const notion = await screen.findByRole("dialog", { name: "Notion team" });
+  await userEvent.click(within(notion).getByRole("button", { name: "Close" }));
 
-  await waitFor(() => expect(screen.queryByRole("region", { name: "GitHub" })).toBeNull());
-  expect(screen.queryByRole("region", { name: "Notion team" })).toBeNull();
+  const github = await screen.findByRole("dialog", { name: "GitHub" });
+  expect(screen.queryByRole("dialog", { name: "Notion team" })).toBeNull();
+  await userEvent.click(within(github).getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull());
   expect(track()).toEqual([]);
 });
 
@@ -303,10 +305,11 @@ test("closing the last record leaves the one it was opened from standing", async
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Close Notion team" }));
+  const notion = await screen.findByRole("dialog", { name: "Notion team" });
+  await userEvent.click(within(notion).getByRole("button", { name: "Close" }));
 
-  await waitFor(() => expect(screen.queryByRole("region", { name: "Notion team" })).toBeNull());
-  expect(screen.getByRole("region", { name: "GitHub" })).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Notion team" })).toBeNull());
+  expect(screen.getByRole("dialog", { name: "GitHub" })).toBeTruthy();
   expect(track()).toEqual(["github-coverage"]);
 });
 
@@ -480,18 +483,18 @@ test("a revoked connection stays shut when the grant comes back on a later read"
   await openAgentSettings("Assistant", "Connectors");
 
   await pressRow("github");
-  expect(await screen.findByRole("region", { name: "acct" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "acct" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
-  await waitFor(() => expect(screen.queryByRole("region", { name: "acct" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "acct" })).toBeNull());
 
   await userEvent.click(await screen.findByRole("combobox", { name: "Connection" }));
   await userEvent.click(await screen.findByRole("option", { name: /github/ }));
   await userEvent.click(screen.getByRole("button", { name: "Attach" }));
 
   expect(await screen.findByRole("cell", { name: "github" })).toBeTruthy();
-  expect(screen.queryByRole("region", { name: "acct" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "acct" })).toBeNull();
 });
 
 test("the attach picker names the provider and the account, not the broker id", async () => {
@@ -608,7 +611,7 @@ test("the agent's connectors stand on their own tab of its settings dialog", asy
   expect(dialog.queryByRole("button", { name: "Add connector" })).toBeNull();
 });
 
-test("the settings dialog holds a grant record and the add form in one track", async () => {
+test("the settings dialog replaces a grant sheet with the add sheet", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   wire({
     "/connections": () => json({ connections: [grant("github", false, "g1")] }),
@@ -619,12 +622,12 @@ test("the settings dialog holds a grant record and the add form in one track", a
   const dialog = await openAgentSettings("Assistant", "Connectors");
 
   await pressRow("github");
-  expect(await screen.findByRole("region", { name: "acct" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "acct" })).toBeTruthy();
 
   await userEvent.click(within(dialog).getByRole("button", { name: "Add connector" }));
 
-  expect(await screen.findByRole("region", { name: "Add connector" })).toBeTruthy();
-  expect(screen.getByRole("region", { name: "acct" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Add connector" })).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "acct" })).toBeNull();
 });
 
 test("a connector's consent opens in a window this page owns, so its return page closes itself", async () => {

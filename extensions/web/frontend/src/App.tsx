@@ -1096,7 +1096,6 @@ function LinkedPane({
               member={member}
               conversationId={conversation.id}
               onActivity={onActivity}
-              onOpenArtifacts={() => onSelectSlot("artifacts")}
             />
           ) : (
             <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
@@ -1104,7 +1103,6 @@ function LinkedPane({
                 agent={agent}
                 conversation={conversation}
                 headed
-                onOpenArtifacts={() => onSelectSlot("artifacts")}
               />
               <p className="max-w-hint text-ink-soft">
                 This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to

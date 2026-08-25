@@ -1,9 +1,10 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { expect, onTestFinished, test, vi } from "vitest";
 
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
+import { FileSheet } from "@/kernel/artifact";
 import { Pager } from "@/kernel/pager";
 import { RowLines } from "@/kernel/rows";
 import { getJson } from "@/lib/api";
@@ -13,10 +14,63 @@ import { DataTable } from "@/kernel/table";
 import { Table, Td, Th } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
+import { Sheet } from "@/components/ui/sheet";
 import { Header, PageSearch, PageToolbar } from "@/kernel/pane";
 import type { SchemaProperty } from "@/lib/types";
 
 import { declaredFloor, json, opened } from "./harness";
+
+test("a sheet overlays the page and leads with its close control", async () => {
+  const shut: boolean[] = [];
+  render(
+    <main data-testid="page">
+      <p>Page body</p>
+      <Sheet open title="Attachment" onClose={() => shut.push(true)}>
+        <p>File body</p>
+      </Sheet>
+    </main>,
+  );
+
+  const page = screen.getByTestId("page");
+  const sheet = screen.getByRole("dialog", { name: "Attachment" });
+  const header = sheet.querySelector("[data-slot=sheet-header]");
+  const close = within(sheet).getByRole("button", { name: "Close" });
+
+  expect(page.contains(sheet)).toBe(false);
+  expect(sheet.className).toContain("fixed");
+  expect(sheet.className).toContain("right-0");
+  expect(header?.firstElementChild).toBe(close);
+
+  await userEvent.click(close);
+  expect(shut).toEqual([true]);
+});
+
+test("a file sheet owns the shared title, metadata, preview, and download", () => {
+  render(
+    <FileSheet
+      file={{
+        filename: "report.png",
+        subject: "Quarterly report",
+        media_type: "image/png",
+        size_bytes: 2048,
+        url: "/files/report.png",
+        preview_url: null,
+      }}
+      onClose={() => {}}
+      details={<div>Shared by Mel</div>}
+    />,
+  );
+
+  const sheet = screen.getByRole("dialog", { name: "report.png" });
+  expect(within(sheet).getByText("Quarterly report · image/png · 2 kB")).toBeTruthy();
+  expect(within(sheet).getByText("Shared by Mel")).toBeTruthy();
+  expect(within(sheet).getByRole("img", { name: "Quarterly report" }).getAttribute("src")).toBe(
+    "/files/report.png",
+  );
+  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
+    "/files/report.png",
+  );
+});
 
 type Row = { name: string };
 

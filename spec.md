@@ -717,6 +717,11 @@ over the listing that renders what the page honestly can — an image inline, te
 read, and a plain refusal to preview anything else — leaving the download an explicit act rather
 than the click's default.
 
+Every secondary panel uses the app kit's right sheet: attachments, sites, object records, forms,
+and scheduled tasks overlay the page without changing its measure. Its header starts with the close
+control, then the title and explicit actions. The app homepage's chat is the only right column that
+participates in layout.
+
 Every object kind reaches the portal through two generic reads rather than a page of its own:
 `objects/{kind}` is one kind's rows and `objects/{kind}/{name}` is one row whole, each answering
 through the kind's own gate (`member_page` / `member_detail`) in the agent namespace the request

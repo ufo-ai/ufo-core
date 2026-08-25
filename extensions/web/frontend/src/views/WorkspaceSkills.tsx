@@ -20,10 +20,10 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
+import { Sheet } from "@/components/ui/sheet";
 import type { Placement } from "@/kernel/pager";
-import { PageToolbar, RecordPanel, usePageAct, usePageSearch } from "@/kernel/pane";
+import { PageToolbar, usePageAct, usePageSearch } from "@/kernel/pane";
 import { rowControl } from "@/kernel/row";
-import { useSlot } from "@/kernel/slots";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -89,12 +89,6 @@ const SOURCE_URL = "https://github.com/";
  *  mono `Textarea` states code where there is none. Only the family changes: the size stays the
  *  one every control in the portal is set at, and mono's narrow step goes with the mono. */
 const PROSE = "font-sans text-subtitle narrow:text-ui";
-
-/** The lane the writing form stands in, for a skill being written and one being edited alike: one
- *  form stands at a time, so one name holds it, and the lane's own band states which skill. The
- *  address never carries it — a skill half written has no name to carry, and an edit is the
- *  member's place in a form rather than a record the track keeps. */
-const WRITING = "write-skill";
 
 const COMMUNITY = "community";
 const INSTALLED = "installed";
@@ -425,9 +419,9 @@ export function WorkspaceSkills({
   }
 
   const editing = draft?.skill ?? null;
-  const beside = useSlot(
+  const sheet =
     draft !== null ? (
-      <RecordPanel>
+      <Sheet open title={editing ? editing.name : "New skill"} onClose={close}>
         <OutcomeNotice state={saveNotice} />
         <form onSubmit={save} className="flex flex-col gap-xl">
           <Field
@@ -493,15 +487,8 @@ export function WorkspaceSkills({
             </Button>
           </div>
         </form>
-      </RecordPanel>
-    ) : null,
-    {
-      id: WRITING,
-      kind: "panel",
-      title: editing ? editing.name : "New skill",
-      onClose: close,
-    },
-  );
+      </Sheet>
+    ) : null;
 
   const act = usePageAct(
     mainAgent ? (
@@ -628,7 +615,7 @@ export function WorkspaceSkills({
         </Dialog>
       ) : null}
 
-      {beside}
+      {sheet}
 
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>

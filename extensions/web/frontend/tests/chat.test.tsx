@@ -960,10 +960,11 @@ test("a conversation opens its file changes and returns to chat", async () => {
 
   await userEvent.click(await screen.findByRole("button", { name: "Changes" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=changes");
+  const sheet = await screen.findByRole("dialog", { name: "Changes" });
   expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
   const column = screen.getByTestId("log").closest("[data-slot=message-scroller]")!.parentElement!;
-  expect(column.children).toHaveLength(3);
-  expect(column.closest("[data-slot=slot-track]")?.children).toHaveLength(2);
+  expect(screen.getByRole("main").contains(sheet)).toBe(false);
+  expect(column.closest("[data-slot=slot-track]")?.className).toContain("contents");
   expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
   expect(screen.getByText("-old").className).toContain("bg-attention");
   expect(screen.getByText("+new").className).toContain("bg-affirm");
@@ -973,9 +974,7 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(screen.getByText("This diff is truncated.")).toBeTruthy();
   expect(screen.getByText("Some changes may not be shown.")).toBeTruthy();
 
-  await userEvent.click(
-    within(screen.getByRole("main")).getByRole("button", { name: "Close Changes" }),
-  );
+  await userEvent.click(within(sheet).getByRole("button", { name: "Close" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
@@ -1034,7 +1033,7 @@ test("multiple slot types coexist and sources render as external links", async (
   expect(screen.getByText("The retrieved result.").closest("strong")).toBeTruthy();
 });
 
-test("artifacts slot renders durable shared outputs with their download metadata", async () => {
+test("an artifact slot file opens the shared file sheet", async () => {
   const url = "https://ufo.example/artifacts/chart.png?token=signed";
   wire({
     ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
@@ -1074,20 +1073,21 @@ test("artifacts slot renders durable shared outputs with their download metadata
   open();
 
   await userEvent.click(await screen.findByRole("button", { name: "Artifacts 1" }));
-  const artifact = await screen.findByRole("link", { name: "chart.png" });
-  expect(artifact.getAttribute("href")).toBe(url);
-  expect(artifact.getAttribute("download")).toBe("chart.png");
+  const sheet = await screen.findByRole("dialog", { name: "Artifacts" });
+  const artifact = await within(sheet).findByRole("button", { name: "chart.png" });
+  expect(within(sheet).queryByRole("link", { name: "chart.png" })).toBeNull();
   expect(screen.getByText("The final chart")).toBeTruthy();
-  expect(
-    screen
-      .getByRole("region", { name: "Artifacts" })
-      .querySelector('img[src="/artifacts/preview/chart.png?token=signed"]'),
-  ).toBeTruthy();
-  // The picture is already on the row, so the row offers no disclosure to open it again.
-  expect(screen.queryByText("Preview")).toBeNull();
+  expect(sheet.querySelector('img[src="/artifacts/preview/chart.png?token=signed"]')).toBeTruthy();
+
+  await userEvent.click(artifact);
+
+  const file = await screen.findByRole("dialog", { name: "chart.png" });
+  expect(within(file).getByText("The final chart · image/png · 2 kB")).toBeTruthy();
+  expect(within(file).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(url);
+  expect(file.querySelector('img[src="/artifacts/preview/chart.png?token=signed"]')).toBeTruthy();
 });
 
-test("a markdown artifact starts with its first lines and expands to the full document inline", async () => {
+test("a markdown artifact opens as the full document in the shared file sheet", async () => {
   const notes = "https://ufo.example/artifacts/notes.md?token=signed";
   let bodyReads = 0;
   wire({
@@ -1132,22 +1132,18 @@ test("a markdown artifact starts with its first lines and expands to the full do
 
   await userEvent.click(await screen.findByRole("button", { name: "Artifacts 2" }));
   expect(await screen.findByText("The written summary")).toBeTruthy();
+  expect(bodyReads).toBe(0);
+
+  await userEvent.click(screen.getByRole("button", { name: "notes.md" }));
+
+  const heading = await screen.findByRole("heading", { name: "Findings" });
   expect(await screen.findByText(/The number moved\./)).toBeTruthy();
   expect(bodyReads).toBe(1);
-  const heading = await screen.findByRole("heading", { name: "Findings" });
   expect(heading.tagName).toBe("H1");
   expect(screen.queryByText(/# Findings/)).toBeNull();
   const document = heading.closest("[data-artifact-document]");
-  expect(document?.className).toContain("max-h-24");
-
-  const full = screen.getByRole("button", { name: "Full document" });
-  expect(full.getAttribute("aria-expanded")).toBe("false");
-  await userEvent.click(full);
   expect(document?.className).not.toContain("max-h-24");
-  expect(screen.getByRole("button", { name: "First lines" }).getAttribute("aria-expanded")).toBe(
-    "true",
-  );
-  expect(screen.queryByText("Preview")).toBeNull();
+  expect(screen.getByRole("link", { name: "Download" }).getAttribute("href")).toBe(notes);
 });
 
 test("a plain text artifact keeps its characters instead of being read as markdown", async () => {
@@ -1181,8 +1177,7 @@ test("a plain text artifact keeps its characters instead of being read as markdo
   open();
 
   await userEvent.click(await screen.findByRole("button", { name: "Artifacts 1" }));
-  await userEvent.click(await screen.findByText("Preview"));
-  // A .txt means the characters it holds: no heading is made of its '#', no list of its '*'.
+  await userEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
   const preformatted = await screen.findByText(/# Findings/);
   expect(preformatted.tagName).toBe("PRE");
   expect(preformatted.textContent).toContain("* not a list item");
@@ -1848,10 +1843,15 @@ test("a settled turn names each shared file once, with its size", async () => {
   });
 
   expect(await screen.findByText(saying("Here it is."))).toBeTruthy();
-  const links = screen.getAllByRole("link", { name: "report.csv" });
-  expect(links).toHaveLength(1);
-  expect(links[0].getAttribute("href")).toBe("/dl/report.csv");
+  const files = screen.getAllByRole("button", { name: "report.csv" });
+  expect(files).toHaveLength(1);
   expect(screen.getByText("2 kB")).toBeTruthy();
+
+  await userEvent.click(files[0]);
+  const sheet = await screen.findByRole("dialog", { name: "report.csv" });
+  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
+    "/dl/report.csv",
+  );
 });
 
 test("a turn puts shared images in one carousel before its document grid", async () => {
@@ -1912,8 +1912,8 @@ test("a turn puts shared images in one carousel before its document grid", async
   const portrait = within(carousel).getByRole("img", { name: "portrait.jpg" });
   const chart = within(carousel).getByRole("img", { name: "chart.png" });
   const reportPreview = within(documents).getByRole("img", { name: "report.pdf" });
-  const report = within(documents).getByRole("link", { name: "report.pdf" });
-  const scan = within(documents).getByRole("link", { name: "scan.bmp" });
+  const report = within(documents).getByRole("button", { name: "report.pdf" });
+  const scan = within(documents).getByRole("button", { name: "scan.bmp" });
   const notes = within(documents).getByRole("button", { name: "notes.md" });
   expect(carousel.children).toHaveLength(2);
   expect(carousel.children[0].contains(portrait)).toBe(true);
@@ -1950,7 +1950,7 @@ test("a file the running turn shares stands under the log before the turn ends",
     ],
   });
 
-  expect(await screen.findByRole("link", { name: "report.csv" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "report.csv" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
@@ -1960,7 +1960,7 @@ test("a file the running turn shares stands under the log before the turn ends",
     cost_micro_usd: 1_000_000,
   });
   await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeTruthy());
-  expect(screen.getAllByRole("link", { name: "report.csv" })).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: "report.csv" })).toHaveLength(1);
 });
 
 /** A file rides the reply that shared it, never the foot of the log: the member's next message
@@ -2012,7 +2012,7 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
     tokens: 9,
     cost_micro_usd: 1_000_000,
   });
-  expect(await screen.findByRole("link", { name: "report.csv" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "report.csv" })).toBeTruthy();
   expect(screen.getByRole("img", { name: "portrait.jpg" })).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Message the app"), "and another");
@@ -2020,12 +2020,12 @@ test("a file stays on the reply that shared it when a follow-up opens the next t
 
   expect(await screen.findByText(saying("and another"))).toBeTruthy();
   const reply = screen.getByText(saying("Here it is.")).closest("[data-slot=message]") as HTMLElement;
-  expect(within(reply).getByRole("link", { name: "report.csv" })).toBeTruthy();
+  expect(within(reply).getByRole("button", { name: "report.csv" })).toBeTruthy();
   expect(within(reply).getByRole("img", { name: "portrait.jpg" })).toBeTruthy();
 
   land({ turn_id: "turn-2", conversation_id: CONVO_ID, title: "hello" });
   await waitFor(() => expect(StreamFake.opened.length).toBe(2));
-  expect(screen.getAllByRole("link", { name: "report.csv" })).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: "report.csv" })).toHaveLength(1);
   expect(screen.getAllByRole("img", { name: "portrait.jpg" })).toHaveLength(1);
 });
 
@@ -2068,7 +2068,7 @@ test("a reloaded conversation draws files on the earlier reply that shared them"
     "[data-slot=message]",
   ) as HTMLElement;
   expect(reply.contains(picture)).toBe(true);
-  expect(within(reply).getByRole("link", { name: "report.csv" })).toBeTruthy();
+  expect(within(reply).getByRole("button", { name: "report.csv" })).toBeTruthy();
   const rows = screen.getByTestId("log").querySelectorAll("[data-slot=message-scroller-item]");
   expect(rows[rows.length - 1].textContent).toBe("Anything else?");
 });
@@ -2197,17 +2197,17 @@ test("an image the turn shares stands inline in the answer and opens the artifac
   const picture = await screen.findByRole("img", { name: "portrait.jpg" });
   expect(picture.getAttribute("src")).toBe("https://web/artifacts/preview/portrait.jpg?token=signed");
   expect(screen.queryByRole("link", { name: "portrait.jpg" })).toBeNull();
-  expect(screen.getByRole("link", { name: "report.csv" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "report.csv" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "portrait.jpg" }));
-  expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
-  expect(await screen.findByRole("region", { name: "Artifacts" })).toBeTruthy();
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
+  const sheet = await screen.findByRole("dialog", { name: "portrait.jpg" });
+  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
+    "/dl/portrait.jpg",
+  );
 });
 
-/** A markdown file is a document the artifacts sidebar draws, so its card opens there — like a
- *  picture — instead of navigating to the download. Every other card keeps the download link, and
- *  a pane with no sidebar keeps it for markdown too. */
-test("a markdown file the turn shares opens the artifacts sidebar instead of downloading", async () => {
+test("every file the turn shares opens in the attachment sheet instead of downloading", async () => {
   wire({
     ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
       json({
@@ -2269,13 +2269,17 @@ test("a markdown file the turn shares opens the artifacts sidebar instead of dow
 
   expect(await screen.findByRole("button", { name: "notes.md" })).toBeTruthy();
   expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
-  expect(screen.getByRole("link", { name: "report.csv" }).getAttribute("href")).toBe(
-    "/dl/report.csv",
-  );
+  expect(screen.getByRole("button", { name: "report.csv" })).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "report.csv" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "notes.md" }));
-  expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
-  expect(await screen.findByRole("region", { name: "Artifacts" })).toBeTruthy();
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
+  const sheet = await screen.findByRole("dialog", { name: "notes.md" });
+  expect(await within(sheet).findByRole("heading", { name: "Notes" })).toBeTruthy();
+  expect(within(sheet).getByRole("link", { name: "Download" }).getAttribute("href")).toBe(
+    "/dl/notes.md",
+  );
+  await userEvent.click(within(sheet).getByRole("button", { name: "Close" }));
 
   cleanup();
   render(
@@ -2298,8 +2302,8 @@ test("a markdown file the turn shares opens the artifacts sidebar instead of dow
       ]}
     />,
   );
-  expect(screen.getByRole("link", { name: "notes.md" }).getAttribute("href")).toBe("/dl/notes.md");
-  expect(screen.queryByRole("button", { name: "notes.md" })).toBeNull();
+  expect(screen.getByRole("button", { name: "notes.md" })).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
 });
 
 test("a credential handoff stores a value and drops the prompt it answered", async () => {

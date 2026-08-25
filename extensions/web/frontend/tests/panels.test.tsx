@@ -181,11 +181,10 @@ test("settings polling preserves dirty edits", async () => {
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   try {
     render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-    // The gear, not `openAgentSettings`: this test drives fake timers, which userEvent waits on.
-    fireEvent.click(screen.getByRole("button", { name: "Settings for Assistant" }));
+    await openAgentSettings();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
       await Promise.resolve();

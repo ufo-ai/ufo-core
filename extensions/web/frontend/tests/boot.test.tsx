@@ -426,7 +426,7 @@ test("an agent's record carries its surfaces and the web access grant, and the r
   expect(screen.queryByText("Slack, Terminal")).toBeNull();
 
   await pressRow("Second");
-  const record = await screen.findByRole("region", { name: "Second" });
+  const record = await screen.findByRole("dialog", { name: "Second" });
   expect(within(record).getByText("Surfaces")).toBeTruthy();
   expect(within(record).getByText("Slack, Terminal")).toBeTruthy();
 
@@ -454,7 +454,7 @@ const GRANT_ROUTES = {
 
 async function grantForm(): Promise<HTMLElement> {
   await pressRow("Second");
-  return await screen.findByRole("region", { name: "Second" });
+  return await screen.findByRole("dialog", { name: "Second" });
 }
 
 /** One field, two acts, one contract. The address is declared by the field, so the field is what
@@ -531,16 +531,16 @@ test("a second app row takes the first record's place, and closing it leaves the
   });
 
   await pressRow("Assistant");
-  expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Assistant" })).toBeTruthy();
 
   await pressRow("Second");
 
-  expect(await screen.findByRole("region", { name: "Second" })).toBeTruthy();
-  await waitFor(() => expect(screen.queryByRole("region", { name: "Assistant" })).toBeNull());
+  const second = await screen.findByRole("dialog", { name: "Second" });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Assistant" })).toBeNull());
 
-  await userEvent.click(screen.getByRole("button", { name: "Close Second" }));
+  await userEvent.click(within(second).getByRole("button", { name: "Close" }));
 
-  await waitFor(() => expect(screen.queryByRole("region", { name: "Second" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Second" })).toBeNull());
   expect(screen.getByText("Second")).toBeTruthy();
 });
 
@@ -551,7 +551,7 @@ test("the main agent's record states its audience and carries no grant form", as
   });
   await pressRow("Assistant");
 
-  const record = await screen.findByRole("region", { name: "Assistant" });
+  const record = await screen.findByRole("dialog", { name: "Assistant" });
   expect(within(record).getByText("Every member")).toBeTruthy();
   expect(within(record).queryByRole("button", { name: "Grant" })).toBeNull();
 });
@@ -610,7 +610,7 @@ test("a refused audience change tones the notice inside the record that raised i
   });
   await pressRow("Second");
 
-  const record = await screen.findByRole("region", { name: "Second" });
+  const record = await screen.findByRole("dialog", { name: "Second" });
   await userEvent.type(within(record).getByLabelText("Web Access Address"), "new@work.com");
   await userEvent.click(within(record).getByRole("button", { name: "Grant" }));
 

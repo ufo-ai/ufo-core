@@ -8,6 +8,7 @@ import {
 import { useEffect, useState, type ReactNode } from "react";
 
 import { buttonVariants } from "@/components/ui/button";
+import { Sheet } from "@/components/ui/sheet";
 import { Waiting } from "@/kernel/panel";
 import { Markdown } from "@/lib/markdown";
 import { cn } from "@/lib/cn";
@@ -62,6 +63,7 @@ export type SharedFile = {
   filename: string;
   subject: string | null;
   media_type: string;
+  size_bytes?: number;
   url: string | null;
   /** The picture the store rendered for a file that is not itself one — a document's first page. */
   preview_url: string | null;
@@ -74,7 +76,7 @@ export type SharedFile = {
  *
  *  A picture whose link has expired states that, because the src is a signed URL the listing minted
  *  and the member's answer is to read the listing again. */
-export function FileBody({ file }: { file: SharedFile }) {
+function FileBody({ file }: { file: SharedFile }) {
   const [failed, setFailed] = useState(false);
   const pictured = file.preview_url ?? (file.media_type.startsWith("image/") ? file.url : null);
   if (pictured === null) {
@@ -104,7 +106,7 @@ export function FileBody({ file }: { file: SharedFile }) {
 
 /** What the file's own bytes are fetched by. It is drawn only where the file answers one: a link to
  *  nothing is a control the member presses once and learns nothing from. */
-export function FileDownload({ file }: { file: SharedFile }) {
+function FileDownload({ file }: { file: SharedFile }) {
   if (!file.url) return null;
   return (
     <a
@@ -114,6 +116,36 @@ export function FileDownload({ file }: { file: SharedFile }) {
     >
       Download
     </a>
+  );
+}
+
+export function FileSheet({
+  file,
+  onClose,
+  details,
+}: {
+  file: SharedFile;
+  onClose: () => void;
+  details?: ReactNode;
+}) {
+  const meta = [
+    file.subject,
+    file.media_type,
+    file.size_bytes === undefined ? null : formatSize(file.size_bytes),
+  ]
+    .filter((part) => part)
+    .join(" · ");
+  return (
+    <Sheet
+      open
+      onClose={onClose}
+      title={file.filename}
+      actions={<FileDownload file={file} />}
+    >
+      <div className="font-mono text-small text-ink-soft">{meta}</div>
+      {details}
+      <FileBody file={file} />
+    </Sheet>
   );
 }
 

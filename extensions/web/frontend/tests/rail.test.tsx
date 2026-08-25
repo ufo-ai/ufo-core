@@ -898,9 +898,8 @@ test("a terminal conversation is marked with its surface and no way out", async 
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
-/** A conversation another surface holds shares files the same way the chat does, so its markdown
- *  cards open the artifacts sidebar there too. */
-test("a markdown file in a Slack conversation opens the artifacts sidebar", async () => {
+/** A conversation another surface holds shares files through the same attachment sheet. */
+test("a markdown file in a Slack conversation opens the attachment sheet", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
     ["/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
@@ -972,10 +971,10 @@ test("a markdown file in a Slack conversation opens the artifacts sidebar", asyn
   const card = await screen.findByRole("button", { name: "notes.md" });
   expect(screen.queryByRole("link", { name: "notes.md" })).toBeNull();
   await userEvent.click(card);
-  expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=artifacts");
-  const lane = await screen.findByRole("region", { name: "Artifacts" });
-  expect(await within(lane).findByText("notes.md")).toBeTruthy();
-  await userEvent.click(within(lane).getByRole("button", { name: "Close Artifacts" }));
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
+  const sheet = await screen.findByRole("dialog", { name: "notes.md" });
+  expect(await within(sheet).findByRole("heading", { name: "Notes" })).toBeTruthy();
+  await userEvent.click(within(sheet).getByRole("button", { name: "Close" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 

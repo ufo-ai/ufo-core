@@ -5,6 +5,7 @@ import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts, type Fact } from "@/components/ui/facts";
 import { Field, Input, Search } from "@/components/ui/field";
 import { Filter } from "@/components/ui/filter";
+import { Sheet } from "@/components/ui/sheet";
 import {
   Select,
   SelectContent,
@@ -15,8 +16,8 @@ import {
 import { Td, TdFact } from "@/components/ui/table";
 import { FormFromSchema, initialSpecValue, type SpecSchema, type SpecValue } from "@/kernel/form";
 import type { Placement } from "@/kernel/pager";
-import { Header, PageToolbar, RecordPanel } from "@/kernel/pane";
-import { appended, beside, closed, opened, useSlot, type SlotKind } from "@/kernel/slots";
+import { Header, PageToolbar } from "@/kernel/pane";
+import { appended, beside, closed, opened } from "@/kernel/slots";
 import {
   OutcomeNotice,
   Panel,
@@ -205,22 +206,12 @@ export type ObjectAddress = { agent: string; kind: string; name: string };
 const SLOT_PREFIX = "object/";
 const SLOT_SEPARATOR = "/";
 
-/** The id one object stands under wherever it is named — the lane in the track, the `open` key in
- *  the address, the row the store holds. One id space, so a link a member sends reopens the record
- *  the track was holding rather than one that merely looks like it.
- *
- *  The whole address rides in the one string, app included, so a track is a row of lanes and
- *  nothing beside it: two apps' records stand side by side, and opening the second says nothing
- *  about the first. `object/` leads, because that is what tells this lane from a run's permalink or
- *  a member's page, and the app follows it, because an app id holds no separator while a name
- *  may. */
+/** The route id for one object in one app namespace. */
 export function slotOf(at: ObjectAddress): string {
   return SLOT_PREFIX + at.agent + SLOT_SEPARATOR + at.kind + SLOT_SEPARATOR + at.name;
 }
 
-/** The object a lane of the track stands on, or null where the id names something else: a track
- *  holds whatever its screen opens, and a run's own permalink or a member's page is not a record
- *  this pane can draw. */
+/** The object named by a route id, or null when the id names another kind of view. */
 export function objectAt(id: string): ObjectAddress | null {
   if (!id.startsWith(SLOT_PREFIX)) return null;
   const [agent, kind, ...rest] = id.slice(SLOT_PREFIX.length).split(SLOT_SEPARATOR);
@@ -229,22 +220,7 @@ export function objectAt(id: string): ObjectAddress | null {
   return { agent, kind, name };
 }
 
-/** One kind's pages: its index, and the records the screen's own track stands on as rows and links
- *  are pressed. `agentId` names the one agent namespace the index reads, or null to read across the
- *  viewer's whole audience — the same choice the index route itself offers; a record is read in the
- *  app its own lane names, which is how a cross-app index opens two apps' records at once. Closing
- *  a record remounts the index, so a row that record deleted or changed is read again rather than
- *  shown stale.
- *
- *  The track has one owner and it is the screen: `opens` is the path the member walked and every
- *  press hands the next one back through `onPlace`. A pane keeping a second track of its own would
- *  put two nodes on one id, both portalling into the one host that id names, and a row pressed in
- *  the index would leave the address's record standing beside the one it opened.
- *
- *  The records are a path, not a shelf: a row of the index is the root, so pressing one leaves that
- *  record standing alone, and a link followed out of a record shuts whatever stood to the right of
- *  it before the target lands there. `opened`, `appended` and `closed` are the whole of that rule
- *  and every screen takes it from the same place, so this pane cannot drift from them. */
+/** One object kind's index and selected record sheet. */
 export function ObjectPane({
   agentId,
   kind,
@@ -256,10 +232,7 @@ export function ObjectPane({
 }: {
   agentId: string | null;
   kind: string;
-  /** What heads this listing where it is one of several on a page the caller has already headed.
-   *  A pane given one draws a heading under the page's name rather than a page title of its own,
-   *  and draws none of the track's records: the page that heads several listings holds the one
-   *  track they all open into, and two listings each drawing it would put two nodes on one id. */
+  /** What heads this listing where a page carries more than one kind. */
   section?: string;
   /** What a page holding more than one kind says about which one is showing. It leads the toolbar,
    *  where what family to show already stands. */
@@ -267,7 +240,7 @@ export function ObjectPane({
   /** The page's own name, where this pane is the page. A tab inside another page passes none —
    *  the pane it stands in is already headed. */
   title?: string;
-  /** The track the screen holds, records and everything else it opened alike. */
+  /** The selected record path carried by the route. */
   opens: string[];
   onPlace: (place: Placement) => void;
 }) {
@@ -285,7 +258,7 @@ export function ObjectPane({
         onOpen={(at) => onPlace({ opens: opened(opens, slotOf(at), undefined) })}
       />
       {section ? null : (
-        <HeldRecords
+        <ObjectSheets
           opens={opens}
           onPlace={onPlace}
           onShut={() => setGeneration((count) => count + 1)}
@@ -295,15 +268,7 @@ export function ObjectPane({
   );
 }
 
-/** The records a screen's track stands on, drawn once for the whole screen. The screen owns them,
- *  never a listing on it: a page holding two listings would otherwise register two nodes under one
- *  id, both portalling into the one host that id names, and the member would read the record twice.
- *
- *  A link out of a record opens what it names immediately beside it and ends the path there, so the
- *  record the member came from still stands and what was reached through the record they have just
- *  left does not. `onShut` is how the listings above hear that a record closed, since a record the
- *  member deleted or changed leaves a row that has to be read again rather than shown stale. */
-export function HeldRecords({
+function ObjectSheets({
   opens,
   onPlace,
   onShut,
@@ -318,72 +283,33 @@ export function HeldRecords({
   };
   return (
     <>
-      {opens.map((id) => {
+      {opens.slice(-1).map((id) => {
         const at = objectAt(id);
-        return (
-          <HeldRecord key={id} id={id} title={at?.name ?? id} onClose={() => shut(id)}>
-            {at === null ? (
+        if (at === null)
+          return (
+            <Sheet open key={id} title={id} onClose={() => shut(id)}>
               <PanelEmpty>That item is not on this page.</PanelEmpty>
-            ) : (
-              <ObjectDetail
-                agentId={at.agent}
-                kind={at.kind}
-                name={at.name}
-                onOpen={(next, aside) =>
-                  onPlace({
-                    opens: aside
-                      ? appended(opens, slotOf(next))
-                      : opened(opens, slotOf(next), id),
-                  })
-                }
-                onBack={() => shut(id)}
-              />
-            )}
-          </HeldRecord>
+            </Sheet>
+          );
+        return (
+          <ObjectDetail
+            key={id}
+            agentId={at.agent}
+            kind={at.kind}
+            name={at.name}
+            onOpen={(next, aside) =>
+              onPlace({
+                opens: aside
+                  ? appended(opens, slotOf(next))
+                  : opened(opens, slotOf(next), id),
+              })
+            }
+            onBack={() => shut(id)}
+          />
         );
       })}
     </>
   );
-}
-
-/** One lane of the track, and the one renderer every screen that stands a record in a lane uses.
- *  The record inside it cannot name the lane: it is drawn within the track its own acts lie over,
- *  so a track read from in there is that one rather than the pane's. This pane named the lane, so
- *  the lane a link was followed from is the id it gave it.
- *
- *  An id the pane cannot draw a record for — one naming something other than an object, or any of
- *  them while the track names no agent to read them in — still stands as a lane and says so inside
- *  it. Drawing nothing would leave the address carrying a record the member can neither read nor
- *  shut, because the close belongs to the lane.
- *
- *  `from` is what the lane was opened out of, said as the crumb over it: a lane paged one to a
- *  screen has no lane standing to its left to read as the way back. A screen that stands its lanes
- *  beside each other passes none, because the lane to the left is that way back. It is a name and no
- *  address — a lane on the screen is not a place a link reaches — so it states where the record came
- *  from and the lane's own way out shuts it. */
-export function HeldRecord({
-  id,
-  title,
-  kind = "panel",
-  from,
-  onClose,
-  children,
-}: {
-  id: string;
-  /** What the lane's band names it, absent while the read that names it is still in flight. */
-  title?: string;
-  kind?: SlotKind;
-  from?: string;
-  onClose: () => void;
-  children: ReactNode;
-}) {
-  return useSlot(children, {
-    id,
-    kind,
-    title,
-    crumb: from === undefined ? undefined : { label: from },
-    onClose,
-  });
 }
 
 /** The band a listing standing among others is headed by: what these records are, and the act that
@@ -452,8 +378,9 @@ function ObjectIndex({
     return outcomeNotice(outcome);
   }
 
-  const slot = useSlot(
+  const sheet =
     creating?.spec_schema && owner !== null ? (
+      <Sheet open title={"New " + noun(kind)} onClose={() => setCreating(null)}>
       <NewObject
         schema={creating.spec_schema}
         kind={creating.kind}
@@ -462,14 +389,8 @@ function ObjectIndex({
         onDone={submit}
         onClose={() => setCreating(null)}
       />
-    ) : null,
-    {
-      id: "new-" + kind,
-      kind: "panel",
-      title: "New " + noun(kind),
-      onClose: () => setCreating(null),
-    },
-  );
+      </Sheet>
+    ) : null;
 
   return (
     <>
@@ -644,7 +565,7 @@ function ObjectIndex({
         );
       }}
       </Panel>
-      {slot}
+      {sheet}
     </>
   );
 }
@@ -698,15 +619,13 @@ function NewObject({
   );
 }
 
-/** One object's record, beside the screen that opened it: the gutters and the scroll every opened
- *  record wears, over the record's own groups. `lead` stands above those groups — the one thing a
- *  kind can show that its facts cannot, a site's own live page — supplied by the screen that knows
- *  the kind, so this panel stays ignorant of any one of them. */
+/** One object's record inside a sheet. */
 export function ObjectDetail({
   agentId,
   kind,
   name,
   lead,
+  actions,
   onOpen,
   onBack,
 }: {
@@ -714,31 +633,44 @@ export function ObjectDetail({
   kind: string;
   name: string;
   lead?: ReactNode;
-  /** What a link inside the record reaches for, and whether the press asked for it beside what is
-   *  already open rather than in place of whatever stands to this record's right. */
+  actions?: (
+    status: Record<string, ObjectValue> | null,
+    apply: (spec: Record<string, SpecValue>) => Promise<NoticeState>,
+  ) => ReactNode;
+  /** What a link inside the record reaches for and whether it preserves the current route path. */
   onOpen: (at: ObjectAddress, aside: boolean) => void;
   onBack: () => void;
 }) {
   return (
-    <RecordPanel>
-      {lead}
-      <ObjectRecord agentId={agentId} kind={kind} name={name} onOpen={onOpen} onBack={onBack} />
-    </RecordPanel>
+    <ObjectRecord
+      agentId={agentId}
+      kind={kind}
+      name={name}
+      lead={lead}
+      actions={actions}
+      onOpen={onOpen}
+      onBack={onBack}
+    />
   );
 }
 
-/** The record's body, inside the panel so the edit form it raises lies over this record rather than
- *  taking a slot of its own beside it. */
 function ObjectRecord({
   agentId,
   kind,
   name,
+  lead,
+  actions,
   onOpen,
   onBack,
 }: {
   agentId: string;
   kind: string;
   name: string;
+  lead?: ReactNode;
+  actions?: (
+    status: Record<string, ObjectValue> | null,
+    apply: (spec: Record<string, SpecValue>) => Promise<NoticeState>,
+  ) => ReactNode;
   onOpen: (at: ObjectAddress, aside: boolean) => void;
   onBack: () => void;
 }) {
@@ -757,6 +689,12 @@ function ObjectRecord({
     return outcomeNotice(outcome);
   }
 
+  async function apply(spec: Record<string, SpecValue>) {
+    const next = await submit({ verb: "apply", kind, name, spec });
+    setNotice(next);
+    return next;
+  }
+
   async function remove() {
     const outcome = await postIntent(agentId, { verb: "delete", kind, name });
     if (outcome.applied) {
@@ -766,116 +704,116 @@ function ObjectRecord({
     setNotice(outcomeNotice(outcome));
   }
 
-  const slot = useSlot(
-    editing?.spec_schema && editing.spec ? (
-      <SpecPanel
-        schema={editing.spec_schema}
-        kind={editing.kind}
-        name={editing.name}
-        spec={editing.spec}
-        onDone={submit}
-        onClose={() => setEditing(null)}
-      />
-    ) : null,
-    {
-      id: "edit-" + kind + "/" + name,
-      kind: "panel",
-      title: "Edit " + name,
-      onClose: () => setEditing(null),
-    },
-  );
-
+  const payload = state.phase === "ready" ? state.payload : null;
   return (
-    <>
-      <div className="text-ink-soft">{noun(kind)}</div>
-      <Panel state={state} shape="form">
-        {(payload) => (
-          <>
-            <OutcomeNotice state={notice} />
-            <Section title="Spec">
-              {payload.spec ? (
-                <Facts
-                  rows={Object.entries(payload.spec).flatMap(([field, value]) => {
-                    const fact = specFact(field, value, payload.spec_schema);
-                    return fact ? [fact] : [];
-                  })}
-                />
-              ) : (
-                <p className="m-0">{payload.summary}</p>
-              )}
-            </Section>
-            <Section title="Status">
-              <Facts
-                rows={payload.fields.filter((field) => field !== ID_FIELD).map((field) =>
-                  field === OWNER_FIELD
-                    ? { label: OWNER_HEADING, value: creator(payload.status[field], viewer) }
-                    : {
-                        label: heading(field, payload.spec_schema),
-                        value: cell(field, payload.status[field] ?? null, payload.spec_schema),
-                      },
-                )}
-              />
-            </Section>
-            <Section title="Links">
-              {payload.links.length ? (
-                <ul className="m-0 list-none p-0">
-                  {payload.links.map((link) => {
-                    const at = { agent: agentId, kind: link.kind, name: link.name };
-                    const said = link.relation + " " + noun(link.kind) + " " + link.name;
-                    return (
-                      <li key={link.relation + link.kind + link.name} className="py-2xs">
-                        {link.opens ? (
-                          <button
-                            type="button"
-                            data-part="link"
-                            onClick={(event) => onOpen(at, beside(event))}
-                            onAuxClick={(event) => {
-                              if (!beside(event)) return;
-                              onOpen(at, true);
-                            }}
-                            className="border-0 bg-transparent p-0 text-left font-strong text-inherit"
-                          >
-                            {said}
-                          </button>
-                        ) : (
-                          <span data-part="link">{said}</span>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : (
-                <p className="m-0 text-ink-soft">Nothing links out of this one.</p>
-              )}
-            </Section>
-            <div className="mb-2xl text-small text-ink-soft">
-              {payload.created_at ? (
-                <span>
-                  Created <Moment at={payload.created_at} />
-                </span>
-              ) : null}
-              {payload.created_at && payload.updated_at ? " · " : null}
-              {payload.updated_at ? (
-                <span>
-                  Updated <Moment at={payload.updated_at} />
-                </span>
-              ) : null}
-            </div>
-            {payload.deletes ? (
-              <div className="flex flex-wrap gap-sm">
-                {payload.applies && payload.spec_schema && payload.spec ? (
-                  <Button variant="send" onClick={() => setEditing(payload)}>
-                    Edit
-                  </Button>
+    <Sheet
+      open
+      title={name}
+      onClose={onBack}
+      actions={editing === null ? actions?.(payload?.status ?? null, apply) : undefined}
+    >
+      {lead}
+      {editing?.spec_schema && editing.spec ? (
+        <SpecPanel
+          schema={editing.spec_schema}
+          kind={editing.kind}
+          name={editing.name}
+          spec={editing.spec}
+          onDone={submit}
+          onClose={() => setEditing(null)}
+        />
+      ) : (
+        <>
+          <div className="text-ink-soft">{noun(kind)}</div>
+          <Panel state={state} shape="form">
+            {(record) => (
+              <>
+                <OutcomeNotice state={notice} />
+                <Section title="Spec">
+                  {record.spec ? (
+                    <Facts
+                      rows={Object.entries(record.spec).flatMap(([field, value]) => {
+                        const fact = specFact(field, value, record.spec_schema);
+                        return fact ? [fact] : [];
+                      })}
+                    />
+                  ) : (
+                    <p className="m-0">{record.summary}</p>
+                  )}
+                </Section>
+                <Section title="Status">
+                  <Facts
+                    rows={record.fields.filter((field) => field !== ID_FIELD).map((field) =>
+                      field === OWNER_FIELD
+                        ? { label: OWNER_HEADING, value: creator(record.status[field], viewer) }
+                        : {
+                            label: heading(field, record.spec_schema),
+                            value: cell(field, record.status[field] ?? null, record.spec_schema),
+                          },
+                    )}
+                  />
+                </Section>
+                <Section title="Links">
+                  {record.links.length ? (
+                    <ul className="m-0 list-none p-0">
+                      {record.links.map((link) => {
+                        const at = { agent: agentId, kind: link.kind, name: link.name };
+                        const said = link.relation + " " + noun(link.kind) + " " + link.name;
+                        return (
+                          <li key={link.relation + link.kind + link.name} className="py-2xs">
+                            {link.opens ? (
+                              <button
+                                type="button"
+                                data-part="link"
+                                onClick={(event) => onOpen(at, beside(event))}
+                                onAuxClick={(event) => {
+                                  if (!beside(event)) return;
+                                  onOpen(at, true);
+                                }}
+                                className="border-0 bg-transparent p-0 text-left font-strong text-inherit"
+                              >
+                                {said}
+                              </button>
+                            ) : (
+                              <span data-part="link">{said}</span>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : (
+                    <p className="m-0 text-ink-soft">Nothing links out of this one.</p>
+                  )}
+                </Section>
+                <div className="mb-2xl text-small text-ink-soft">
+                  {record.created_at ? (
+                    <span>
+                      Created <Moment at={record.created_at} />
+                    </span>
+                  ) : null}
+                  {record.created_at && record.updated_at ? " · " : null}
+                  {record.updated_at ? (
+                    <span>
+                      Updated <Moment at={record.updated_at} />
+                    </span>
+                  ) : null}
+                </div>
+                {record.deletes ? (
+                  <div className="flex flex-wrap gap-sm">
+                    {record.applies && record.spec_schema && record.spec ? (
+                      <Button variant="send" onClick={() => setEditing(record)}>
+                        Edit
+                      </Button>
+                    ) : null}
+                    <ConfirmButton verb="Delete" variant="row" onClick={remove} />
+                  </div>
                 ) : null}
-                <ConfirmButton verb="Delete" variant="row" onClick={remove} />
-              </div>
-            ) : null}
-          </>
-        )}
-      </Panel>
-      {slot}
-    </>
+              </>
+            )}
+          </Panel>
+        </>
+      )}
+    </Sheet>
   );
 }
 
@@ -894,8 +832,7 @@ function specFact(field: string, value: ObjectValue, schema: SpecSchema | null):
   };
 }
 
-/** One mutation of one object as the lane takes it: the verb, the kind, the name the member typed,
- *  and the spec the schema's own fields produced. */
+/** One typed object mutation. */
 export type SpecEnvelope = {
   verb: "apply";
   kind: string;
@@ -903,16 +840,7 @@ export type SpecEnvelope = {
   spec: Record<string, SpecValue>;
 };
 
-/** The one form a typed object is written through, for both the act that creates it and the act
- *  that changes it, made or changed in the same kind of slot the object itself opens in. Six schema
- *  fields under the records push the records off the screen and read as a seventh section of the
- *  page; in a slot they are the act the member asked for, with the index still readable beside them
- *  and a refusal stated next to the rows it was refused against.
- *
- *  `lead` is for the one field the schema cannot state: which agent's namespace the new row lands
- *  in, which only a view listing across agents knows to ask. `options` is for the one facet the
- *  schema cannot state: a field whose choices are the deploy's rather than the type's, as an
- *  agent's model is. */
+/** The schema-driven form for creating and editing typed objects. */
 export function SpecPanel({
   schema,
   kind,
@@ -966,7 +894,7 @@ export function SpecPanel({
   }
 
   return (
-    <RecordPanel>
+    <>
       <OutcomeNotice state={notice} />
       <form onSubmit={send} className="flex flex-col gap-xl">
         {lead}
@@ -992,6 +920,6 @@ export function SpecPanel({
           </Button>
         </div>
       </form>
-    </RecordPanel>
+    </>
   );
 }

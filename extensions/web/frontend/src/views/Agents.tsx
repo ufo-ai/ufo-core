@@ -7,7 +7,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ObjectPane } from "@/kernel/objects";
 import { Empty, usePanelRead } from "@/kernel/panel";
 import { BANDS } from "@/kernel/pane";
-import { SlotTrack } from "@/kernel/slots";
 import { TabPanel, TabRow } from "@/kernel/tabs";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
@@ -431,8 +430,6 @@ export function Agents({
   }, [forwarding, onForwardAgents]);
   const [settling, setSettling] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(SETTINGS_TABS[0]);
-  // The dialog carries no address, so the one track its Scheduled tab walks is held here — the
-  // pane keeps none of its own, and the dialog opens on the first tab with nothing standing.
   const [scheduled, setScheduled] = useState<string[]>([]);
 
   if (forwarding) return null;
@@ -476,45 +473,41 @@ export function Agents({
         <Empty>No app is visible to you.</Empty>
       )}
       {shown && !building ? (
-        <Dialog open={settling} onOpenChange={setSettling}>
+        <Dialog modal={false} open={settling} onOpenChange={setSettling}>
           <DialogContent className="w-settings" aria-describedby={undefined}>
-            {/* A record the dialog raises — a connector's own row — has to stand inside it: the
-                pane's track lies under the dialog's scrim, where nothing can reach it. */}
-            <SlotTrack over opens={scheduled} onMove={setScheduled}>
-              <DialogHeader className="flex-row items-center gap-2xl">
-                <DialogTitle className="min-w-0 flex-1 truncate">{agentName(shown.name)}</DialogTitle>
-                <TabRow
-                  group="agent-settings"
-                  tabs={SETTINGS_TABS}
-                  current={settingsTab}
-                  label={(name) => SETTINGS_TAB_LABELS[name]}
-                  onPick={setSettingsTab}
+            <DialogHeader className="flex-row items-center gap-2xl">
+              <DialogTitle className="min-w-0 flex-1 truncate">{agentName(shown.name)}</DialogTitle>
+              <TabRow
+                group="agent-settings"
+                tabs={SETTINGS_TABS}
+                current={settingsTab}
+                label={(name) => SETTINGS_TAB_LABELS[name]}
+                onPick={setSettingsTab}
+              />
+            </DialogHeader>
+            <TabPanel group="agent-settings" current={settingsTab} className={BANDS}>
+              {settingsTab === "settings" ? (
+                <Settings
+                  key={shown.id}
+                  agent={shown}
+                  onArchived={() => {
+                    setSettling(false);
+                    openAgents();
+                    onAgents();
+                  }}
                 />
-              </DialogHeader>
-              <TabPanel group="agent-settings" current={settingsTab} className={BANDS}>
-                {settingsTab === "settings" ? (
-                  <Settings
-                    key={shown.id}
-                    agent={shown}
-                    onArchived={() => {
-                      setSettling(false);
-                      openAgents();
-                      onAgents();
-                    }}
-                  />
-                ) : null}
-                {settingsTab === "connectors" ? <AgentConnectors agent={shown} /> : null}
-                {settingsTab === "scheduled" ? (
-                  <ObjectPane
-                    key={shown.id}
-                    agentId={shown.id}
-                    kind={TASK_KIND}
-                    opens={scheduled}
-                    onPlace={(next) => setScheduled(next.opens ?? [])}
-                  />
-                ) : null}
-              </TabPanel>
-            </SlotTrack>
+              ) : null}
+              {settingsTab === "connectors" ? <AgentConnectors agent={shown} /> : null}
+              {settingsTab === "scheduled" ? (
+                <ObjectPane
+                  key={shown.id}
+                  agentId={shown.id}
+                  kind={TASK_KIND}
+                  opens={scheduled}
+                  onPlace={(next) => setScheduled(next.opens ?? [])}
+                />
+              ) : null}
+            </TabPanel>
           </DialogContent>
         </Dialog>
       ) : null}

@@ -45,6 +45,7 @@ import {
   useMessageScroller,
 } from "@/components/ui/message-scroller";
 import { Reveal } from "@/components/ui/reveal";
+import { FileSheet } from "@/kernel/artifact";
 import { AgentIcon } from "@/lib/agentIcon";
 import { BASE } from "@/lib/api";
 import { agentName } from "@/lib/agentName";
@@ -243,8 +244,7 @@ function EarlierRow({ earlier }: { earlier: EarlierMessages }) {
  *  supplies the form: `question` draws one and a pane that cannot answer passes none.
  *
  *  A reply that shared files draws them under its words: a picture as the picture it is, every
- *  other file as a card. `onOpenArtifacts` is where pressing a picture goes on a screen with an
- *  artifacts sidebar; a pane without one passes none and the picture links to the file itself.
+ *  other file as a card. Pressing any file opens it in the shared sheet.
  *
  *  `children` is what the screen hangs at the foot of the transcript, in the same column — a
  *  handoff, an empty state — so nothing floats over the conversation in a pane of its own. */
@@ -253,7 +253,6 @@ export function MessageLog({
   earlier,
   live = null,
   question,
-  onOpenArtifacts,
   className,
   children,
 }: {
@@ -264,13 +263,13 @@ export function MessageLog({
   earlier?: EarlierMessages;
   live?: LiveTurn | null;
   question?: (asked: ChatQuestion) => ReactNode;
-  onOpenArtifacts?: () => void;
   /** The reading column, set on the messages rather than on the pane that scrolls them: a pane
    *  narrowed to the column carries the scrollbar at the column's edge, which puts a moving bar
    *  in the middle of the screen beside the words instead of at the side of the window. */
   className?: string;
   children?: ReactNode;
 }) {
+  const [opened, setOpened] = useState<ChatFile | null>(null);
   const waiting = messages.findIndex(
     (message) => message.arrival_id !== undefined || message.queued === true,
   );
@@ -317,7 +316,7 @@ export function MessageLog({
             </Said>
           )}
           {message.role === "user" || !message.files?.length ? null : (
-            <Files files={message.files} onOpen={onOpenArtifacts} />
+            <Files files={message.files} onOpen={setOpened} />
           )}
           {message.role === "user" || !message.apps?.length ? null : <Apps apps={message.apps} />}
           {message.connect ? <ConnectLink connect={message.connect} /> : null}
@@ -327,46 +326,49 @@ export function MessageLog({
       </MessageScrollerItem>
     );
   return (
-    <MessageScrollerContent className={className} aria-busy={live !== null}>
-      {earlier &&
-      (earlier.pages.length > 0 || earlier.more || earlier.loading || earlier.failed) ? (
-        <EarlierRow earlier={earlier} />
-      ) : null}
-      {earlier?.pages.flatMap((page) =>
-        page.messages.map((said, at) => bubble(said, "h" + page.cursor + ":" + at)),
-      )}
-      {rows.map((row) =>
-        row.live ? (
-          <MessageScrollerItem key={"m" + String(row.at)} messageId={"m" + String(row.at)}>
-            <Speech mine={false}>
-              <Activity
-                events={row.live.events}
-                runs={row.live.subagents}
-                live
-                working={
-                  row.live.reconnecting
-                    ? "Reconnecting…"
-                    : (row.live.activity ?? (row.live.text ? undefined : "Thinking…"))
-                }
-              />
-              <Said mine={false} entering>
-                <StreamingBody text={row.live.text} />
-              </Said>
-              {row.live.files.length ? (
-                <Files files={row.live.files} onOpen={onOpenArtifacts} />
-              ) : null}
-              {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
-              {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
-              {row.live.meter ? <Meta>{row.live.meter}</Meta> : null}
-              {row.live.meta ? <Meta>{row.live.meta}</Meta> : null}
-            </Speech>
-          </MessageScrollerItem>
-        ) : (
-          bubble(row.said, "m" + String(row.at))
-        ),
-      )}
-      {children}
-    </MessageScrollerContent>
+    <>
+      <MessageScrollerContent className={className} aria-busy={live !== null}>
+        {earlier &&
+        (earlier.pages.length > 0 || earlier.more || earlier.loading || earlier.failed) ? (
+          <EarlierRow earlier={earlier} />
+        ) : null}
+        {earlier?.pages.flatMap((page) =>
+          page.messages.map((said, at) => bubble(said, "h" + page.cursor + ":" + at)),
+        )}
+        {rows.map((row) =>
+          row.live ? (
+            <MessageScrollerItem key={"m" + String(row.at)} messageId={"m" + String(row.at)}>
+              <Speech mine={false}>
+                <Activity
+                  events={row.live.events}
+                  runs={row.live.subagents}
+                  live
+                  working={
+                    row.live.reconnecting
+                      ? "Reconnecting…"
+                      : (row.live.activity ?? (row.live.text ? undefined : "Thinking…"))
+                  }
+                />
+                <Said mine={false} entering>
+                  <StreamingBody text={row.live.text} />
+                </Said>
+                {row.live.files.length ? (
+                  <Files files={row.live.files} onOpen={setOpened} />
+                ) : null}
+                {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
+                {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
+                {row.live.meter ? <Meta>{row.live.meter}</Meta> : null}
+                {row.live.meta ? <Meta>{row.live.meta}</Meta> : null}
+              </Speech>
+            </MessageScrollerItem>
+          ) : (
+            bubble(row.said, "m" + String(row.at))
+          ),
+        )}
+        {children}
+      </MessageScrollerContent>
+      {opened ? <AttachmentSheet file={opened} onClose={() => setOpened(null)} /> : null}
+    </>
   );
 }
 
@@ -410,8 +412,6 @@ function Said({
   );
 }
 
-const MARKDOWN_MEDIA_TYPE = "text/markdown";
-
 /** A file's name is the whole of the control that opens it, and a name set in a small line is 15px
  *  tall. At a phone width the control keeps the control height as the box a finger has to land on,
  *  which the name itself does not decide. */
@@ -421,9 +421,8 @@ const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-
  *  one is drawn as part of the answer, and several stand in share order on one snapping row. Every
  *  other file follows in a card grid, including documents whose first page has a preview and images
  *  no preview was rendered for — only a drawable image belongs in the image carousel. Pressing an
- *  preview goes to `onOpen` where the screen has an artifacts sidebar. A markdown card opens there
- *  too; everywhere else a card links to the file itself. */
-function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
+ *  preview goes to `onOpen`, as does every file card. */
+function Files({ files, onOpen }: { files: ChatFile[]; onOpen: (file: ChatFile) => void }) {
   const images = files.filter(
     (file) => file.media_type.startsWith("image/") && file.preview_url !== null,
   );
@@ -459,46 +458,32 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen?: () => void }) {
   );
 }
 
-function FileCard({ file, onOpen }: { file: ChatFile; onOpen?: () => void }) {
+function FileCard({ file, onOpen }: { file: ChatFile; onOpen: (file: ChatFile) => void }) {
   const thumbnail =
     file.preview_url === null ? null : (
       <AttachmentThumbnail filename={file.filename} previewUrl={file.preview_url} />
     );
   return (
     <Attachment size="sm" className={cn("w-full min-w-0", thumbnail && "flex-nowrap")}>
-      {thumbnail === null ? null : onOpen ? (
+      {thumbnail === null ? null : (
         <button
           type="button"
-          onClick={onOpen}
+          onClick={() => onOpen(file)}
           aria-label={`Open ${file.filename}`}
           className="shrink-0 cursor-pointer border-0 bg-transparent p-0"
         >
           {thumbnail}
         </button>
-      ) : file.url ? (
-        <a href={file.url} aria-label={`Download ${file.filename}`} className="shrink-0">
-          {thumbnail}
-        </a>
-      ) : (
-        thumbnail
       )}
       <AttachmentContent>
         <AttachmentTitle>
-          {onOpen && file.media_type === MARKDOWN_MEDIA_TYPE ? (
-            <button
-              type="button"
-              onClick={onOpen}
-              className={cn("cursor-pointer border-0 bg-transparent p-0 text-inherit", TAP_FLOOR)}
-            >
-              {file.filename}
-            </button>
-          ) : file.url ? (
-            <a href={file.url} className={TAP_FLOOR}>
-              {file.filename}
-            </a>
-          ) : (
-            file.filename
-          )}
+          <button
+            type="button"
+            onClick={() => onOpen(file)}
+            className={cn("cursor-pointer border-0 bg-transparent p-0 text-inherit", TAP_FLOOR)}
+          >
+            {file.filename}
+          </button>
         </AttachmentTitle>
         {file.size_bytes === undefined ? null : (
           <AttachmentDescription>{formatSize(file.size_bytes)}</AttachmentDescription>
@@ -567,15 +552,14 @@ function Attached({ files, picked }: { files: ChatFile[]; picked: File[] }) {
 }
 
 /** One shared picture, named by its filename — a file that is itself a picture, or the first page a
- *  document was rendered to, which wears a badge naming the kind of document it came from. A pane
- *  with no sidebar to open draws it as a link to the file itself. */
+ *  document was rendered to, which wears a badge naming the kind of document it came from. */
 function Picture({
   file,
   onOpen,
   grouped = false,
 }: {
   file: ChatFile;
-  onOpen?: () => void;
+  onOpen: (file: ChatFile) => void;
   grouped?: boolean;
 }) {
   const badge = attachmentBadgeFor(file.filename);
@@ -596,25 +580,20 @@ function Picture({
       )}
     </span>
   );
-  if (onOpen) {
-    return (
-      <button
-        type="button"
-        onClick={onOpen}
-        className={cn(className, "cursor-pointer border-0 bg-transparent p-0")}
-      >
-        {drawn}
-      </button>
-    );
-  }
-  if (file.url) {
-    return (
-      <a href={file.url} className={className}>
-        {drawn}
-      </a>
-    );
-  }
-  return <div className={className}>{drawn}</div>;
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(file)}
+      className={cn(className, "cursor-pointer border-0 bg-transparent p-0")}
+    >
+      {drawn}
+    </button>
+  );
+}
+
+function AttachmentSheet({ file, onClose }: { file: ChatFile; onClose: () => void }) {
+  const shared = { ...file, subject: null };
+  return <FileSheet file={shared} onClose={onClose} />;
 }
 
 export function Meta({ children }: { children: ReactNode }) {

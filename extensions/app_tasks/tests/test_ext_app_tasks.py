@@ -26,7 +26,9 @@ def test_the_built_page_is_the_apps_own_tsx() -> None:
     assert entry is not None
     assert (BUILD_ENTRY.parent / entry[1]).resolve() == (SKILL_DIR / "app.tsx").resolve()
     source = (SKILL_DIR / "app.tsx").read_text()
-    assert "HeldRecords" in source
+    assert "<Sheet" in source
+    assert 'paused ? "Resume" : "Pause"' in source
+    assert "onApply({ paused: !paused })" in source
     assert "mountApp(" in source
 
 

@@ -9,10 +9,8 @@ import {
   Button,
   Dialog,
   DialogTrigger,
-  FileBody,
-  FileDownload,
+  FileSheet,
   Header,
-  HeldRecord,
   Markdown,
   Moment,
   ObjectDetail,
@@ -136,27 +134,6 @@ const STATUS_NOTES: Record<string, string> = {
   cancelled: "Stopped",
 };
 
-/** The workspace's radar: the feed of what ran on its own, answered across the viewer's whole
- *  audience. What is armed to run is the tasks screen's answer, not this one — a member here is
- *  reading what happened. A story's task name opens that task's record in a slot beside the feed,
- *  and a second name takes that record's place, because the feed is one list and the record beside
- *  it is where the member is reading; two tasks are read side by side when the member asks for that
- *  with a cmd- or middle-press. The feed crosses apps, so each lane names the app its record is
- *  read in and standing a second app's task beside the first leaves the first where it was.
- *
- *  The band over it says where the member is: the app's own name at the feed, and — standing on one
- *  report — that report under it, under the crumb back to the page. That crumb is the shell's own,
- *  carried in over the bridge, so the step it names is the step the portal's tab title names and the
- *  page states no second answer to where it stands. The report names itself from the document it
- *  published, which lands after the page does, so the name is held here beside the run it belongs to;
- *  a name kept without its run would head the next report the member opened with the last one's
- *  title.
- *
- *  Shutting the report is the band's own way out, not the crumb: the crumb goes to an address and
- *  closing a lane is a verb of the lane.
- *
- *  The one act on the whole feed stands on that band, and only there: a member reading one report
- *  is reading it, not maintaining the list they reached it from. */
 function Radar({
   title,
   crumb,
@@ -193,20 +170,18 @@ function Radar({
       <Section>
         <Feed place={place} pin={pin} onPlace={onPlace} onName={name} />
       </Section>
-      {opens.map((id, at) => {
-        if (id === pin) return null;
-        const before = at === 0 ? null : objectAt(opens[at - 1]);
-        return (
+      {opens
+        .filter((id) => id !== pin)
+        .slice(-1)
+        .map((id) => (
           <RecordSlot
             key={id}
             id={id}
             held={objectAt(id)}
-            from={before?.name ?? page}
             opens={opens}
             onPlace={onPlace}
           />
-        );
-      })}
+        ))}
     </>
   );
 }
@@ -236,45 +211,32 @@ function RebuildEntries() {
   );
 }
 
-/** One task's record, standing in the track as a panel. A link out of it opens the record it names
- *  immediately beside this one and ends the path there: the task the member came from is still
- *  where it stood, and what was reached through the record they have just left is not.
- *
- *  `from` is what the record was opened out of — the record standing to its left, or the screen
- *  itself — said as the crumb over it. A lane paged one to a screen has nothing standing to its
- *  left, so that crumb is the only way back the member has.
- *
- *  An id the feed does not pin and this screen cannot draw a record for — one naming no object —
- *  still stands as a lane and says so inside it, because the close is the lane's and an address the
- *  member cannot shut is one they cannot leave. */
 function RecordSlot({
   id,
   held,
-  from,
   opens,
   onPlace,
 }: {
   id: string;
   held: ObjectAddress | null;
-  from: string;
   opens: string[];
   onPlace: (place: Placement) => void;
 }) {
   const shut = () => onPlace({ opens: closed(opens, id) });
-  return (
-    <HeldRecord id={id} title={held?.name ?? id} from={from} onClose={shut}>
-      {held === null ? (
+  if (held === null)
+    return (
+      <Sheet open title={id} onClose={shut}>
         <PanelEmpty>That item is not on this page.</PanelEmpty>
-      ) : (
-        <ObjectDetail
-          agentId={held.agent}
-          kind={held.kind}
-          name={held.name}
-          onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
-          onBack={shut}
-        />
-      )}
-    </HeldRecord>
+      </Sheet>
+    );
+  return (
+    <ObjectDetail
+      agentId={held.agent}
+      kind={held.kind}
+      name={held.name}
+      onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
+      onBack={shut}
+    />
   );
 }
 
@@ -383,9 +345,6 @@ const READ_NEXT = 3;
  *  feed names it. A report is the end of a page, and a member who read to the end of one is deciding
  *  what to read next, not whether to go back — the way back stands in the crumb at the top, where
  *  they came in.
- *
- *  A row is a link to the report's own address and carries the track that address holds: one report
- *  on the screen, and nothing left standing beside it from the report the member has just finished.
  *
  *  The whole feed is read for this, not the one run the page is pinned to, so the page holds a
  *  second read of the same projection. A reader who reaches the foot of a document has waited out
@@ -661,15 +620,6 @@ function Story({
   );
 }
 
-/** The task a run belongs to, pressed to open the record where its prompt and schedule are read.
- *  The record opens after whatever the feed is standing on and takes the place of the one opened
- *  before it, so the row is a step down a path rather than another thing left lying open; a cmd- or
- *  middle-press stands it beside that one instead, which is how two tasks are compared. The name
- *  carries the mark an open row takes while its record stands, so the feed says which row the panel
- *  beside it was opened from.
- *
- *  A task is reached from the report that raised the question about it, never by leaving for the
- *  tasks screen: the answer stands beside the report the member is reading. */
 function TaskName({
   task,
   agentId,
@@ -784,28 +734,8 @@ function Shared({ artifact }: { artifact: RadarArtifact }) {
       >
         {card}
       </button>
-      {open ? <FileSheet artifact={artifact} onClose={() => setOpen(false)} /> : null}
+      {open ? <FileSheet file={artifact} onClose={() => setOpen(false)} /> : null}
     </>
-  );
-}
-
-/** The pressed file at full size, read the way every screen reads a shared file: its picture — the
- *  file itself when it is an image, the first rendered page when it is a document — under its name
- *  and the download that fetches the file itself. */
-function FileSheet({ artifact, onClose }: { artifact: RadarArtifact; onClose: () => void }) {
-  const meta = [artifact.subject, artifact.media_type, formatSize(artifact.size_bytes)]
-    .filter((part) => part)
-    .join(" · ");
-  return (
-    <Sheet
-      open
-      onClose={onClose}
-      title={artifact.filename}
-      actions={<FileDownload file={artifact} />}
-    >
-      <div className="font-mono text-small text-ink-soft">{meta}</div>
-      <FileBody file={artifact} />
-    </Sheet>
   );
 }
 

@@ -3,6 +3,7 @@ import { type FormEvent, useRef, useState } from "react";
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Facts } from "@/components/ui/facts";
 import { Field, Hint, Input } from "@/components/ui/field";
+import { Sheet } from "@/components/ui/sheet";
 import { ACTS, Td, TdActs, TdFact } from "@/components/ui/table";
 import {
   type NoticeState,
@@ -15,8 +16,8 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
-import { Header, Page, Pane, RecordPanel } from "@/kernel/pane";
-import { closed, opened, useSlot } from "@/kernel/slots";
+import { Header, Page, Pane } from "@/kernel/pane";
+import { closed, opened } from "@/kernel/slots";
 import { DataTable, OPEN } from "@/kernel/table";
 import { agentName } from "@/lib/agentName";
 import { postIntent } from "@/lib/api";
@@ -25,16 +26,12 @@ import { money } from "@/lib/money";
 import type { AdminAgent, AdminPayload, Member } from "@/lib/types";
 import { MEMBER_COLUMNS, MemberCells } from "@/views/Team";
 
-/** The row states what the eye compares down the column and hands the rest to the record beside it:
- *  an agent's surfaces are a list of unknown length, and the act that grants web access is a field
- *  and two buttons, which no fixed track holds at the pitch a row is read at. */
 const AGENT_COLUMNS = [
   "App",
   { label: "Model", fact: true },
   { label: "Public Internet", fact: true },
   "Web Audience",
 ];
-/** The roster's own track, with the column administration's acts stand in. */
 const ADMIN_MEMBER_COLUMNS = [...MEMBER_COLUMNS, ""];
 const CAP_COLUMNS = [
   { label: "Cap", fact: true },
@@ -49,8 +46,6 @@ const EXTENSION_COLUMNS = [
   { label: "Public Internet", fact: true },
 ];
 
-/** What an app's slot is named in the track. Administration has no address of its own — `#/admin`
- *  carries no place — so the track is held here and lives as long as the screen. */
 const APP = "agent/";
 
 function allowance(allowed: boolean): string {
@@ -177,11 +172,6 @@ export function Admin() {
   );
 }
 
-/** The agents, and the one the member opened, standing in a slot beside the table. The track is
- *  local because `#/admin` carries no place to hold it, but the rule over it is the portal's, taken
- *  from where every other index takes it: the table is the root of the path, so a row leads there
- *  rather than stacking on what the member walked past, and a close shuts what was reached through
- *  what it shuts. */
 function AgentSection({
   agents,
   onIntent,
@@ -190,7 +180,7 @@ function AgentSection({
   onIntent: (agentId: string, envelope: unknown) => Promise<NoticeState>;
 }) {
   const [opens, setOpens] = useState<string[]>([]);
-  const track = opens.map((id) => {
+  const sheet = opens.slice(-1).map((id) => {
     const agent = agents.find((row) => APP + row.id === id);
     if (!agent) return null;
     return (
@@ -227,7 +217,7 @@ function AgentSection({
           )}
         </DataTable>
       </Section>
-      {track}
+      {sheet}
     </>
   );
 }
@@ -260,8 +250,8 @@ function AgentRecord({
     setBusy(false);
   }
 
-  return useSlot(
-    <RecordPanel>
+  return (
+    <Sheet open title={agentName(agent.name)} onClose={onClose}>
       <Facts
         rows={[
           { label: "Model", value: agent.model },
@@ -303,8 +293,7 @@ function AgentRecord({
           </div>
         </form>
       )}
-    </RecordPanel>,
-    { id: APP + agent.id, kind: "panel", title: agentName(agent.name), onClose },
+    </Sheet>
   );
 }
 

@@ -1,10 +1,10 @@
 import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Sheet } from "@/components/ui/sheet";
 import { Chat, type ChatProps } from "@/views/Chat";
 import { Header, Pane } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
-import { useSlot } from "@/kernel/slots";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import type { Crumb } from "@/lib/title";
@@ -29,15 +29,8 @@ export type ChatPaneProps = ChatProps & {
   crumb?: Crumb;
 };
 
-/** A conversation's own named pane — its files, its diffs, its sources — standing in the track
- *  beside the transcript it belongs to. It asks for the slot from inside the pane, because the
- *  track is the pane's: a caller outside its own `Pane` reaches none, and the panel would stand
- *  under the transcript instead of beside it.
- *
- *  The slot's name is the slot's own, so a caller already holding the conversation's inventory —
- *  the pane whose header draws a control for every slot — hands it over rather than making the
- *  same read a second time, and a caller holding none reads it here, once, for both the header the
- *  track draws and the list standing under it. */
+/** A conversation's own named sheet — its files, diffs or sources — over the transcript it belongs
+ *  to. A caller already holding the inventory hands its summary over rather than reading it twice. */
 export function ConversationSlot({
   agent,
   conversationId,
@@ -59,15 +52,16 @@ export function ConversationSlot({
     (inventory.phase === "ready"
       ? inventory.payload.slots.find((entry) => entry.id === slot)
       : undefined);
-  return useSlot(
-    <ConversationSlotPane
-      agent={agent}
-      conversationId={conversationId}
-      slot={slot}
-      summary={resolved}
-      embedded
-    />,
-    { id: slot, kind: "panel", title: resolved?.label ?? slot, onClose },
+  return (
+    <Sheet open title={resolved?.label ?? slot} onClose={onClose}>
+      <ConversationSlotPane
+        agent={agent}
+        conversationId={conversationId}
+        slot={slot}
+        summary={resolved}
+        embedded
+      />
+    </Sheet>
   );
 }
 
@@ -130,9 +124,6 @@ export function ChatPane({
           onCreated={onCreated}
           onActivity={onActivity}
           onSettled={settled}
-          onOpenArtifacts={
-            conversationId && onSelectSlot ? () => onSelectSlot("artifacts") : undefined
-          }
         />
       </div>
       {conversationId && slot ? (

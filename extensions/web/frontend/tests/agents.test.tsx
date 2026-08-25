@@ -672,7 +672,7 @@ test("a mark named for what every object answers still leads the picker as the a
   expect((marks[0] as HTMLInputElement).checked).toBe(true);
 });
 
-test("a slot the settings dialog raises stands inside it, beside what raised it", async () => {
+test("a settings action opens the shared right sheet above the dialog", async () => {
   wire({
     "/settings": () => json(SETTINGS),
     "/connections": () => json({ connections: [] }),
@@ -684,11 +684,13 @@ test("a slot the settings dialog raises stands inside it, beside what raised it"
 
   await userEvent.click(within(dialog).getByRole("button", { name: "Add connector" }));
 
-  const form = await screen.findByRole("region", { name: "Add connector" });
-  expect(dialog.contains(form)).toBe(true);
-  const cover = form.closest("[data-slot=slot-track]");
-  expect(cover?.className).toContain("absolute");
-  expect(cover?.contains(within(dialog).getByRole("tabpanel"))).toBe(false);
+  const form = await screen.findByRole("dialog", { name: "Add connector" });
+  expect(dialog.contains(form)).toBe(false);
+  expect(form.getAttribute("data-slot")).toBe("sheet-content");
+  expect(form.className).toContain("fixed");
+
+  await userEvent.click(within(form).getByRole("button", { name: "Close" }));
+  expect(await screen.findByRole("dialog", { name: "Assistant" })).toBe(dialog);
 });
 
 test("the selected app archives from its Settings screen", async () => {
@@ -779,10 +781,7 @@ test("the workspace Apps tab restores an archived app hidden from the Applicatio
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-/** The dialog holds no address, so it holds the one track its Scheduled tab walks. The index there
- *  is the root like any other: a second row takes the first record's place, and the dialog reopens
- *  on the first tab with nothing standing. */
-test("a second row of the dialog's Scheduled tab takes the first record's place", async () => {
+test("scheduled task sheets close back to their settings list", async () => {
   const task = (name: string, prompt: string) =>
     json({
       ...TASK_KIND,
@@ -809,18 +808,16 @@ test("a second row of the dialog's Scheduled tab takes the first record's place"
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   const dialog = await openAgentSettings("Assistant", "Scheduled");
-  const standing = () =>
-    within(dialog)
-      .queryAllByRole("region")
-      .map((slot) => slot.getAttribute("aria-label"));
 
   await openRow("daily-brief");
-  expect(await within(dialog).findByRole("region", { name: "daily-brief" })).toBeTruthy();
+  const daily = await screen.findByRole("dialog", { name: "daily-brief" });
+  expect(daily.getAttribute("data-slot")).toBe("sheet-content");
+  await userEvent.click(within(daily).getByRole("button", { name: "Close" }));
 
   await openRow("weekly-roll");
-
-  expect(await within(dialog).findByRole("region", { name: "weekly-roll" })).toBeTruthy();
-  await waitFor(() => expect(standing()).toEqual(["weekly-roll"]));
+  const weekly = await screen.findByRole("dialog", { name: "weekly-roll" });
+  expect(weekly.getAttribute("data-slot")).toBe("sheet-content");
+  await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
 
   await userEvent.click(within(dialog).getByRole("tab", { name: "Settings" }));
   await userEvent.keyboard("{Escape}");
@@ -828,7 +825,7 @@ test("a second row of the dialog's Scheduled tab takes the first record's place"
 
   const reopened = await openAgentSettings("Assistant", "Scheduled");
   expect(await within(reopened).findByText("daily-brief")).toBeTruthy();
-  expect(within(reopened).queryAllByRole("region")).toEqual([]);
+  expect(document.querySelectorAll("[data-slot=sheet-content]")).toHaveLength(0);
 });
 
 /** The workspace's own mark is reserved: the picker offers it to no app, and the main agent is the

@@ -483,28 +483,3 @@ export function FacetMenu({
     </DropdownMenu>
   );
 }
-
-/** What a record reads as inside the slot it was opened in: its groups one gutter apart, in the one
- *  column they scroll in. The slot states the record's name and carries the way out of it, and the
- *  track draws the hairline between one slot and the next — so a record states neither a heading nor
- *  an edge of its own, which would say the name twice and draw the seam twice.
- *
- *  The track it holds is the host for an act raised inside the record. That act cannot be drawn in
- *  the slot the record is already standing in: filling that slot means emptying it of the record,
- *  which unmounts the very control that raised the act and takes the act with it. So the record's
- *  own track lies over it — the opener stays mounted underneath, and the form still opens beside
- *  rather than over the middle of the screen. */
-export function RecordPanel({ children }: { children: ReactNode }) {
-  return (
-    <SlotTrack over>
-      <div
-        className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col gap-(--size-record-gutter)",
-          "overflow-y-auto scrollbar-gutter-stable px-(--size-record-gutter) pb-2xl",
-        )}
-      >
-        {children}
-      </div>
-    </SlotTrack>
-  );
-}

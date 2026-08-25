@@ -6,9 +6,7 @@ import {
   CardGrid,
   DataTable,
   FacetMenu,
-  FileBody,
-  FileDownload,
-  HeldRecord,
+  FileSheet,
   IconWorldWww,
   Lede,
   MediaIcon,
@@ -22,38 +20,31 @@ import {
   Section,
   SectionApp,
   Segmented,
+  Sheet,
   Td,
   TdFact,
   ToolbarRule,
   ViewSwitch,
-  appended,
-  beside,
   buttonVariants,
   chatHash,
-  closed,
   cn,
   creator,
-  formatSize,
   mountApp,
   objectAt,
-  opened,
   ownerLabel,
   slackLink,
   slotOf,
   useCallback,
   useMainAgent,
   usePanelRead,
-  useRef,
   useState,
   useViewer,
 } from "ufo/kit";
-import type { Face, FacetGroup, ObjectRow, PanelState, Placement, ReactNode, RefObject } from "ufo/kit";
+import type { Face, FacetGroup, ObjectRow, PanelState, Placement, ReactNode } from "ufo/kit";
 
 const SITE_KIND = "site";
 
 const NOT_FOUND = 404;
-/** What the shelf is called where a lane has to say where it was opened from. */
-const SHELF = "Artifacts";
 const SITE_FAMILY = "Sites";
 const MEDIA: Record<string, string> = {
   Images: "image",
@@ -213,11 +204,6 @@ function tileExcerpt(file: Artifact | null): ReactNode {
   );
 }
 
-/** A shared file's lane id: the file's own object name, which is what the shelf keys its card by
- *  and what the address and the track store carry. A filename is whatever the agent that shared it
- *  called the file — free text of any length, holding the characters a track is written with — so a
- *  lane named off it is a lane the address cannot always carry. The spotlight mints the same id
- *  from the same fact, which is what makes a hit open the card this shelf lists. */
 function fileKey(file: { name: string }): string {
   return file.name;
 }
@@ -252,8 +238,6 @@ function shelf(
   viewer: string | null,
   onSites: boolean,
   scope: Scope,
-  /** The app the sites were read under, which is the app their lanes name; null where the shelf
-   *  read no sites at all. */
   owner: string | null,
   top: boolean,
 ): PanelState<Shelf> {
@@ -271,41 +255,8 @@ function shelf(
   return { phase: "ready", payload: { cards, files: files.payload } };
 }
 
-/** What a lane of the track is called: a record by the name in its own id, a file by the card it
- *  was opened from — and nothing at all while the shelf it came off has not answered. */
 function nameOf(id: string, cards: Card[] | null): string | undefined {
   return objectAt(id)?.name ?? cards?.find((card) => card.key === id)?.name;
-}
-
-/** What each press asked for, read off the press itself: a tile and a table row both hand their
- *  opener a bare call, so the gesture would otherwise be gone by the time the record is opened. One
- *  listener over the records, in the capture phase, so it is recorded before the row acts on it.
- *
- *  The middle button raises no press of its own on a button or a row, so the shelf raises the press
- *  it would have been. A press that landed on a link is that link's: a site's own address opens in
- *  the browser's new tab exactly as it does anywhere else. */
-const MIDDLE_BUTTON = 1;
-
-function Presses({ alongside, children }: { alongside: RefObject<boolean>; children: ReactNode }) {
-  return (
-    <div
-      className="contents"
-      onMouseDownCapture={(event) => {
-        alongside.current = beside(event);
-      }}
-      onKeyDownCapture={(event) => {
-        alongside.current = beside(event);
-      }}
-      onAuxClickCapture={(event) => {
-        if (event.button !== MIDDLE_BUTTON) return;
-        const pressed = event.target as HTMLElement;
-        if (pressed.closest("a")) return;
-        pressed.closest<HTMLElement>("button, tr")?.click();
-      }}
-    >
-      {children}
-    </div>
-  );
 }
 
 const SITE_VIEW_PAGE_WIDTH = 1280;
@@ -355,7 +306,6 @@ function Artifacts({
 }) {
   const mainAgent = useMainAgent();
   const viewer = useViewer();
-  const alongside = useRef(false);
   const scope = asScope(place.scope);
   const face = asFace(place.face);
   const query = place.q ?? "";
@@ -380,8 +330,6 @@ function Artifacts({
     picked === SITE_FAMILY ? null : "/objects/artifact?" + fileParams.toString(),
   );
   const onSites = picked === SITE_FAMILY;
-  /** The app the sites are read under, which is the app their lanes name. A shelf narrowed to one
-   *  media kind lists files alone, and one with no main agent has read no sites at all. */
   const siteOwner = mainAgent && !media ? mainAgent.id : null;
   const state = shelf(
     siteOwner ? held : NO_SITES,
@@ -393,7 +341,8 @@ function Artifacts({
     !after,
   );
 
-  const opens = place.opens ?? [];
+  const selected = place.opens?.at(-1);
+  const opens = selected ? [selected] : [];
   const cards = state.phase === "ready" ? state.payload.cards : null;
   const sites = held.phase === "ready" ? held.payload.objects : null;
 
@@ -441,32 +390,27 @@ function Artifacts({
                   }
                 />
               );
-            const open = (card: Card) => () =>
-              onPlace({
-                opens: alongside.current ? appended(opens, card.key) : opened(opens, card.key),
-              });
+            const open = (card: Card) => () => onPlace({ opens: [card.key] });
             return (
               <>
-                <Presses alongside={alongside}>
-                  {face === "table" ? (
-                    <Shapes cards={payload.cards} opens={opens} open={open} />
-                  ) : (
-                    <CardGrid
-                      rows={payload.cards}
-                      rowKey={(card) => card.key}
-                      mark={{
-                        shape: "tile",
-                        image: (card) => card.image,
-                        body: (card) => tileExcerpt(card.file),
-                      }}
-                      primary={(card) => card.name}
-                      status={(card) => card.status}
-                      open={(card) => (card.file && !card.file.url ? null : open(card))}
-                      current={(card) => opens.includes(card.key)}
-                      action={(card) => (card.link ? <OpenSite href={card.link} /> : null)}
-                    />
-                  )}
-                </Presses>
+                {face === "table" ? (
+                  <Shapes cards={payload.cards} opens={opens} open={open} />
+                ) : (
+                  <CardGrid
+                    rows={payload.cards}
+                    rowKey={(card) => card.key}
+                    mark={{
+                      shape: "tile",
+                      image: (card) => card.image,
+                      body: (card) => tileExcerpt(card.file),
+                    }}
+                    primary={(card) => card.name}
+                    status={(card) => card.status}
+                    open={(card) => (card.file && !card.file.url ? null : open(card))}
+                    current={(card) => opens.includes(card.key)}
+                    action={(card) => (card.link ? <OpenSite href={card.link} /> : null)}
+                  />
+                )}
                 {payload.files.next_cursor || after ? (
                   <div className="flex gap-xs">
                     {payload.files.next_cursor ? (
@@ -493,15 +437,14 @@ function Artifacts({
             );
           }}
         </Panel>
-        {opens.map((id, at) => (
+        {opens.slice(-1).map((id) => (
           <Opened
             key={id}
             id={id}
             cards={cards}
             sites={sites}
-            from={(at === 0 ? undefined : nameOf(opens[at - 1], cards)) ?? SHELF}
-            onOpen={(next) => onPlace({ opens: opened(opens, next, id) })}
-            onClose={() => onPlace({ opens: closed(opens, id) })}
+            onOpen={(next) => onPlace({ opens: [next] })}
+            onClose={() => onPlace({ opens: undefined })}
           />
         ))}
       </Section>
@@ -509,36 +452,20 @@ function Artifacts({
   );
 }
 
-/** One slot of the track. The shelf holds two families under one address, so the id itself decides
- *  what stands in the slot and how wide it is: a site is a record of a few fields and takes a panel,
- *  a file is read whole and takes a reading slot, where two files divide the width and are compared
- *  side by side. An outbound link inside a record opens the next slot beside this one; an id naming
- *  no file this page holds still stands as a lane and says so inside it, because the close is the
- *  lane's and an address the member cannot shut is one they cannot leave.
- *
- *  A site's lane leads with the site: the record states the facts, and the page itself is the one
- *  thing about it those facts cannot carry.
- *
- *  `from` is what this lane was opened out of — the lane standing to its left, or the shelf
- *  itself — said as the crumb over it, which is the way back a lane paged one to a screen has
- *  instead of the lane that would otherwise stand beside it. */
+/** The selected file or site in the shelf's shared sheet. */
 function Opened({
   id,
   cards,
   sites,
-  from,
   onOpen,
   onClose,
 }: {
   id: string;
-  /** The shelf as it stands, or nothing while it is still being read — a file's slot waits for the
-   *  page it is on rather than reporting the file missing from a listing that has not answered. */
   cards: Card[] | null;
   /** The sites as the shelf read them. The record's own read belongs to the panel drawing it, so
-   *  the address the frame stands on is taken from the listing this lane was opened out of — which
+   *  the address the frame stands on is taken from the listing the sheet was opened out of — which
    *  holds every site whatever page of files the shelf is walking. */
   sites: ObjectRow[] | null;
-  from: string;
   onOpen: (id: string) => void;
   onClose: () => void;
 }) {
@@ -548,29 +475,32 @@ function Opened({
   const site =
     at !== null && at.kind === SITE_KIND ? sites?.find((row) => row.name === at.name) : undefined;
   const url = typeof site?.site_url === "string" ? site.site_url : null;
+  if (card?.file) {
+    return (
+      <FileSheet
+        file={card.file}
+        onClose={onClose}
+        details={<ArtifactDetails entry={card.file} />}
+      />
+    );
+  }
+  if (at !== null) {
+    return (
+      <ObjectDetail
+        agentId={at.agent}
+        kind={at.kind}
+        name={at.name}
+        lead={url ? <SiteView url={url} name={at.name} /> : undefined}
+        actions={() => (url ? <OpenSite href={url} /> : undefined)}
+        onOpen={(next) => onOpen(slotOf(next))}
+        onBack={onClose}
+      />
+    );
+  }
   return (
-    <HeldRecord
-      id={id}
-      kind={at !== null ? "panel" : "reading"}
-      title={stranded ? id : nameOf(id, cards)}
-      from={from}
-      onClose={onClose}
-    >
-      {at !== null ? (
-        <ObjectDetail
-          agentId={at.agent}
-          kind={at.kind}
-          name={at.name}
-          lead={url ? <SiteView url={url} name={at.name} /> : undefined}
-          onOpen={(next) => onOpen(slotOf(next))}
-          onBack={onClose}
-        />
-      ) : card?.file ? (
-        <Viewer entry={card.file} />
-      ) : stranded ? (
-        <PanelEmpty>That item is not on this page.</PanelEmpty>
-      ) : null}
-    </HeldRecord>
+    <Sheet open title={stranded ? id : (nameOf(id, cards) ?? id)} onClose={onClose}>
+      {stranded ? <PanelEmpty>That item is not on this page.</PanelEmpty> : null}
+    </Sheet>
   );
 }
 
@@ -593,14 +523,6 @@ function OpenSite({ href }: { href: string }) {
 
 const COLUMNS = ["Name", "Details", { label: "Type", fact: true }];
 
-/** The shelf as facts in columns. A record leads with the same picture its tile is drawn from,
- *  at the row's own pitch — a name alone makes the member read every line to find the file they
- *  would have recognised at a glance, and a file with no picture states its type as a glyph so the
- *  column of marks stays a column rather than a run of gaps.
- *
- *  A record whose document is standing in the track is marked on the row band it stands in, the
- *  same mark the tiles carry: a press shuts the lanes to the right of the one it was taken in, and
- *  the mark is what makes that read as a path being walked rather than as slots leaving. */
 function Shapes({
   cards,
   opens,
@@ -639,32 +561,24 @@ function Mark({ card }: { card: Card }) {
   return <MediaIcon mediaType={card.file.media_type} />;
 }
 
-/** A file as the member reads it, standing in the track beside the shelf it was picked from rather
- *  than over it: the listing stays legible while the file is read, and a second file opens next to
- *  the first instead of taking its place. The slot's own header names the file and carries the way
- *  to shut it, so the body carries the facts, the ways back to where the file came from, and the
- *  file itself. */
-function Viewer({ entry }: { entry: Artifact }) {
+function ArtifactDetails({ entry }: { entry: Artifact }) {
   const viewer = useViewer();
   const thread = slackLink(entry.surface, entry.source);
   const out = "text-inherit no-underline hover:underline focus-visible:underline";
   const meta = [
-    entry.subject,
     entry.owner_email ? ownerLabel(entry.owner_email, viewer) : null,
     entry.origin,
-    entry.media_type,
-    formatSize(entry.size_bytes),
   ]
     .filter((part) => part)
     .join(" · ");
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2xl overflow-y-auto px-2xl pb-2xl">
+    <>
       <div className="font-mono text-small text-ink-soft">
-        {meta} · <Moment at={entry.shared_at} />
+        {meta ? meta + " · " : null}
+        <Moment at={entry.shared_at} />
       </div>
       <div className="flex flex-wrap items-center gap-lg">
-        <FileDownload file={entry} />
         <span className="flex flex-wrap gap-x-lg font-mono text-small text-ink-soft">
           <a href={chatHash(entry.conversation)} className={out}>
             Conversation
@@ -676,8 +590,7 @@ function Viewer({ entry }: { entry: Artifact }) {
           ) : null}
         </span>
       </div>
-      <FileBody file={entry} />
-    </div>
+    </>
   );
 }
 

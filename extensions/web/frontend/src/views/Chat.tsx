@@ -82,7 +82,6 @@ export type ChatProps = {
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
   onSettled?: () => void;
-  onOpenArtifacts?: () => void;
 };
 
 export function Chat({
@@ -93,7 +92,6 @@ export function Chat({
   onCreated,
   onActivity,
   onSettled,
-  onOpenArtifacts,
 }: ChatProps) {
   const chatKey = conversationId ?? foundingKey ?? "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
@@ -179,7 +177,6 @@ export function Chat({
                 onAct={() => composer.current?.focus()}
               />
             )}
-            onOpenArtifacts={onOpenArtifacts}
           >
             {credentials ? (
               <Handoff>

@@ -213,19 +213,17 @@ export function ConversationTranscript({
   title,
   messages,
   earlier,
-  onOpenArtifacts,
 }: {
   title?: ReactNode;
   messages: Message[];
   earlier?: EarlierMessages;
-  onOpenArtifacts?: () => void;
 }) {
   return (
     <Section title={title}>
       {messages.length ? (
         <TranscriptScroll>
           <OpenedAtTheFoot>
-            <MessageLog messages={messages} earlier={earlier} onOpenArtifacts={onOpenArtifacts} />
+            <MessageLog messages={messages} earlier={earlier} />
           </OpenedAtTheFoot>
         </TranscriptScroll>
       ) : (
@@ -240,7 +238,6 @@ export function ConversationDetail({
   conversation,
   onBack,
   headed = false,
-  onOpenArtifacts,
 }: {
   agent: Agent;
   conversation: Conversation;
@@ -250,7 +247,6 @@ export function ConversationDetail({
   /** True where the pane's own header already states what the conversation is called, so the
    *  transcript draws no heading of its own — the name is stated once. */
   headed?: boolean;
-  onOpenArtifacts?: () => void;
 }) {
   const path = "/agents/" + agent.id + "/conversations/" + conversation.id;
   const state = usePanelRead<Transcript>(path + "/transcript");
@@ -269,7 +265,6 @@ export function ConversationDetail({
             title={headed ? undefined : conversationTitle(conversation, viewer)}
             messages={payload.messages}
             earlier={earlier}
-            onOpenArtifacts={onOpenArtifacts}
           />
         )}
       </Panel>

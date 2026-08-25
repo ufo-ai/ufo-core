@@ -2,11 +2,16 @@
 // to change the page.
 
 import {
+  Button,
   Header,
-  HeldRecords,
+  ObjectDetail,
   ObjectPane,
+  PanelEmpty,
   SectionApp,
+  Sheet,
   mountApp,
+  objectAt,
+  slotOf,
   usePageHead,
   useState,
 } from "ufo/kit";
@@ -29,14 +34,8 @@ const KINDS = [
   { kind: "source_trigger", label: "Triggers" },
 ];
 
-/** The workspace's standing orders. The page owns the track and draws the records on it, because
- *  two listings stand here and a record either of them opens is the page's — a listing drawing the
- *  track would put a second node on an id the other listing had already put one on. A record the
- *  route names — which is what search hands over — stands on that same track, and its lane names
- *  the app whose namespace it lives in, since the kinds cross apps.
- *
- *  Closing a record reads the listings again, so a row that record deleted or changed is stated as
- *  it now is rather than as it was when the member opened it. */
+/** The workspace's standing orders. Both listings open their selected record in the page's one
+ *  sheet. Closing it reads the listings again, so a changed or deleted row is stated as it is. */
 function Tasks({
   title,
   place,
@@ -47,7 +46,12 @@ function Tasks({
   onPlace: (place: Placement) => void;
 }) {
   const [generation, setGeneration] = useState(0);
-  const opens = place.opens ?? [];
+  const selected = place.opens?.at(-1) ?? null;
+  const at = selected === null ? null : objectAt(selected);
+  const close = () => {
+    onPlace({ opens: undefined });
+    setGeneration((count) => count + 1);
+  };
   const band = usePageHead(<Header pinned heading={1} title={title} />);
   return (
     <>
@@ -58,16 +62,51 @@ function Tasks({
           agentId={null}
           kind={held.kind}
           section={held.label}
-          opens={opens}
-          onPlace={onPlace}
+          opens={selected === null ? [] : [selected]}
+          onPlace={(next) => onPlace({ ...next, opens: next.opens?.slice(-1) })}
         />
       ))}
-      <HeldRecords
-        opens={opens}
-        onPlace={onPlace}
-        onShut={() => setGeneration((count) => count + 1)}
-      />
+      {selected && at === null ? (
+        <Sheet open title={selected} onClose={close}>
+          <PanelEmpty>That item is not on this page.</PanelEmpty>
+        </Sheet>
+      ) : at !== null ? (
+        <ObjectDetail
+          key={selected}
+          agentId={at.agent}
+          kind={at.kind}
+          name={at.name}
+          actions={(status, apply) =>
+            at.kind === "scheduled_task" && typeof status?.paused === "boolean" ? (
+              <TaskStateAction paused={status.paused} onApply={apply} />
+            ) : null
+          }
+          onOpen={(next) => onPlace({ opens: [slotOf(next)] })}
+          onBack={close}
+        />
+      ) : null}
     </>
+  );
+}
+
+function TaskStateAction({
+  paused,
+  onApply,
+}: {
+  paused: boolean;
+  onApply: (spec: Record<string, string | boolean>) => Promise<unknown>;
+}) {
+  const [busy, setBusy] = useState(false);
+  async function toggle() {
+    if (busy) return;
+    setBusy(true);
+    await onApply({ paused: !paused });
+    setBusy(false);
+  }
+  return (
+    <Button variant="send" busy={busy} onClick={toggle}>
+      {paused ? "Resume" : "Pause"}
+    </Button>
   );
 }
 

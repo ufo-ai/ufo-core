@@ -188,8 +188,8 @@ way it compares event names, and a reviewer counts keys.
 ### Content drawn in two containers has one renderer
 
 The pop-out and the centre pane are one mechanism, so content that appears in both is one component
-with an embedded flag — `ConversationSlotPane` is the shape — and the kernel exports what a
-container needs instead of holding `HeldRecord` and `Empty` private. A second implementation is how
+with an embedded flag — `ConversationSlotPane` is the shape — and every secondary panel uses the
+exported `Sheet` while its content renderer stays shared. A second implementation is how
 copy drifts where nothing catches it: one record lane says "reload the listing" where its twin says
 "reload the page", the same act reads "Unshare" in one view and "Make private" in another, a member
 row says "No seat" against "Unseated", a theme preference held twice goes visibly stale at phone

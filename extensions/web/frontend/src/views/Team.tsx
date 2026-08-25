@@ -12,9 +12,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Td, TdFact } from "@/components/ui/table";
+import { Sheet } from "@/components/ui/sheet";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
-import { PageToolbar, RecordPanel, usePageAct, usePageSearch } from "@/kernel/pane";
-import { useSlot } from "@/kernel/slots";
+import { PageToolbar, usePageAct, usePageSearch } from "@/kernel/pane";
 import {
   type NoticeState,
   OutcomeNotice,
@@ -40,19 +40,11 @@ const ROLES = [
 
 const BLANK: Draft = { email: "", admin: false };
 
-/** The slot the form stands in. A half-written invitation is nobody's record: it names no member
- *  yet, so the address does not carry it and a reload finds the roster rather than an empty
- *  form. */
-const ADD_MEMBERS = "add-members";
-
-/** The line stating what the form does with every address typed into it. The lane takes focus as it
- *  lands, so a member who cannot see it is told the lane's name and nothing else; naming this line
- *  as the lane's description is how they are told the rest. */
 const ADD_MEMBERS_NOTE = "add-members-note";
 
 /** What a member row states, wherever the workspace lists its members: the address it is held
  *  under, whether they administer it, and whether they hold a seat. Administration stands its own
- *  acts after these, so it takes the same track with one column added. */
+ *  acts after these, so it takes the same columns with one added. */
 export const MEMBER_COLUMNS = [
   "Member",
   { label: "Role", fact: true },
@@ -145,9 +137,8 @@ export function Team({
     });
   }
 
-  const beside = useSlot(
-    adding ? (
-      <RecordPanel>
+  const sheet = adding ? (
+    <Sheet open title="Add members" describedBy={ADD_MEMBERS_NOTE} onClose={close}>
         <OutcomeNotice state={notice} />
         <form onSubmit={add} className="flex flex-col items-start gap-sm">
           <Hint id={ADD_MEMBERS_NOTE} className="m-0">
@@ -190,16 +181,8 @@ export function Team({
             </Button>
           </div>
         </form>
-      </RecordPanel>
-    ) : null,
-    {
-      id: ADD_MEMBERS,
-      kind: "panel",
-      title: "Add members",
-      describes: ADD_MEMBERS_NOTE,
-      onClose: close,
-    },
-  );
+    </Sheet>
+  ) : null;
 
   const act = usePageAct(
     state.phase === "ready" && state.payload.can_add && mainAgent ? (
@@ -237,7 +220,7 @@ export function Team({
           );
         }}
       </Panel>
-      {beside}
+      {sheet}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
     </>
   );

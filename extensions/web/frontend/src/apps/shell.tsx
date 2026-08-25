@@ -7,7 +7,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 
 import { connect, installShims, navigate, onPlaced, type AppInit } from "@/apps/runtime";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -162,12 +162,26 @@ export function mountApp(
   root: HTMLElement,
   render: (init: AppInit, agents: Agent[]) => ReactNode,
 ): void {
+  const mounted = { active: true, root: null as Root | null };
+  mountedApps.set(root, mounted);
   void connect().then((init) => {
+    if (!mounted.active) return;
     installShims();
-    createRoot(root).render(
+    mounted.root = createRoot(root);
+    mounted.root.render(
       <StrictMode>
         <Booted init={init} render={render} />
       </StrictMode>,
     );
   });
+}
+
+const mountedApps = new WeakMap<HTMLElement, { active: boolean; root: Root | null }>();
+
+export function unmountApp(root: HTMLElement): void {
+  const mounted = mountedApps.get(root);
+  if (!mounted) return;
+  mounted.active = false;
+  mounted.root?.unmount();
+  mountedApps.delete(root);
 }

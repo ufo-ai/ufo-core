@@ -194,7 +194,7 @@ test("a refused add states the refusal and leaves the form to correct", async ()
   await userEvent.click(submit);
 
   await refusedNotice("Only an admin adds a member.");
-  expect(screen.getByRole("region", { name: "Add members" })).toBeTruthy();
+  expect(screen.getByRole("dialog", { name: "Add members" })).toBeTruthy();
   expect((screen.getByPlaceholderText("email@work.com") as HTMLInputElement).value).toBe(
     "x@example.com",
   );
@@ -207,16 +207,16 @@ test("the tab names the roster, so the section under it repeats no heading", asy
   expect(destination()).toBe("Team");
   expect(screen.queryByRole("heading", { name: "Members" })).toBeNull();
   await openAdd();
-  expect(screen.getByRole("region", { name: "Add members" })).toBeTruthy();
+  expect(screen.getByRole("dialog", { name: "Add members" })).toBeTruthy();
 });
 
-test("the add form stands in its own slot, and the roster stays readable beside it", async () => {
+test("the add form overlays the roster in the shared sheet", async () => {
   wire({ "/workspace/team": () => json(ROSTER) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await openAdd();
 
-  const form = screen.getByRole("region", { name: "Add members" });
+  const form = screen.getByRole("dialog", { name: "Add members" });
   expect(within(form).getByPlaceholderText("email@work.com")).toBeTruthy();
   expect(screen.getByText("lead@example.com")).toBeTruthy();
   expect(location.hash).toBe("#/workspace/team");
@@ -231,7 +231,7 @@ test("the add panel states what it does to the member focus lands on", async () 
 
   await openAdd();
 
-  const panel = screen.getByRole("region", { name: "Add members" });
+  const panel = screen.getByRole("dialog", { name: "Add members" });
   const describes = panel.getAttribute("aria-describedby");
   expect(describes).toBeTruthy();
   expect(document.getElementById(String(describes))?.textContent).toBe(

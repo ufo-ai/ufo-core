@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { ArtifactText, isTextMedia } from "@/kernel/artifact";
+import { FileSheet } from "@/kernel/artifact";
 import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
@@ -399,70 +399,54 @@ function ArtifactsContent({ payload }: { payload: ArtifactsPayload }) {
 }
 
 function SharedArtifact({ artifact }: { artifact: ConversationArtifact }) {
-  const [opened, setOpened] = useState(false);
-  const textUrl = isTextMedia(artifact.media_type) ? artifact.url : null;
-  const markdown = artifact.media_type === "text/markdown";
+  const [open, setOpen] = useState(false);
+  const file = {
+    filename: artifact.filename,
+    subject: artifact.subject,
+    media_type: artifact.media_type,
+    size_bytes: artifact.size_bytes,
+    url: artifact.url,
+    preview_url: artifact.preview?.url ?? null,
+  };
   return (
-    <article className="min-w-0 rounded-panel border border-edge p-lg">
-      {artifact.preview ? (
-        <img
-          loading="lazy"
-          alt=""
-          src={artifact.preview.url}
-          className="mb-md max-h-(--media-card) max-w-full rounded-sm border border-edge object-contain"
+    <>
+      <article className="min-w-0 rounded-panel border border-edge p-lg">
+        <button
+          type="button"
+          aria-label={artifact.filename}
+          onClick={() => setOpen(true)}
+          className="block w-full cursor-pointer border-0 bg-transparent p-0 text-left text-inherit"
+        >
+          {artifact.preview ? (
+            <img
+              loading="lazy"
+              alt=""
+              src={artifact.preview.url}
+              className="mb-md max-h-(--media-card) max-w-full rounded-sm border border-edge object-contain"
+            />
+          ) : null}
+          <span className="block break-all font-mono text-label font-strong">
+            {artifact.filename}
+          </span>
+        </button>
+        {artifact.subject ? <p className="m-0 mt-sm break-words">{artifact.subject}</p> : null}
+        <p className="m-0 mt-sm font-mono text-mono text-ink-soft">
+          {artifact.media_type} · {formatSize(artifact.size_bytes)} ·{" "}
+          <Moment at={artifact.created_at} />
+        </p>
+      </article>
+      {open ? (
+        <FileSheet
+          file={file}
+          onClose={() => setOpen(false)}
+          details={
+            <div className="font-mono text-small text-ink-soft">
+              Shared <Moment at={artifact.created_at} />
+            </div>
+          }
         />
       ) : null}
-      <h2 className="m-0 break-all font-mono text-label font-strong">
-        {artifact.url ? (
-          <a href={artifact.url} download={artifact.filename} className={TAP_FLOOR}>
-            {artifact.filename}
-          </a>
-        ) : (
-          artifact.filename
-        )}
-      </h2>
-      {artifact.subject ? <p className="m-0 mt-sm break-words">{artifact.subject}</p> : null}
-      <p className="m-0 mt-sm font-mono text-mono text-ink-soft">
-        {artifact.media_type} · {formatSize(artifact.size_bytes)} ·{" "}
-        <Moment at={artifact.created_at} />
-      </p>
-      {textUrl && markdown ? (
-        <div className="mt-sm">
-          <ArtifactText
-            url={textUrl}
-            name={artifact.filename}
-            mediaType={artifact.media_type}
-            display={opened ? "inline" : "excerpt"}
-          />
-          <button
-            type="button"
-            className={cn(
-              "mt-sm border-0 bg-transparent p-0 text-label text-inherit underline",
-              TAP_FLOOR,
-            )}
-            aria-expanded={opened}
-            onClick={() => setOpened((full) => !full)}
-          >
-            {opened ? "First lines" : "Full document"}
-          </button>
-        </div>
-      ) : textUrl ? (
-        <details className="mt-sm" onToggle={(event) => setOpened(event.currentTarget.open)}>
-          <summary className="cursor-pointer select-none text-label text-ink-soft">
-            Preview
-          </summary>
-          <div className="mt-sm">
-            {opened ? (
-              <ArtifactText
-                url={textUrl}
-                name={artifact.filename}
-                mediaType={artifact.media_type}
-              />
-            ) : null}
-          </div>
-        </details>
-      ) : null}
-    </article>
+    </>
   );
 }
 

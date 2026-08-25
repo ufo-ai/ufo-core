@@ -12,7 +12,6 @@ import {
   Facts,
   Group,
   Header,
-  HeldRecord,
   IconChevronDown,
   IconChevronUp,
   IconDots,
@@ -61,7 +60,7 @@ const NOT_FOUND = 404;
 /** What an item the store filed on its own is classed as, before any consolidation. */
 const ATOM_CLASS = "fact";
 const MEMBER_PREFIX = "member/";
-/** The app's own name, which is what its front page is called and what every page and lane inside
+/** The app's own name, which is what its front page is called and what every page and sheet inside
  *  it is reached from. */
 const WIKI = "Wiki";
 /** What a member's page is headed by until the roster has answered who they are. */
@@ -207,28 +206,11 @@ function distinct<Row extends { name: string }>(rows: Row[]): Row[] {
   return kept;
 }
 
-/** The member the page stands on. A member's page is not a lane standing beside the workspace's —
- *  it is what the pane's own body draws — so it heads the track as the root every lane after it was
- *  opened from: a record opens after it and leaves it standing, and shutting it shuts them with it.
- *  Carried in the track rather than in a key of its own, so one link states the whole screen. */
 function memberAt(opens: string[]): string | null {
   const held = opens.find((id) => id.startsWith(MEMBER_PREFIX));
   return held ? held.slice(MEMBER_PREFIX.length) || null : null;
 }
 
-/** The Wiki app: the workspace is what it opens on, and one member is a page inside it. Both are
- *  the same document — a heading, what is known under it, and the people it is known about — so
- *  they are one route and one placement rather than two screens that would drift apart. A record a
- *  bullet opens stands in the track beside the page as the path the member took to it, so a second
- *  bullet takes the first record's place and reading two at once is asked for with a cmd- or
- *  middle-press. Each lane names the app it is read in, since a memory reaches the page through the
- *  app that filed it and one page draws several apps' memories.
- *
- *  Standing on one member, the band names them under the crumb back to the page. That crumb is the
- *  shell's own, carried in over the bridge, so the step it names is the step the portal's tab title
- *  names and the page states no second answer to where it stands. Shutting the member's page is the
- *  band's own way out, not the crumb: the crumb goes to an address and closing a page of the track is
- *  a verb of the track. */
 function Wiki({
   crumb,
   place,
@@ -258,16 +240,14 @@ function Wiki({
         )}
       </div>
 
-      {opens.map((id, at) => {
+      {opens.slice(-1).map((id) => {
         const held = objectAt(id);
-        const before = at === 0 ? null : objectAt(opens[at - 1]);
         if (held === null) return null;
         return (
           <RecordSlot
             key={id}
             id={id}
             held={held}
-            from={before?.name ?? WIKI}
             opens={opens}
             onPlace={onPlace}
           />
@@ -277,37 +257,26 @@ function Wiki({
   );
 }
 
-/** One record the page opened, standing in the track as a panel. A link out of it opens the record
- *  it names immediately beside this one and ends the path there: whatever stood further right was
- *  reached through the record the member has just left.
- *
- *  `from` is what this one was opened out of — the record standing to its left, or the app's own
- *  page — said as the crumb over it. A lane paged one to a screen has nothing standing to its left,
- *  so that crumb is the only way back the member has. */
 function RecordSlot({
   id,
   held,
-  from,
   opens,
   onPlace,
 }: {
   id: string;
   held: ObjectAddress;
-  from: string;
   opens: string[];
   onPlace: (place: Placement) => void;
 }) {
   const shut = () => onPlace({ opens: closed(opens, id) });
   return (
-    <HeldRecord id={id} title={held.name} from={from} onClose={shut}>
-      <ObjectDetail
-        agentId={held.agent}
-        kind={held.kind}
-        name={held.name}
-        onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
-        onBack={shut}
-      />
-    </HeldRecord>
+    <ObjectDetail
+      agentId={held.agent}
+      kind={held.kind}
+      name={held.name}
+      onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
+      onBack={shut}
+    />
   );
 }
 

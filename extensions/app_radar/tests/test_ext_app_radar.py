@@ -27,6 +27,9 @@ def test_the_built_page_is_the_apps_own_tsx() -> None:
     assert (BUILD_ENTRY.parent / entry[1]).resolve() == (SKILL_DIR / "app.tsx").resolve()
     source = (SKILL_DIR / "app.tsx").read_text()
     assert "RebuildDialog" in source
+    assert "FileSheet" in source
+    assert "FileBody" not in source
+    assert "FileDownload" not in source
     assert "mountApp(" in source
 
 

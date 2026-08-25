@@ -109,7 +109,10 @@ async function runPage(
   vi.resetModules();
   const { calls, handler } = wire(routes);
   cleanups.push(shell(handler, init));
+  const root = document.getElementById("root")!;
   await import(/* @vite-ignore */ pagePath(app));
+  const { unmountApp } = await import("@/apps/shell");
+  cleanups.push(() => unmountApp(root));
   return { calls };
 }
 
@@ -123,14 +126,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // The kit mounts each page on its own React root this harness cannot unmount, so drain the
-  // page's pending bridge round-trips and their React work here — while the shell and fetch it
-  // tunnels through still stand — rather than letting them fire after the test's jsdom is torn down
-  // (which surfaces as an unhandled `window is not defined`).
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
+    for (const cleanup of cleanups.splice(0)) cleanup();
   });
-  for (const cleanup of cleanups.splice(0)) cleanup();
   window.fetch = nativeFetch;
   (window as { EventSource: typeof EventSource }).EventSource = nativeEventSource;
 });
@@ -329,5 +328,7 @@ test("the chat page opens a Slack or terminal conversation for comments", async 
   expect(await screen.findByLabelText("Message the app")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
   expect(screen.queryByText("This conversation is not available here.")).toBeNull();
-  expect(calls.some((url) => url.includes("transcript") && url.includes(SLACK))).toBe(true);
+  await vi.waitFor(() =>
+    expect(calls.some((url) => url.includes("transcript") && url.includes(SLACK))).toBe(true),
+  );
 });

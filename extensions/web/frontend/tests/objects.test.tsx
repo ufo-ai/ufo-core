@@ -4,7 +4,7 @@ import { useState } from "react";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import { ObjectPane } from "@/kernel/objects";
+import { ObjectDetail, ObjectPane } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { Pane } from "@/kernel/pane";
 import { Viewer } from "@/lib/audience";
@@ -126,9 +126,15 @@ function headings(): string[] {
   return screen.getAllByRole("columnheader").map((head) => String(head.textContent));
 }
 
-/** What the track is holding, in the order it holds it. */
+/** The one object sheet currently visible. */
 function standing(): (string | null)[] {
-  return screen.queryAllByRole("region").map((slot) => slot.getAttribute("aria-label"));
+  return screen
+    .queryAllByRole("dialog")
+    .filter((dialog) => dialog.getAttribute("data-slot") === "sheet-content")
+    .map((dialog) => {
+      const title = dialog.getAttribute("aria-labelledby");
+      return title ? document.getElementById(title)?.textContent ?? null : null;
+    });
 }
 
 /** One fact of the detail's `Spec` group, scoped to that group: `Status` states some of the same
@@ -573,6 +579,54 @@ test("a detail renders spec, then status, then links, then when the row was made
   expect(screen.getByText("Created").textContent).toBe("Created Jul 1 2026");
 });
 
+test("a record header action applies a partial spec and reads back its next state", async () => {
+  const posted: unknown[] = [];
+  let paused = false;
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({
+        ...TASK_DETAIL,
+        spec: { ...TASK_DETAIL.spec, paused },
+        status: { ...TASK_DETAIL.status, paused },
+      }),
+    "/intents": (_url, init) => {
+      const envelope = JSON.parse(String(init?.body));
+      posted.push(envelope);
+      paused = envelope.spec.paused;
+      return json({ applied: true, message: paused ? "Paused." : "Resumed." });
+    },
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <ObjectDetail
+        agentId={AGENT_ID}
+        kind="scheduled_task"
+        name="daily-brief"
+        actions={(status, apply) =>
+          status === null ? null : (
+            <button
+              type="button"
+              onClick={() => void apply({ paused: status.paused !== true })}
+            >
+              {status.paused === true ? "Resume" : "Pause"}
+            </button>
+          )
+        }
+        onOpen={() => {}}
+        onBack={() => {}}
+      />
+    </MainAgentProvider>,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Pause" }));
+
+  expect(await screen.findByRole("button", { name: "Resume" })).toBeTruthy();
+  expect(await screen.findByText("Paused.")).toBeTruthy();
+  expect(posted).toEqual([
+    { verb: "apply", kind: "scheduled_task", name: "daily-brief", spec: { paused: true } },
+  ]);
+});
+
 test("a spec value longer than its row stands under its label, wrapped, and clears its neighbours", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () =>
@@ -656,7 +710,7 @@ test("the index read across the audience names the agent and leaves the creator 
  *  followed from, and shuts whatever stood there: the path is what the member walked, so a record
  *  reached from a branch they have left does not stay standing. A link the projection marks closed
  *  opens nothing and is not a control. */
-test("a link inside a record shuts what stood right of it and opens beside it", async () => {
+test("a link inside a record replaces the visible sheet and closing returns to its source", async () => {
   tasks();
   mount();
 
@@ -664,34 +718,38 @@ test("a link inside a record shuts what stood right of it and opens beside it", 
   expect(standing()).toEqual(["daily-brief"]);
 
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
-  expect(standing()).toEqual(["daily-brief", "weekly-roll"]);
+  const weekly = await screen.findByRole("dialog", { name: "weekly-roll" });
+  expect(standing()).toEqual(["weekly-roll"]);
+
+  await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
 
   await userEvent.click(link(REPORTS_TO));
 
   expect(await screen.findByRole("heading", { name: CONVO_ID })).toBeTruthy();
-  expect(standing()).toEqual(["daily-brief", CONVO_ID]);
+  expect(standing()).toEqual([CONVO_ID]);
   expect(screen.getByText("member:m1")).toBeTruthy();
   const shut = screen.getByText("scoped_to agent assistant");
   expect(shut.tagName).toBe("SPAN");
   expect(screen.queryByRole("button", { name: "scoped_to agent assistant" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "Close " + CONVO_ID }));
-  expect(standing()).toEqual(["daily-brief"]);
+  await userEvent.click(
+    within(screen.getByRole("dialog", { name: CONVO_ID })).getByRole("button", { name: "Close" }),
+  );
+  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
 });
 
-test("a modifier press on a link stands the record it names at the end of the path", async () => {
+test("a modifier press retains the source behind the one visible sheet", async () => {
   tasks();
   mount();
 
   await openRow("daily-brief");
-  await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+  await besidePress(link(FOLLOWS));
 
-  await besidePress(link(REPORTS_TO));
-
-  expect(await screen.findByRole("heading", { name: CONVO_ID })).toBeTruthy();
-  expect(standing()).toEqual(["daily-brief", "weekly-roll", CONVO_ID]);
+  const weekly = await screen.findByRole("dialog", { name: "weekly-roll" });
+  expect(standing()).toEqual(["weekly-roll"]);
+  await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
 });
 
 /** The index is the root of the path, so a row pressed there leaves one record standing however
@@ -702,24 +760,24 @@ test("a row of the index shuts every record standing and opens the one it names"
 
   await openRow("daily-brief");
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "weekly-roll" })).toBeTruthy();
 
   await openRow("weekly-roll");
 
   await waitFor(() => expect(standing()).toEqual(["weekly-roll"]));
 });
 
-test("closing a record shuts the record opened from it", async () => {
+test("closing the current record returns to the record opened from it", async () => {
   tasks();
   mount();
 
   await openRow("daily-brief");
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  expect(await screen.findByRole("region", { name: "weekly-roll" })).toBeTruthy();
+  const weekly = await screen.findByRole("dialog", { name: "weekly-roll" });
 
-  await userEvent.click(screen.getByRole("button", { name: "Close daily-brief" }));
+  await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
 
-  await waitFor(() => expect(standing()).toEqual([]));
+  await waitFor(() => expect(standing()).toEqual(["daily-brief"]));
 });
 
 /** The screen owns the track and the pane reads it, so the record the address opened and the record
@@ -743,7 +801,7 @@ test("the index row whose record is standing is marked, and no other", async () 
 
   await openRow("daily-brief");
 
-  expect(await screen.findByRole("region", { name: "daily-brief" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "daily-brief" })).toBeTruthy();
   const marked = screen
     .getAllByRole("row")
     .filter((row) => row.getAttribute("aria-current") === "true");
@@ -753,7 +811,7 @@ test("the index row whose record is standing is marked, and no other", async () 
 
 /** An outcome is the record's own, so it stays in the slot the act was taken in. The record opened
  *  beside it reports what happened to itself and nothing else. */
-test("an outcome stays in the slot it happened in, not in the one opened beside it", async () => {
+test("an outcome does not leak into the sheet that replaces its record", async () => {
   wire({
     ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL),
     "/objects/scheduled_task/daily-brief": () => json(TASK_DETAIL),
@@ -769,13 +827,9 @@ test("an outcome stays in the slot it happened in, not in the one opened beside 
 
   await userEvent.click(screen.getByText("reports_to conversation " + CONVO_ID));
 
-  const opened = await screen.findByRole("region", { name: CONVO_ID });
+  const opened = await screen.findByRole("dialog", { name: CONVO_ID });
   expect(within(opened).queryByText("The workspace refuses it.")).toBeNull();
-  expect(
-    within(screen.getByRole("region", { name: "daily-brief" })).getByText(
-      "The workspace refuses it.",
-    ),
-  ).toBeTruthy();
+  expect(standing()).toEqual([CONVO_ID]);
 });
 
 test("a spec the kind elides reads as the row's own summary, with no form to submit", async () => {
@@ -849,8 +903,9 @@ test("an app's Scheduled tab lists that app's tasks, and a row opens inside the 
 
   await openRow("daily-brief");
 
-  expect(await within(dialog).findByRole("region", { name: "daily-brief" })).toBeTruthy();
-  expect(within(dialog).getByText("write the daily brief")).toBeTruthy();
+  const sheet = await screen.findByRole("dialog", { name: "daily-brief" });
+  expect(within(sheet).getByText("write the daily brief")).toBeTruthy();
+  expect(dialog).toBeTruthy();
 });
 
 /** The form that writes a record is a lane of the track like any other, so it stands beside the
@@ -1031,6 +1086,3 @@ test("a kind the lane declines to write offers no act on its rows", async () => 
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   expect(screen.queryByRole("button", { name: "New scheduled task" })).toBeNull();
 });
-
-
-
