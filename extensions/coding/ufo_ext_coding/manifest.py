@@ -1,5 +1,5 @@
 """The coding pack: a software-engineering child turn over the core code builtins, the `coding`
-skill the agent loads on demand, and the `code-review` agent that puts both to work.
+skill that routes work to it, and the GitHub credentials its checkouts and API calls ride.
 
 `spawn("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
 tests, and reports a result. The profile names only tool names — bash/read/write/
@@ -16,13 +16,9 @@ the same input contract on a stronger pinned model, with its own prompt for a wo
 reports. The model is pinned on the profile because the answer is always "this rung wants that
 model", and the caller escalates by naming the target.
 
-`code-review` is the durable agent the pack ships. One conversation tracks one pull request: it
-reads the page the source updates, spawns two `coding` children over the same head SHA with
-different focuses, coalesces their findings, and publishes one `ufo review` commit status. It runs
-on the member-facing tool set, because the page it reads and the GitHub connection it publishes
-through both belong to the workspace, not to this pack. It arrives with no grant and no connection
-of its own: a member gives it the GitHub account in chat, which is what its publication calls
-through.
+The pack ships no agent. It is the machinery a durable one runs on — the child profiles, the
+skill, the credentials — and a durable agent with work of its own is an application: it ships as
+its own extension, under the slug its page is served at.
 
 The pack also declares the GitHub credential slots, because repository work includes Git and API
 calls. A workspace that installs the App gets authenticated Git and API access, with short-lived
@@ -36,9 +32,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import (
-    AgentProvision,
-    AgentSetup,
-    AgentSpec,
     CredentialSlot,
     InjectionTarget,
     Manifest,
@@ -190,36 +183,6 @@ FABLE_ESCALATION_PROFILE = SubagentProfile(
     model=FABLE_ESCALATION_MODEL,
 )
 
-CODE_REVIEW_AGENT_NAME = "code-review"
-CODE_REVIEW_PROMPT = (Path(__file__).parent / "prompts" / "agent_code_review.md").read_text()
-
-CODE_REVIEW_SETUP = (
-    "Connect the GitHub account this workspace reviews under. A connection binds to the agent "
-    "whose conversation it is made in, so make it here, with you. Then ask the member to "
-    "register the pull-request source for that account and share it — only a shared source "
-    "carries a trigger — "
-    "and apply a source trigger naming it, so a changed pull request wakes this conversation. The "
-    "children also need the ufo GitHub App installed to fetch commits: `connect_github` hands an "
-    "admin that link once for the whole workspace."
-)
-
-CODE_REVIEW_PURPOSE = (
-    "Reviews each pull request as it changes, and says what would break and what is missing."
-)
-
-CODE_REVIEW_AGENT = AgentProvision(
-    name=CODE_REVIEW_AGENT_NAME,
-    spec=AgentSpec(
-        prompt=CODE_REVIEW_PROMPT,
-        purpose=CODE_REVIEW_PURPOSE,
-        model="auto",
-        reasoning="high",
-        internet_access_allowed=False,
-        sandbox_size="large",
-    ),
-    setup=AgentSetup(connectors=(GITHUB_CONNECTOR,), instructions=CODE_REVIEW_SETUP),
-)
-
 UFO_GITHUB_APP = SetupCredential(
     label="ufo GitHub App",
     slots=(GIT_INSTALLATION_SLOT, GIT_SLOT),
@@ -238,7 +201,6 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
-        agents=(CODE_REVIEW_AGENT,),
         subagents=(CODING_PROFILE, FABLE_ESCALATION_PROFILE),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
         credentials=(GIT_INSTALLATION, GIT_CREDENTIAL, GITHUB_API_CREDENTIAL),

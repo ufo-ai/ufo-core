@@ -272,20 +272,6 @@ def test_onboarding_help_refuses_to_run_outside_the_hosted_pack(
     )
 
 
-def test_code_review_refuses_to_run_as_the_default_agent(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(
-        "evals.__main__.load_config",
-        lambda: SimpleNamespace(pack=SimpleNamespace(name="assistant_eval")),
-    )
-
-    with pytest.raises(SystemExit):
-        eval_main(["--only", "code_review", "--out", str(tmp_path)])
-
-    assert "code_review requires --agent 'code-review'" in capsys.readouterr().err
-
-
 def test_first_run_refuses_to_run_outside_a_pack_that_carries_the_skill(
     tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -660,7 +646,6 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "skill_authoring",
         "skill_loading_member",
         "skill_gtm",
-        "code_review",
     }
 
 

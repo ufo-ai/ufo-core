@@ -4,7 +4,6 @@ from uuid import uuid4
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.harness.harness import JsonObject
 from evals.harness.timing import CaseTiming, StepTiming, TurnRole, TurnTiming
-from evals.registry import TASKS
 from evals.suites import code_review
 
 
@@ -46,14 +45,6 @@ def _turn(role: TurnRole, *steps: StepTiming) -> TurnTiming:
 
 def _call(name: str, call_id: str, input: JsonObject) -> ToolInvocation:
     return ToolInvocation(name, input, has_result=True, call_id=call_id)
-
-
-def test_code_review_task_selects_its_agent_and_waits_for_reviewers() -> None:
-    task = next(task for task in TASKS if task.name == "code_review")
-    review = next(case for case in code_review.CASES if "parallel" in case.name)
-
-    assert task.agent == "code-review"
-    assert review.wait_for_background is True
 
 
 async def test_parallel_review_grader_requires_two_same_round_spawns_and_child_batches() -> None:
