@@ -22,6 +22,7 @@ from ufo.sandbox.session import COPY_IN_PROG as COPY_IN_PROG
 from ufo.sandbox.session import NO_PROXY_HOSTS as NO_PROXY_HOSTS
 from ufo.sandbox.session import NODE_GLOBAL_MODULES as NODE_GLOBAL_MODULES
 from ufo.sandbox.session import PLAYWRIGHT_BROWSERS_DIR as PLAYWRIGHT_BROWSERS_DIR
+from ufo.sandbox.session import PLAYWRIGHT_VERSION as PLAYWRIGHT_VERSION
 from ufo.sandbox.session import SANDBOX_ENV as SANDBOX_ENV
 from ufo.sandbox.session import SANDBOX_MODULE_BOOTSTRAP as SANDBOX_MODULE_BOOTSTRAP
 from ufo.sandbox.session import SANDBOX_PYTHON_FLAG as SANDBOX_PYTHON_FLAG

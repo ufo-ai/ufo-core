@@ -80,6 +80,8 @@ CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
+PLAYWRIGHT_VERSION = "1.62.0"
+PLAYWRIGHT_CHROMIUM_REVISION = "1234"
 SANDBOX_ENV: dict[str, str] = {
     "NODE_PATH": NODE_GLOBAL_MODULES,
     "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,

@@ -51,7 +51,13 @@ from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
 
 from ufo.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
-from ufo.sdk.sandbox import PLAYWRIGHT_BROWSERS_DIR, SANDBOX_ENV, SANDBOX_SIZES, WORKSPACE_DIR
+from ufo.sdk.sandbox import (
+    PLAYWRIGHT_BROWSERS_DIR,
+    PLAYWRIGHT_VERSION,
+    SANDBOX_ENV,
+    SANDBOX_SIZES,
+    WORKSPACE_DIR,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 E2B_TEMPLATE_NAME = "ufo-sbx"
@@ -208,7 +214,7 @@ NPM_PACKAGES = (
     "sharp",
     "docx",
     "pdf-lib",
-    "playwright",
+    f"playwright@{PLAYWRIGHT_VERSION}",
 )
 # Runtime env the image needs beyond the base — SANDBOX_ENV, defined in core beside its
 # run-boundary consumer: NODE_PATH so node resolves the globally installed skill modules from any

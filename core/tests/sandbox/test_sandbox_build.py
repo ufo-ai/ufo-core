@@ -6,6 +6,7 @@ expected sets and the rendered Dockerfile is asserted to carry the whole install
 render targets (E2B template, Docker image) share `apply_layers`, so this offline check over the
 Dockerfile render also covers what the E2B template bakes."""
 
+import json
 import re
 import sys
 from collections.abc import Iterator
@@ -41,7 +42,7 @@ from sandbox.build_template import (
     pod_dockerfile,
     template_name,
 )
-from ufo.sdk.sandbox import SANDBOX_SIZES
+from ufo.sdk.sandbox import PLAYWRIGHT_VERSION, SANDBOX_SIZES
 
 
 @pytest.fixture(autouse=True)
@@ -103,7 +104,7 @@ EXPECTED_NPM = (
     "sharp",
     "docx",
     "pdf-lib",
-    "playwright",
+    f"playwright@{PLAYWRIGHT_VERSION}",
 )
 
 
@@ -119,6 +120,11 @@ def test_pip_packages_match_the_expected_toolchain() -> None:
 
 def test_npm_packages_match_the_expected_toolchain() -> None:
     assert NPM_PACKAGES == EXPECTED_NPM
+
+
+def test_the_playwright_pin_matches_the_edge_suite() -> None:
+    edge = json.loads((ROOT / "infra/modules/edge/package.json").read_text())
+    assert edge["devDependencies"]["playwright"] == PLAYWRIGHT_VERSION
 
 
 def test_sandbox_tiers_scale_cpu_and_memory_together() -> None:

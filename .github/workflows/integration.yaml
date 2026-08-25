@@ -98,6 +98,11 @@ jobs:
           else
             echo "no published image for ${KEY:-an underivable key} — the fixture builds it"
           fi
+      - name: Install Chrome for Testing
+        run: >-
+          npx --yes "playwright@$(uv run python -c
+          'from ufo.sandbox.session import PLAYWRIGHT_VERSION; print(PLAYWRIGHT_VERSION)')"
+          install --with-deps chromium
       # Serial pass: the container/image-build/live turns run one process, no xdist — the ~6-7 GB
       # sandbox image build, the fixed-name MinIO container, and the live integration turns each need
       # a single owner of their shared resource. `integration` tests needing an absent key (a live

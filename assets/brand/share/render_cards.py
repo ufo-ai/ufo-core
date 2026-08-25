@@ -35,6 +35,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_REPO = HERE.parents[2] if len(HERE.parents) > 2 else HERE
 CARD_DIR = "servers/control/src/assets"
 W, H = 1200, 630
+CONTAINED_FLAGS = ("--no-sandbox",) if sys.platform.startswith("linux") else ()
 
 LOCKUP = "art/logo-ember-with-padding.svg"
 # stem -> the one line set above the lockup, empty where the card carries none.
@@ -87,7 +88,10 @@ def render(work: pathlib.Path, out: pathlib.Path) -> list[pathlib.Path]:
                 "chromium",
                 "--headless",
                 "--disable-gpu",
-                "--no-sandbox",
+                "--use-mock-keychain",
+                "--password-store=basic",
+                f"--user-data-dir={work / 'profile'}",
+                *CONTAINED_FLAGS,
                 "--hide-scrollbars",
                 "--force-device-scale-factor=1",
                 f"--window-size={W},{H}",

@@ -1,7 +1,7 @@
 # ufo application QA
 
-Use this path for an application homepage. It keeps full browser proof in a small number of model
-turns. Read `12-playwright-interactive.md` as well only when the
+Use this path for a direct HTML, CSS, and JavaScript application homepage. It keeps full browser
+proof in a small number of model turns. Read `12-playwright-interactive.md` as well only when the
 application has multi-page routing, authentication, realtime behavior, or motion that needs its
 extended checks.
 
@@ -21,22 +21,9 @@ Use the Chromium endpoint at `http://127.0.0.1:9222` when it answers. Start Chro
 that endpoint is absent, with `bash(background=true)`:
 
 ```
-BROWSER="$(command -v chromium || command -v chromium-browser \
-  || node -e 'console.log(require("playwright").chromium.executablePath())')"
-PROFILE="$(mktemp -d /tmp/ufo-chrome-qa.XXXXXX)"
-trap 'rm -rf "$PROFILE"' EXIT INT TERM
-CONTAINED=
-if [ "$(uname -s)" = Linux ]; then CONTAINED="--no-sandbox --disable-dev-shm-usage"; fi
-"$BROWSER" --headless=new --use-mock-keychain --password-store=basic $CONTAINED \
-  --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
-  --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check \
-  --disable-gpu about:blank
+chromium --headless=new --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
+  --user-data-dir=/tmp/ufo-chrome-qa --no-sandbox --disable-dev-shm-usage --disable-gpu about:blank
 ```
-
-Never name a browser under `/Applications`: that bundle is the browser the person at this machine
-uses, a headless instance of it holds their next launch, and its keychain is not reachable from
-here. `$CONTAINED` is unquoted so it disappears where it does not apply: the container needs both
-flags and a host must not have either.
 
 Every `js_repl` browser call uses `reset: true`, connects with `chromium.connectOverCDP`, and closes
 that connection in `finally` with `await browser.close()` so the call ends. Never carry variables

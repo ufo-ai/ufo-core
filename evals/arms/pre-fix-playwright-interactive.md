@@ -35,33 +35,18 @@ Use this skill when a task needs interactive browser work driven from `js_repl`.
 Call `bash` with `background: true`:
 
 ```
-BROWSER="$(command -v chromium || command -v chromium-browser \
-  || node -e 'console.log(require("playwright").chromium.executablePath())')"
-PROFILE="$(mktemp -d /tmp/ufo-chrome-qa.XXXXXX)"
-trap 'rm -rf "$PROFILE"' EXIT INT TERM
-CONTAINED=
-if [ "$(uname -s)" = Linux ]; then CONTAINED="--no-sandbox --disable-dev-shm-usage"; fi
-"$BROWSER" --headless=new --use-mock-keychain --password-store=basic $CONTAINED \
-  --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
-  --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check \
-  --disable-gpu about:blank
+chromium --headless=new --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
+  --user-data-dir=/tmp/ufo-chrome-qa --no-sandbox --disable-dev-shm-usage --disable-gpu about:blank
 ```
 
-Never name a browser under `/Applications`: that bundle is the browser the person at this machine
-uses, a headless instance of it holds their next launch, and its keychain is not reachable from
-here. The profile directory is this run's own and the `trap` removes it, so no run inherits another
-run's state. `$CONTAINED` is unquoted so it disappears where it does not apply: the container needs
-both flags and a host must not have either.
+If `chromium` is not on `PATH`, resolve it with `command -v chromium || command -v chromium-browser`.
 
 Keep the `task`, `log`, and `stop` handles the background call hands back: `log` is where a browser that failed to start says why, and `stop` is how you end it.
 
-Then poll until it is listening, with a normal `bash` call:
+Then confirm it is listening with a normal `bash` call:
 
 ```
-for _ in $(seq 30); do
-  curl -sf -m 2 http://127.0.0.1:9222/json/version && break
-  sleep 0.5
-done
+curl -sf http://127.0.0.1:9222/json/version
 ```
 
 If the port already answers, a browser is already up — reuse it. Do not start a second one; each Chromium costs 200MB+.
@@ -322,7 +307,7 @@ Only use `waitForTimeout` when real elapsed time must pass (e.g., holding a key 
 
 - `Cannot find module 'playwright'`: run the one-time setup in the current workspace and verify the import before using `js_repl`.
 - Playwright package is installed but the browser executable is missing: run `npx playwright install chromium`.
-- `connect ECONNREFUSED 127.0.0.1:9222`: Chromium is not up. Read the background task's `log`, start it again, then re-check `/json/version` before the next cell. A browser left alive by an earlier run holds the port without answering on it, so sweep with the `pkill` in Cleanup first.
+- `connect ECONNREFUSED 127.0.0.1:9222`: Chromium is not up. Read the background task's `log`, start it again, then re-check `/json/version` before the next cell.
 - `js_repl` returned `exit_code: 124`: the cell's budget expired, the run was killed, and REPL state did not advance. The cause is nearly always a cell that opened a browser or a context and never closed it. Rewrite that cell around connect over CDP with `browser.close()` in `finally`; never re-run the same cell unchanged. Chromium is a separate process and is probably still fine — check `/json/version`.
 - `page.goto: net::ERR_CONNECTION_REFUSED`: the dev server may have crashed. Run `lsof -i :3000` — if nothing is listening, restart it with the same `start_server` call from the Dev Server section, then retry navigation.
 - `Identifier has already been declared`: an accumulated block already declared that binding, and every call replays the whole accumulation. Pass `reset: true` so the cell runs on its own.

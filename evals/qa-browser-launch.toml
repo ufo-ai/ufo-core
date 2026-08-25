@@ -1,0 +1,23 @@
+name = "qa-browser-launch"
+base = "HEAD"
+suites = ["ufo-app-bench"]
+cases = ["daily-brief"]
+repeats = 3
+concurrency = 1
+max_stacks = 1
+budget_usd = 60.0
+est_usd_per_case = 3.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+[[arm]]
+name = "pre-fix"
+[arm.files]
+"extensions/sites/ufo_ext_sites/skills/website-building/shared/12-playwright-interactive.md" = "arms/pre-fix-playwright-interactive.md"
+"extensions/sites/ufo_ext_sites/skills/website-building/shared/13-ufo-application-qa.md" = "arms/pre-fix-application-qa.md"

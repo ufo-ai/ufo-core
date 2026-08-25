@@ -460,6 +460,26 @@ def test_the_playwright_guidance_keeps_the_browser_outside_the_cell() -> None:
     assert "bootstrap" not in lowered, "the bootstrap cell is the timeout this guidance replaced"
 
 
+def test_the_qa_guidance_starts_a_browser_that_touches_no_keychain() -> None:
+    for guidance in (_playwright_guidance(), _application_qa_guidance()):
+        launch = next(
+            block
+            for block in re.findall(r"```\n(.*?)```", guidance, re.S)
+            if "--headless=new" in block
+        )
+        for text in (
+            "--use-mock-keychain",
+            "--password-store=basic",
+            'PROFILE="$(mktemp -d /tmp/ufo-chrome-qa.XXXXXX)"',
+            "trap 'rm -rf \"$PROFILE\"' EXIT INT TERM",
+            '--user-data-dir="$PROFILE"',
+        ):
+            assert text in launch
+        assert "/Applications" not in launch
+        assert 'if [ "$(uname -s)" = Linux ]; then CONTAINED=' in launch
+        assert "--password-store=basic $CONTAINED" in launch
+
+
 def test_every_playwright_example_cell_can_exit() -> None:
     """Each example is a cell the model runs verbatim, so a connect with no matching close is a
     documented deadline loss. The close sits in `finally`, so a check that throws still exits."""
@@ -772,13 +792,11 @@ def test_the_shot_is_drawn_by_the_sandbox_browser_under_its_own_wall() -> None:
         height=CARD_HEIGHT,
         scale=2,
         shot=shot,
-        profile="/tmp/ufo-share-card",
         root="/workspace",
     )
 
-    assert f"for browser in {shlex.join(BROWSER_COMMANDS)}; do" in command
-    assert shlex.quote("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") in command
-    assert shlex.quote("/Applications/Chromium.app/Contents/MacOS/Chromium") in command
+    assert f"for candidate in {shlex.join(BROWSER_COMMANDS)}; do" in command
+    assert "/Applications" not in command
     assert "playwright" not in command
     assert "--virtual-time-budget" not in command
     for flag in UNATTENDED_FLAGS.split():
@@ -790,6 +808,10 @@ def test_the_shot_is_drawn_by_the_sandbox_browser_under_its_own_wall() -> None:
     assert "timeout " not in command
     assert SHOT_DEADLINE_SECONDS < CARD_TIMEOUT_SECONDS
     assert f"test -s {shlex.quote(shot)}" in command
+    assert 'CONTAINED = "--no-sandbox --disable-dev-shm-usage"' in command
+    assert 'CONTAINED.split() if sys.platform.startswith("linux") else []' in command
+    assert 'profile="$(mktemp -d /tmp/ufo-share-card.XXXXXX)"' in command
+    assert "trap 'rm -rf \"$profile\"' EXIT INT TERM" in command
 
 
 def test_the_shot_is_driven_to_a_settle_point_inside_its_wall() -> None:
@@ -811,7 +833,6 @@ def test_the_shot_is_driven_to_a_settle_point_inside_its_wall() -> None:
         height=PREVIEW_HEIGHT,
         scale=1,
         shot=shot,
-        profile="/tmp/ufo-site-preview",
         root="/workspace",
     )
 
@@ -831,7 +852,7 @@ def test_the_shot_is_driven_to_a_settle_point_inside_its_wall() -> None:
     assert f"LOAD_WALL = {LOAD_WALL_SECONDS}" in command
     assert f"SETTLE_WALL = {SETTLE_WALL_SECONDS}" in command
     assert f"FRAME = {FRAME_SECONDS}" in command
-    for argument in (shlex.quote(shot), shlex.quote("/tmp/ufo-site-preview"), "/workspace"):
+    for argument in (shlex.quote(shot), '"$profile"', "/workspace"):
         assert argument in command
 
 

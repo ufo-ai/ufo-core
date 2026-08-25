@@ -139,12 +139,13 @@ asyncio.run(main())
 BRING_UP_SOURCE = (
     f"""BROWSER_DIR = "{BROWSER_DIR}"
 DOWNLOAD_DIR = "{DOWNLOAD_DIR}"
+CONTAINED_ARGV = ["--no-sandbox", "--disable-dev-shm-usage"]
 CHROME_URL = "http://127.0.0.1:{BROWSER_CDP_PORT}/json/version"
 CHROME_ARGV_TAIL = [
     "--headless=new",
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
     "--disable-gpu",
+    "--use-mock-keychain",
+    "--password-store=basic",
     "--remote-debugging-address=0.0.0.0",
     "--remote-debugging-port={BROWSER_CDP_PORT}",
     "--remote-allow-origins=*",
@@ -169,6 +170,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -260,9 +262,10 @@ Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 browser = next((found for found in map(which, BROWSER_COMMANDS) if found), None)
 if browser is None:
     raise SystemExit("Chromium is required in the sandbox image")
+contained = CONTAINED_ARGV if sys.platform.startswith("linux") else []
 serving(
     CHROME_URL,
-    [browser] + CHROME_ARGV_TAIL,
+    [browser] + contained + CHROME_ARGV_TAIL,
     CHROME_LOG,
     CHROME_PID,
     CHROME_READY_BUDGET_SECONDS,

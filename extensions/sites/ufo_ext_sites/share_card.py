@@ -81,10 +81,7 @@ CARD_FILE = f"{TOOL_OUTPUT_DIR}/share-card-{{site}}.{CARD_EXTENSION}"
 STORED_SHOT = f"{TOOL_OUTPUT_DIR}/share-card-stored-{{site}}.png"
 """Where the picture a past deploy stored is put back down for a card that has none of its own."""
 
-CARD_PROFILE_DIR = "/tmp/ufo-share-card"
-"""Its own chromium profile directory, outside the workspace and outside the one the page shot
-takes: a one-shot chromium holds the profile lock for its run, and two runs sharing a directory
-would fail whichever started second."""
+CARD_PROFILE_TEMPLATE = "/tmp/ufo-share-card.XXXXXX"
 SHOT_DEADLINE_SECONDS = 30
 """The kill wall the browser driver's whole run is given. Its alarm raises through the run's one
 `finally`, which kills and reaps the browser, so macOS needs no separate `timeout` executable and a
@@ -122,8 +119,6 @@ BROWSER_COMMANDS = (
     "chromium-browser",
     "google-chrome",
     "google-chrome-stable",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
 )
 QUIET_FLAGS = (
     "--disable-background-networking --disable-sync --disable-component-update "
@@ -149,18 +144,15 @@ uploads are off; and the component extensions with background pages — what reg
 — are never loaded. Measured on chromium 151: the same page renders to a byte-identical PNG in the
 same half second with and without them, so these change what a run waits for and never what it
 draws."""
+CONTAINED_FLAGS = "--no-sandbox --disable-dev-shm-usage"
 SHOT_FLAGS = " ".join(
     (
-        "--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu",
+        "--headless=new --disable-gpu",
         QUIET_FLAGS,
         UNATTENDED_FLAGS,
         "--hide-scrollbars --remote-debugging-pipe",
     )
 )
-"""The browser's own command line, which the driver launches it with: what a headless run inside a
-container needs, both quiet sets above, and the pipe the protocol is spoken over. The viewport and
-the device scale factor are not here — the driver sets those through `Emulation`, which fixes the
-raster the capture answers with rather than asking a window manager the container has not got."""
 SHOT_PROG = '''
 import base64
 import io
@@ -175,6 +167,7 @@ from containment import ContainmentError, contained_file
 from PIL import Image
 
 FLAGS = "{flags}"
+CONTAINED = "{contained}"
 DEADLINE = {deadline}
 LOAD_WALL = {load_wall}
 SETTLE_WALL = {settle_wall}
@@ -194,8 +187,11 @@ def main():
     driven = None
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(DEADLINE)
+    contained = CONTAINED.split() if sys.platform.startswith("linux") else []
     try:
-        driven = Driven([browser] + FLAGS.split() + ["--user-data-dir=" + profile, "about:blank"])
+        driven = Driven(
+            [browser] + FLAGS.split() + contained + ["--user-data-dir=" + profile, "about:blank"]
+        )
         picture = settled(driven, url, int(width), int(height), float(scale))
         if picture is None:
             raise SystemExit("the page drew one flat colour, which is no picture of it")
@@ -382,15 +378,17 @@ guard, the way every other write inside the sandbox does: the shot's name sits i
 agent writes."""
 SHOT_HEREDOC = "UFO_SHOT_DRIVER"
 SHOT_CMD = (
-    "for browser in " + shlex.join(BROWSER_COMMANDS) + "; do\n"
-    '  command -v "$browser" >/dev/null 2>&1 || continue\n'
-    '  python3 {isolated} - "$browser" {url} {width} {height}'
-    " {scale} {shot} {profile} {root} <<'" + SHOT_HEREDOC + "'\n"
-    "{driver}\n" + SHOT_HEREDOC + "\n"
-    "  test -s {shot}\n"
-    "  exit\n"
+    "browser=\n"
+    "for candidate in " + shlex.join(BROWSER_COMMANDS) + "; do\n"
+    '  command -v "$candidate" >/dev/null 2>&1 && browser="$candidate" && break\n'
     "done\n"
-    'printf %s "no chromium in this sandbox" >&2; exit 1'
+    'if [ -z "$browser" ]; then printf %s "no chromium in this sandbox" >&2; exit 1; fi\n'
+    'profile="$(mktemp -d ' + CARD_PROFILE_TEMPLATE + ')"\n'
+    "trap 'rm -rf \"$profile\"' EXIT INT TERM\n"
+    'python3 {isolated} - "$browser" {url} {width} {height}'
+    ' {scale} {shot} "$profile" {root} <<\'' + SHOT_HEREDOC + "'\n"
+    "{driver}\n" + SHOT_HEREDOC + "\n"
+    "test -s {shot}"
 )
 
 PAGE_PROG = """
@@ -520,34 +518,21 @@ def _lockup() -> str:
     return drawing[drawing.index("<svg") :]
 
 
-def shot_command(
-    *, url: str, width: int, height: int, scale: int, shot: str, profile: str, root: str
-) -> str:
-    """One headless chromium run drawing `url` at `width`x`height` into `shot`, under whichever of
-    the sandbox's browsers is present — the same browser the site's own page shot is taken with.
-    `scale` is the deviceScaleFactor the raster is multiplied by, and `root` is the workspace the
-    shot is contained under.
-
-    The browser is driven rather than one-shot: `SHOT_PROG` launches it over its own protocol pipe,
-    waits for the page to load and then for it to stop moving, and captures there — so a page that
-    reveals its content with an entrance animation or writes its DOM after load is photographed with
-    what it draws, and a shot that is one flat colour is refused instead of stored. Every wait it
-    takes is bounded, and `SHOT_DEADLINE_SECONDS` rides outside all of them. The command answers on
-    the shot rather than on the browser's status, so a run that draws the picture and then will not
-    exit still ends inside the wall with a shot."""
+def shot_command(*, url: str, width: int, height: int, scale: int, shot: str, root: str) -> str:
+    """Draw `url` into a contained `shot` with a disposable browser profile."""
     return SHOT_CMD.format(
         deadline=SHOT_DEADLINE_SECONDS,
         isolated=SANDBOX_PYTHON_FLAG,
         scale=scale,
         width=width,
         height=height,
-        profile=shlex.quote(profile),
         shot=shlex.quote(shot),
         url=shlex.quote(url),
         root=shlex.quote(root),
         driver=SANDBOX_MODULE_BOOTSTRAP
         + SHOT_PROG.format(
             flags=SHOT_FLAGS,
+            contained=CONTAINED_FLAGS,
             deadline=SHOT_DEADLINE_SECONDS,
             load_wall=LOAD_WALL_SECONDS,
             settle_wall=SETTLE_WALL_SECONDS,
@@ -617,7 +602,6 @@ async def _shoot(
             height=height,
             scale=scale,
             shot=shot,
-            profile=CARD_PROFILE_DIR,
             root=WORKSPACE_DIR,
         ),
         timeout_s=CARD_TIMEOUT_SECONDS,

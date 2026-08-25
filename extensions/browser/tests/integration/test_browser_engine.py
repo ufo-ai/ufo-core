@@ -10,8 +10,8 @@ integration gate and skips an optional local run."""
 
 import base64
 import os
-import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -22,18 +22,11 @@ from urllib.parse import quote
 import httpx
 import pytest
 from ufo_ext_browser.bua.backend import BuaSurface
+from ufo_testsupport.browser import MISSING_BROWSER_REASON, chrome_for_testing, headless_flags
 from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.browser import CdpEndpoint, CdpLease, FileBytes
 
-CHROME_CANDIDATES = (
-    "google-chrome",
-    "google-chrome-stable",
-    "chromium",
-    "chromium-browser",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-)
 READY_TIMEOUT_S = 60.0
 READY_POLL_S = 0.1
 
@@ -47,32 +40,23 @@ PROBE_HTML = (
 PROBE_URL = f"data:text/html,{quote(PROBE_HTML)}"
 
 
-def _chrome() -> str | None:
-    for candidate in CHROME_CANDIDATES:
-        found = shutil.which(candidate) if "/" not in candidate else candidate
-        if found and Path(found).exists():
-            return found
-    integration_dependency_available(False, "Chrome/Chromium binary is not available")
-    return None
-
-
-pytestmark = pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium binary for live CDP")
+CHROME = chrome_for_testing()
+pytestmark = pytest.mark.skipif(
+    not integration_dependency_available(CHROME is not None, MISSING_BROWSER_REASON),
+    reason=MISSING_BROWSER_REASON,
+)
 
 
 @pytest.fixture
 def chrome_cdp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    binary = _chrome()
-    assert binary is not None
+    assert CHROME is not None
     profile = tmp_path / "chrome-profile"
     chrome_log = tmp_path / "chrome.log"
     with chrome_log.open("wb") as log:
         process = subprocess.Popen(
             [
-                binary,
-                "--headless=new",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
+                CHROME,
+                *headless_flags(sys.platform),
                 "--remote-debugging-port=0",
                 "--remote-allow-origins=*",
                 f"--user-data-dir={profile}",

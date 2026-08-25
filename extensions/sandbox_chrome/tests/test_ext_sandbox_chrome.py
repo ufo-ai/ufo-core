@@ -167,6 +167,12 @@ async def test_lease_brings_the_browser_up_in_one_command() -> None:
     assert 'f"Host: {CHROME_HOST}:{CHROME_PORT}"' in command
     assert ext.PROXY_SCRIPT_PATH in command
     assert f"http://127.0.0.1:{ext.BROWSER_CDP_PROXY_PORT}/json/version" in command
+    assert "--use-mock-keychain" in command
+    assert "--password-store=basic" in command
+    assert 'CONTAINED_ARGV = ["--no-sandbox", "--disable-dev-shm-usage"]' in command
+    assert 'contained = CONTAINED_ARGV if sys.platform.startswith("linux") else []' in command
+    assert "[browser] + contained + CHROME_ARGV_TAIL" in command
+    assert command.count("--no-sandbox") == 1
 
 
 async def test_the_carrier_deadline_leaves_the_command_room_to_report_its_own_failure() -> None:

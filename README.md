@@ -105,6 +105,8 @@ adds 100 to each port. To change the host ports, set `UFO_PG_PORT`, `UFO_GATEWAY
   Redis hub, and the Docker sandbox carrier. Each needs its extension in a local pack.
 - The tests use this Postgres, or an existing instance, for the Postgres half of the test matrix.
   `make db` starts only that service. Sandboxes (U2 and later) need Docker.
+- Live browser tests require the pinned Chrome for Testing: `npx playwright@$(uv run python -c
+  'from ufo.sandbox.session import PLAYWRIGHT_VERSION; print(PLAYWRIGHT_VERSION)') install chromium`.
 
 ## Evals
 

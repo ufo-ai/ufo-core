@@ -50,6 +50,7 @@ from ufo_ext_sites.share_card import (
     shot_command,
 )
 from ufo_ext_sites.tools import PREVIEW_HEIGHT, PREVIEW_WIDTH
+from ufo_testsupport.browser import chrome_for_testing
 
 from ufo.sandbox.session import SANDBOX_MODULE_BOOTSTRAP, SANDBOX_PYTHON_FLAG
 
@@ -133,6 +134,21 @@ of its own, so the kill below does not reach it and it can hold these pipes open
 the wall this read must not sit behind. What is there is reported; what is not is given up."""
 
 
+def _shim_the_testing_browser() -> tempfile.TemporaryDirectory[str] | None:
+    binary = chrome_for_testing()
+    if binary is None:
+        return None
+    shim = tempfile.TemporaryDirectory(prefix="ufo-card-browser-")
+    wrapper = Path(shim.name) / BROWSER_COMMANDS[0]
+    wrapper.write_text(f'#!/bin/sh\nexec "{binary}" "$@"\n')
+    wrapper.chmod(0o755)
+    os.environ["PATH"] = f"{shim.name}{os.pathsep}{os.environ['PATH']}"
+    return shim
+
+
+_BROWSER_SHIM = _shim_the_testing_browser()
+
+
 def _walled(command: list[str], wall: int) -> tuple[subprocess.CompletedProcess[str], bool]:
     """`command` under `wall` seconds, answering what it did and whether the wall ended it.
 
@@ -169,7 +185,6 @@ def _run_shot(url: str, width: int, height: int, scale: int, shot: Path) -> list
             height=height,
             scale=scale,
             shot=str(shot),
-            profile=str(shot.parent / f"profile-{shot.stem}"),
             root=str(shot.parent),
         ),
     ]
