@@ -828,6 +828,7 @@ metadata:
   annotations:
     external-dns.alpha.kubernetes.io/hostname: ${shared_host}
     external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "90"
 spec:
   ingressClassName: ${ingress_class}
   tls:

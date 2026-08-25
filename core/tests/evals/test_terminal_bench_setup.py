@@ -269,6 +269,16 @@ def test_dockerignore_bytes_affect_client_source_digest(
     assert setup._client_source_digest() != first
 
 
+def test_client_dockerfile_embeds_the_release_gh_payload() -> None:
+    dockerfile = (
+        TerminalBenchSetup().repository_root / "evals/terminal_bench/client.Dockerfile"
+    ).read_text()
+
+    assert "golang:1.27.0-bookworm AS gh" in dockerfile
+    assert 'client/scripts/build-gh.sh "$target" /ufo-gh.gz' in dockerfile
+    assert "UFO_GH_ARCHIVE=/ufo-gh.gz" in dockerfile
+
+
 def _upstream(archive: Path) -> UpstreamMetadata:
     body = archive.read_bytes()
     return UpstreamMetadata(

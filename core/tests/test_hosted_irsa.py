@@ -322,6 +322,21 @@ def test_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> None
     assert routing == expected
 
 
+def test_app_host_ingress_outlives_the_terminal_surface_hold() -> None:
+    blocks = HOSTED_TEMPLATE.read_text().split("kind: Ingress")
+    serve_ingress = next(b for b in blocks if "name: ufo-serve" in b.split("---", 1)[0])
+    configured = re.search(
+        r'nginx\.ingress\.kubernetes\.io/proxy-read-timeout: "(\d+)"', serve_ingress
+    )
+    surface = (
+        Path(__file__).resolve().parents[2] / "extensions/ufo/ufo_ext_ufo/surface.py"
+    ).read_text()
+    held = re.search(r"^HOLD_SECONDS = ([\d.]+)$", surface, re.MULTILINE)
+
+    assert configured and held
+    assert int(configured.group(1)) > float(held.group(1))
+
+
 def test_hosted_proxy_runs_the_ufo_egress_data_plane() -> None:
     """The proxy pod runs the standalone ufo-egress image as its entrypoint (no `args`), binds 8888,
     and reaches serve's egress-control RPC: the control URL on serve's internal port, the bearer and

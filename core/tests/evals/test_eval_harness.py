@@ -36,6 +36,7 @@ import evals.harness.mounts as mounts
 import evals.harness.target as harness_target
 from evals.__main__ import (
     EVAL_SHARE_BUCKET_ENV,
+    REMOTE_HOME_ROOT,
     _task_reports,
     _task_workflow_wait_seconds,
     _with_task_wait,
@@ -6061,6 +6062,11 @@ async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path
         await driver.open("missing-member", "missing@eval.invalid")
 
 
+def test_remote_eval_homes_live_under_the_ignored_local_root() -> None:
+    assert REMOTE_HOME_ROOT.is_relative_to(Path(".local"))
+    assert ".local/" in Path(".gitignore").read_text().splitlines()
+
+
 async def test_remote_workspace_driver_uses_the_ufo_json_transport(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -7617,7 +7623,9 @@ def test_candidate_arm_rejects_corpus_backed_evals(tmp_path) -> None:
     assert excinfo.value.code == 2
 
 
-async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, monkeypatch) -> None:
+async def test_eval_run_installs_credentials_pins_model_and_closes_blob_client(
+    tmp_path, monkeypatch
+) -> None:
     workspace_id = uuid4()
     agent_id = uuid4()
     report = EvalReport(name="suite", suite="capability", digest="sha256:abc", cases=())
@@ -7642,6 +7650,8 @@ async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, m
 
     key = Fernet.generate_key()
     monkeypatch.setenv("UFO_CREDENTIAL_KEY", key.decode())
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
     monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
     monkeypatch.setattr("evals.__main__.dispose_db", dispose)
     monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
@@ -7649,7 +7659,9 @@ async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, m
         "evals.__main__.install_credential_requests", lambda requests: installed.append(requests)
     )
     monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
-    monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: object())
+    blob_backend = S3BlobStore(bucket="test", endpoint_url="http://localhost:1", region="us-east-1")
+    await blob_backend._client()
+    monkeypatch.setattr("evals.__main__.blob_store_for", lambda _config: blob_backend)
     monkeypatch.setattr("evals.__main__.replay_safe_client", lambda _url: object())
     monkeypatch.setattr("evals.__main__.WorkspaceDriver", workspace_driver)
     monkeypatch.setattr(
@@ -7709,6 +7721,7 @@ async def test_eval_run_installs_credentials_and_pins_model_metadata(tmp_path, m
         ),
     )
     assert driver_models == [MODEL]
+    assert not blob_backend._clients
 
 
 async def test_run_builds_the_compaction_client_inside_the_workspace_scope(

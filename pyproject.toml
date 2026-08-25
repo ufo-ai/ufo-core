@@ -5,6 +5,7 @@ description = "An agent runtime with its first-party extensions, packs, and oper
 requires-python = ">=3.12"
 dependencies = [
     "aiobotocore>=3.7.0",
+    "botocore[crt]>=1.43.0",
     "aiosqlite>=0.22.1",
     "alembic>=1.18.5",
     "anthropic>=0.116",

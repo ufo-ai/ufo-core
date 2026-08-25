@@ -159,7 +159,7 @@ from evals.wandr.runner import (
 from ufo.access.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.agent_scope import agent
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.blob import WorkspaceBlobStore, blob_store_for
+from ufo.blob import S3BlobStore, WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.durability import replay_safe_client
@@ -185,6 +185,7 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.workspace import init_workspace_credentials, ws
 
 DEFAULT_OUT = Path("eval-reports")
+REMOTE_HOME_ROOT = Path(".local/eval-ufo")
 EVAL_SHARE_BUCKET_ENV = "UFO_EVAL_SHARE_BUCKET"
 EVAL_TARGET_JOB = "evals:target"
 EVAL_JUDGE_JOB = "evals:judge"
@@ -872,7 +873,11 @@ async def _run(
                 agent_reasoning,
             ) = await resolve_workspace_and_agent(agent_name, workspace_id)
             recorder.agent_prompt = agent_prompt
-            blob = WorkspaceBlobStore(backend=blob_store_for(config.blob))
+            blob_backend = blob_store_for(config.blob)
+            match blob_backend:
+                case S3BlobStore():
+                    stack.push_async_callback(blob_backend.close)
+            blob = WorkspaceBlobStore(backend=blob_backend)
             dbos = replay_safe_client(config.database.system_url)
             registry = model_registry(config, manifests)
             resolved_agent_model = registry.resolve(agent_model)
@@ -889,7 +894,7 @@ async def _run(
                     workspace_url=config.connect.public_base_url
                     or f"http://{config.serve.host}:{config.serve.port}",
                     token_secret=token_secret,
-                    home_root=config.sandbox.workspace_root.parent / "eval-ufo",
+                    home_root=REMOTE_HOME_ROOT,
                 )
                 await remote_client.validate()
             driver = WorkspaceDriver(

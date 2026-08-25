@@ -370,6 +370,12 @@ class S3BlobStore:
                 break
         return tuple(entries[:BLOB_LIST_MAX_KEYS])
 
+    async def close(self) -> None:
+        """Close and discard the client owned by the running event loop."""
+        client = self._clients.pop(asyncio.get_running_loop(), None)
+        if client is not None:
+            await client.close()
+
     async def _client(self) -> AioBaseClient:
         """The store's one client per event loop. Its signing config is pinned rather than left to
         botocore's defaults: unpinned, `generate_presigned_url` emits SigV2 for a bucket in a
