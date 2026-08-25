@@ -21,7 +21,7 @@ import json
 import shlex
 import threading
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -54,6 +54,7 @@ OP_EXEC = "exec"
 OP_WRITE = "write"
 OP_READ = "read"
 OP_FILE = "fileop"
+OP_SYSTEM_SKILLS = "system-skills"
 OP_NOT_FOUND_PREFIX = "ENOENT"
 EXEC_TIMEOUT_CODE = 124
 """What an exec the op's own deadline stopped exits with, whatever the client's signal made of the
@@ -632,6 +633,23 @@ class TerminalCarrier:
         verifier reads that bundle without changing the member's certificate store."""
         root = _root(handle)
         return await self._exec(handle, host_argv(argv, root), timeout_s)
+
+    async def mount_system_skills(
+        self, handle: SandboxHandle, skills: Mapping[str, str]
+    ) -> ExecResult:
+        """Ask the running client to read its `$UFO_HOME/skills` cache without a subprocess."""
+        try:
+            reply = await self.terminals.send(
+                handle.conversation_id,
+                OP_SYSTEM_SKILLS,
+                DEFAULT_EXEC_TIMEOUT_SECONDS,
+                params=json.dumps(skills, sort_keys=True, separators=(",", ":")),
+            )
+        except TerminalOpFailed as error:
+            if str(error) == f"unknown op kind: {OP_SYSTEM_SKILLS}":
+                return ExecResult(stdout="", stderr="", exit_code=2)
+            raise RuntimeError(str(error)) from error
+        return ExecResult(stdout=reply.decode(), stderr="", exit_code=0)
 
     async def _exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int

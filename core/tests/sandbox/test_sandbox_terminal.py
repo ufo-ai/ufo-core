@@ -21,6 +21,7 @@ from ufo.sandbox import terminal
 from ufo.sandbox.session import (
     WORKSPACE_DIR,
     ProxyEndpoint,
+    SandboxSession,
     SandboxSpec,
     SandboxUnreachable,
 )
@@ -352,6 +353,39 @@ async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply(
     assert params["argv"] == ["cat", "/Users/member/proj/a.txt"]
     assert params["env"]["HTTP_PROXY"].startswith("http://run-token:@")
     assert result.exit_code == 0 and result.stdout == "out\n"
+
+
+async def test_system_skills_use_the_running_clients_native_cache_operation() -> None:
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/Users/member/proj", None)
+    handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
+    session = SandboxSession(carrier=carrier, handle=handle)
+    requested = {"sandbox": "sha256:aaa"}
+
+    running = asyncio.create_task(session.mount_system_skills(requested))
+    op = await _answer(terminals, conversation_id, b'{"mounted":["sandbox"]}')
+
+    assert op.kind == "system-skills"
+    assert op.name == "" and op.arg == ""
+    assert _op_params(op) == requested
+    assert await running == frozenset({"sandbox"})
+
+
+async def test_system_skills_fall_back_when_the_native_operation_is_unavailable() -> None:
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/Users/member/proj", None)
+    handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
+    session = SandboxSession(carrier=carrier, handle=handle)
+
+    running = asyncio.create_task(session.mount_system_skills({"sandbox": "sha256:aaa"}))
+    op = await _refuse(terminals, conversation_id, "unknown op kind: system-skills")
+
+    assert op.kind == "system-skills"
+    assert await running == frozenset()
 
 
 async def test_exec_keeps_a_presigned_url_whole_beside_the_path_it_uploads() -> None:

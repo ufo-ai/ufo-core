@@ -11,15 +11,17 @@ contribute more through the manifest `skills` point, which the loader aggregates
 one `SkillRegistry` per boot.
 
 `load_skill` resolves the named skill and its transitive `depends` through `SkillRegistry.closure`,
-then for each: mounts its files into the conversation's workspace under `.skills/<name>/` — inside
-the scoped subtree the sandbox permits, never the framework paths above it — and injects its
+then mounts each under `.skills/<name>/`: deploy skills from a content-addressed bundle local to the
+carrier, member skills from the exact stored rows materialized for the load. It injects each
 `SKILL.md` workflow under a header saying whether the agent asked for it or a dependency pulled it.
-One tree of everything mounted closes the load, once for the whole closure rather than per skill. So
-a load costs the workflows it pulled and the paths to their files, never a restated catalog entry or
-a prefix repeated once per bundled file. A workflow already in the context is not injected a second
-time: `LoadedSkills` tracks what the window holds, so a repeat load re-mounts the files and names
-the skill in one line instead of paying for its instructions again."""
+One tree of everything mounted closes the load. A workflow already in the context is not injected a
+second time: `LoadedSkills` tracks what the window holds, so a repeat load re-mounts the files and
+names the skill in one line instead of paying for its instructions again."""
 
+import hashlib
+import io
+import json
+import zipfile
 from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -42,6 +44,9 @@ DEPENDENCY_SUFFIX = " (dependency of {puller})"
 SKILL_BLOCK_SEPARATOR = "\n\n---\n\n"
 ALREADY_LOADED_NOTE = "Already in context above, not repeated: {names}"
 SUGGESTION_LIMIT = 5
+SYSTEM_SKILL_DIGEST_PREFIX = "sha256:"
+SYSTEM_SKILL_OBJECTS_DIR = "objects"
+SYSTEM_SKILL_MANIFEST = "manifest.json"
 
 
 def skill_mount_root(name: str) -> str:
@@ -98,6 +103,59 @@ class RuntimeSkill:
             depends=self.depends,
             agents=self.agents,
         )
+
+    def content_digest(self) -> str:
+        """The content address shared by the serve registry, terminal cache, and sandbox image."""
+        digest = hashlib.sha256()
+        for path, content in sorted(self.mounted_files().items()):
+            digest.update(hashlib.sha256(path.encode()).digest())
+            digest.update(hashlib.sha256(content).digest())
+        return SYSTEM_SKILL_DIGEST_PREFIX + digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class SystemSkillBundle:
+    """One deploy's immutable system-skill objects as a deterministic ZIP and cache identity."""
+
+    digest: str
+    archive: bytes
+    manifest: bytes
+
+    @classmethod
+    def from_skills(cls, skills: Iterable[RuntimeSkill]) -> "SystemSkillBundle":
+        named: dict[str, RuntimeSkill] = {}
+        for skill in skills:
+            existing = named.get(skill.name)
+            if existing is not None and existing.content_digest() != skill.content_digest():
+                raise ValueError(f"duplicate system skill name: {skill.name}")
+            named[skill.name] = skill
+        cards = {name: {"digest": skill.content_digest()} for name, skill in sorted(named.items())}
+        payload = json.dumps({"skills": cards}, sort_keys=True, separators=(",", ":")).encode()
+        digest = SYSTEM_SKILL_DIGEST_PREFIX + hashlib.sha256(payload).hexdigest()
+        manifest = json.dumps(
+            {"digest": digest, "skills": cards}, sort_keys=True, separators=(",", ":")
+        ).encode()
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
+            cls._write(archive, SYSTEM_SKILL_MANIFEST, manifest)
+            objects: dict[str, RuntimeSkill] = {}
+            for skill in named.values():
+                objects.setdefault(skill.content_digest(), skill)
+            for content_digest, skill in sorted(objects.items()):
+                object_id = content_digest.removeprefix(SYSTEM_SKILL_DIGEST_PREFIX)
+                for path, content in sorted(skill.mounted_files().items()):
+                    cls._write(
+                        archive,
+                        f"{SYSTEM_SKILL_OBJECTS_DIR}/{object_id}/{path}",
+                        content,
+                    )
+        return cls(digest=digest, archive=output.getvalue(), manifest=manifest)
+
+    @staticmethod
+    def _write(archive: zipfile.ZipFile, path: str, content: bytes) -> None:
+        entry = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
+        entry.external_attr = 0o100644 << 16
+        archive.writestr(entry, content)
 
 
 @dataclass(frozen=True)
@@ -473,3 +531,18 @@ async def mount_skill(sandbox: Sandbox, skill: RuntimeSkill) -> None:
     root = skill.mount_root()
     for path, content in skill.mounted_files().items():
         await sandbox.write_file(contained_relative(path, root), content)
+
+
+async def mount_skills(
+    sandbox: Sandbox, loaded: Sequence[LoadedSkill], deploy_names: Container[str]
+) -> None:
+    """Mount deploy skills from the carrier's local objects and copy every other skill in."""
+    deploy = {
+        entry.skill.name: entry.skill.content_digest()
+        for entry in loaded
+        if entry.skill.name in deploy_names
+    }
+    mounted = await sandbox.mount_system_skills(deploy)
+    for entry in loaded:
+        if entry.skill.name not in mounted:
+            await mount_skill(sandbox, entry.skill)

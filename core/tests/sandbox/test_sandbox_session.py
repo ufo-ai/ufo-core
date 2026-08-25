@@ -273,6 +273,7 @@ class _RecordingCarrier:
     def __init__(self, result: ExecResult | None = None, probe: ExecResult | None = None) -> None:
         self.timeouts: list[int] = []
         self.commands: list[str] = []
+        self.argvs: list[tuple[str, ...]] = []
         self.result = result or ExecResult(stdout="", stderr="", exit_code=0)
         self.probe = probe
 
@@ -286,6 +287,7 @@ class _RecordingCarrier:
     ) -> ExecResult:
         self.timeouts.append(timeout_s)
         self.commands.append(argv[-1] if argv else "")
+        self.argvs.append(argv)
         if self.probe is not None and argv and argv[-1] == EXEC_TIMEOUT_VITALS_CMD:
             return self.probe
         if TASK_PROBE in argv:
@@ -372,6 +374,43 @@ async def test_a_carrier_that_declares_no_stop_is_never_asked_for_one() -> None:
     await session.stop_commands()
 
     assert not hasattr(session.carrier, "stop_commands")
+
+
+async def test_system_skills_mount_in_one_container_command() -> None:
+    carrier = _RecordingCarrier(
+        result=ExecResult(stdout='{"mounted":["sandbox"]}', stderr="", exit_code=0)
+    )
+    session = SandboxSession(
+        carrier=carrier,
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+    )
+
+    mounted = await session.mount_system_skills(
+        {"sandbox": "sha256:aaa", "ufo-style": "sha256:bbb"}
+    )
+
+    assert mounted == frozenset({"sandbox"})
+    assert carrier.argvs == [
+        (
+            "sh",
+            "-c",
+            'if command -v ufo >/dev/null 2>&1; then exec ufo fs "$@"; fi; '
+            'if command -v sbxfs >/dev/null 2>&1; then exec sbxfs "$@"; fi; exit 2',
+            "sh",
+            "system-skills",
+            '{"sandbox":"sha256:aaa","ufo-style":"sha256:bbb"}',
+        )
+    ]
+
+
+async def test_system_skill_mount_falls_back_when_the_container_operation_is_unavailable() -> None:
+    carrier = _RecordingCarrier(result=ExecResult(stdout="", stderr="", exit_code=2))
+    session = SandboxSession(
+        carrier=carrier,
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+    )
+
+    assert await session.mount_system_skills({"sandbox": "sha256:aaa"}) == frozenset()
 
 
 async def test_document_file_ops_outlive_the_preview_request() -> None:

@@ -21,9 +21,9 @@ Docker image's Dockerfile to stdout (build it with the repository root as the co
 ``--build-docker`` renders that Dockerfile and runs ``docker build`` locally, tagging the image the
 Docker carrier runs.
 
-Every mode that actually builds stages the compiled ``ufo`` client into the build context first
-(``stage_client_binary``); rendering the Dockerfile alone never needs the binary, so the CI job that
-only wants the image's cache key derives it without a Rust toolchain.
+Every mode that actually builds stages the compiled ``ufo`` client and system skill bundle into the
+build context first; rendering the Dockerfile alone needs neither artifact, so the CI job that only
+wants the image's cache key derives it without a Rust toolchain or build-context writes.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 from daytona import (
@@ -56,8 +57,10 @@ from ufo.sdk.sandbox import (
     PLAYWRIGHT_VERSION,
     SANDBOX_ENV,
     SANDBOX_SIZES,
+    SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
 )
+from ufo.skills.runtime import SystemSkillBundle, parse_skill
 
 ROOT = Path(__file__).resolve().parents[1]
 E2B_TEMPLATE_NAME = "ufo-sbx"
@@ -78,6 +81,8 @@ SANDBOX_CLIENT_TARGET = "x86_64-unknown-linux-musl"
 # from the base's libc.
 CLIENT_STAGE_DIR = ROOT / "sandbox" / "artifacts"
 CLIENT_STAGE_PATH = CLIENT_STAGE_DIR / CLIENT_BINARY_NAME
+SYSTEM_SKILLS_STAGE_PATH = CLIENT_STAGE_DIR / "system-skills.zip"
+SYSTEM_SKILLS_ARCHIVE_PATH = f"{UFO_DIR}/system-skills.zip"
 # Inside the repository because the build context is the repository root and `.dockerignore`
 # excludes `**/target`, so the crate's own output directory cannot be COPY'd from.
 # What the binary is built from, and so what the image's digest moves with. `target/` is this
@@ -225,7 +230,7 @@ NPM_PACKAGES = (
 # change so the digest moves: a program's own directory is `sys.path[0]`, so a sibling here is what
 # an in-sandbox script imports with no installed package inside the sandbox.
 SANDBOX_MODULES: tuple[tuple[str, int], ...] = (("containment.py", 4),)
-SANDBOX_TEMPLATE_READY_COMMAND = """
+SANDBOX_TEMPLATE_READY_COMMAND = f"""
 set -ex
 command -v python3 >/dev/null
 command -v node >/dev/null
@@ -236,6 +241,7 @@ command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
 command -v soffice >/dev/null
 command -v gh >/dev/null
+test -f "{SYSTEM_SKILLS_ROOT}/current"
 browser="$(command -v chromium || command -v chromium-browser \\
   || command -v google-chrome || command -v google-chrome-stable || true)"
 test -n "$browser"
@@ -316,6 +322,28 @@ def stage_client_binary() -> Path:
     return CLIENT_STAGE_PATH
 
 
+@cache
+def system_skill_bundle() -> SystemSkillBundle:
+    paths = sorted(
+        {
+            *ROOT.glob("core/src/ufo/skills/**/SKILL.md"),
+            *ROOT.glob("extensions/**/skills/**/SKILL.md"),
+            *ROOT.glob("packs/**/skills/**/SKILL.md"),
+        }
+    )
+    skills = tuple(
+        parse_skill(path.parent, registry_name=path.parent.relative_to(ROOT).as_posix())
+        for path in paths
+    )
+    return SystemSkillBundle.from_skills(skills)
+
+
+def stage_system_skills() -> Path:
+    SYSTEM_SKILLS_STAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SYSTEM_SKILLS_STAGE_PATH.write_bytes(system_skill_bundle().archive)
+    return SYSTEM_SKILLS_STAGE_PATH
+
+
 def build_definition_digest(sizing: Sizing | None) -> str:
     """Content digest of everything apply_layers bakes — base, users, the start/ready commands, the
     apt/pip/npm package sets, the env, the baked client and each module (version + content hash) —
@@ -339,6 +367,7 @@ def build_definition_digest(sizing: Sizing | None) -> str:
         "npm": list(NPM_PACKAGES),
         "env": SANDBOX_ENV,
         "client": client_definition(),
+        "system_skills": system_skill_bundle().digest,
         "modules": [
             {
                 "name": name,
@@ -353,6 +382,9 @@ def build_definition_digest(sizing: Sizing | None) -> str:
 
 
 def apply_layers(builder: object, digest: str) -> object:
+    skill_bundle = system_skill_bundle()
+    skill_bundle_id = skill_bundle.digest.removeprefix("sha256:")
+    skill_bundle_root = f"{SYSTEM_SKILLS_ROOT}/bundles/{skill_bundle_id}"
     builder.set_user(BUILD_USER)
     builder.run_cmd(
         "apt-get update && apt-get install -y --no-install-recommends "
@@ -374,6 +406,13 @@ def apply_layers(builder: object, digest: str) -> object:
     )
     builder.run_cmd(f"printf '%s' '{digest}' > {BUILD_DIGEST_PATH}")
     builder.set_envs(SANDBOX_ENV)
+    builder.copy(SYSTEM_SKILLS_STAGE_PATH.relative_to(ROOT), SYSTEM_SKILLS_ARCHIVE_PATH, mode=0o644)
+    builder.run_cmd(
+        f"mkdir -p {skill_bundle_root} && "
+        f"python3 -m zipfile -e {SYSTEM_SKILLS_ARCHIVE_PATH} {skill_bundle_root} && "
+        f"printf '%s\\n' '\"{skill_bundle.digest}\"' > {SYSTEM_SKILLS_ROOT}/current && "
+        f"rm {SYSTEM_SKILLS_ARCHIVE_PATH} && chmod -R a-w {SYSTEM_SKILLS_ROOT}"
+    )
     client = f"{SBX_BIN_DIR}/{CLIENT_BINARY_NAME}"
     builder.copy(CLIENT_STAGE_PATH.relative_to(ROOT), client, mode=0o755)
     builder.run_cmd(f"chmod 0755 {client}")
@@ -428,6 +467,7 @@ def build_daytona_snapshots() -> None:
     verify sandbox draws from the organization's one memory budget, which the live fleet is
     spending, so a boot happens only where there is something new to prove."""
     stage_client_binary()
+    stage_system_skills()
     daytona = Daytona()
     references = []
     for size, sizing in DAYTONA_TIERS.items():
@@ -512,6 +552,7 @@ def build_docker_image() -> None:
     Offline — no E2B account, only the local Docker daemon — so a Docker-only deploy builds with no
     E2B key. The context is the repository root, matching the COPY paths apply_layers emits."""
     stage_client_binary()
+    stage_system_skills()
     process = subprocess.run(
         ["docker", "build", "-t", DOCKER_IMAGE_TAG, "-f", "-", str(ROOT)],
         input=pod_dockerfile().encode(),
@@ -618,6 +659,7 @@ def main() -> None:
         check_daytona_snapshots()
         return
     stage_client_binary()
+    stage_system_skills()
     references = []
     for size, sizing in SANDBOX_TIERS.items():
         info = Template.build(

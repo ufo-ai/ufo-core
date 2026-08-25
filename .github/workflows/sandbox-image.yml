@@ -16,7 +16,10 @@ on:
       - client/**
       - core/src/ufo/sandbox/client_binary.py
       - core/src/ufo/sandbox/containment.py
+      - core/src/ufo/skills/**
       - extensions/e2b/ufo_ext_e2b.py
+      - extensions/**/skills/**
+      - packs/**/skills/**
       - uv.lock
       - .github/scripts/sandbox_image_key.sh
       - .github/workflows/sandbox-image.yml
@@ -82,6 +85,6 @@ jobs:
             echo "$IMAGE already published"
             exit 0
           fi
-          uv run python -c 'from sandbox.build_template import stage_client_binary; stage_client_binary()'
+          uv run python -c 'from sandbox.build_template import stage_client_binary, stage_system_skills; stage_client_binary(); stage_system_skills()'
           docker build -t "$IMAGE" -f "$DOCKERFILE" .
           docker push "$IMAGE"

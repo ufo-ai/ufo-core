@@ -22,7 +22,10 @@ pub const USAGE: &str = "usage: ufo fs {read|write|edit|grep|glob|changes} <json
 /// The Windows build still answers the verb: a usage error on stderr and exit 2, because falling
 /// through the verb loop would post `fs read {…}` as a chat message.
 #[cfg(not(unix))]
-pub fn main(_args: &[String]) -> i32 {
+pub fn main(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("system-skills") {
+        return crate::system_skills::main(&args[1..]);
+    }
     eprintln!("{USAGE}");
     2
 }
@@ -38,6 +41,9 @@ pub struct Outcome {
 /// Run one `ufo fs` call from the launch directory and answer the exit code.
 #[cfg(unix)]
 pub fn main(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("system-skills") {
+        return crate::system_skills::main(&args[1..]);
+    }
     let workdir = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
     let outcome = run(args, &workdir);
     if !outcome.stdout.is_empty() {

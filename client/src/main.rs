@@ -147,6 +147,7 @@ fn main() {
     let runtime = OpRuntime {
         workdir,
         cwd: launch_dir,
+        home: home.clone(),
     };
     let code = if json {
         run_json(session, runtime, home, message)
@@ -487,6 +488,7 @@ impl Wire {
     /// goes to the loop before the post itself, which blocks until the reply's headers arrive —
     /// a member ends a turn while it is still thinking, and this thread cannot hear the key.
     fn run(mut self, first: String) {
+        let _ = ufo::system_skills::sync(&self.home, &self.session);
         let mut body = if first.is_empty() {
             Some(PostBody::Empty)
         } else {
@@ -582,11 +584,16 @@ impl Wire {
     fn handle(&mut self, directive: Directive) -> bool {
         match directive {
             Directive::Run(op) => {
-                let _ = self.evt.send(WireEvent::OpStarted(op.clone()));
+                let visible = op.kind != ops::OP_SYSTEM_SKILLS;
+                if visible {
+                    let _ = self.evt.send(WireEvent::OpStarted(op.clone()));
+                }
                 let reply = ops::run_op(&self.runtime, &self.session, &op);
-                let _ = self
-                    .evt
-                    .send(WireEvent::OpFinished(op.clone(), reply.clone()));
+                if visible {
+                    let _ = self
+                        .evt
+                        .send(WireEvent::OpFinished(op.clone(), reply.clone()));
+                }
                 self.op_reply = Some(PostBody::OpReply {
                     op_id: op.op_id,
                     reply,
@@ -624,6 +631,7 @@ impl Wire {
                     url,
                     channel: self.session.channel.clone(),
                 });
+                let _ = ufo::system_skills::sync(&self.home, &self.session);
                 false
             }
             Directive::Install => {
@@ -1640,6 +1648,7 @@ mod tests {
             runtime: OpRuntime {
                 workdir: dir.clone(),
                 cwd: dir.clone(),
+                home: config::Home { root: dir.clone() },
             },
             home: config::Home { root: dir },
             evt: evt_tx,
@@ -1674,6 +1683,30 @@ mod tests {
             }
         }
         said
+    }
+
+    #[test]
+    fn the_system_skill_cache_operation_is_invisible() {
+        let (mut wire, _cmd, evt) = listening_wire(None);
+        let ended = wire.handle(Directive::Run(OpRequest {
+            op_id: "skills".into(),
+            kind: ops::OP_SYSTEM_SKILLS.into(),
+            name: String::new(),
+            timeout_s: 30,
+            arg: String::new(),
+            params: "{}".into(),
+        }));
+
+        assert!(ended);
+        assert!(evt.try_recv().is_err());
+        let Some(PostBody::OpReply { op_id, reply }) = wire.op_reply.take() else {
+            panic!("the cache operation must answer the server");
+        };
+        assert_eq!(op_id, "skills");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&reply.unwrap()).unwrap(),
+            serde_json::json!({"mounted": []})
+        );
     }
 
     #[test]

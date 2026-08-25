@@ -1,6 +1,6 @@
 [package]
 name = "ufo"
-version = "0.1.36"
+version = "0.1.37"
 edition = "2021"
 
 [[bin]]
@@ -21,6 +21,7 @@ rustls-native-certs = "0.7"
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 similar = { version = "2", default-features = false, features = ["unicode"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 unicode-width = "0.2"

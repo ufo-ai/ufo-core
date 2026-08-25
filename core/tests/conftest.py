@@ -12,7 +12,7 @@ from aiobotocore.session import get_session
 from botocore.exceptions import BotoCoreError, ClientError
 from ufo_testsupport.plugin import integration_dependency_available
 
-from sandbox.build_template import ROOT, pod_dockerfile, stage_client_binary
+from sandbox.build_template import ROOT, pod_dockerfile, stage_client_binary, stage_system_skills
 from ufo.blob import S3BlobStore
 from ufo.sandbox.client_binary import client_binary
 from ufo.sandbox.session import SANDBOX_GID, SANDBOX_UID
@@ -98,6 +98,7 @@ def sandbox_image() -> str:
     except RuntimeError as error:
         integration_dependency_available(False, str(error))
         pytest.skip(str(error))
+    stage_system_skills()
     built = run_docker_build(
         ["docker", "build", "-t", SANDBOX_TEST_IMAGE, "-f", "-", str(ROOT)],
         timeout=IMAGE_BUILD_TIMEOUT_S,

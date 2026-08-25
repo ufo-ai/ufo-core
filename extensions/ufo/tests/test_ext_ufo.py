@@ -3,10 +3,12 @@ import base64
 import hashlib
 import hmac
 import json
+import zipfile
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -451,6 +453,28 @@ async def test_resolve_workspace_reads_the_bearer(monkeypatch: pytest.MonkeyPatc
     )
     assert await resolve_workspace(_get_request({}), auth) is None
     assert await resolve_workspace(_get_request({"authorization": token}), auth) is None
+
+
+async def test_terminal_downloads_the_system_skill_bundle_once_at_startup(ufo) -> None:
+    client, workspace_id = ufo
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    path = "/surface/ufo/main/skills"
+
+    first = await client.get(path, headers={"authorization": f"Bearer {token}"})
+
+    assert first.status_code == 200
+    assert first.headers["content-type"] == "application/zip"
+    etag = first.headers["etag"]
+    with zipfile.ZipFile(BytesIO(first.content)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+    assert etag == f'"{manifest["digest"]}"'
+
+    current = await client.get(
+        path,
+        headers={"authorization": f"Bearer {token}", "if-none-match": etag},
+    )
+    assert current.status_code == 304
+    assert current.content == b""
 
 
 @dataclass(frozen=True)

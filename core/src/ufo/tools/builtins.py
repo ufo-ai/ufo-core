@@ -65,7 +65,7 @@ from ufo.sandbox.preview import PREVIEW_HOST
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
-from ufo.skills.runtime import loaded_context, mount_skill
+from ufo.skills.runtime import loaded_context, mount_skills
 from ufo.skills.selection import SKILL_LINE_MAX_CHARS, lexical_score
 from ufo.tools.context import (
     AmbiguousSpawnTarget,
@@ -983,14 +983,14 @@ async def ask_user_handler(ctx: ToolContext, args: AskUserCall) -> ToolResult:
 async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult:
     """Resolve the named skill and the full chain of what it `depends` on over routing cards,
     materialize each one's files — a deploy skill from the registry, a member skill read from its
-    stored row — mount them into the workspace under `.skills/<name>/`, and return each one's
-    `SKILL.md` workflow — the asked-for skill first, so its workflow leads — closing with one tree
-    of everything mounted. A workflow the context already holds is named in one note instead of
-    injected again, while its files still mount, so re-loading is cheap and self-healing rather
-    than an error. An unknown name fails loud as a recoverable tool error."""
+    stored row — mount deploy objects from the carrier's local bundle and copy member objects into
+    the workspace under `.skills/<name>/`, and return each one's `SKILL.md` workflow — the asked-for
+    skill first, so its workflow leads — closing with one tree of everything mounted. A workflow
+    the context already holds is named in one note instead of injected again, while its files still
+    mount, so re-loading is cheap and self-healing rather than an error. An unknown name fails loud
+    as a recoverable tool error."""
     loaded = await ctx.skills.materialize(ctx.skills.closure(args.name))
-    for entry in loaded:
-        await mount_skill(ctx.sandbox, entry.skill)
+    await mount_skills(ctx.sandbox, loaded, ctx.skills.by_name)
     text = loaded_context(loaded, ctx.loaded_skills.in_context)
     return ToolResult(content=(TextContent(text=text),))
 

@@ -32,6 +32,7 @@ from sandbox.build_template import (
     SANDBOX_MODULES,
     SANDBOX_TEMPLATE_READY_COMMAND,
     SANDBOX_TIERS,
+    SYSTEM_SKILLS_STAGE_PATH,
     DaytonaSizing,
     Sizing,
     build_definition_digest,
@@ -41,9 +42,11 @@ from sandbox.build_template import (
     daytona_refs,
     daytona_snapshot_name,
     pod_dockerfile,
+    stage_system_skills,
+    system_skill_bundle,
     template_name,
 )
-from ufo.sdk.sandbox import PLAYWRIGHT_VERSION, SANDBOX_SIZES
+from ufo.sdk.sandbox import PLAYWRIGHT_VERSION, SANDBOX_SIZES, SYSTEM_SKILLS_ROOT
 
 
 @pytest.fixture(autouse=True)
@@ -51,15 +54,20 @@ def staged_client() -> Iterator[None]:
     """Every render COPYs the staged client from one path, and Daytona's builder refuses a COPY
     source that is not there, so these offline renders need a file at that path — never a real
     build, whose bytes no render reads and whose absence is no drift."""
-    if CLIENT_STAGE_PATH.exists():
-        yield
-        return
-    CLIENT_STAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CLIENT_STAGE_PATH.write_bytes(b"")
+    created_client = not CLIENT_STAGE_PATH.exists()
+    created_skills = not SYSTEM_SKILLS_STAGE_PATH.exists()
+    if created_client:
+        CLIENT_STAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CLIENT_STAGE_PATH.write_bytes(b"")
+    if created_skills:
+        stage_system_skills()
     try:
         yield
     finally:
-        CLIENT_STAGE_PATH.unlink()
+        if created_client:
+            CLIENT_STAGE_PATH.unlink()
+        if created_skills:
+            SYSTEM_SKILLS_STAGE_PATH.unlink()
 
 
 EXPECTED_APT = (
@@ -194,6 +202,15 @@ def test_the_containment_guard_is_baked_beside_the_client() -> None:
     serve process imports as `ufo.sandbox.containment`, never a second copy of the checks."""
     assert tuple(name for name, _ in SANDBOX_MODULES) == ("containment.py",)
     assert "/usr/local/bin/containment.py" in pod_dockerfile()
+
+
+def test_system_skills_are_baked_into_each_sandbox_image() -> None:
+    dockerfile = pod_dockerfile()
+    assert str(SYSTEM_SKILLS_STAGE_PATH.relative_to(ROOT)) in dockerfile
+    assert SYSTEM_SKILLS_ROOT in dockerfile
+    assert system_skill_bundle().digest.removeprefix("sha256:") in dockerfile
+    assert system_skill_bundle().archive == SYSTEM_SKILLS_STAGE_PATH.read_bytes()
+    assert f'test -f "{SYSTEM_SKILLS_ROOT}/current"' in SANDBOX_TEMPLATE_READY_COMMAND
 
 
 def test_the_baked_client_moves_the_drift_digest_with_its_source(monkeypatch, tmp_path) -> None:

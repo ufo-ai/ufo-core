@@ -11,7 +11,12 @@ import conftest
 import pytest
 import yaml
 
-from sandbox.build_template import CLIENT_STAGE_PATH, DOCKER_BASE_IMAGE, pod_dockerfile
+from sandbox.build_template import (
+    CLIENT_STAGE_PATH,
+    DOCKER_BASE_IMAGE,
+    SYSTEM_SKILLS_STAGE_PATH,
+    pod_dockerfile,
+)
 
 ROOT = Path(__file__).parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -32,7 +37,10 @@ KEY_INPUTS = frozenset(
         "client/**",
         "core/src/ufo/sandbox/client_binary.py",
         "core/src/ufo/sandbox/containment.py",
+        "core/src/ufo/skills/**",
         "extensions/e2b/ufo_ext_e2b.py",
+        "extensions/**/skills/**",
+        "packs/**/skills/**",
         "uv.lock",
         ".github/scripts/sandbox_image_key.sh",
         ".github/workflows/sandbox-image.yml",
@@ -60,7 +68,11 @@ UV_STUB = f"""#!/bin/sh
 [ "${{UV_EXIT:-0}}" = 0 ] || exit "$UV_EXIT"
 printf '%s\n' "$*" >>"$UV_CALLS"
 case "$*" in
-  *stage_client_binary*) mkdir -p "$(dirname "$STAGED_CLIENT")"; : >"$STAGED_CLIENT" ;;
+  *stage_client_binary*)
+    mkdir -p "$(dirname "$STAGED_CLIENT")"
+    : >"$STAGED_CLIENT"
+    : >"$STAGED_SKILLS"
+    ;;
   *) cat "$RENDERED_DOCKERFILE" ;;
 esac
 """
@@ -73,7 +85,11 @@ case "$*" in
   "pull"*) _hang "${{PULL_SLEEP:-0}}"; exit "${{PULL_EXIT:-0}}" ;;
   "manifest inspect"*) exit "${{MANIFEST_EXIT:-1}}" ;;
   "image inspect"*) sleep "${{INSPECT_SLEEP:-0}}"; exit "${{INSPECT_EXIT:-0}}" ;;
-  "build"*) [ -f "$STAGED_CLIENT" ] || exit 91; cat >/dev/null ;;
+  "build"*)
+    [ -f "$STAGED_CLIENT" ] || exit 91
+    [ -f "$STAGED_SKILLS" ] || exit 92
+    cat >/dev/null
+    ;;
 esac
 """
 
@@ -97,6 +113,7 @@ def _env(root: Path, **overrides: str) -> dict[str, str]:
         "DOCKER_CALLS": str(root / "docker-calls"),
         "UV_CALLS": str(root / "uv-calls"),
         "STAGED_CLIENT": str(root / "sandbox" / "artifacts" / "ufo"),
+        "STAGED_SKILLS": str(root / "sandbox" / "artifacts" / "system-skills.zip"),
         "BASE_DIGEST": BASE_DIGEST,
         **overrides,
     }
@@ -109,6 +126,7 @@ def _export(
     compiled crate, and where that binary comes from is proven where it lives — here the question is
     which image the fixture runs."""
     monkeypatch.setattr(conftest, "stage_client_binary", lambda: CLIENT_STAGE_PATH)
+    monkeypatch.setattr(conftest, "stage_system_skills", lambda: SYSTEM_SKILLS_STAGE_PATH)
     for name, value in _env(root, **overrides).items():
         monkeypatch.setenv(name, value)
     if prebuilt is None:
@@ -291,6 +309,7 @@ def test_the_consumer_names_the_image_the_publisher_pushed(tmp_path: Path) -> No
     ]
     assert f"pull -q {pushed[0]}" in _calls(consumer)
     assert sum("stage_client_binary" in call for call in _uv_calls(publisher)) == 1
+    assert sum("stage_system_skills" in call for call in _uv_calls(publisher)) == 1
 
 
 @pytest.mark.parametrize("miss", [{"UV_EXIT": "3"}, {"PULL_EXIT": "1"}])
@@ -354,6 +373,7 @@ def test_the_publisher_skips_a_key_it_already_published(tmp_path: Path) -> None:
     assert "already published" in published.stdout
     assert not [call for call in _calls(root) if call.startswith(("build ", "push "))]
     assert not any("stage_client_binary" in call for call in _uv_calls(root))
+    assert not any("stage_system_skills" in call for call in _uv_calls(root))
 
 
 def test_integration_names_the_musl_client_it_builds() -> None:
@@ -374,18 +394,23 @@ def test_every_input_that_moves_the_key_triggers_the_publisher() -> None:
     named key input — a key that moves with no publish behind it makes every PR rebuild the image,
     and a sandbox running an image older than the guard baked into it cannot run a file op at all.
 
-    The staged `ufo` binary is the one COPY source no trigger can name: it is a build product, not a
-    tracked file. `client/**` is its trigger, which is also what the definition digest hashes."""
+    The staged client and skill archive are build products no trigger can name directly. Their
+    tracked sources are the client crate and the three skill trees, which are also what the
+    definition digest hashes."""
     triggers = _workflow("sandbox-image.yml")["on"]["push"]["paths"]
 
     assert set(triggers) == KEY_INPUTS
-    staged = str(CLIENT_STAGE_PATH.relative_to(conftest.ROOT))
+    staged = {
+        str(CLIENT_STAGE_PATH.relative_to(conftest.ROOT)),
+        str(SYSTEM_SKILLS_STAGE_PATH.relative_to(conftest.ROOT)),
+    }
     prefixes = tuple(entry.removesuffix("/**") for entry in KEY_INPUTS)
     copied = [line.split()[1] for line in pod_dockerfile().splitlines() if line.startswith("COPY ")]
     assert copied
-    assert staged in copied and "client/**" in KEY_INPUTS
+    assert staged <= set(copied)
+    assert {"client/**", "core/src/ufo/skills/**", "extensions/**/skills/**"} <= KEY_INPUTS
     for source in copied:
-        assert source == staged or source.startswith(prefixes), source
+        assert source in staged or source.startswith(prefixes), source
 
 
 def test_a_named_prebuilt_image_replaces_the_build(

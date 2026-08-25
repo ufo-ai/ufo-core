@@ -32,6 +32,7 @@ struct Served {
     url: String,
     gateway: Gateway,
     arrived: std::sync::mpsc::Receiver<()>,
+    skills_arrived: std::sync::mpsc::Receiver<()>,
 }
 
 /// The scripted gateway, still serving.
@@ -59,6 +60,7 @@ impl Gateway {
 
 #[derive(Debug)]
 struct Request {
+    system_skills: bool,
     body: String,
     op_header: Option<String>,
     slot_header: Option<String>,
@@ -76,6 +78,7 @@ fn serve(script: Vec<Exchange>) -> Served {
     listener.set_nonblocking(true).expect("nonblocking");
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (arrival, arrived) = std::sync::mpsc::channel();
+    let (skill_arrival, skills_arrived) = std::sync::mpsc::channel();
     let (last, served_out) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = stop.clone();
@@ -101,6 +104,15 @@ fn serve(script: Vec<Exchange>) -> Served {
                     .set_read_timeout(Some(REQUEST_WAIT))
                     .expect("request deadline");
                 if let Some(request) = read_request(&mut stream) {
+                    if request.system_skills {
+                        let _ = skill_arrival.send(());
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 304 Not Modified\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                            )
+                            .expect("respond to system skills");
+                        continue;
+                    }
                     break (stream, request);
                 }
             };
@@ -149,6 +161,7 @@ fn serve(script: Vec<Exchange>) -> Served {
             handle,
         },
         arrived,
+        skills_arrived,
     }
 }
 
@@ -183,6 +196,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
     let mut buffer = [0u8; 4096];
     let (
         headers_end,
+        system_skills,
         content_length,
         op_header,
         slot_header,
@@ -203,6 +217,11 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
             continue;
         };
         let head = String::from_utf8_lossy(&raw[..end]).to_string();
+        let system_skills = head.lines().next().is_some_and(|line| {
+            let mut fields = line.split_ascii_whitespace();
+            fields.next() == Some("GET")
+                && fields.next().is_some_and(|path| path.ends_with("/skills"))
+        });
         let mut length = 0usize;
         let mut op = None;
         let mut slot = None;
@@ -248,6 +267,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         }
         break (
             end + 4,
+            system_skills,
             length,
             op,
             slot,
@@ -268,6 +288,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         raw.extend_from_slice(&buffer[..read]);
     }
     Some(Request {
+        system_skills,
         body: String::from_utf8_lossy(&raw[headers_end..]).to_string(),
         op_header,
         slot_header,
@@ -704,6 +725,10 @@ fn plain_session_round_trips_ask_and_exit() {
     ]);
     let home = scratch_home("plain");
     let (stdout, code) = run_client(&served.url, &[], "hi\n", &home);
+    served
+        .skills_arrived
+        .recv_timeout(SCRIPT_WAIT)
+        .expect("startup fetches the system skill bundle");
     let requests = served.gateway.requests();
     assert_eq!(code, 0);
     assert!(stdout.contains("hello there"), "stdout: {stdout}");

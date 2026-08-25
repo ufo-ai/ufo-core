@@ -82,14 +82,19 @@ NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
 PLAYWRIGHT_VERSION = "1.62.0"
 PLAYWRIGHT_CHROMIUM_REVISION = "1234"
+UFO_HOME_ENV = "UFO_HOME"
+SANDBOX_UFO_HOME = "/home/user/.ufo"
+SYSTEM_SKILLS_ROOT = f"{SANDBOX_UFO_HOME}/skills"
 SANDBOX_ENV: dict[str, str] = {
     "NODE_PATH": NODE_GLOBAL_MODULES,
     "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
+    UFO_HOME_ENV: SANDBOX_UFO_HOME,
 }
 """Runtime env the sandbox image needs beyond its base: NODE_PATH so node resolves the globally
 installed skill modules from any cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked
-at build time. The image bakes it as ENV; a carrier whose exec does not inherit image ENV merges it
-into every command's env instead."""
+at build time, and UFO_HOME so the baked client reads the same skill-cache path as a terminal. The
+image bakes it as ENV; a carrier whose exec does not inherit image ENV merges it into every
+command's env instead."""
 
 
 def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
@@ -462,6 +467,15 @@ class CommandStopping(Protocol):
     async def stop_commands(self, handle: SandboxHandle) -> None: ...
 
 
+@runtime_checkable
+class SystemSkillMounting(Protocol):
+    """A carrier whose connected runtime reads system skills through its native operation."""
+
+    async def mount_system_skills(
+        self, handle: SandboxHandle, skills: Mapping[str, str]
+    ) -> ExecResult: ...
+
+
 async def ufo_fs_file_op(
     carrier: Carrier, handle: SandboxHandle, op: str, params: dict[str, object]
 ) -> dict[str, object]:
@@ -626,6 +640,45 @@ class Sandbox:
     async def write_file(self, path: str, content: bytes) -> None:
         bound = await self._bound()
         await bound.carrier.write(bound.handle, workspace_path(path), content)
+
+    async def mount_system_skills(self, skills: Mapping[str, str]) -> frozenset[str]:
+        """Mount content-addressed system skills from the carrier's local bundle in one call."""
+        if not skills:
+            return frozenset()
+        bound = await self._bound()
+        if isinstance(bound.carrier, SystemSkillMounting):
+            result = await bound.carrier.mount_system_skills(bound.handle, skills)
+        else:
+            result = await bound.carrier.exec(
+                bound.handle,
+                (
+                    "sh",
+                    "-c",
+                    'if command -v ufo >/dev/null 2>&1; then exec ufo fs "$@"; fi; '
+                    'if command -v sbxfs >/dev/null 2>&1; then exec sbxfs "$@"; fi; exit 2',
+                    "sh",
+                    "system-skills",
+                    json.dumps(skills, sort_keys=True, separators=(",", ":")),
+                ),
+                timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
+            )
+        if result.exit_code == 2:
+            return frozenset()
+        if result.exit_code != 0:
+            raise OSError(result.stderr.strip() or "system skill mount failed")
+        try:
+            payload = json.loads(result.stdout)
+            mounted = payload["mounted"]
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise RuntimeError("system skill mount returned an invalid result") from error
+        if not isinstance(mounted, list) or any(not isinstance(name, str) for name in mounted):
+            raise RuntimeError("system skill mount returned invalid names")
+        unexpected = set(mounted) - skills.keys()
+        if unexpected:
+            raise RuntimeError(
+                f"system skill mount returned unexpected names: {sorted(unexpected)}"
+            )
+        return frozenset(mounted)
 
     async def ensure_tool_output_dir(self) -> bool:
         """Guarantee the engine's private `.tool-output` offload dir exists, reclaiming a

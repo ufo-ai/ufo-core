@@ -826,7 +826,23 @@ async def op_body(ctx: SurfaceContext, request: Request) -> Response:
     return Response(content=body, media_type="application/octet-stream")
 
 
+async def system_skills(ctx: SurfaceContext, request: Request) -> Response:
+    if _authenticated_email(request, ctx.workspace_id) is None:
+        return PlainTextResponse("unauthorized", status_code=401)
+    bundle = ctx.system_skill_bundle
+    etag = f'"{bundle.digest}"'
+    headers = {"etag": etag, "cache-control": "no-cache"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(
+        content=bundle.archive,
+        media_type="application/zip",
+        headers=headers,
+    )
+
+
 ROUTES = (
     SurfaceRoute(method="POST", path="{channel}", handler=channel),
     SurfaceRoute(method="GET", path="{channel}/op/{op_id}", handler=op_body),
+    SurfaceRoute(method="GET", path="{channel}/skills", handler=system_skills),
 )

@@ -891,6 +891,8 @@ class RecordingCarrier:
     ) -> ExecResult:
         self.calls.append(argv)
         self.operations.append(f"exec:{argv[-1]}")
+        if len(argv) >= 2 and argv[-2] == "system-skills":
+            return ExecResult(stdout="", stderr="", exit_code=2)
         return self.result
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:

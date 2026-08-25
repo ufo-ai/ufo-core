@@ -651,6 +651,17 @@ async def test_an_in_sandbox_program_carries_the_guard_it_runs(tmp_path: Path) -
     assert reachable.exit_code == 0 and "accepted" in reachable.stdout
 
 
+async def test_system_skill_mount_falls_back_without_a_local_client(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    bare = replace(handle, egress_env={**handle.egress_env, "PATH": BARE_PATH})
+    session = SandboxSession(carrier=carrier, handle=bare)
+
+    assert shutil.which("ufo", path=BARE_PATH) is None
+    assert await session.mount_system_skills({"sandbox": "sha256:" + "a" * 64}) == frozenset()
+
+
 async def test_the_container_copy_in_program_replaces_a_planted_symlink(tmp_path: Path) -> None:
     """The program the container carriers stream a copy-in into, run with a real stdin the way
     `docker exec -i` gives it one. `mkdir -p && cat > "$1"` truncated through a link planted at the

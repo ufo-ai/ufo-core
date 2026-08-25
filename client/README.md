@@ -20,8 +20,8 @@ ufo login | logout
 ```
 
 Sign-in happens in the conversation itself the first time you run it: answer the prompts, and the
-client keeps the credential and the workspace it was given under `$UFO_HOME` (`~/.ufo` by default).
-`ufo login` starts that over, and `ufo logout` forgets it.
+client keeps the credential, workspace, and system skill cache under `$UFO_HOME` (`~/.ufo` by
+default). `ufo login` starts sign-in over, and `ufo logout` forgets it.
 
 ## Run it in development
 
@@ -53,7 +53,7 @@ CI builds that release for each supported platform.
 | Variable | What it does |
 |---|---|
 | `UFO_URL` | Base URL of the gateway the client signs in against. Defaults to the hosted service. |
-| `UFO_HOME` | Directory holding the credential, the current workspace, and this machine's conversation list. Defaults to `~/.ufo`. |
+| `UFO_HOME` | Directory holding the credential, current workspace, conversation list, and system skill cache. Defaults to `~/.ufo`. |
 | `WORKSPACE_URL` | Talks to one workspace directly, instead of the one stored after sign-in. |
 | `UFO_CHANNEL` | Names the conversation to join instead of starting a fresh one. |
 | `UFO_PLAIN` | Any value forces the plain line renderer. `NO_COLOR` and `TERM=dumb` do the same. |

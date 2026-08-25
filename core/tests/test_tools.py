@@ -60,6 +60,8 @@ class FakeSandbox:
         default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
     )
     files: dict[str, bytes] = field(default_factory=dict)
+    system_skills: frozenset[str] = frozenset()
+    system_skill_mounts: list[dict[str, str]] = field(default_factory=list)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return self.bash_result
@@ -72,6 +74,10 @@ class FakeSandbox:
 
     async def write_file(self, path: str, content: bytes) -> None:
         self.files[path] = content
+
+    async def mount_system_skills(self, skills: dict[str, str]) -> frozenset[str]:
+        self.system_skill_mounts.append(skills)
+        return self.system_skills & skills.keys()
 
 
 async def _unavailable_spawn(
@@ -558,6 +564,21 @@ async def test_load_skill_mounts_files_under_the_workspace_and_returns_instructi
     assert b"name: sandbox" in mounted
 
 
+async def test_load_skill_mounts_a_deploy_skill_from_the_local_system_bundle(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeSandbox(system_skills=frozenset({"sandbox"}))
+    ctx = make_context(sandbox, tmp_path)
+
+    result = await _load_skill(ctx, "sandbox")
+
+    assert result.is_error is False
+    assert sandbox.files == {}
+    assert sandbox.system_skill_mounts == [
+        {"sandbox": CORE_SKILL_REGISTRY.named("sandbox").content_digest()}
+    ]
+
+
 async def test_load_skill_mounts_and_injects_the_skill_then_each_dependency(
     tmp_path: Path,
 ) -> None:
@@ -668,6 +689,26 @@ async def test_load_skill_mounts_a_member_skill_from_its_materialized_row(tmp_pa
     assert "# Skill: greet\n\nGREET BODY" in text
     assert sandbox.files["/workspace/.skills/greet/SKILL.md"] == saved.raw_skill_md.encode()
     assert sandbox.files["/workspace/.skills/greet/notes.md"] == b"kept"
+
+
+async def test_member_skill_dependencies_use_the_local_system_bundle(tmp_path: Path) -> None:
+    saved = RuntimeSkill(
+        name="greet",
+        description="say hi",
+        instructions="GREET BODY",
+        depends=("sandbox",),
+        raw_skill_md="---\nname: greet\ndescription: say hi\n---\nGREET BODY\n",
+    )
+    sandbox = FakeSandbox(system_skills=frozenset({"sandbox"}))
+    ctx = replace(make_context(sandbox, tmp_path), skills=_member_tier(saved))
+
+    await _load_skill(ctx, "greet")
+
+    assert sandbox.system_skill_mounts == [
+        {"sandbox": CORE_SKILL_REGISTRY.named("sandbox").content_digest()}
+    ]
+    assert "/workspace/.skills/greet/SKILL.md" in sandbox.files
+    assert "/workspace/.skills/sandbox/SKILL.md" not in sandbox.files
 
 
 async def test_load_skill_of_a_vanished_member_row_fails_loud(tmp_path: Path) -> None:

@@ -109,7 +109,7 @@ from ufo.skills.runtime import (
     SkillCard,
     SkillMaterializer,
     SkillRegistry,
-    mount_skill,
+    mount_skills,
 )
 from ufo.skills.selection import (
     SKILL_QUERY_MAX_CHARS,
@@ -671,8 +671,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         )
         if preload:
             with span("skills.mount", count=len(preload)):
-                for entry in preload:
-                    await mount_skill(sandbox, entry.skill)
+                await mount_skills(sandbox, preload, skills.by_name)
         engine = TurnEngine(
             turn=turn,
             agent=resolved,

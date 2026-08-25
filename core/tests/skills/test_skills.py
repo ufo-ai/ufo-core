@@ -1,4 +1,7 @@
+import json
 import re
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
@@ -24,6 +27,7 @@ from ufo.skills.runtime import (
     RuntimeSkill,
     SkillCard,
     SkillRegistry,
+    SystemSkillBundle,
     discover_skills,
     loaded_context,
     mount_skill,
@@ -159,6 +163,70 @@ def test_parse_reads_frontmatter_body_and_bundled_files(tmp_path: Path) -> None:
     assert skill.instructions == "Do the thing."
     assert ("helper.py", b"print('hi')") in skill.files
     assert skill.raw_skill_md.startswith("---\n")
+
+
+def test_system_skill_bundle_is_content_addressed_and_deterministic(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path, "probe", "a probe skill", "Do the thing.")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "run.py").write_bytes(b"print('hi')")
+    skill = parse_skill(skill_dir)
+
+    first = SystemSkillBundle.from_skills((skill,))
+    second = SystemSkillBundle.from_skills((skill,))
+
+    assert first == second
+    manifest = json.loads(first.manifest)
+    assert manifest["digest"] == first.digest
+    assert manifest["skills"] == {"probe": {"digest": skill.content_digest()}}
+    object_id = skill.content_digest().removeprefix("sha256:")
+    with zipfile.ZipFile(BytesIO(first.archive)) as archive:
+        assert set(archive.namelist()) == {
+            "manifest.json",
+            f"objects/{object_id}/SKILL.md",
+            f"objects/{object_id}/scripts/run.py",
+        }
+        assert archive.read(f"objects/{object_id}/scripts/run.py") == b"print('hi')"
+
+
+def test_system_skill_content_digest_moves_with_a_path_or_its_bytes() -> None:
+    base = RuntimeSkill(
+        name="probe",
+        description="d",
+        instructions="i",
+        raw_skill_md="skill",
+        files=(("notes.txt", b"one"),),
+    )
+    changed_path = RuntimeSkill(
+        name="probe",
+        description="d",
+        instructions="i",
+        raw_skill_md="skill",
+        files=(("other.txt", b"one"),),
+    )
+    changed_bytes = RuntimeSkill(
+        name="probe",
+        description="d",
+        instructions="i",
+        raw_skill_md="skill",
+        files=(("notes.txt", b"two"),),
+    )
+
+    assert (
+        len({base.content_digest(), changed_path.content_digest(), changed_bytes.content_digest()})
+        == 3
+    )
+    wire = RuntimeSkill(
+        name="probe",
+        description="d",
+        instructions="i",
+        raw_skill_md="workflow",
+    )
+    assert wire.content_digest() == (
+        "sha256:308c9d25ca09c876af5002d9e89c5b82abd64748c78cc0fc1eeeae882f7e5f88"
+    )
+    assert SystemSkillBundle.from_skills((wire,)).digest == (
+        "sha256:10936b8d47be11283777bb3e27dee5f7d8d0c7c116f424a55c7ec4f1ec390c98"
+    )
 
 
 def test_parse_rejects_a_name_that_does_not_match_its_directory(tmp_path: Path) -> None:

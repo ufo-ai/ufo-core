@@ -167,7 +167,7 @@ from ufo.sandbox.session import (
 from ufo.sandbox.terminal import Terminals, TerminalTransport
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, DBOS_MAX_EXECUTOR_THREADS
 from ufo.search import SearchProvider
-from ufo.skills.runtime import RuntimeSkill, SkillRegistry
+from ufo.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
 from ufo.sources.sync import (
     FOLDER_BACKEND,
     CorePageFeed,
@@ -1037,6 +1037,7 @@ def _mount_shared_surfaces(
     )
     tailer = HubTailer(hub=hub, billing_url=billing_url)
     stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
+    system_skill_bundle = SystemSkillBundle.from_skills(skills.by_name.values())
     registered: dict[str, SurfaceSpec] = {}
     listeners = []
 
@@ -1097,6 +1098,7 @@ def _mount_shared_surfaces(
             _models=models,
             _sandbox_sizes=sandbox_sizes,
             _skills=skills,
+            _system_skill_bundle=system_skill_bundle,
             _member_skill_listing=member_skill_listing,
             _declared_slots=slots,
             _ambient_reply=ambient_reply,

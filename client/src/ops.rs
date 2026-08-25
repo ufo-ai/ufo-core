@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::config::Home;
 #[cfg(unix)]
 use crate::guard;
 use crate::wire::{OpRequest, Session};
@@ -16,6 +17,7 @@ pub const OP_EXEC: &str = "exec";
 pub const OP_WRITE: &str = "write";
 pub const OP_READ: &str = "read";
 pub const OP_FILE: &str = "fileop";
+pub const OP_SYSTEM_SKILLS: &str = "system-skills";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +31,7 @@ struct ReadBackParams {
 pub struct OpRuntime {
     pub workdir: PathBuf,
     pub cwd: PathBuf,
+    pub home: Home,
 }
 
 /// Run one op and answer its reply body, or the failure string carried in `x-ufo-op-err`.
@@ -61,6 +64,7 @@ pub fn run_op(rt: &OpRuntime, session: &Session, op: &OpRequest) -> Result<Vec<u
                 }
             })
         }
+        OP_SYSTEM_SKILLS => crate::system_skills::load(&rt.home, &rt.cwd, &op.params),
         other => Err(format!("unknown op kind: {other}")),
     }
 }
@@ -175,7 +179,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         OpRuntime {
             workdir: root.clone(),
-            cwd: root,
+            cwd: root.clone(),
+            home: Home {
+                root: root.join("home"),
+            },
         }
     }
 
@@ -219,6 +226,39 @@ mod tests {
         assert!(
             failure.starts_with("fileop failed: params are not JSON"),
             "{failure}"
+        );
+        let _ = fs::remove_dir_all(&rt.workdir);
+    }
+
+    #[test]
+    fn system_skills_load_from_ufo_home_without_an_exec() {
+        let rt = runtime("system-skills");
+        let object = "308c9d25ca09c876af5002d9e89c5b82abd64748c78cc0fc1eeeae882f7e5f88";
+        let bundle = "f".repeat(64);
+        let skills = rt.home.root.join("skills");
+        let source = skills
+            .join("bundles")
+            .join(&bundle)
+            .join("objects")
+            .join(object);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("SKILL.md"), b"workflow").unwrap();
+        fs::write(skills.join("current"), format!("\"sha256:{bundle}\"\n")).unwrap();
+        let asked = asking(
+            OP_SYSTEM_SKILLS,
+            "",
+            &format!(r#"{{"probe":"sha256:{object}"}}"#),
+        );
+
+        let reply = run_op(&rt, &offline_session(), &asked).unwrap();
+
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&reply).unwrap(),
+            serde_json::json!({"mounted": ["probe"]})
+        );
+        assert_eq!(
+            fs::read(rt.cwd.join(".skills/probe/SKILL.md")).unwrap(),
+            b"workflow"
         );
         let _ = fs::remove_dir_all(&rt.workdir);
     }

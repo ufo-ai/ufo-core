@@ -124,7 +124,7 @@ from ufo.schema.records import (
     TurnContext,
 )
 from ufo.seats import SeatEntry, Seats, create_member, email_domain, workspace_domain
-from ufo.skills.runtime import RuntimeSkill, SkillRegistry
+from ufo.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
 from ufo.sources.backend import ConnectorSourceConfig, binding_name
 from ufo.turns.ambient_reply import NO_REPLY, AmbientMessage, AmbientReplyClassifier
 from ufo.turns.audience import (
@@ -1647,6 +1647,9 @@ class SurfaceContext:
     _declared_slots: tuple[DeclaredSlot, ...]
     _ambient_reply: AmbientReplyClassifier
     _connectors: ConnectorRegistry
+    _system_skill_bundle: SystemSkillBundle = field(
+        default_factory=lambda: SystemSkillBundle.from_skills(())
+    )
     _key_slot_for: Callable[[str], str | None] | None = None
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _deploy_extensions: tuple[DeployExtensionView, ...] = ()
@@ -1702,6 +1705,11 @@ class SurfaceContext:
         `{{skill_index}}`, and a profile is deploy shape reached by every agent, so those belong to
         `agent_skills` and this names the shared part."""
         return self._skills.index()
+
+    @property
+    def system_skill_bundle(self) -> SystemSkillBundle:
+        """The immutable deploy-skill archive a terminal caches before it executes a turn."""
+        return self._system_skill_bundle
 
     @property
     def models(self) -> tuple[str, ...]:

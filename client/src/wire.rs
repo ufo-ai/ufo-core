@@ -2,7 +2,7 @@
 
 use std::cell::OnceCell;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -11,6 +11,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const AGENT_IDLE_REFRESH: Duration = Duration::from_secs(4);
 const FALLBACK_TIMEOUT_SECONDS: u64 = 600;
+const MAX_SYSTEM_SKILLS_BYTES: u64 = 128 * 1024 * 1024;
+
+pub enum SystemSkillsFetch {
+    Current,
+    Downloaded(String),
+}
 
 /// One `run` directive: an op the server asks this terminal to execute.
 #[derive(Debug, Clone, PartialEq)]
@@ -335,6 +341,51 @@ impl Session {
         std::io::copy(&mut reader, &mut file)
             .map_err(|error| format!("could not stage {}: {error}", dest.display()))?;
         Ok(())
+    }
+
+    pub fn fetch_system_skills(
+        &self,
+        current: Option<&str>,
+        dest: &Path,
+    ) -> Result<SystemSkillsFetch, String> {
+        let workspace = self
+            .workspace_url
+            .as_deref()
+            .ok_or("no workspace to fetch system skills from")?;
+        let url = format!(
+            "{}/surface/ufo/{}/skills",
+            workspace.trim_end_matches('/'),
+            self.channel
+        );
+        let mut request = self.request("GET", &url);
+        if let Some(etag) = current {
+            request = request.set("if-none-match", etag);
+        }
+        let response = match request.call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(304, _)) => return Ok(SystemSkillsFetch::Current),
+            Err(ureq::Error::Status(code, response)) => {
+                return Err(format!(
+                    "system skills failed ({code}): {}",
+                    response.into_string().unwrap_or_default().trim()
+                ));
+            }
+            Err(error) => return Err(format!("lost connection ({error})")),
+        };
+        let etag = response
+            .header("etag")
+            .ok_or("system skills response has no etag")?
+            .to_string();
+        let mut reader = response.into_reader().take(MAX_SYSTEM_SKILLS_BYTES + 1);
+        let mut file = File::create(dest)
+            .map_err(|error| format!("could not stage {}: {error}", dest.display()))?;
+        let copied = std::io::copy(&mut reader, &mut file)
+            .map_err(|error| format!("could not stage {}: {error}", dest.display()))?;
+        if copied > MAX_SYSTEM_SKILLS_BYTES {
+            let _ = std::fs::remove_file(dest);
+            return Err("system skills response is too large".to_string());
+        }
+        Ok(SystemSkillsFetch::Downloaded(etag))
     }
 
     /// GET the staged bytes of an in-flight write op into `dest`.
