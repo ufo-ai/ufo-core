@@ -67,6 +67,7 @@ from ufo_ext_sites.surface import (
     FRAME_PATH,
     GENERIC_SHARE_TITLE,
     LOGOUT_PATH,
+    NO_PORTAL_PAGE,
     SESSION_COOKIE,
     SHARE_CARD_ALT,
     SHARE_CARD_URL,
@@ -328,6 +329,9 @@ class Deployment:
     workspace: Workspace
     client: AsyncClient
     unhosted: AsyncClient
+    portalless: AsyncClient
+    """A deploy that installs no browser portal — the one place a kit page can be read — so the
+    frame has nowhere to send a visit that arrives outside one."""
 
 
 @pytest.fixture
@@ -346,9 +350,9 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
         workspace_root=tmp_path / "workspaces",
     )
 
-    def mounted(ingress_public_url: str | None) -> AsyncClient:
+    def mounted(ingress_public_url: str | None, *, portal: bool = True) -> AsyncClient:
         app = FastAPI()
-        manifests = (web_manifest(), sites_manifest())
+        manifests = (web_manifest(), sites_manifest()) if portal else (sites_manifest(),)
         _mount_shared_surfaces(
             app,
             manifests,
@@ -372,8 +376,14 @@ async def deployment(db: None, dbos_launched: Config, tmp_path: Path) -> AsyncIt
         )
         return AsyncClient(transport=ASGITransport(app=app), base_url=PUBLIC_BASE_URL)
 
-    async with mounted(INGRESS_BASE_URL) as client, mounted(None) as unhosted:
-        yield Deployment(workspace=workspace, client=client, unhosted=unhosted)
+    async with (
+        mounted(INGRESS_BASE_URL) as client,
+        mounted(None) as unhosted,
+        mounted(INGRESS_BASE_URL, portal=False) as portalless,
+    ):
+        yield Deployment(
+            workspace=workspace, client=client, unhosted=unhosted, portalless=portalless
+        )
     await asyncio.to_thread(dbos_client.destroy)
 
 
@@ -2825,7 +2835,8 @@ async def test_a_homepage_frame_follows_the_agent_and_redirects_the_portal_to_in
 ) -> None:
     """A bound site's frame gates on the agent — every member for a workspace agent, owner and
     admins for a private one, the creator holding no standing of their own — redirects the portal's
-    frame to ingress, and refuses the visibility post whole."""
+    frame to ingress, sends every other visit to the app's screen in the portal, and refuses the
+    visibility post whole."""
     client, workspace = deployment.client, deployment.workspace
     creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
     _other_id, other_token = await _seed_member(workspace, OTHER_EMAIL)
@@ -2841,13 +2852,15 @@ async def test_a_homepage_frame_follows_the_agent_and_redirects_the_portal_to_in
         )
     portal_link = homepage_embed_url(link)
 
+    # An app page is the portal's kit, and the kit draws from the `init` the portal hands it over
+    # the bridge. Opened on its own it would hold a screen that never receives one, so the visit
+    # lands on the app's screen in the portal instead and is framed there a moment later.
     standalone = await client.get(portal_link, headers=_cookie(other_token))
-    assert standalone.status_code == 200
-    assert INGRESS_HOST in _embedded(standalone.text)
-    assert "if(self!==top)location.replace" in standalone.text
-    assert "if(ended)location.reload()" in standalone.text
-    assert "addEventListener('focus',refresh)" in standalone.text
-    assert standalone.text.index("</iframe>") < standalone.text.index("const frame=")
+    assert standalone.status_code == 303
+    assert standalone.headers["location"] == (
+        f"{PUBLIC_BASE_URL}/surface/web#/agents/{workspace.agent_id}"
+    )
+    assert "<iframe" not in standalone.text
     dev_portal = await client.get(
         portal_link,
         headers={**_cookie(other_token), "sec-fetch-dest": "iframe", "sec-fetch-site": "same-site"},
@@ -2882,6 +2895,12 @@ async def test_a_homepage_frame_follows_the_agent_and_redirects_the_portal_to_in
     assert unhosted.status_code == 200
     assert "<iframe" not in unhosted.text
     assert UNCONFIGURED_BODY in unhosted.text
+
+    # A deploy with no portal has nowhere to send the visit, and the page could not have drawn
+    # there either, so the frame says that rather than redirecting nowhere.
+    portalless = await deployment.portalless.get(portal_link, headers=_cookie(admin_token))
+    assert portalless.status_code == 200
+    assert NO_PORTAL_PAGE in portalless.text
 
 
 SHIPPED_DIGEST = "deadbeefdeadbeef"
@@ -2945,20 +2964,30 @@ def test_a_shipped_homepage_url_round_trips_and_never_collides_with_a_site_token
 async def test_a_shipped_app_frame_redirects_without_viewer_or_agent_reads(
     deployment: Deployment,
 ) -> None:
-    """A deploy-wide app page is public code routed to its workspace-specific origin."""
+    """A shipped app page has no hosted_site row: the frame resolves the agent from the token, gates
+    on its visibility exactly as a bound homepage does, and redirects to the deploy-wide bundle from
+    the fleet store — the ingress view token it mints carries the shipped claim and the synthetic
+    per-workspace anchor, an unconfigured ingress renders a refusal rather than redirecting nowhere,
+    and a visit from outside that frame is sent to the app's screen in the portal."""
     client, workspace = deployment.client, deployment.workspace
     _other_id, other_token = await _seed_member(workspace, OTHER_EMAIL)
     app_agent = await _seed_app_agent(workspace, "radar")
     url = shipped_homepage_url(PUBLIC_BASE_URL, workspace.id, "radar", SHIPPED_DIGEST)
     assert url is not None
 
+    # A visit from outside the portal's frame is sent to the app's screen there, signed in or not:
+    # the page draws from the `init` the portal hands it over the bridge, so on its own it would
+    # hold a screen that never receives one. The portal asks whoever arrives to sign in.
     anonymous = await client.get(url)
-    assert anonymous.status_code == 200
-    assert INGRESS_HOST in _embedded(anonymous.text)
+    assert anonymous.status_code == 303
+    assert anonymous.headers["location"] == f"{PUBLIC_BASE_URL}/surface/web#/agents/{app_agent}"
+    assert "<iframe" not in anonymous.text
 
+    # The same rule with a session: a kit page opened outside the portal's frame lands on the app's
+    # screen in the portal.
     standalone = await client.get(url, headers=_cookie(other_token))
-    assert standalone.status_code == 200
-    assert INGRESS_HOST in _embedded(standalone.text)
+    assert standalone.status_code == 303
+    assert standalone.headers["location"] == f"{PUBLIC_BASE_URL}/surface/web#/agents/{app_agent}"
 
     opened = await client.get(url, headers=_iframe_cookie(other_token))
     assert opened.status_code == 303

@@ -61,7 +61,12 @@ from ufo.sdk.http import (
     Request,
     Response,
 )
-from ufo.sdk.sandbox import INGRESS_SESSION_ENDED_MESSAGE, serve_port, shipped_anchor
+from ufo.sdk.sandbox import (
+    INGRESS_SESSION_ENDED_MESSAGE,
+    serve_port,
+    shipped_anchor,
+    shipped_app_slug,
+)
 from ufo.sdk.seats import Seats
 from ufo.sdk.surface_token import mint_surface_token, verify_surface_token
 from ufo.sdk.surfaces import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
@@ -101,6 +106,14 @@ NOT_SIGNED_IN_PAGE = (
     "<main><p>This site is not public, and this browser is not signed in to the workspace that "
     f'hosts it.</p><p><a href="{LOGOUT_PATH}">Sign in</a>, then open this link again.</p></main>'
 )
+NO_PORTAL_TITLE = "No portal"
+NO_PORTAL_PAGE = (
+    "<main><p>This app's page is read in the member portal, and this deployment installs "
+    "none.</p></main>"
+)
+AGENT_FRAGMENT = "#/agents/"
+"""The portal's own address for one app's screen. Core does not interpret a fragment, so the
+route the portal reads is spelled here, beside the one redirect that sends a viewer to it."""
 IFRAME_SANDBOX = (
     "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads "
     "allow-pointer-lock"
@@ -338,12 +351,14 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
             and not await _viewer_is_admin(ctx, viewer)
         ):
             return _not_found()
+        if not (address.portal_embed and _is_portal_iframe_request(request)):
+            return _into_the_portal(ctx, site.homepage_agent_id, share)
         embedded = ctx.ingress_url(
             site.conversation_id, site.port, f"/{request.path_params.get(PATH_PARAM, '')}"
         )
-        if embedded is not None and address.portal_embed and _is_portal_iframe_request(request):
-            return RedirectResponse(embedded, status_code=303)
-        return HTMLResponse(_homepage_frame_page(site.name, embedded, share))
+        if embedded is None:
+            return HTMLResponse(_unconfigured_page(site.name, share))
+        return RedirectResponse(embedded, status_code=303)
     if site.visibility != "public" and viewer is None:
         return HTMLResponse(_page("Not public", _STYLE, NOT_SIGNED_IN_PAGE, share))
     if (
@@ -366,8 +381,31 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
 async def _shipped_frame(
     ctx: SurfaceContext, request: Request, shipped: ShippedAddress
 ) -> Response:
-    """Open a workspace's deploy-wide app bundle at its stable workspace origin."""
+    """Open a workspace's deploy-wide app bundle at its stable workspace origin.
+
+    A visit that did not arrive inside the portal's frame is sent to the app's screen there. An app
+    page is the portal's kit and draws from the `init` the portal hands it over the bridge, so on
+    its own it would hold a screen that never receives one.
+
+    The framed path reads no viewer and no agent: the bundle is the deploy's own code, identical for
+    every workspace, and the ingress view token it redirects to is what carries the authority to
+    read anything. Gating it would cost two reads to protect a page that holds no data. Only the
+    visit that arrives outside the frame pays for a read, to name the app it belongs to — the token
+    carries the slug the extension shipped under, and the agent that slug provisioned is the screen
+    the member wanted."""
     share = _share_tags(None, None, None)
+    if not _is_portal_iframe_request(request):
+        agent = next(
+            (
+                entry
+                for entry in await ctx.list_agents()
+                if shipped_app_slug(entry.provisioned_by) == shipped.slug
+            ),
+            None,
+        )
+        if agent is None:
+            return _not_found()
+        return _into_the_portal(ctx, agent.id, share)
     anchor = shipped_anchor(shipped.workspace_id, shipped.slug)
     embedded = ctx.ingress_url(
         anchor,
@@ -376,29 +414,39 @@ async def _shipped_frame(
         shipped_slug=shipped.slug,
         shipped_digest=shipped.digest,
     )
-    if embedded is not None and _is_portal_iframe_request(request):
-        return RedirectResponse(embedded, status_code=303)
-    return HTMLResponse(_homepage_frame_page(shipped.slug.title(), embedded, share))
+    if embedded is None:
+        return HTMLResponse(_unconfigured_page(shipped.slug, share))
+    return RedirectResponse(embedded, status_code=303)
 
 
 def _is_portal_iframe_request(request: Request) -> bool:
     return request.headers.get(FETCH_DESTINATION_HEADER) == IFRAME_DESTINATION
 
 
-def _homepage_frame_page(title: str, embedded: str | None, share: str) -> str:
-    if embedded is None:
-        site_view = f"<main><p>{UNCONFIGURED_BODY}</p></main>"
-    else:
-        escaped_url = html.escape(embedded, quote=True)
-        site_view = (
-            f'<script data-url="{escaped_url}">'
-            "if(self!==top)location.replace(document.currentScript.dataset.url)</script>"
-            f'<iframe src="{escaped_url}" title="{html.escape(title, quote=True)}" '
-            f'referrerpolicy=no-referrer sandbox="{IFRAME_SANDBOX}" '
-            'allow="fullscreen"></iframe>' + FOCUS_REFRESH_SCRIPT
-        )
+def _into_the_portal(ctx: SurfaceContext, agent_id: UUID, share: str) -> Response:
+    """Send the viewer to the app's own screen in the portal.
+
+    An app page is built on the portal's kit, and the kit reaches the deploy over the bridge the
+    portal opens with it — so a page rendered anywhere else holds a screen that never receives its
+    `init` and never draws. The portal frames the same page a moment later with that bridge in
+    place, so the link keeps working; it just arrives the one way the page can be read.
+
+    A deploy with no portal has nowhere to send them, and the page could not have drawn there
+    either, so it says the one true thing instead."""
+    portal = ctx.home_url(f"{AGENT_FRAGMENT}{agent_id}")
+    if portal is None:
+        return HTMLResponse(_page(NO_PORTAL_TITLE, _STYLE, NO_PORTAL_PAGE, share))
+    return RedirectResponse(portal, status_code=303)
+
+
+def _unconfigured_page(title: str, share: str) -> str:
+    """What the portal's own frame gets where the deploy hosts no sites: there is no origin to
+    embed, so the frame says so rather than framing nothing."""
     return _page(
-        html.escape(title), _STYLE + _FRAME_STYLE + _HOMEPAGE_FRAME_STYLE, site_view, share
+        html.escape(title),
+        _STYLE + _FRAME_STYLE + _HOMEPAGE_FRAME_STYLE,
+        f"<main><p>{UNCONFIGURED_BODY}</p></main>",
+        share,
     )
 
 
