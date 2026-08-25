@@ -296,7 +296,9 @@ reads that bundle without changing the member's certificate store. A client-boun
 with no connected terminal is unreachable — its turns and its file browser fail loud rather than
 running somewhere the member cannot see. The op logic runs natively in the client binary the
 deploy builds and serves, held to the server's op contracts by the client's own tests; a stale
-client is told to update the moment the server sees its version.
+client is told to update the moment the server sees its version. `ufo --remote` sends no terminal
+binding, so the conversation opens on the deploy's configured carrier exactly as web and Slack do;
+`--json` changes only the client event framing and composes with either carrier choice.
 
 **The sandbox proxy is core, not an extension** — it is the enforcement point for three core
 invariants: **sentinel swap** (processes inside see placeholder credentials; the proxy swaps real

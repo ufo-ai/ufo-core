@@ -23,7 +23,7 @@ use ufo::{config, jsonio, pr};
 const HELP: &str = "\
 Opens a conversation with your workspace assistant.
 
-Usage: ufo [--resume [id]] [--json] [message...]
+Usage: ufo [--resume [id]] [--remote] [--json] [message...]
        ufo login | logout
        ufo fs {read|write|edit|grep|glob|changes} <json>
        ufo llm [--model MODEL] [--max-tokens N] PROMPT
@@ -38,6 +38,7 @@ Commands:
 
 Options:
   --resume [id]  Resume a conversation; bare --resume picks from this machine's list.
+  --remote       Run in the workspace's sandbox instead of the current directory.
   --json         Read and write JSON events on stdin and stdout.
   -h, --help     Show this help.
 ";
@@ -59,12 +60,11 @@ fn main() {
         Some("tool") => process::exit(tools::main(&args[1..])),
         _ => {}
     }
-    #[cfg(unix)]
-    adopt_tty_stdin();
     let home = config::Home::resolve();
     let mut rest: &[String] = &args;
     let mut resumed: Option<String> = None;
     let mut login = false;
+    let mut remote = false;
     let mut json = false;
     loop {
         match rest.first().map(String::as_str) {
@@ -86,6 +86,10 @@ fn main() {
                 json = true;
                 rest = &rest[1..];
             }
+            Some("--remote") => {
+                remote = true;
+                rest = &rest[1..];
+            }
             Some("--resume") => match rest.get(1) {
                 Some(id) if !id.starts_with("--") => {
                     resumed = Some(id.clone());
@@ -98,6 +102,10 @@ fn main() {
             },
             _ => break,
         }
+    }
+    #[cfg(unix)]
+    if !json {
+        adopt_tty_stdin();
     }
     let message = rest.join(" ");
     let workspace_url = if login {
@@ -121,10 +129,14 @@ fn main() {
     let launch_dir = env::current_dir()
         .and_then(|dir| dir.canonicalize())
         .unwrap_or_else(|error| die(&format!("could not resolve the working directory: {error}")));
-    let cwd_header = launch_dir
-        .to_str()
-        .filter(|path| path.starts_with('/'))
-        .map(String::from);
+    let cwd_header = if remote {
+        None
+    } else {
+        launch_dir
+            .to_str()
+            .filter(|path| path.starts_with('/'))
+            .map(String::from)
+    };
     let installed = config::installed(&home);
     let tty = std::io::stdout().is_terminal();
     let workdir = private_workdir().unwrap_or_else(|error| die(&error));

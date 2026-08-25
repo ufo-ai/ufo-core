@@ -114,6 +114,7 @@ Start `ufoctl serve` with a test workspace. You can delete the workspace after t
 
 ```bash
 uv run python -m evals --workspace <workspace-id> --label baseline
+uv run python -m evals --remote --workspace <workspace-id> --label remote
 uv run python -m evals --view
 uv run python -m evals --share <current-run> <baseline-run>
 ```

@@ -1,18 +1,20 @@
 """Run eval suites, browse recorded runs, share a two-run comparison, or reconstruct one.
 
 `python -m evals` drives capability cases as real turns and MCP-Atlas cases through their pinned
-sandbox, grades each answer and trajectory, and records one immutable run under `--out`. `--view`
-opens the offline archive; `--share CURRENT [BASELINE]` publishes only those runs, whole, behind a
-private expiring S3 URL; `--reconstruct RUN_ID` rebuilds a diagnostic copy of a run recorded
-without evidence from the workspace's durable conversations, turns, and blobs, without touching
-the original. Capability cases create durable conversations and may write memory or artifacts, so
-target a disposable workspace with `--workspace`."""
+sandbox, grades each answer and trajectory, and records one immutable run under `--out`. `--remote`
+admits those turns through `ufo --remote --json`; otherwise the runner admits through the shared
+in-process boundary. `--view` opens the offline archive; `--share CURRENT [BASELINE]` publishes only
+those runs, whole, behind a private expiring S3 URL; `--reconstruct RUN_ID` rebuilds a diagnostic
+copy of a run recorded without evidence from the workspace's durable conversations, turns, and
+blobs, without touching the original. Capability cases create durable conversations and may write
+memory or artifacts, so target a disposable workspace with `--workspace`."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 import webbrowser
@@ -45,6 +47,7 @@ from evals.compaction.target import CompactionTarget
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
     WORKFLOW_WAIT_SECONDS,
+    RemoteClient,
     WorkspaceDriver,
     resolve_workspace_and_agent,
     seed_candidate_agent,
@@ -149,6 +152,7 @@ from evals.wandr.runner import (
 )
 from ufo.access.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.agent_scope import agent
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -226,6 +230,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--label", default="", help="human-readable run label")
     parser.add_argument("--concurrency", type=int, default=1, help="max eval cases in flight")
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="admit suite turns through ufo --remote --json",
+    )
     parser.add_argument("--s3-bucket", help="private bucket override for --share")
     parser.add_argument("--s3-region", help="S3 region for --share")
     parser.add_argument("--s3-endpoint-url", help="S3-compatible endpoint for --share")
@@ -342,6 +351,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
+    if args.remote and (args.list or args.view or args.share or args.reconstruct):
+        parser.error("--remote runs eval suites")
     names = tuple(args.only)
     if args.case and not names:
         parser.error("--case requires --only naming the suites to narrow")
@@ -673,6 +684,7 @@ def main(argv: list[str] | None = None) -> None:
             workflow_wait_seconds,
             args.mcp_atlas_url,
             args.mcp_atlas_external_url,
+            args.remote,
             args.candidate_from_proposal,
             args.concurrency,
         )
@@ -732,6 +744,7 @@ async def _run(
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS,
     mcp_atlas_url: str | None = None,
     mcp_atlas_external_url: str | None = None,
+    remote: bool = False,
     candidate_proposal: UUID | None = None,
     concurrency: int = 1,
 ) -> tuple[tuple[EvalReport, ...], str]:
@@ -776,6 +789,22 @@ async def _run(
             dbos = replay_safe_client(config.database.system_url)
             registry = model_registry(config, manifests)
             resolved_agent_model = registry.resolve(agent_model)
+            remote_client: RemoteClient | None = None
+            if remote:
+                executable = shutil.which("ufo")
+                if executable is None:
+                    raise RuntimeError("--remote requires ufo on PATH")
+                token_secret = os.environ.get(UFO_TOKEN_SECRET_ENV)
+                if not token_secret:
+                    raise RuntimeError(f"--remote requires {UFO_TOKEN_SECRET_ENV}")
+                remote_client = RemoteClient(
+                    executable=executable,
+                    workspace_url=config.connect.public_base_url
+                    or f"http://{config.serve.host}:{config.serve.port}",
+                    token_secret=token_secret,
+                    home_root=config.sandbox.workspace_root.parent / "eval-ufo",
+                )
+                await remote_client.validate()
             driver = WorkspaceDriver(
                 workspace_id,
                 agent_id,
@@ -786,6 +815,7 @@ async def _run(
                 resolved_agent_model,
                 pricing=registry.pricing,
                 workflow_wait_seconds=workflow_wait_seconds,
+                remote=remote_client,
             )
             ctx = context_for(
                 "evals",

@@ -71,6 +71,7 @@ struct Request {
     timezone_header: Option<String>,
     since_header: Option<String>,
     listen_header: Option<String>,
+    cwd_header: Option<String>,
 }
 
 fn serve(script: Vec<Exchange>) -> Served {
@@ -207,6 +208,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         timezone_header,
         since_header,
         listen_header,
+        cwd_header,
     ) = loop {
         let read = match stream.read(&mut buffer) {
             Ok(0) | Err(_) => return None,
@@ -232,6 +234,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         let mut timezone = None;
         let mut since = None;
         let mut listen = None;
+        let mut cwd = None;
         for line in head.lines() {
             let lower = line.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("content-length:") {
@@ -264,6 +267,9 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
             if lower.starts_with("x-ufo-listen:") {
                 listen = Some(line.split_once(':').unwrap().1.trim().to_string());
             }
+            if lower.starts_with("x-ufo-cwd:") {
+                cwd = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
         }
         break (
             end + 4,
@@ -278,6 +284,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
             timezone,
             since,
             listen,
+            cwd,
         );
     };
     while raw.len() < headers_end + content_length {
@@ -299,6 +306,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         timezone_header,
         since_header,
         listen_header,
+        cwd_header,
     })
 }
 
@@ -366,6 +374,58 @@ fn run_client(url: &str, args: &[&str], stdin: &str, home: &std::path::Path) -> 
             .expect("feed stdin");
         wait_for_client(child)
     };
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+#[cfg(unix)]
+fn run_client_with_closed_stdin_and_controlling_terminal(
+    url: &str,
+    args: &[&str],
+    home: &std::path::Path,
+) -> (String, i32) {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let leader = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(leader >= 0, "a pty is available");
+    assert_eq!(unsafe { libc::grantpt(leader) }, 0, "the pty is granted");
+    assert_eq!(unsafe { libc::unlockpt(leader) }, 0, "the pty is unlocked");
+    let name = unsafe { std::ffi::CStr::from_ptr(libc::ptsname(leader)) }.to_owned();
+    let follower = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY) };
+    assert!(follower >= 0, "the pty follower opens");
+    let _leader = unsafe { std::fs::File::from_raw_fd(leader) };
+
+    let scratch_tmp = home.join("tmp");
+    std::fs::create_dir_all(&scratch_tmp).expect("scratch tmp");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ufo"));
+    command
+        .args(args)
+        .env("WORKSPACE_URL", url)
+        .env("UFO_URL", url)
+        .env("UFO_HOME", home)
+        .env("UFO_CHANNEL", "e2e-test")
+        .env("TMPDIR", &scratch_tmp)
+        .env_remove("NO_COLOR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 || libc::ioctl(follower, libc::TIOCSCTTY as libc::c_ulong, 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command
+        .spawn()
+        .expect("spawn client with a controlling terminal");
+    unsafe { libc::close(follower) };
+    let output = wait_for_client(child);
     (
         String::from_utf8_lossy(&output.stdout).to_string(),
         output.status.code().unwrap_or(-1),
@@ -703,7 +763,9 @@ fn help_prints_usage_and_never_touches_the_wire() {
             stdout.contains("Usage: ufo"),
             "{flag} prints usage:\n{stdout}"
         );
-        for named in ["login", "logout", "--resume", "--json", "--help"] {
+        for named in [
+            "login", "logout", "--resume", "--remote", "--json", "--help",
+        ] {
             assert!(stdout.contains(named), "{flag} names {named}:\n{stdout}");
         }
     }
@@ -735,6 +797,7 @@ fn plain_session_round_trips_ask_and_exit() {
     assert!(stdout.contains("The answer."), "stdout: {stdout}");
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].body, "hi");
+    assert!(requests[1].cwd_header.is_some(), "{requests:?}");
     assert_eq!(
         requests[1].timezone_header,
         iana_time_zone::get_timezone().ok()
@@ -847,6 +910,58 @@ fn json_mode_speaks_the_event_protocol() {
         .expect("sign-in is observable");
     assert_eq!(signed_in["workspace_url"], "http://workspace.example");
     assert_eq!(signed_in["channel"], "e2e-test");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn remote_json_mode_uses_the_workspace_sandbox() {
+    for args in [["--remote", "--json", "go"], ["--json", "--remote", "go"]] {
+        let served = serve(vec![Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tdone", "exit\t0"],
+        }]);
+        let home = scratch_home(if args[0] == "--remote" {
+            "remote-json"
+        } else {
+            "json-remote"
+        });
+        let (stdout, code) = run_client(&served.url, &args, "", &home);
+        let requests = served.gateway.requests();
+        assert_eq!(code, 0, "stdout: {stdout}");
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert_eq!(requests[0].body, "go");
+        assert_eq!(requests[0].cwd_header, None, "{requests:?}");
+        assert!(
+            stdout
+                .lines()
+                .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok()),
+            "stdout: {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_json_mode_keeps_closed_stdin_with_a_controlling_terminal() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &["say\tdone"],
+    }]);
+    let home = scratch_home("remote-json-closed-stdin");
+    let (stdout, code) = run_client_with_closed_stdin_and_controlling_terminal(
+        &served.url,
+        &["--remote", "--json", "go"],
+        &home,
+    );
+    let requests = served.gateway.requests();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0].body, "go");
+    assert_eq!(requests[0].cwd_header, None, "{requests:?}");
+    assert!(stdout.contains("\"type\":\"turn_end\""), "stdout: {stdout}");
     let _ = std::fs::remove_dir_all(&home);
 }
 

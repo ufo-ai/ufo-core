@@ -11,8 +11,11 @@ advances over a still-running predecessor."""
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import shutil
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -23,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from evals.harness.capability import UndeliveredRound, WorkspaceFile
 from evals.harness.timing import TurnStep
+from ufo.auth.bearer import mint_token
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import Trajectory
@@ -47,12 +51,145 @@ from ufo.turns.transcript import Conversation, TranscriptDecodeError, decode, en
 from ufo.workspace import ws
 
 EVAL_SURFACE = "eval"
+REMOTE_SURFACE = "ufo"
 CANDIDATE_AGENT_NAME = "candidate-{proposal_id}"
 POLL_INTERVAL_SECONDS = 1.0
 WORKFLOW_WAIT_SECONDS = 300.0
 TERMINAL_STATUSES = frozenset({"done", "cancelled", "failed"})
 WORKFLOW_STATUSES = frozenset({"queued", "running"})
 FAILED_WORKFLOW_STATUSES = frozenset({"ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED", "CANCELLED"})
+REMOTE_TOKEN_TTL = timedelta(days=1)
+
+
+class RemoteTurnTimeout(Exception):
+    def __init__(self, turn_id: UUID | None) -> None:
+        super().__init__("ufo remote session exceeded the workflow wait")
+        self.turn_id = turn_id
+
+
+@dataclass(frozen=True)
+class RemoteClient:
+    executable: str
+    workspace_url: str
+    token_secret: str
+    home_root: Path
+
+    async def validate(self) -> None:
+        """Fail unless the selected client implements the remote JSON transport."""
+        process = await asyncio.create_subprocess_exec(
+            self.executable,
+            "--help",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode or b"--remote" not in stdout or b"--json" not in stdout:
+            detail = (stderr or stdout).decode("utf-8", "replace").strip()
+            raise RuntimeError(f"{self.executable} does not support remote JSON sessions: {detail}")
+
+    async def admit(
+        self,
+        workspace_id: UUID,
+        conversation_id: UUID,
+        email: str,
+        message: str,
+        wait_seconds: float,
+    ) -> UUID:
+        """Run one member turn through `ufo --remote --json` and return its durable turn id."""
+        async with workspace_tx() as connection:
+            baseline = (
+                await connection.execute(
+                    sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0)).where(
+                        tables.turn.c.workspace_id == workspace_id,
+                        tables.turn.c.conversation_id == conversation_id,
+                    )
+                )
+            ).scalar_one()
+        home = self.home_root / str(conversation_id)
+        token = mint_token(self.token_secret, str(workspace_id), email, REMOTE_TOKEN_TTL)
+        await asyncio.to_thread(self._write_credentials, home, token)
+        env = dict(os.environ)
+        env.update(
+            {
+                "UFO_HOME": str(home),
+                "UFO_URL": self.workspace_url,
+                "WORKSPACE_URL": self.workspace_url,
+                "UFO_CHANNEL": str(conversation_id),
+            }
+        )
+        process: asyncio.subprocess.Process | None = None
+        try:
+            try:
+                async with asyncio.timeout(wait_seconds):
+                    process = await asyncio.create_subprocess_exec(
+                        self.executable,
+                        "--remote",
+                        "--json",
+                        "--resume",
+                        str(conversation_id),
+                        message,
+                        stdin=asyncio.subprocess.DEVNULL,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=env,
+                    )
+                    stdout, stderr = await process.communicate()
+            except TimeoutError as error:
+                await self._stop(process)
+                raise RemoteTurnTimeout(
+                    await self._turn_id(workspace_id, conversation_id, baseline)
+                ) from error
+            except BaseException:
+                await self._stop(process)
+                raise
+        finally:
+            await asyncio.to_thread(shutil.rmtree, home, True)
+        try:
+            events = tuple(json.loads(line) for line in stdout.splitlines())
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"ufo remote session returned non-JSON output: "
+                f"{stdout.decode('utf-8', 'replace')[-1000:]}"
+            ) from error
+        if not events or any(not isinstance(event, dict) for event in events):
+            raise RuntimeError("ufo remote session returned no JSON events")
+        event_types = tuple(event.get("type") for event in events)
+        if event_types[0] != "session_start" or "turn_end" not in event_types:
+            raise RuntimeError(f"ufo remote session returned incomplete JSON events: {event_types}")
+        turn_id = await self._turn_id(workspace_id, conversation_id, baseline)
+        if turn_id is None:
+            detail = (stderr or stdout).decode("utf-8", "replace").strip()[-1000:]
+            raise RuntimeError(f"ufo remote session admitted no turn: {detail}")
+        return turn_id
+
+    @staticmethod
+    async def _stop(process: asyncio.subprocess.Process | None) -> None:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
+
+    @staticmethod
+    async def _turn_id(workspace_id: UUID, conversation_id: UUID, baseline: int) -> UUID | None:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.turn.c.id)
+                    .where(
+                        tables.turn.c.workspace_id == workspace_id,
+                        tables.turn.c.conversation_id == conversation_id,
+                        tables.turn.c.seq > baseline,
+                    )
+                    .order_by(tables.turn.c.seq.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
+    @staticmethod
+    def _write_credentials(home: Path, token: str) -> None:
+        home.mkdir(parents=True, exist_ok=True)
+        path = home / "credentials"
+        path.write_text(f"{token}\n")
+        path.chmod(0o600)
 
 
 async def resolve_workspace_and_agent(
@@ -171,6 +308,7 @@ class WorkspaceDriver:
     pricing: Pricing = CORE_PRICING
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS
+    remote: RemoteClient | None = None
 
     async def open(
         self,
@@ -199,13 +337,28 @@ class WorkspaceDriver:
         conversation_id = uuid4()
         async with workspace_tx() as connection:
             member_id = await self._speaker(connection, member_key)
+            member_email = (
+                None
+                if member_id is None
+                else (
+                    await connection.execute(
+                        sa.select(tables.member.c.email).where(tables.member.c.id == member_id)
+                    )
+                ).scalar_one()
+            )
+            if self.remote is not None and (shared or member_email is None):
+                raise ValueError("remote eval conversations require one member audience")
             await connection.execute(
                 sa.insert(tables.conversation).values(
                     id=conversation_id,
                     workspace_id=self.workspace_id,
                     agent_id=self.agent_id,
-                    surface=EVAL_SURFACE,
-                    queue_key=f"{EVAL_SURFACE}:{case_name}:{conversation_id}",
+                    surface=REMOTE_SURFACE if self.remote is not None else EVAL_SURFACE,
+                    queue_key=(
+                        f"{member_email}:{conversation_id}"
+                        if self.remote is not None
+                        else f"{EVAL_SURFACE}:{case_name}:{conversation_id}"
+                    ),
                     member_id=None if shared else member_id,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
@@ -437,9 +590,9 @@ class WorkspaceDriver:
         idempotency_key: str | None = None,
         speaker_key: str | None = None,
     ) -> UUID:
-        """Admit one case message as the member who speaks it, through the same `MemberAdmission`
-        every surface admits through — so a case exercises the member path it is written as, seat
-        gate and mid-turn folding included.
+        """Admit one case message as the member who speaks it. A remote driver uses the terminal
+        surface through `ufo --remote --json`; an in-process driver uses the same `MemberAdmission`
+        every surface reaches, including its seat gate and mid-turn folding.
 
         `speaker_key` is that member's email, carried by the case rather than read off the
         conversation: a shared room is unowned (`member_id` is null) yet still has someone talking
@@ -460,6 +613,24 @@ class WorkspaceDriver:
                     )
                 ).scalar_one()
             )
+        if self.remote is not None:
+            if sender is None:
+                raise ValueError("remote eval conversations require a member speaker")
+            try:
+                return await self.remote.admit(
+                    self.workspace_id,
+                    conversation_id,
+                    sender,
+                    message,
+                    self.workflow_wait_seconds,
+                )
+            except RemoteTurnTimeout as error:
+                if error.turn_id is None:
+                    raise RuntimeError(
+                        "ufo remote session timed out before admitting a turn"
+                    ) from error
+                await self._cancel_overdue(conversation_id, error.turn_id)
+                return error.turn_id
         admitter = MemberAdmission(
             admission=Admission(dbos=self.dbos, durable_surfaces=frozenset()),
             workspace_id=self.workspace_id,

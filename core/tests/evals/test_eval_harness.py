@@ -45,6 +45,7 @@ from evals.__main__ import main as eval_main
 from evals.compaction.target import CompactionTarget
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
+    RemoteClient,
     WorkspaceDriver,
     resolve_workspace_and_agent,
     seed_candidate_agent,
@@ -5711,6 +5712,186 @@ async def test_workspace_driver_rejects_an_unknown_member_key(db: None, tmp_path
         await driver.open("missing-member", "missing@eval.invalid")
 
 
+async def test_remote_workspace_driver_uses_the_ufo_json_transport(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    owner_id = await _seed_owner(workspace_id)
+    agent_id = await _seed_agent(workspace_id)
+    turn_id = uuid4()
+    calls: list[dict[str, object]] = []
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, output: bytes, admit: bool = False) -> None:
+            self.output = output
+            self.admit = admit
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            if self.admit:
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.insert(tables.turn).values(
+                            id=turn_id,
+                            workspace_id=workspace_id,
+                            conversation_id=conversation_id,
+                            agent_id=agent_id,
+                            seq=1,
+                            status="done",
+                            inbound="Run it.",
+                            terminal={"status": "done", "text": "Done.", "model": MODEL},
+                            created_at=sa.func.now(),
+                            updated_at=sa.func.now(),
+                        )
+                    )
+            return self.output, b""
+
+    async def spawn(*args, **kwargs) -> Process:
+        if args[1:] == ("--help",):
+            return Process(b"--remote --json\n")
+        env = kwargs["env"]
+        home = Path(env["UFO_HOME"])
+        calls.append(
+            {
+                "args": list(args[1:]),
+                "workspace": env["WORKSPACE_URL"],
+                "channel": env["UFO_CHANNEL"],
+                "credential": (home / "credentials").is_file(),
+            }
+        )
+        return Process(b'{"type":"session_start"}\n{"type":"turn_end"}\n', admit=True)
+
+    monkeypatch.setattr("evals.driver.asyncio.create_subprocess_exec", spawn)
+    remote = RemoteClient(
+        executable="/bin/ufo",
+        workspace_url="http://workspace.test",
+        token_secret="remote-test-secret",
+        home_root=tmp_path / "ufo-home",
+    )
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path / "blobs"),
+        UNCALLED_DBOS,
+        tmp_path / "workspaces",
+        remote=remote,
+    )
+
+    with ws(workspace_id):
+        await remote.validate()
+        conversation_id = await driver.open("remote-case")
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.conversation.c.surface,
+                        tables.conversation.c.queue_key,
+                        tables.conversation.c.member_id,
+                    ).where(tables.conversation.c.id == conversation_id)
+                )
+            ).one()
+        admitted = await driver.admit(conversation_id, "Run it.")
+
+    assert row.surface == "ufo"
+    assert row.queue_key == f"{OWNER_EMAIL}:{conversation_id}"
+    assert row.member_id == owner_id
+    assert admitted == turn_id
+    assert calls == [
+        {
+            "args": [
+                "--remote",
+                "--json",
+                "--resume",
+                str(conversation_id),
+                "Run it.",
+            ],
+            "workspace": "http://workspace.test",
+            "channel": str(conversation_id),
+            "credential": True,
+        }
+    ]
+    assert not (tmp_path / "ufo-home" / str(conversation_id)).exists()
+
+
+async def test_remote_workspace_driver_deadline_stops_the_client_and_cancels_the_turn(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _workspace()
+    await _seed_owner(workspace_id)
+    agent_id = await _seed_agent(workspace_id)
+    turn_id = uuid4()
+
+    class Process:
+        returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=turn_id,
+                        workspace_id=workspace_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        seq=1,
+                        status="running",
+                        inbound="Keep working.",
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            await asyncio.Event().wait()
+            raise AssertionError("the remote client wait must end")
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            assert self.returncode is not None
+            return self.returncode
+
+    async def spawn(*args, **kwargs) -> Process:
+        return Process()
+
+    monkeypatch.setattr("evals.driver.asyncio.create_subprocess_exec", spawn)
+    dbos = CancellingDbos()
+    remote = RemoteClient(
+        executable="/bin/ufo",
+        workspace_url="http://workspace.test",
+        token_secret="remote-test-secret",
+        home_root=tmp_path / "ufo-home",
+    )
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        FilesystemBlobStore(root=tmp_path / "blobs"),
+        cast(DBOSClient, dbos),
+        tmp_path / "workspaces",
+        workflow_wait_seconds=0.01,
+        remote=remote,
+    )
+
+    with ws(workspace_id):
+        conversation_id = await driver.open("remote-deadline")
+        admitted = await driver.admit(conversation_id, "Keep working.")
+
+    assert admitted == turn_id
+    assert dbos.cancelled == [str(turn_id)]
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.terminal).where(
+                    tables.turn.c.id == turn_id
+                )
+            )
+        ).one()
+    assert row.status == "cancelled"
+    assert row.terminal["status"] == "cancelled"
+    assert not (tmp_path / "ufo-home" / str(conversation_id)).exists()
+
+
 @dataclass(frozen=True)
 class RecordedStepsDbos:
     """A workflow whose durable step log is fixed."""
@@ -7029,6 +7210,22 @@ def test_eval_run_is_recorded_without_git(tmp_path, monkeypatch) -> None:
     assert recorded[0].label == "no-git"
     assert recorded[0].revision == "0.1.0"
     assert recorded[0].agent_prompt == "be helpful"
+
+
+def test_remote_eval_flag_reaches_the_suite_runner(tmp_path, monkeypatch) -> None:
+    received: list[bool] = []
+
+    async def run(*args) -> tuple[tuple[EvalReport, ...], str]:
+        received.append(args[-3])
+        return (), "be helpful"
+
+    monkeypatch.setattr("evals.__main__._run", run)
+    monkeypatch.setattr("evals.__main__.load_config", lambda: object())
+    monkeypatch.setattr("evals.__main__.version", lambda _package: "0.1.0")
+
+    eval_main(["--remote", "--out", str(tmp_path)])
+
+    assert received == [True]
 
 
 def test_candidate_arm_labels_the_recorded_run(tmp_path, monkeypatch) -> None:
