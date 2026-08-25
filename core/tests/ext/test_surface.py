@@ -2017,6 +2017,9 @@ async def test_shared_artifacts_reads_a_turns_files_deterministically(db: None, 
         subject="the report",
         media_type="application/pdf",
         size_bytes=3,
+        preview_blob_key="artifacts/x/report.png",
+        preview_media_type="image/png",
+        preview_size_bytes=7,
     )
     data = SharedArtifact(
         blob_key="artifacts/x/data.csv",

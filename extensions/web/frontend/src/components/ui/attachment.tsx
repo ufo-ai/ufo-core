@@ -108,6 +108,7 @@ const ATTACHMENT_BADGES: Record<string, string> = {
   webm: "WEBM",
   mkv: "MKV",
 };
+const DOCUMENT_PREVIEW_TYPES = /\.(pdf|docx|xlsx|pptx|csv|md|svg)$/i;
 
 /** What a card says it is a picture of, or nothing for a file that is its own picture. A rendered
  *  page or a video's first frame is a picture of a document and reads as one only while something
@@ -121,9 +122,10 @@ export function attachmentBadgeFor(filename: string): string | null {
 }
 
 /** One file drawn as the thing it is rather than as its name: a thumbnail card holding the picture,
- *  cover-cropped, so a row of files reads as a row of pictures whatever shape each file is. A file
- *  with no picture — a type nothing renders, a picture the browser could not load — keeps the card
- *  and names itself inside it, so a member always sees one thing per file they attached and the row
+ *  cover-cropped, so a row of files reads as a row of pictures whatever shape each file is. A
+ *  document's first page aligns to the top, so the crop removes only its bottom. A file with no
+ *  picture — a type nothing renders, a picture the browser could not load — keeps the card and
+ *  names itself inside it, so a member always sees one thing per file they attached and the row
  *  never collapses to nothing.
  *
  *  A preview link is answered off the conversation's live workspace, so it can stop answering while
@@ -151,6 +153,7 @@ export function AttachmentThumbnail({
   const drawn = previewUrl !== null && failed !== previewUrl ? previewUrl : null;
   const shimmering = loading && drawn === null;
   const badge = attachmentBadgeFor(filename);
+  const documentPreview = DOCUMENT_PREVIEW_TYPES.test(filename);
   return (
     <div
       data-slot="attachment-thumbnail"
@@ -166,7 +169,12 @@ export function AttachmentThumbnail({
           alt={filename}
           src={drawn}
           onError={() => setFailed(drawn)}
-          className="absolute inset-0 size-full object-cover"
+          className={cn(
+            "absolute",
+            documentPreview
+              ? "inset-x-0 top-0 h-auto w-full"
+              : "inset-0 size-full object-cover",
+          )}
         />
       )}
       {shimmering ? (
@@ -210,7 +218,6 @@ const PICKED_PICTURE_TYPES = /^image\/(gif|jpeg|png|webp)$/;
 // a body over MAX_REQUEST_BYTES (25 MB, `preview` in ufo_ext_web/surface.py), so a file admitted
 // over that is uploaded whole only to earn a 413 and fall back to a bare name.
 const PICKED_RENDER_MAX_BYTES = 25 * 1024 * 1024;
-const PICKED_DOCUMENT_TYPES = /\.(pdf|docx|xlsx|pptx|csv|md|svg)$/i;
 const PICKED_VIDEO_TYPES = /\.(mp4|mov|webm|mkv)$/i;
 
 /** The picture of a file the member has picked but not sent yet.
@@ -242,7 +249,7 @@ function usePickedPicture(file: File): PickedPicture {
       reader.readAsDataURL(blob);
     };
     const rendered =
-      (PICKED_DOCUMENT_TYPES.test(file.name) || PICKED_VIDEO_TYPES.test(file.name)) &&
+      (DOCUMENT_PREVIEW_TYPES.test(file.name) || PICKED_VIDEO_TYPES.test(file.name)) &&
       file.size <= PICKED_RENDER_MAX_BYTES;
     if (PICKED_PICTURE_TYPES.test(file.type) && file.size <= PICKED_PICTURE_MAX_BYTES) {
       setState({ preview: null, loading: false });

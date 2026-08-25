@@ -7608,12 +7608,15 @@ async def test_shared_files_stream_and_reload_as_download_links(
         await connection.execute(
             sa.insert(tables.shared_artifact).values(
                 turn_id=turn_id,
-                blob_key=f"artifacts/{uuid4()}/report.pdf",
+                blob_key=f"artifacts/{uuid4()}/report.md",
                 workspace_id=workspace_id,
-                filename="report.pdf",
+                filename="report.md",
                 subject="the report",
-                media_type="application/pdf",
+                media_type="text/markdown",
                 size_bytes=3,
+                preview_blob_key=f"artifacts/{uuid4()}/report.png",
+                preview_media_type="image/png",
+                preview_size_bytes=7,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -7633,10 +7636,11 @@ async def test_shared_files_stream_and_reload_as_download_links(
         )
     events = dict(await _collect_events(client, token, turn_id))
     streamed = {file["filename"]: file for file in events["files"]["files"]}
-    assert streamed["report.pdf"]["size_bytes"] == 3
-    assert streamed["report.pdf"]["media_type"] == "application/pdf"
-    assert streamed["report.pdf"]["url"].startswith("https://web/artifacts/")
-    assert streamed["report.pdf"]["preview_url"] is None
+    assert streamed["report.md"]["size_bytes"] == 3
+    assert streamed["report.md"]["media_type"] == "text/markdown"
+    assert streamed["report.md"]["url"].startswith("https://web/artifacts/")
+    assert streamed["report.md"]["preview_url"].startswith("https://web/artifacts/")
+    assert "&preview=" in streamed["report.md"]["preview_url"]
     assert streamed["portrait.jpg"]["media_type"] == "image/jpeg"
     assert streamed["portrait.jpg"]["preview_url"].startswith("https://web/artifacts/")
     assert "&preview=" in streamed["portrait.jpg"]["preview_url"]
@@ -7650,10 +7654,10 @@ async def test_shared_files_stream_and_reload_as_download_links(
     reply = payload["messages"][-1]
     assert reply["role"] == "assistant"
     reloaded = {file["filename"]: file for file in reply["files"]}
-    assert reloaded["report.pdf"]["url"].startswith("https://web/artifacts/")
-    assert reloaded["report.pdf"]["size_bytes"] == 3
-    assert reloaded["report.pdf"]["media_type"] == "application/pdf"
-    assert reloaded["report.pdf"]["preview_url"] is None
+    assert reloaded["report.md"]["url"].startswith("https://web/artifacts/")
+    assert reloaded["report.md"]["size_bytes"] == 3
+    assert reloaded["report.md"]["media_type"] == "text/markdown"
+    assert reloaded["report.md"]["preview_url"].startswith("https://web/artifacts/")
     assert reloaded["portrait.jpg"]["media_type"] == "image/jpeg"
     assert reloaded["portrait.jpg"]["preview_url"].startswith("https://web/artifacts/")
 

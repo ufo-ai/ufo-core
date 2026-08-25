@@ -1923,6 +1923,10 @@ test("a turn puts shared images in one carousel before its document grid", async
   expect(documents.children[0].contains(report)).toBe(true);
   expect(documents.children[1].contains(scan)).toBe(true);
   expect(documents.children[2].contains(notes)).toBe(true);
+  expect(reportPreview.className).toContain("top-0");
+  expect(reportPreview.className).toContain("h-auto w-full");
+  expect(reportPreview.className).not.toContain("object-cover");
+  expect(portrait.className).not.toContain("top-0");
   expect(carousel.nextElementSibling).toBe(documents);
 });
 

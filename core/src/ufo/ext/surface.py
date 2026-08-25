@@ -1870,6 +1870,9 @@ class SurfaceContext:
                         tables.shared_artifact.c.subject,
                         tables.shared_artifact.c.media_type,
                         tables.shared_artifact.c.size_bytes,
+                        tables.shared_artifact.c.preview_blob_key,
+                        tables.shared_artifact.c.preview_media_type,
+                        tables.shared_artifact.c.preview_size_bytes,
                     )
                     .where(
                         tables.shared_artifact.c.workspace_id == self.workspace_id,
@@ -1887,6 +1890,9 @@ class SurfaceContext:
                 subject=row.subject,
                 media_type=row.media_type,
                 size_bytes=row.size_bytes,
+                preview_blob_key=row.preview_blob_key,
+                preview_media_type=row.preview_media_type,
+                preview_size_bytes=row.preview_size_bytes,
             )
             for row in rows
         )
