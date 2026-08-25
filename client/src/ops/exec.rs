@@ -18,6 +18,12 @@ const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
 const TRUST_BUNDLE_FILE: &str = "trust-bundle.pem";
 const PEM_LINE_BYTES: usize = 64;
 const X509_OVERRIDE: &str = "x509sslcertoverrideplatform";
+const GH_BASH_ENV: &str = "gh-bash-env";
+const GH_PATH_ENV: &str = "UFO_GH";
+const GH_ORIGINAL_BASH_ENV: &str = "UFO_GH_ORIGINAL_BASH_ENV";
+const GH_BASH_SETUP: &str = r#"if [ -n "${UFO_GH_ORIGINAL_BASH_ENV:-}" ]; then . "$UFO_GH_ORIGINAL_BASH_ENV"; fi
+gh() { "$UFO_GH" "$@"; }
+"#;
 #[cfg(windows)]
 const GH_FILE: &str = "gh.exe";
 #[cfg(not(windows))]
@@ -85,7 +91,7 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
         }
         command.env(name, value);
     }
-    if gh.is_some() {
+    if let Some(gh) = &gh {
         let current = parsed
             .env
             .get("PATH")
@@ -98,6 +104,24 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
         )
         .map_err(|error| format!("could not prepare gh PATH: {error}"))?;
         command.env("PATH", path);
+        let bash_env = workdir.join(GH_BASH_ENV);
+        fs::write(&bash_env, GH_BASH_SETUP)
+            .map_err(|error| format!("could not prepare gh shell: {error}"))?;
+        command.env(GH_PATH_ENV, gh);
+        command.env("BASH_ENV", bash_env);
+        match parsed
+            .env
+            .get("BASH_ENV")
+            .map(std::ffi::OsString::from)
+            .or_else(|| env::var_os("BASH_ENV"))
+        {
+            Some(original) => {
+                command.env(GH_ORIGINAL_BASH_ENV, original);
+            }
+            None => {
+                command.env_remove(GH_ORIGINAL_BASH_ENV);
+            }
+        }
     }
     if let Some(cert) = parsed.env.get(CA_CERT_ENV) {
         let bundle = workdir.join(TRUST_BUNDLE_FILE);
@@ -188,6 +212,9 @@ fn materialize_gh(workdir: &Path) -> Result<PathBuf, String> {
     let path = workdir.join(GH_FILE);
     fs::write(workdir.join(GH_LICENSE_FILE), GH_LICENSE)
         .map_err(|error| format!("could not write bundled gh license: {error}"))?;
+    if path.is_file() {
+        return Ok(path);
+    }
     let mut file =
         File::create(&path).map_err(|error| format!("could not create bundled gh: {error}"))?;
     io::copy(&mut GzDecoder::new(GH_ARCHIVE), &mut file)
@@ -452,28 +479,55 @@ mod tests {
 
     #[cfg(all(unix, debug_assertions))]
     #[test]
-    fn shell_uses_bundled_gh_with_the_operation_bundle() {
+    fn login_shell_uses_bundled_gh_after_replacing_path() {
         let dir = scratch("gh");
-        let reply = run(
-            r#"{"argv":["/bin/sh","-c","printf '%s\\n' \"$(command -v gh)\"; gh"],"env":{"GODEBUG":"http2debug=1","UFO_EGRESS_CA_CERT":"-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"}}"#,
-            &dir,
-            Path::new("/tmp"),
-            30,
-        )
-        .unwrap();
+        let original_bash_env = dir.join("member-bash-env");
+        fs::write(&original_bash_env, "export UFO_MEMBER_ENV=present\n").unwrap();
+        let params = serde_json::json!({
+            "argv": [
+                "/bin/sh",
+                "-c",
+                "exec bash -c \"$1\" bash \"$2\"",
+                "sh",
+                "bash -lc \"$1\"",
+                "PATH=/usr/bin:/bin; printf '%s:%s:' \"$UFO_MEMBER_ENV\" \"$(type -t gh)\"; gh"
+            ],
+            "env": {
+                "BASH_ENV": original_bash_env,
+                "GODEBUG": "http2debug=1",
+                "UFO_EGRESS_CA_CERT": "-----BEGIN CERTIFICATE-----\nEGRESSCA\n-----END CERTIFICATE-----\n"
+            }
+        })
+        .to_string();
+        let reply = run(&params, &dir, Path::new("/tmp"), 30).unwrap();
         let result = parsed(&reply);
         assert_eq!(result["exit_code"], 0);
         let stdout = String::from_utf8(decoded(&result, "stdout_b64")).unwrap();
         assert_eq!(
             stdout,
-            format!(
-                "{}\nufo-gh-test:http2debug=1,x509sslcertoverrideplatform=1",
-                dir.join("gh").display()
-            )
+            "present:function:ufo-gh-test:http2debug=1,x509sslcertoverrideplatform=1"
         );
         assert!(fs::read_to_string(dir.join(GH_LICENSE_FILE))
             .unwrap()
             .contains("Copyright (c) 2019 GitHub Inc."));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reuses_materialized_gh_while_it_is_running() {
+        let current = std::env::current_exe().unwrap();
+        let dir = current
+            .parent()
+            .unwrap()
+            .join(format!("ufo-exec-test-{}-running-gh", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(GH_FILE);
+        fs::hard_link(current, &path).unwrap();
+
+        let result = materialize_gh(&dir);
+
+        assert_eq!(result.unwrap(), path);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(all(unix, not(debug_assertions)))]
