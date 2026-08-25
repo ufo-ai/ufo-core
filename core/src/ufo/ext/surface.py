@@ -40,6 +40,7 @@ from enum import StrEnum
 from secrets import token_hex
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -123,6 +124,7 @@ from ufo.schema.records import (
     TurnAdmissionSource,
     TurnContext,
 )
+from ufo.sdk.http import cookie_secure
 from ufo.seats import SeatEntry, Seats, create_member, email_domain, workspace_domain
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry, SystemSkillBundle
 from ufo.sources.backend import ConnectorSourceConfig, binding_name
@@ -1852,6 +1854,13 @@ class SurfaceContext:
         """The deploy's public base (`[connect] public_base_url`), or None when unset — a
         channel's callback URL (Slack's Events request URL) renders from it."""
         return self._public_base_url
+
+    @property
+    def cookie_secure(self) -> bool:
+        """Whether a surface of this deploy may mark its session cookie `Secure`. Read off the
+        published base rather than the request every surface handler holds, so one deploy-wide
+        fact answers every surface that binds a session."""
+        return cookie_secure(urlsplit(self._public_base_url or "").scheme)
 
     def home_url(self, fragment: str = "") -> str | None:
         """A link into the deploy's browser portal, or None when this deploy has no public base or

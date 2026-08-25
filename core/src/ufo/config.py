@@ -230,10 +230,12 @@ class SandboxConfig(BaseModel):
         while `SurfaceContext.ingress_url` puts a label in front of `netloc` — and they agree only
         while the value carries no path, query, fragment, or userinfo: a path would be dropped from
         every minted link without a word, and userinfo would ride into the hostname the label goes
-        in front of. `https` is required for a separate reason: the session cookie the ingress binds
-        is `Secure`, so a plain-http base would boot green and 403 every visit. The hosts exempt
-        are `localhost` and its subdomains: browsers resolve `*.localhost` to the loopback and
-        treat it as trustworthy, so a zero-services dev run serves sites with no certificate. The
+        in front of. `https` is required for a separate reason: a site holds a member's session, and
+        a public deploy handing that over plain http hands it to the network. The hosts exempt are
+        `localhost` and its subdomains, which never leave the machine: browsers resolve
+        `*.localhost` to the loopback, so a zero-services dev run serves sites with no
+        certificate — and the session cookie the ingress binds gives up `Secure` for exactly that
+        base, because a browser stores no `Secure` cookie a plain-http origin sent. The
         dev base is a subdomain (`ufo.localhost`), not the bare host, for a same-site reason: a
         browser reads the registrable domain of `label.ufo.localhost` and of the portal's
         `ufo.localhost` as one site, so the frame's `Lax` session cookie flows exactly as a
@@ -249,9 +251,9 @@ class SandboxConfig(BaseModel):
         if not base.hostname or (base.scheme != "https" and not plain_local):
             raise ValueError(
                 "sandbox.ingress_public_url must be an https base with a host "
-                "(e.g. https://example.com) — a site's session cookie is `Secure`, so a "
-                "plain-http origin can never carry one. http is allowed for the one host "
-                "browsers treat as trustworthy without it: localhost"
+                "(e.g. https://example.com) — a site carries a member's session, and plain http "
+                "hands it to the network. http is allowed for the one host that never leaves "
+                "the machine: localhost"
             )
         if base.path or base.query or base.fragment or base.username or base.password:
             raise ValueError(

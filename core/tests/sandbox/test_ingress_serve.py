@@ -344,6 +344,7 @@ def _server(
     frame_ancestor: str = APP_ORIGIN,
     resume: Mapping[str, tuple[Carrier, CarrierSpec]] | None = None,
     blob: FilesystemBlobStore = UNREAD_BLOBS,
+    site_scheme: str = "https",
 ) -> IngressServe:
     """Annotated as the `Carrier` it stands in for, with no suppression: a stub that drifts from the
     protocol it fakes stops standing in for the dependency, and mypy is what catches the drift."""
@@ -354,7 +355,7 @@ def _server(
         client=upstream,
         blob=blob,
         frame_ancestor=frame_ancestor,
-        site_scheme="https",
+        site_scheme=site_scheme,
         site_port_suffix="",
         resume_carriers=resume if resume is not None else {},
     )
@@ -455,6 +456,32 @@ async def test_the_view_token_binds_a_session_and_redirects_to_the_site_root(db,
     assert cookie.startswith(f"{INGRESS_SESSION_COOKIE}=")
     assert "HttpOnly" in cookie and "Secure" in cookie and "domain" not in cookie.lower()
     assert "samesite=lax" in cookie.lower()
+
+
+async def test_a_plain_http_deploy_binds_a_session_the_browser_will_keep(
+    db, origin_port: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A browser stores no `Secure` cookie sent by a plain-http origin, so a deploy that publishes
+    one would bind a session that is dropped on arrival and answer every request after it with
+    "this link is no longer valid". The attribute follows the scheme the deploy publishes: the one
+    base the config gate lets be plain http is `*.localhost`, which is where a local stack serves
+    its sites from."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    token = _token(workspace_id, conversation_id)
+    async with upstream_client() as upstream:
+        server = _server(_StubCarrier(origin_port), upstream, site_scheme="http")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            got = await client.get(
+                f"http://{site_label(conversation_id, 8000)}.{BASE_HOST}{INGRESS_VIEW_PATH}/{token}"
+            )
+    assert got.status_code == 303
+    cookie = got.headers["set-cookie"]
+    assert cookie.startswith(f"{INGRESS_SESSION_COOKIE}=")
+    assert "Secure" not in cookie
+    # Everything else the attribute does not touch stands: the session is still the browser's
+    # alone and still host-only.
+    assert "HttpOnly" in cookie and "domain" not in cookie.lower()
 
 
 async def test_the_view_token_lands_the_viewer_on_the_path_the_frame_named(db, ingress) -> None:

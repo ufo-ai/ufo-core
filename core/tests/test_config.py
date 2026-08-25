@@ -210,10 +210,10 @@ def test_background_jobs_model_rejects_the_auto_sentinel_and_the_empty_value(
 
 def test_ingress_public_url_must_be_a_full_https_base(tmp_path: Path) -> None:
     """Every site's address is built by putting a label in front of this host, so a bare hostname or
-    a path-only value would mint links to nowhere. `http` is refused for a reason of its own: the
-    session cookie the ingress binds is `Secure`, so a plain-http origin can never carry one and
-    every visit would 403 after booting green. The one exempt host is `localhost` — browsers treat
-    `http://*.localhost` as trustworthy, so a zero-services dev run serves sites with no
+    a path-only value would mint links to nowhere. `http` is refused for a reason of its own: a
+    site carries a member's session, and a public deploy serving it over plain http hands that to
+    the network. The one exempt host is `localhost`, which never leaves the machine — browsers
+    resolve `http://*.localhost` to the loopback, so a zero-services dev run serves sites with no
     certificate. Caught at load, not at the first site."""
     path = tmp_path / "ufo.toml"
     for rejected in ("sites.example.com", "http://sites.example.com", "ws://sites.example.com"):

@@ -121,7 +121,13 @@ async def bind_operator_session(ctx: SurfaceContext, request: Request) -> Respon
     if not isinstance(posted, str) or not posted.strip():
         return JSONResponse({"error": "token form field is required"}, status_code=400)
     response = RedirectResponse(str(request.url), status_code=303)
-    set_session_cookie(response, OPERATOR_COOKIE, posted.strip(), samesite="lax")
+    set_session_cookie(
+        response,
+        OPERATOR_COOKIE,
+        posted.strip(),
+        samesite="lax",
+        secure=ctx.cookie_secure,
+    )
     return response
 
 

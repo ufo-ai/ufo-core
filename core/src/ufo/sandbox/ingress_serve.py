@@ -71,7 +71,7 @@ from ufo.sandbox.session import (
     sandbox_handle_id,
 )
 from ufo.schema import tables
-from ufo.sdk.http import set_session_cookie
+from ufo.sdk.http import cookie_secure, set_session_cookie
 from ufo.workspace import ws
 
 HOP_BY_HOP_HEADERS = frozenset(
@@ -389,7 +389,13 @@ class IngressServe:
         if claims.shipped is not None:
             target = f"{target}?{SHIPPED_VERSION_PARAM}={claims.shipped.digest}"
         response = RedirectResponse(target, status_code=303)
-        set_session_cookie(response, INGRESS_SESSION_COOKIE, session, samesite="lax")
+        set_session_cookie(
+            response,
+            INGRESS_SESSION_COOKIE,
+            session,
+            samesite="lax",
+            secure=cookie_secure(self.site_scheme),
+        )
         return response
 
     def _site(self, request: HTTPConnection) -> tuple[UUID, int] | None:

@@ -564,7 +564,13 @@ async def open_session(ctx: SurfaceContext, request: Request) -> Response:
     if not TOKEN_SHAPE.fullmatch(posted.strip()):
         return JSONResponse({"error": "malformed token"}, status_code=400)
     response = RedirectResponse(str(request.url), status_code=303)
-    set_session_cookie(response, SESSION_COOKIE, posted.strip(), samesite="lax")
+    set_session_cookie(
+        response,
+        SESSION_COOKIE,
+        posted.strip(),
+        samesite="lax",
+        secure=ctx.cookie_secure,
+    )
     return response
 
 

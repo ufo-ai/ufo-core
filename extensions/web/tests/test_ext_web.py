@@ -11151,6 +11151,58 @@ async def test_a_sandbox_size_refuses_where_the_deploy_offers_none(
     assert turns == 0
 
 
+@pytest.mark.parametrize(
+    ("base", "secure"),
+    [("https://portal.example", True), ("http://ufo.localhost:8710", False)],
+)
+async def test_the_session_cookie_is_secure_where_the_portal_publishes_https(
+    db: None,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+    base: str,
+    secure: bool,
+) -> None:
+    """A browser stores no `Secure` cookie sent by a plain-http origin. A local stack publishes
+    one, so a portal that marked the attribute regardless would bind a session the browser drops
+    and answer the redirect it just sent with the sign-in page again.
+
+    The scheme comes off the published base, never the request: a deploy terminates TLS at its
+    ingress, so every request reaches the portal as plain http while the origin the browser holds
+    is https."""
+    config, hub, blob, sandboxes = dbos_runtime
+    monkeypatch.setenv("UFO_TOKEN_SECRET", TOKEN_SECRET)
+    dbos_client = replay_safe_client(config.database.system_url)
+    workspace_id, _agent_id = await _seed_workspace()
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (web_manifest(),),
+        None,
+        blob,
+        sandboxes,
+        hub,
+        dbos_client,
+        SECRET,
+        base,
+        None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
+        surface_model=lambda _name: SURFACE_MODEL[0],
+        skills=EMPTY_SKILL_REGISTRY,
+        member_skill_listing=no_member_skills,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=base) as client:
+        opened = await client.post("/surface/web", data={"token": token})
+    dbos_client.destroy()
+    assert opened.status_code == 303
+    cookie = opened.headers["set-cookie"]
+    assert cookie.startswith(f"{SESSION_COOKIE}=")
+    assert ("Secure" in cookie) is secure
+    # The attributes that do not follow the scheme stand either way.
+    assert "HttpOnly" in cookie and "domain" not in cookie.lower()
+
+
 async def test_a_sizes_offering_deploy_draws_the_sandbox_size_setting(
     db: None,
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
