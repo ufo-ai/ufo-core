@@ -263,6 +263,7 @@ module = [
     "lz4.*",
     "mammoth",
     "pdfplumber",
+    "harbor.*",
     "pyarrow",
     "pyarrow.*",
 ]

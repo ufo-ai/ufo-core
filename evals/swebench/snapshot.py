@@ -11,7 +11,6 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from evals.swebench.models import (
-    APPROVED_CASE_IDS,
     SnapshotFile,
     SnapshotManifest,
     SWEbenchCase,
@@ -53,21 +52,24 @@ def verify_source(source: bytes, upstream: SWEbenchUpstream = SWEBENCH_UPSTREAM)
         )
 
 
-def select_cases(rows: Iterable[Mapping[str, object]]) -> tuple[SWEbenchCase, ...]:
+def select_cases(
+    rows: Iterable[Mapping[str, object]], upstream: SWEbenchUpstream = SWEBENCH_UPSTREAM
+) -> tuple[SWEbenchCase, ...]:
+    """Order the approved rows as the roster names them, refusing any other membership."""
+    approved_ids = upstream.subsets.all_ids
     cases = tuple(SWEbenchCase.model_validate(row) for row in rows)
     case_ids = tuple(case.instance_id for case in cases)
     duplicates = sorted(case_id for case_id in set(case_ids) if case_ids.count(case_id) > 1)
     if duplicates:
         raise ValueError(f"duplicate SWE-bench selected instance ids: {', '.join(duplicates)}")
-    approved = set(APPROVED_CASE_IDS)
-    unknown = sorted(set(case_ids) - approved)
+    unknown = sorted(set(case_ids) - set(approved_ids))
     if unknown:
         raise ValueError(f"unknown SWE-bench selected instance ids: {', '.join(unknown)}")
-    missing = tuple(case_id for case_id in APPROVED_CASE_IDS if case_id not in case_ids)
+    missing = tuple(case_id for case_id in approved_ids if case_id not in case_ids)
     if missing:
         raise ValueError(f"missing SWE-bench selected instance ids: {', '.join(missing)}")
     by_id = {case.instance_id: case for case in cases}
-    return tuple(by_id[case_id] for case_id in APPROVED_CASE_IDS)
+    return tuple(by_id[case_id] for case_id in approved_ids)
 
 
 def write_snapshot(
@@ -75,16 +77,16 @@ def write_snapshot(
     cases: tuple[SWEbenchCase, ...],
     upstream: SWEbenchUpstream = SWEBENCH_UPSTREAM,
 ) -> Path:
-    _validate_cases(cases)
+    _validate_cases(cases, upstream.subsets.all_ids)
     if output.exists() and not output.is_symlink():
         raise ValueError(f"SWE-bench snapshot output must be a symbolic link: {output}")
     payload = b"".join(canonical_json(case) + b"\n" for case in cases)
     case_file = SnapshotFile(sha256=content_digest(payload))
     manifest = SnapshotManifest(
-        digest=_snapshot_digest(upstream, case_file, APPROVED_CASE_IDS),
+        digest=_snapshot_digest(upstream, case_file, upstream.subsets.all_ids),
         upstream=upstream,
         cases=case_file,
-        case_ids=APPROVED_CASE_IDS,
+        case_ids=upstream.subsets.all_ids,
     )
     versions = output.parent / f"{output.name}.versions"
     if versions.is_symlink():
@@ -140,7 +142,7 @@ def _load_snapshot_version(version: Path, *, require_digest_path: bool = True) -
     if content_digest(payload) != manifest.cases.sha256:
         raise ValueError("SWE-bench case records do not match the snapshot manifest")
     cases = tuple(SWEbenchCase.model_validate_json(line) for line in payload.splitlines())
-    _validate_cases(cases)
+    _validate_cases(cases, manifest.upstream.subsets.all_ids)
     if manifest.case_ids != tuple(case.instance_id for case in cases):
         raise ValueError("SWE-bench snapshot cases do not use manifest order")
     expected_digest = _snapshot_digest(manifest.upstream, manifest.cases, manifest.case_ids)
@@ -161,14 +163,13 @@ def _snapshot_digest(
     return content_digest(payload)
 
 
-def _validate_cases(cases: tuple[SWEbenchCase, ...]) -> None:
-    if len(cases) != len(APPROVED_CASE_IDS):
+def _validate_cases(cases: tuple[SWEbenchCase, ...], approved_ids: tuple[str, ...]) -> None:
+    if len(cases) != len(approved_ids):
         raise ValueError(
-            f"SWE-bench snapshot requires exactly {len(APPROVED_CASE_IDS)} cases, "
-            f"found {len(cases)}"
+            f"SWE-bench snapshot requires exactly {len(approved_ids)} cases, found {len(cases)}"
         )
     case_ids = tuple(case.instance_id for case in cases)
-    if case_ids != APPROVED_CASE_IDS:
+    if case_ids != approved_ids:
         raise ValueError("SWE-bench snapshot cases do not use the approved order")
 
 

@@ -1,0 +1,105 @@
+import asyncio
+import os
+import shlex
+import tempfile
+from pathlib import Path
+from typing import override
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
+from harbor.environments.base import BaseEnvironment
+from harbor.models.agent.context import AgentContext
+
+CLIENT_TARGET = "/installed-agent/ufo"
+HOME_TARGET = "/installed-agent/home"
+CREDENTIALS_TARGET = f"{HOME_TARGET}/credentials"
+
+
+def _required_environment(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} is required")
+    return value
+
+
+class UfoAgent(BaseInstalledAgent):
+    """Install the native client and run one turn inside Harbor's graded environment."""
+
+    _workspace_url: str
+    _workspace_host: str
+
+    @staticmethod
+    @override
+    def name() -> str:
+        return "ufo"
+
+    @override
+    async def install(self, environment: BaseEnvironment) -> None:
+        client = await asyncio.to_thread(Path(_required_environment("UFO_BENCH_CLIENT")).resolve)
+        token = _required_environment("UFO_BENCH_TOKEN")
+        workspace_url = _required_environment("UFO_BENCH_WORKSPACE_URL")
+        parsed = urlsplit(workspace_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("UFO_BENCH_WORKSPACE_URL must be a public HTTPS URL")
+        if not await asyncio.to_thread(client.is_file):
+            raise FileNotFoundError(f"Terminal-Bench client is missing: {client}")
+        if not await asyncio.to_thread(os.access, client, os.X_OK):
+            raise PermissionError(f"Terminal-Bench client is not executable: {client}")
+        self._workspace_url = workspace_url
+        self._workspace_host = parsed.hostname
+
+        await environment.upload_file(client, CLIENT_TARGET)
+        await self.exec_as_root(environment, command=f"mkdir -p {shlex.quote(HOME_TARGET)}")
+        descriptor, temporary_name = await asyncio.to_thread(
+            tempfile.mkstemp, prefix="ufo-bench-credentials-"
+        )
+        credentials = Path(temporary_name)
+        try:
+            await asyncio.to_thread(os.close, descriptor)
+            await asyncio.to_thread(credentials.write_text, token, encoding="utf-8")
+            await environment.upload_file(credentials, CREDENTIALS_TARGET)
+        finally:
+            await asyncio.to_thread(credentials.unlink, missing_ok=True)
+
+        owner = shlex.quote(
+            str(environment.default_user) if environment.default_user is not None else "root"
+        )
+        await self.exec_as_root(
+            environment,
+            command=(
+                f"chown -R {owner} {shlex.quote(HOME_TARGET)} {shlex.quote(CLIENT_TARGET)} && "
+                f"chmod 700 {shlex.quote(HOME_TARGET)} && "
+                f"chmod 600 {shlex.quote(CREDENTIALS_TARGET)} && "
+                f"chmod 755 {shlex.quote(CLIENT_TARGET)}"
+            ),
+        )
+        await self.exec_as_agent(
+            environment, command=f"{shlex.quote(CLIENT_TARGET)} --help >/dev/null"
+        )
+
+    @override
+    @with_prompt_template
+    async def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        if environment.context_id is None:
+            raise RuntimeError("Harbor environment context_id is required")
+        channel = f"{environment.context_id.hex}-{uuid4().hex[:12]}"
+        context.metadata = {
+            "channel": channel,
+            "client_target": CLIENT_TARGET,
+            "workspace_host": self._workspace_host,
+        }
+        await self.exec_as_agent(
+            environment,
+            command=shlex.join((CLIENT_TARGET, "--json", instruction)),
+            env={
+                "UFO_HOME": HOME_TARGET,
+                "WORKSPACE_URL": self._workspace_url,
+                "UFO_CHANNEL": channel,
+            },
+        )

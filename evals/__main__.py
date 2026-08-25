@@ -21,7 +21,7 @@ import webbrowser
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -127,6 +127,9 @@ from evals.swebench.runner import (
     SNAPSHOT_ROOT as SWEBENCH_SNAPSHOT_ROOT,
 )
 from evals.swebench.runner import (
+    SUBSETS as SWEBENCH_SUBSETS,
+)
+from evals.swebench.runner import (
     SWEBENCH_PACKS,
     load_swebench,
     new_submissions_root,
@@ -134,6 +137,9 @@ from evals.swebench.runner import (
 from evals.swebench.runner import (
     WORKFLOW_WAIT_SECONDS as SWEBENCH_WORKFLOW_WAIT_SECONDS,
 )
+from evals.terminal_bench.run import CLIENT as TERMINAL_BENCH_CLIENT
+from evals.terminal_bench.run import BenchCredentials, TerminalBenchRun
+from evals.terminal_bench.setup import DEFAULT_ROOT as TERMINAL_BENCH_ROOT
 from evals.turn_logs import TurnLogCollector
 from evals.wandr.runner import (
     SUBMISSIONS_ROOT as WANDR_SUBMISSIONS_ROOT,
@@ -152,7 +158,7 @@ from evals.wandr.runner import (
 )
 from ufo.access.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.agent_scope import agent
-from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -187,6 +193,7 @@ MCP_ATLAS_URL_ENV = "MCP_ATLAS_URL"
 MCP_ATLAS_EXTERNAL_URL_ENV = "MCP_ATLAS_EXTERNAL_URL"
 MCP_ATLAS_TIMEOUT_SECONDS = 1_800.0
 UFO_APP_TASKS = ("ufo-app-bench", "ufo-app-copy")
+TERMINAL_BENCH_TOKEN_TTL = timedelta(days=1)
 
 
 def _task_workflow_wait_seconds(tasks: tuple[EvalTask, ...]) -> float:
@@ -195,6 +202,38 @@ def _task_workflow_wait_seconds(tasks: tuple[EvalTask, ...]) -> float:
     if tasks and all(task.name in UFO_APP_TASKS for task in tasks):
         return UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
     return WORKFLOW_WAIT_SECONDS
+
+
+async def _terminal_bench_credentials(
+    config: Config, workspace_id: UUID, root: Path
+) -> BenchCredentials:
+    """Mint the member bearer a remote Harbor task uses to reach one workspace."""
+    public_url = config.connect.public_base_url
+    if public_url is None:
+        raise ValueError("Terminal-Bench remote runs require connect.public_base_url")
+    secret = os.environ.get(UFO_TOKEN_SECRET_ENV)
+    if not secret:
+        raise ValueError(f"Terminal-Bench remote runs require {UFO_TOKEN_SECRET_ENV}")
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            email = (
+                await connection.execute(
+                    sa.select(tables.member.c.email)
+                    .where(
+                        tables.member.c.workspace_id == workspace_id,
+                        tables.member.c.is_admin.is_(True),
+                    )
+                    .order_by(tables.member.c.created_at)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+    if email is None:
+        raise ValueError(f"workspace {workspace_id} has no admin member")
+    return BenchCredentials(
+        client=(root / TERMINAL_BENCH_CLIENT).resolve(),
+        token=mint_token(secret, str(workspace_id), email, TERMINAL_BENCH_TOKEN_TTL),
+        workspace_url=public_url,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -233,7 +272,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--remote",
         action="store_true",
-        help="admit suite turns through ufo --remote --json",
+        help="run against the configured remote execution boundary",
     )
     parser.add_argument("--s3-bucket", help="private bucket override for --share")
     parser.add_argument("--s3-region", help="S3 region for --share")
@@ -276,8 +315,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--swebench",
         action="store_true",
-        help="run the pinned SWE-bench Verified smoke set",
+        help="run the pinned SWE-bench Verified roster",
     )
+    parser.add_argument("--swebench-subset", choices=(*SWEBENCH_SUBSETS, "all"))
     parser.add_argument(
         "--swebench-case",
         action="append",
@@ -294,6 +334,18 @@ def main(argv: list[str] | None = None) -> None:
         "--swebench-submissions",
         type=Path,
         default=None,
+        metavar="DIR",
+    )
+    parser.add_argument(
+        "--terminal-bench",
+        action="store_true",
+        help="run the pinned Terminal-Bench 3 roster through remote Harbor environments",
+    )
+    parser.add_argument("--terminal-bench-case", action="append", default=[], metavar="CASE")
+    parser.add_argument(
+        "--terminal-bench-root",
+        type=Path,
+        default=TERMINAL_BENCH_ROOT,
         metavar="DIR",
     )
     parser.add_argument("--jobbench", type=Path, metavar="SNAPSHOT")
@@ -376,10 +428,20 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--handbook-ingest requires --handbook")
     if args.coding_repo_case and not args.coding_repo:
         parser.error("--coding-repo-case requires --coding-repo")
-    if args.swebench_case and not args.swebench:
-        parser.error("--swebench-case requires --swebench")
+    if (args.swebench_subset is not None or args.swebench_case) and not args.swebench:
+        parser.error("--swebench-subset and --swebench-case require --swebench")
+    if args.swebench and args.swebench_subset is None and not args.swebench_case:
+        parser.error("--swebench requires --swebench-subset or --swebench-case")
     if args.swebench and args.swebench_submissions is None:
         args.swebench_submissions = new_submissions_root()
+    if args.terminal_bench_case and not args.terminal_bench:
+        parser.error("--terminal-bench-case requires --terminal-bench")
+    if args.terminal_bench and not args.remote:
+        parser.error("--terminal-bench requires --remote")
+    if args.terminal_bench and args.workspace is None:
+        parser.error("--terminal-bench requires --workspace")
+    if args.terminal_bench and (names or args.case):
+        parser.error("Terminal-Bench is a separate eval run")
     if args.skill_loading_case and "skill_loading" not in names:
         parser.error("--skill-loading-case requires --only skill_loading")
     if (args.wandr_subset is not None or args.wandr_case) and args.wandr is None:
@@ -401,6 +463,7 @@ def main(argv: list[str] | None = None) -> None:
             args.handbook,
             args.coding_repo or None,
             args.swebench or None,
+            args.terminal_bench or None,
         )
     )
     if requested_runs > 1:
@@ -409,6 +472,27 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(
             "--candidate-from-proposal runs the capability/scenario suites, not a corpus eval"
         )
+    if args.terminal_bench:
+        config = load_config()
+        init_db(config.database.url)
+        try:
+            try:
+                credentials = asyncio.run(
+                    _terminal_bench_credentials(config, args.workspace, args.terminal_bench_root)
+                )
+            finally:
+                asyncio.run(dispose_db())
+            status = TerminalBenchRun(
+                root=args.terminal_bench_root,
+                cases=tuple(args.terminal_bench_case),
+                concurrency=args.concurrency,
+                credentials=credentials,
+            ).run()
+        except (OSError, ValueError, ValidationError) as error:
+            parser.error(str(error))
+        if status:
+            raise SystemExit(status)
+        return
     memory_run: Memory100Run | None = None
     if args.memory_100 is not None and args.memory_100_state is not None:
         memory_run = load_memory_100(args.memory_100, args.memory_100_state)
@@ -452,6 +536,7 @@ def main(argv: list[str] | None = None) -> None:
                 tuple(args.swebench_case),
                 args.swebench_snapshot,
                 args.swebench_submissions,
+                None if args.swebench_subset == "all" else args.swebench_subset,
             )
             if args.swebench
             else None

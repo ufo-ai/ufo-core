@@ -1,13 +1,15 @@
 import gzip
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from evals.swebench import build
 from evals.swebench.build import build_snapshot
-from evals.swebench.models import SWEbenchCase
+from evals.swebench.models import SubsetSelection, SWEbenchCase
 from evals.swebench.snapshot import (
     CASES_FILE,
     MANIFEST_FILE,
@@ -17,11 +19,41 @@ from evals.swebench.snapshot import (
     write_snapshot,
 )
 
-EXPECTED_IDS = (
+SMOKE_IDS = (
     "django__django-10097",
     "sympy__sympy-20590",
     "scikit-learn__scikit-learn-25102",
 )
+HILLCLIMB_IDS = (
+    "django__django-16877",
+    "sympy__sympy-21612",
+    "sphinx-doc__sphinx-7440",
+    "matplotlib__matplotlib-24570",
+    "scikit-learn__scikit-learn-11578",
+    "astropy__astropy-7336",
+    "pydata__xarray-4629",
+    "pytest-dev__pytest-6197",
+    "pylint-dev__pylint-7080",
+    "psf__requests-1921",
+)
+HOLDOUT_IDS = (
+    "mwaskom__seaborn-3069",
+    "pallets__flask-5014",
+    "django__django-15022",
+    "sympy__sympy-11618",
+    "sphinx-doc__sphinx-8621",
+    "matplotlib__matplotlib-24870",
+    "scikit-learn__scikit-learn-10297",
+    "astropy__astropy-12907",
+    "pydata__xarray-4075",
+    "pytest-dev__pytest-5840",
+)
+HARD_IDS = (
+    "pydata__xarray-6992",
+    "sphinx-doc__sphinx-7590",
+    "sympy__sympy-13878",
+)
+EXPECTED_IDS = SMOKE_IDS + HILLCLIMB_IDS + HOLDOUT_IDS + HARD_IDS
 EXPECTED_COLUMNS = (
     "repo",
     "instance_id",
@@ -50,12 +82,16 @@ def _row(instance_id: str, index: int) -> dict[str, str]:
         "test_patch": f"diff --git a/test{index}.py b/test{index}.py\n",
         "problem_statement": f"Fix regression {index}.",
         "hints_text": f"Hint {index}",
-        "created_at": f"2024-01-0{index + 1}T00:00:00Z",
+        "created_at": f"2024-01-01T00:00:{index:02d}Z",
         "version": f"{index + 1}.0",
         "FAIL_TO_PASS": json.dumps([f"test_fails_{index}"]),
         "PASS_TO_PASS": json.dumps([f"test_passes_{index}"]),
-        "environment_setup_commit": f"{index + 4:040x}",
-        "difficulty": ("<15 min fix", "15 min - 1 hour", "1-4 hours")[index % 3],
+        "environment_setup_commit": f"{index + 100:040x}",
+        "difficulty": (
+            ">4 hours"
+            if instance_id in HARD_IDS
+            else ("<15 min fix", "15 min - 1 hour", "1-4 hours")[index % 3]
+        ),
     }
 
 
@@ -63,7 +99,7 @@ def _rows() -> tuple[dict[str, str], ...]:
     return tuple(_row(instance_id, index) for index, instance_id in enumerate(EXPECTED_IDS))
 
 
-def test_upstream_pin_and_smoke_roster_are_exact() -> None:
+def test_upstream_pin_and_subset_roster_are_exact() -> None:
     upstream = load_upstream()
     assert upstream.dataset == "princeton-nlp/SWE-bench_Verified"
     assert upstream.revision == "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"
@@ -75,7 +111,51 @@ def test_upstream_pin_and_smoke_roster_are_exact() -> None:
     assert upstream.parquet.rows == 500
     assert tuple(column.name for column in upstream.parquet.columns) == EXPECTED_COLUMNS
     assert tuple(column.arrow_type for column in upstream.parquet.columns) == ("string",) * 13
-    assert upstream.smoke_case_ids == EXPECTED_IDS
+    assert upstream.subsets.seed == "swebench-hillclimb-2026-08-22"
+    assert upstream.subsets.smoke == SMOKE_IDS
+    assert upstream.subsets.hillclimb == HILLCLIMB_IDS
+    assert upstream.subsets.holdout == HOLDOUT_IDS
+    assert upstream.subsets.hard == HARD_IDS
+    assert upstream.subsets.all_ids == EXPECTED_IDS
+
+
+def test_subset_accessors_name_every_case() -> None:
+    subsets = load_upstream().subsets
+    assert subsets.ids("smoke") == SMOKE_IDS
+    assert subsets.ids("hillclimb") == HILLCLIMB_IDS
+    assert subsets.ids("holdout") == HOLDOUT_IDS
+    assert subsets.ids("hard") == HARD_IDS
+    assert subsets.subset_of(SMOKE_IDS[0]) == "smoke"
+    assert subsets.subset_of(HILLCLIMB_IDS[4]) == "hillclimb"
+    assert subsets.subset_of(HOLDOUT_IDS[9]) == "holdout"
+    assert subsets.subset_of(HARD_IDS[2]) == "hard"
+    with pytest.raises(ValueError, match="unknown SWE-bench instance id"):
+        subsets.subset_of("pallets__flask-99999")
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    (
+        ({"smoke": SMOKE_IDS[::-1]}, "smoke case ids must use the approved order"),
+        ({"hillclimb": HILLCLIMB_IDS[:9]}, "hillclimb subset requires 10 case ids, found 9"),
+        ({"holdout": (*HOLDOUT_IDS[:9], HILLCLIMB_IDS[0])}, "subsets must be disjoint"),
+        ({"hard": HARD_IDS[:2]}, "hard subset requires 3 case ids, found 2"),
+        ({"hillclimb": (*HILLCLIMB_IDS[:9], "not-an-instance")}, "String should match pattern"),
+    ),
+)
+def test_subset_selection_rejects_roster_drift(
+    override: Mapping[str, tuple[str, ...]], message: str
+) -> None:
+    fields = {
+        "seed": "swebench-hillclimb-2026-08-22",
+        "smoke": SMOKE_IDS,
+        "hillclimb": HILLCLIMB_IDS,
+        "holdout": HOLDOUT_IDS,
+        "hard": HARD_IDS,
+        **override,
+    }
+    with pytest.raises(ValidationError, match=message):
+        SubsetSelection.model_validate(fields)
 
 
 def test_case_rejects_unsafe_instance_ids_and_short_base_commits() -> None:
@@ -98,7 +178,7 @@ def test_selection_retains_every_official_field_in_manifest_order() -> None:
     ("rows", "message"),
     (
         (
-            (*_rows(), _row("pallets__flask-99999", 3)),
+            (*_rows(), _row("pallets__flask-99999", 99)),
             "unknown SWE-bench selected instance ids",
         ),
         (
@@ -115,15 +195,16 @@ def test_selection_rejects_unknown_duplicate_and_missing_ids(
         select_cases(rows)
 
 
-def test_snapshot_round_trip_preserves_complete_rows(tmp_path: Path) -> None:
+def test_snapshot_round_trip_preserves_every_subset_row(tmp_path: Path) -> None:
     root = tmp_path / "snapshot"
     write_snapshot(root, select_cases(_rows()))
     snapshot = load_snapshot(root)
     assert snapshot.root == str(root.resolve())
     assert snapshot.manifest.case_ids == EXPECTED_IDS
+    assert snapshot.manifest.cases.records == 26
     assert snapshot.cases == select_cases(_rows())
     payload = gzip.decompress((root / CASES_FILE).read_bytes())
-    assert len(payload.splitlines()) == 3
+    assert len(payload.splitlines()) == 26
     assert tuple(json.loads(line) for line in payload.splitlines()) == _rows()
 
 
@@ -228,7 +309,7 @@ def test_snapshot_load_rejects_manifest_digest_and_count_drift(tmp_path: Path) -
     manifest["digest"] = "sha256:" + "0" * 64
     (count_root / CASES_FILE).write_bytes(gzip.compress(truncated, mtime=0))
     manifest_path.write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match="requires exactly 3 cases"):
+    with pytest.raises(ValueError, match="requires exactly 26 cases"):
         load_snapshot(count_root)
 
 
@@ -260,4 +341,21 @@ def test_build_rejects_source_drift_without_replacing_snapshot(tmp_path: Path) -
     parquet.write_bytes(b"not the pinned source")
     with pytest.raises(ValueError, match="size mismatch"):
         build_snapshot(parquet, output)
+    assert (output / MANIFEST_FILE).read_bytes() == manifest_before
+
+
+def test_build_refuses_a_source_whose_seeded_split_leaves_the_pinned_roster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "snapshot"
+    write_snapshot(output, select_cases(_rows()))
+    manifest_before = (output / MANIFEST_FILE).read_bytes()
+    parquet = tmp_path / "source.parquet"
+    parquet.write_bytes(b"accepted by the patched verifier")
+    monkeypatch.setattr(build, "verify_source", lambda _source, _upstream: None)
+    monkeypatch.setattr(build, "read_parquet", lambda _source, _upstream: _rows())
+
+    with pytest.raises(ValueError, match="does not match the pinned roster"):
+        build_snapshot(parquet, output)
+
     assert (output / MANIFEST_FILE).read_bytes() == manifest_before

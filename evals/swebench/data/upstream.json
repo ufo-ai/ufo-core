@@ -22,9 +22,41 @@
       {"name": "difficulty", "arrow_type": "string"}
     ]
   },
-  "smoke_case_ids": [
-    "django__django-10097",
-    "sympy__sympy-20590",
-    "scikit-learn__scikit-learn-25102"
-  ]
+  "subsets": {
+    "seed": "swebench-hillclimb-2026-08-22",
+    "smoke": [
+      "django__django-10097",
+      "sympy__sympy-20590",
+      "scikit-learn__scikit-learn-25102"
+    ],
+    "hillclimb": [
+      "django__django-16877",
+      "sympy__sympy-21612",
+      "sphinx-doc__sphinx-7440",
+      "matplotlib__matplotlib-24570",
+      "scikit-learn__scikit-learn-11578",
+      "astropy__astropy-7336",
+      "pydata__xarray-4629",
+      "pytest-dev__pytest-6197",
+      "pylint-dev__pylint-7080",
+      "psf__requests-1921"
+    ],
+    "holdout": [
+      "mwaskom__seaborn-3069",
+      "pallets__flask-5014",
+      "django__django-15022",
+      "sympy__sympy-11618",
+      "sphinx-doc__sphinx-8621",
+      "matplotlib__matplotlib-24870",
+      "scikit-learn__scikit-learn-10297",
+      "astropy__astropy-12907",
+      "pydata__xarray-4075",
+      "pytest-dev__pytest-5840"
+    ],
+    "hard": [
+      "pydata__xarray-6992",
+      "sphinx-doc__sphinx-7590",
+      "sympy__sympy-13878"
+    ]
+  }
 }

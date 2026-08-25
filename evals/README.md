@@ -15,6 +15,19 @@ uv run python -m evals --share <current-run> <baseline-run>
 `ufo` must be on `PATH`, and `UFO_TOKEN_SECRET` must match the running serve process. Remote cases
 use the private member audience of the terminal surface; shared-audience cases fail before admission.
 
+Corpus runs use the same concurrency control:
+
+```bash
+uv run python -m evals --swebench --swebench-subset all --remote \
+  --workspace <workspace-id> --concurrency 24
+uv run python -m evals --terminal-bench --remote \
+  --workspace <workspace-id> --concurrency 24
+```
+
+SWE-bench admits one remote ufo session per case. Terminal-Bench delegates the same bound to one
+remote Harbor job so Harbor grades the task environments it owns. The corpus READMEs hold setup and
+official grading details.
+
 ## Read the results
 
 Each `python -m evals` command records the run as JSON under `eval-reports/runs/`. The record does

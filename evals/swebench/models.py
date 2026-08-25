@@ -1,15 +1,18 @@
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 DIGEST_PATTERN = r"^sha256:[0-9a-f]{64}$"
 INSTANCE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*__[A-Za-z0-9][A-Za-z0-9_.-]*-[1-9][0-9]*$"
 REPOSITORY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$"
-APPROVED_CASE_IDS = (
+Subset = Literal["smoke", "hillclimb", "holdout", "hard"]
+InstanceId = Annotated[str, StringConstraints(pattern=INSTANCE_ID_PATTERN)]
+SMOKE_CASE_IDS = (
     "django__django-10097",
     "sympy__sympy-20590",
     "scikit-learn__scikit-learn-25102",
 )
+SUBSET_SIZES: dict[Subset, int] = {"smoke": 3, "hillclimb": 10, "holdout": 10, "hard": 3}
 EXPECTED_PARQUET_COLUMNS = (
     ("repo", "string"),
     ("instance_id", "string"),
@@ -53,19 +56,60 @@ class UpstreamParquet(BoundaryModel):
         return self
 
 
+class SubsetSelection(BoundaryModel):
+    """The pinned representative roster and every hardest-difficulty case."""
+
+    seed: str = Field(min_length=1)
+    smoke: tuple[InstanceId, ...]
+    hillclimb: tuple[InstanceId, ...]
+    holdout: tuple[InstanceId, ...]
+    hard: tuple[InstanceId, ...]
+
+    @model_validator(mode="after")
+    def validate_subsets(self) -> Self:
+        if self.smoke != SMOKE_CASE_IDS:
+            raise ValueError("SWE-bench smoke case ids must use the approved order")
+        for subset, size in SUBSET_SIZES.items():
+            found = len(self.ids(subset))
+            if found != size:
+                raise ValueError(
+                    f"SWE-bench {subset} subset requires {size} case ids, found {found}"
+                )
+        if len(set(self.all_ids)) != len(self.all_ids):
+            raise ValueError("SWE-bench subsets must be disjoint")
+        return self
+
+    def ids(self, subset: Subset) -> tuple[str, ...]:
+        """Case ids of one subset, in roster order."""
+        match subset:
+            case "smoke":
+                return self.smoke
+            case "hillclimb":
+                return self.hillclimb
+            case "holdout":
+                return self.holdout
+            case "hard":
+                return self.hard
+
+    def subset_of(self, instance_id: str) -> Subset:
+        """The subset holding one case id."""
+        for subset in SUBSET_SIZES:
+            if instance_id in self.ids(subset):
+                return subset
+        raise ValueError(f"unknown SWE-bench instance id: {instance_id}")
+
+    @property
+    def all_ids(self) -> tuple[str, ...]:
+        return self.smoke + self.hillclimb + self.holdout + self.hard
+
+
 class SWEbenchUpstream(BoundaryModel):
     dataset: Literal["princeton-nlp/SWE-bench_Verified"] = "princeton-nlp/SWE-bench_Verified"
     revision: Literal["c104f840cc67f8b6eec6f759ebc8b2693d585d4a"] = (
         "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"
     )
     parquet: UpstreamParquet
-    smoke_case_ids: tuple[str, ...]
-
-    @model_validator(mode="after")
-    def validate_smoke_case_ids(self) -> Self:
-        if self.smoke_case_ids != APPROVED_CASE_IDS:
-            raise ValueError("SWE-bench smoke case ids must use the approved order")
-        return self
+    subsets: SubsetSelection
 
 
 class SWEbenchCase(BoundaryModel):
@@ -86,7 +130,7 @@ class SWEbenchCase(BoundaryModel):
 
 class SnapshotFile(BoundaryModel):
     path: Literal["cases.jsonl.gz"] = "cases.jsonl.gz"
-    records: Literal[3] = 3
+    records: Literal[26] = 26
     sha256: str = Field(pattern=DIGEST_PATTERN)
 
 
@@ -99,7 +143,7 @@ class SnapshotManifest(BoundaryModel):
 
     @model_validator(mode="after")
     def validate_case_ids(self) -> Self:
-        if self.case_ids != self.upstream.smoke_case_ids:
+        if self.case_ids != self.upstream.subsets.all_ids:
             raise ValueError("SWE-bench manifest case ids must use the approved order")
         return self
 

@@ -18,7 +18,7 @@ from evals.harness.coding import AllOf, PinnedRepositoryRoute
 from evals.harness.registry import EvalTask
 from evals.harness.scorers import delegation_only_scorer
 from evals.harness.target import TargetResult
-from evals.swebench.models import APPROVED_CASE_IDS, SWEbenchCase
+from evals.swebench.models import SMOKE_CASE_IDS, Subset, SWEbenchCase
 from evals.swebench.runner import (
     PARENT_FORBIDDEN_TOOLS,
     SWEBENCH_PACKS,
@@ -27,8 +27,16 @@ from evals.swebench.runner import (
     _capability_case,
     load_swebench,
 )
-from evals.swebench.snapshot import load_snapshot, select_cases, write_snapshot
+from evals.swebench.snapshot import (
+    SWEBENCH_UPSTREAM,
+    load_snapshot,
+    select_cases,
+    write_snapshot,
+)
 from ufo.config import BlobConfig, Config, DatabaseConfig, PackConfig
+
+SUBSETS = SWEBENCH_UPSTREAM.subsets
+ALL_IDS = SUBSETS.all_ids
 
 
 class RunStarted(Exception):
@@ -51,13 +59,19 @@ def row(instance_id: str, index: int) -> dict[str, str]:
         "FAIL_TO_PASS": json.dumps([f"test_fails_{index}"]),
         "PASS_TO_PASS": json.dumps([f"test_passes_{index}"]),
         "environment_setup_commit": f"{index + 4:040x}",
-        "difficulty": ("<15 min fix", "15 min - 1 hour", "1-4 hours")[index],
+        "difficulty": ("<15 min fix", "15 min - 1 hour", "1-4 hours")[index % 3],
     }
 
 
-def snapshot(root: Path) -> Path:
-    rows = tuple(row(instance_id, index) for index, instance_id in enumerate(APPROVED_CASE_IDS))
-    write_snapshot(root, select_cases(rows))
+def rows(statement: str = "") -> tuple[dict[str, str], ...]:
+    built = tuple(row(instance_id, index) for index, instance_id in enumerate(ALL_IDS))
+    if not statement:
+        return built
+    return (*built[:-1], {**built[-1], "problem_statement": statement})
+
+
+def snapshot(root: Path, statement: str = "") -> Path:
+    write_snapshot(root, select_cases(rows(statement)))
     return root
 
 
@@ -132,19 +146,19 @@ class PreparingTarget:
 
 def test_one_selected_case_builds_the_exact_pinned_capability_case(tmp_path: Path) -> None:
     snapshot_root = snapshot(tmp_path / "snapshot")
-    selected = APPROVED_CASE_IDS[1]
-    (task,) = load_swebench((selected,), snapshot_root, tmp_path / "submissions")
+    selected = SMOKE_CASE_IDS[1]
+    (task,) = load_swebench((selected,), snapshot_root, tmp_path / "submissions", None)
     case = next(case for case in load_snapshot(snapshot_root).cases if case.instance_id == selected)
     capability = _capability_case(
         case,
-        load_snapshot(snapshot_root).manifest.digest,
+        load_snapshot(snapshot_root).manifest.upstream.parquet.sha256,
         tmp_path / "submissions",
     )
 
-    assert task.name == "swebench_verified"
+    assert task.name == "swebench_verified.smoke"
     assert task.cases == (selected,)
     assert task.pin_runtime
-    assert task.exclusive
+    assert not task.exclusive
     assert capability.message == (
         case.problem_statement
         + "\n\n---\n"
@@ -164,10 +178,72 @@ def test_one_selected_case_builds_the_exact_pinned_capability_case(tmp_path: Pat
     assert capture.case_id == case.instance_id
 
 
+def test_every_subset_loads_as_its_own_concurrent_task(tmp_path: Path) -> None:
+    snapshot_root = snapshot(tmp_path / "snapshot")
+
+    tasks = load_swebench((), snapshot_root, tmp_path / "submissions", None)
+
+    assert tuple(task.name for task in tasks) == (
+        "swebench_verified.smoke",
+        "swebench_verified.hillclimb",
+        "swebench_verified.holdout",
+        "swebench_verified.hard",
+    )
+    assert tuple(task.cases for task in tasks) == (
+        SUBSETS.smoke,
+        SUBSETS.hillclimb,
+        SUBSETS.holdout,
+        SUBSETS.hard,
+    )
+    assert all(task.pin_runtime and not task.exclusive for task in tasks)
+    assert len({task.digest for task in tasks}) == 4
+
+
+@pytest.mark.parametrize("subset", ("smoke", "hillclimb", "holdout", "hard"))
+def test_one_subset_loads_only_its_own_cases(tmp_path: Path, subset: Subset) -> None:
+    snapshot_root = snapshot(tmp_path / "snapshot")
+
+    (task,) = load_swebench((), snapshot_root, tmp_path / "submissions", subset)
+
+    assert task.name == f"swebench_verified.{subset}"
+    assert task.cases == SUBSETS.ids(subset)
+
+
+def test_named_cases_narrow_the_subsets_that_carry_them(tmp_path: Path) -> None:
+    snapshot_root = snapshot(tmp_path / "snapshot")
+    named = (SUBSETS.smoke[0], SUBSETS.holdout[2])
+
+    tasks = load_swebench(named, snapshot_root, tmp_path / "submissions", None)
+
+    assert tuple((task.name, task.cases) for task in tasks) == (
+        ("swebench_verified.smoke", (named[0],)),
+        ("swebench_verified.holdout", (named[1],)),
+    )
+    with pytest.raises(ValueError, match="no SWE-bench cases selected"):
+        load_swebench((SUBSETS.holdout[2],), snapshot_root, tmp_path / "submissions", "hillclimb")
+
+
+def test_a_case_keeps_its_digest_tag_across_snapshot_versions(tmp_path: Path) -> None:
+    first = load_snapshot(snapshot(tmp_path / "first"))
+    second = load_snapshot(snapshot(tmp_path / "second", "A later roster case changed."))
+    submissions = tmp_path / "submissions"
+    unchanged = SMOKE_CASE_IDS[0]
+
+    assert first.manifest.digest != second.manifest.digest
+    tags = tuple(
+        _capability_case(
+            next(case for case in snapshot_value.cases if case.instance_id == unchanged),
+            snapshot_value.manifest.upstream.parquet.sha256,
+            submissions,
+        ).digest_tag
+        for snapshot_value in (first, second)
+    )
+    assert tags[0] == tags[1]
+    assert tags[0].startswith(f"{SWEBENCH_UPSTREAM.parquet.sha256}:")
+
+
 async def test_capture_keeps_exact_valid_and_invalid_candidate_bytes(tmp_path: Path) -> None:
-    case = select_cases(
-        tuple(row(instance_id, index) for index, instance_id in enumerate(APPROVED_CASE_IDS))
-    )[0]
+    case = select_cases(rows())[0]
     root = tmp_path / "submissions"
     capture = PatchCapture(case.instance_id, root)
     name = f"{case.instance_id}.patch"
@@ -224,7 +300,7 @@ async def test_capture_keeps_exact_valid_and_invalid_candidate_bytes(tmp_path: P
     ),
 )
 async def test_incomplete_diff_is_retained_but_refused(tmp_path: Path, candidate: bytes) -> None:
-    case_id = APPROVED_CASE_IDS[0]
+    case_id = SMOKE_CASE_IDS[0]
     root = tmp_path / "submissions"
     capture = PatchCapture(case_id, root)
     name = f"{case_id}.patch"
@@ -237,9 +313,7 @@ async def test_incomplete_diff_is_retained_but_refused(tmp_path: Path, candidate
 
 
 async def test_missing_or_unshared_capture_fails_visibly(tmp_path: Path) -> None:
-    case = select_cases(
-        tuple(row(instance_id, index) for index, instance_id in enumerate(APPROVED_CASE_IDS))
-    )[0]
+    case = select_cases(rows())[0]
     root = tmp_path / "submissions"
     capture = PatchCapture(case.instance_id, root)
     name = f"{case.instance_id}.patch"
@@ -265,28 +339,21 @@ async def test_task_removes_only_a_case_stale_capture_when_that_case_starts(
     tmp_path: Path,
 ) -> None:
     snapshot_root = snapshot(tmp_path / "snapshot")
-    selected = APPROVED_CASE_IDS[:2]
-    unselected = APPROVED_CASE_IDS[2]
+    selected = SMOKE_CASE_IDS[:2]
+    unselected = SMOKE_CASE_IDS[2]
     submissions = tmp_path / "submissions"
-    for case_id in APPROVED_CASE_IDS:
+    for case_id in ALL_IDS:
         stale = submissions / case_id / f"{case_id}.patch"
         stale.parent.mkdir(parents=True)
         stale.write_bytes(b"stale")
-    target = PreparingTarget(submissions, APPROVED_CASE_IDS)
-    (task,) = load_swebench(selected, snapshot_root, submissions)
-    assert all((submissions / case_id).is_dir() for case_id in APPROVED_CASE_IDS)
+    target = PreparingTarget(submissions, ALL_IDS)
+    (task,) = load_swebench(selected, snapshot_root, submissions, "smoke")
+    assert all((submissions / case_id).is_dir() for case_id in ALL_IDS)
 
     await task.run(target, asyncio.Semaphore(2))
 
-    first_name, first_state = target.states[0]
-    second_name, second_state = target.states[1]
-    assert first_name == selected[0]
-    assert not first_state[selected[0]]
-    assert first_state[selected[1]]
-    assert first_state[unselected]
-    assert second_name == selected[1]
-    assert not second_state[selected[1]]
-    assert second_state[unselected]
+    assert {case.name for case in target.seen} == set(selected)
+    assert all(not (submissions / case_id).exists() for case_id in selected)
     assert (submissions / unselected / f"{unselected}.patch").read_bytes() == b"stale"
 
 
@@ -298,10 +365,10 @@ async def test_task_runs_all_three_deterministic_graders_and_captures_the_patch(
     patch = b"diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+fixed\n"
     target = PreparingTarget(
         tmp_path / "submissions",
-        APPROVED_CASE_IDS,
+        ALL_IDS,
         outputs={case.instance_id: successful_output(case, patch)},
     )
-    (task,) = load_swebench((case.instance_id,), snapshot_root, target.submissions_root)
+    (task,) = load_swebench((case.instance_id,), snapshot_root, target.submissions_root, None)
 
     report = await task.run(target, asyncio.Semaphore(1))
 
@@ -317,18 +384,22 @@ async def test_task_runs_all_three_deterministic_graders_and_captures_the_patch(
 def test_unknown_case_fails_during_loading(tmp_path: Path) -> None:
     snapshot_root = snapshot(tmp_path / "snapshot")
     with pytest.raises(ValueError, match="unknown SWE-bench case ids: not-a-case"):
-        load_swebench(("not-a-case",), snapshot_root, tmp_path / "submissions")
+        load_swebench(("not-a-case",), snapshot_root, tmp_path / "submissions", None)
 
 
 def test_cli_refuses_case_without_suite_and_corpus_conflicts(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(SystemExit):
-        evals_main(["--swebench-case", APPROVED_CASE_IDS[0]])
-    assert "--swebench-case requires --swebench" in capsys.readouterr().err
+        evals_main(["--swebench-case", SMOKE_CASE_IDS[0]])
+    assert "--swebench-subset and --swebench-case require --swebench" in capsys.readouterr().err
 
     with pytest.raises(SystemExit):
-        evals_main(["--swebench", "--coding-repo"])
+        evals_main(["--swebench"])
+    assert "--swebench requires --swebench-subset or --swebench-case" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        evals_main(["--swebench", "--swebench-subset", "smoke", "--coding-repo"])
     assert "corpus-backed evals are separate eval runs" in capsys.readouterr().err
 
 
@@ -343,6 +414,8 @@ def test_cli_refuses_missing_snapshot_before_run(
         evals_main(
             [
                 "--swebench",
+                "--swebench-subset",
+                "smoke",
                 "--swebench-snapshot",
                 str(tmp_path / "missing"),
             ]
@@ -377,13 +450,15 @@ def test_cli_mints_a_distinct_default_submissions_root_each_call(
 ) -> None:
     roots: list[Path] = []
 
-    def loaded(_cases: tuple[str, ...], _snapshot: Path, submissions: Path) -> tuple[EvalTask, ...]:
+    def loaded(
+        _cases: tuple[str, ...], _snapshot: Path, submissions: Path, _subset: Subset | None
+    ) -> tuple[EvalTask, ...]:
         roots.append(submissions)
         return ()
 
     monkeypatch.setattr("evals.__main__.load_swebench", loaded)
-    evals_main(["--swebench", "--list"])
-    evals_main(["--swebench", "--list"])
+    evals_main(["--swebench", "--swebench-subset", "smoke", "--list"])
+    evals_main(["--swebench", "--swebench-subset", "smoke", "--list"])
 
     assert len(roots) == 2
     assert roots[0] != roots[1]
@@ -391,6 +466,30 @@ def test_cli_mints_a_distinct_default_submissions_root_each_call(
     assert roots[1].parent == Path(".local/swebench/submissions")
     assert len(roots[0].name.rsplit("-", maxsplit=1)[-1]) == 8
     assert len(roots[1].name.rsplit("-", maxsplit=1)[-1]) == 8
+
+
+def test_cli_all_loads_every_subset_for_remote_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_subsets: list[Subset | None] = []
+
+    def loaded(
+        _cases: tuple[str, ...], _snapshot: Path, _submissions: Path, subset: Subset | None
+    ) -> tuple[EvalTask, ...]:
+        loaded_subsets.append(subset)
+        return ()
+
+    monkeypatch.setattr("evals.__main__.load_swebench", loaded)
+    evals_main(
+        [
+            "--swebench",
+            "--swebench-subset",
+            "all",
+            "--list",
+        ]
+    )
+
+    assert loaded_subsets == [None]
 
 
 def test_cli_validates_pack_before_run(
@@ -409,12 +508,14 @@ def test_cli_validates_pack_before_run(
 
     monkeypatch.setattr("evals.__main__._run", not_reached)
     with pytest.raises(SystemExit):
-        evals_main(["--swebench", "--swebench-snapshot", str(snapshot_root)])
+        evals_main(
+            ["--swebench", "--swebench-subset", "smoke", "--swebench-snapshot", str(snapshot_root)]
+        )
     error = capsys.readouterr().err
     assert f"swebench requires [pack] name in {SWEBENCH_PACKS}" in error
 
 
-def test_cli_loads_task_prints_submissions_and_uses_two_hour_timeout(
+def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     snapshot_root = snapshot(tmp_path / "snapshot")
@@ -425,7 +526,7 @@ def test_cli_loads_task_prints_submissions_and_uses_two_hour_timeout(
         pack=PackConfig(name="assistant"),
     )
     monkeypatch.setattr("evals.__main__.load_config", lambda: config)
-    reached: list[tuple[tuple[str, ...], float, str]] = []
+    reached: list[tuple[tuple[str, ...], float, str, bool, int]] = []
 
     async def run(
         _config: object,
@@ -442,6 +543,8 @@ def test_cli_loads_task_prints_submissions_and_uses_two_hour_timeout(
                 tuple(task.name for task in tasks),
                 workflow_wait_seconds,
                 capsys.readouterr().out,
+                bool(_rest[2]),
+                int(_rest[4]),
             )
         )
         raise RunStarted
@@ -451,13 +554,24 @@ def test_cli_loads_task_prints_submissions_and_uses_two_hour_timeout(
         evals_main(
             [
                 "--swebench",
+                "--swebench-subset",
+                "hillclimb",
                 "--swebench-snapshot",
                 str(snapshot_root),
                 "--swebench-submissions",
                 str(submissions),
+                "--remote",
+                "--concurrency",
+                "8",
             ]
         )
 
     assert reached == [
-        (("swebench_verified",), WORKFLOW_WAIT_SECONDS, f"SWE-bench submissions {submissions}\n")
+        (
+            ("swebench_verified.hillclimb",),
+            WORKFLOW_WAIT_SECONDS,
+            f"SWE-bench submissions {submissions}\n",
+            True,
+            8,
+        )
     ]

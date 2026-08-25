@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
-from evals.swebench.models import SWEbenchCase, SWEbenchSnapshot
+from evals.swebench.models import SUBSET_SIZES, SWEbenchCase, SWEbenchSnapshot
 from evals.swebench.snapshot import SWEBENCH_UPSTREAM, load_snapshot, verify_source
 
 HARNESS_DISTRIBUTION = "swebench"
@@ -28,6 +29,7 @@ DEFAULT_GRADES_ROOT = Path(".local/swebench/grades")
 PREDICTIONS_FILE = "predictions.jsonl"
 SUMMARY_FILE = "summary.json"
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+GradingSubset = Literal["smoke", "hillclimb", "holdout", "hard", "all"]
 
 
 def official_instance_image(instance_id: str) -> str:
@@ -120,11 +122,13 @@ class SWEbenchGrading:
 
     snapshot: SWEbenchSnapshot
     selected_cases: tuple[SWEbenchCase, ...]
+    subset: GradingSubset
     parquet: Path
     submissions_root: Path | None
     grade_directory: Path
     run_id: str
     gold: bool = False
+    prune_images: bool = False
     model_name: str = "ufo"
 
     def __post_init__(self) -> None:
@@ -135,6 +139,13 @@ class SWEbenchGrading:
             raise ValueError("SWE-bench grading requires at least one selected case")
         if self.selected_cases != manifest_cases:
             raise ValueError("SWE-bench grading cases must be unique and use manifest order")
+        selection = self.snapshot.manifest.upstream.subsets
+        allowed = selection.all_ids if self.subset == "all" else selection.ids(self.subset)
+        outside = sorted(selected - set(allowed))
+        if outside:
+            raise ValueError(
+                f"SWE-bench cases outside the {self.subset} subset: {', '.join(outside)}"
+            )
         if not SAFE_RUN_ID.fullmatch(self.run_id):
             raise ValueError(f"unsafe SWE-bench run id: {self.run_id}")
         if self.gold and self.submissions_root is not None:
@@ -164,7 +175,9 @@ class SWEbenchGrading:
         self._invoke_official_harness(grade_directory, predictions_path)
         report_path = self._official_report_path(grade_directory)
         resolved = self._validate_official_report(report_path)
-        return self._write_summary(grade_directory, report_path, resolved)
+        summary_path = self._write_summary(grade_directory, report_path, resolved)
+        self._prune_official_images()
+        return summary_path
 
     def _validate_parquet(self) -> None:
         verify_source(self.parquet.read_bytes(), SWEBENCH_UPSTREAM)
@@ -296,6 +309,7 @@ class SWEbenchGrading:
                 "revision": self.snapshot.manifest.upstream.revision,
                 "parquet": self.snapshot.manifest.upstream.parquet.sha256,
             },
+            "subset": self.subset,
             "selected_ids": [case.instance_id for case in self.selected_cases],
             "official_report": str(report_path),
             "official_resolved": resolved,
@@ -304,14 +318,26 @@ class SWEbenchGrading:
         summary_path.write_text(json.dumps(summary, indent=2) + "\n")
         return summary_path
 
+    def _prune_official_images(self) -> None:
+        if not self.prune_images:
+            return
+        for case in self.selected_cases:
+            subprocess.run(("docker", "rmi", official_instance_image(case.instance_id)), check=True)
+
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Grade pinned SWE-bench submissions with the official harness."""
     parser = argparse.ArgumentParser(prog="python -m evals.swebench.grading")
     parser.add_argument("--submissions", type=Path)
+    parser.add_argument("--subset", choices=(*SUBSET_SIZES, "all"))
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--gold", action="store_true")
     parser.add_argument("--run-id")
+    parser.add_argument(
+        "--prune-images",
+        action="store_true",
+        help="remove each graded instance image once the summary is written",
+    )
     args = parser.parse_args(argv)
     if args.gold and args.submissions is not None:
         parser.error("--gold does not accept --submissions")
@@ -319,6 +345,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error("--submissions is required without --gold")
 
     snapshot = load_snapshot(DEFAULT_SNAPSHOT)
+    selection = snapshot.manifest.upstream.subsets
     requested = tuple(args.case)
     duplicates = sorted(case_id for case_id in set(requested) if requested.count(case_id) > 1)
     if duplicates:
@@ -327,19 +354,30 @@ def main(argv: Sequence[str] | None = None) -> None:
     unknown = sorted(set(requested) - available)
     if unknown:
         parser.error(f"unknown SWE-bench case ids: {', '.join(unknown)}")
-    wanted = set(requested)
-    selected_cases = tuple(
-        case for case in snapshot.cases if not wanted or case.instance_id in wanted
-    )
+    spanned = sorted({selection.subset_of(case_id) for case_id in requested})
+    if len(spanned) > 1 and args.subset != "all":
+        parser.error(f"SWE-bench cases span subsets: {', '.join(spanned)}")
+    if args.subset is None and not spanned:
+        parser.error("SWE-bench grading requires --subset or --case")
+    if args.subset not in (None, "all") and spanned and spanned != [args.subset]:
+        parser.error(
+            f"SWE-bench cases are outside the {args.subset} subset: {', '.join(requested)}"
+        )
+    subset: GradingSubset = args.subset or spanned[0]
+    roster = selection.all_ids if subset == "all" else selection.ids(subset)
+    wanted = set(requested) or set(roster)
+    selected_cases = tuple(case for case in snapshot.cases if case.instance_id in wanted)
     run_id = args.run_id or (datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{uuid4().hex[:8]}")
     summary = SWEbenchGrading(
         snapshot=snapshot,
         selected_cases=selected_cases,
+        subset=subset,
         parquet=DEFAULT_PARQUET,
         submissions_root=args.submissions,
-        grade_directory=DEFAULT_GRADES_ROOT / run_id,
+        grade_directory=DEFAULT_GRADES_ROOT / subset / run_id,
         run_id=run_id,
         gold=args.gold,
+        prune_images=args.prune_images,
     ).run()
     print(f"summary: {summary}")
 

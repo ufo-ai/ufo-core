@@ -22,10 +22,11 @@ from evals.harness.coding import AllOf, PinnedRepositoryRoute
 from evals.harness.harness import JsonObject
 from evals.harness.registry import EvalTask, capability_task, rewrapped
 from evals.harness.scorers import delegation_only_scorer
-from evals.swebench.models import SWEbenchCase
+from evals.swebench.models import SUBSET_SIZES, Subset, SWEbenchCase
 from evals.swebench.snapshot import load_snapshot
 
 SUITE_NAME = "swebench_verified"
+SUBSETS: tuple[Subset, ...] = tuple(SUBSET_SIZES)
 LOCAL_ROOT = Path(".local/swebench")
 SNAPSHOT_ROOT = LOCAL_ROOT / "snapshot"
 SUBMISSIONS_ROOT = LOCAL_ROOT / "submissions"
@@ -50,29 +51,43 @@ def new_submissions_root() -> Path:
 
 
 def load_swebench(
-    case_names: tuple[str, ...], snapshot_root: Path, submissions_root: Path
+    case_names: tuple[str, ...],
+    snapshot_root: Path,
+    submissions_root: Path,
+    subset: Subset | None,
 ) -> tuple[EvalTask, ...]:
-    """Load selected snapshot cases as one serial, exclusive capability task."""
+    """Load selected snapshot cases as one concurrent capability task per subset."""
     snapshot = load_snapshot(snapshot_root)
+    selection = snapshot.manifest.upstream.subsets
+    parquet_sha256 = snapshot.manifest.upstream.parquet.sha256
     requested = frozenset(case_names)
     unknown = sorted(requested - {case.instance_id for case in snapshot.cases})
     if unknown:
         raise ValueError(f"unknown SWE-bench case ids: {', '.join(unknown)}")
-    selected = tuple(
-        case for case in snapshot.cases if not requested or case.instance_id in requested
-    )
-    cases = tuple(
-        _capability_case(case, snapshot.manifest.digest, submissions_root) for case in selected
-    )
-    task = rewrapped(
-        capability_task(SUITE_NAME, cases, serial=True, packs=SWEBENCH_PACKS),
-        lambda built: replace(built, pin_runtime=True),
-    )
-    return (task,)
+    tasks = []
+    for group in SUBSETS:
+        if subset is not None and group != subset:
+            continue
+        members = frozenset(selection.ids(group))
+        cases = tuple(
+            _capability_case(case, parquet_sha256, submissions_root)
+            for case in snapshot.cases
+            if case.instance_id in members and (not requested or case.instance_id in requested)
+        )
+        if cases:
+            tasks.append(
+                rewrapped(
+                    capability_task(f"{SUITE_NAME}.{group}", cases, packs=SWEBENCH_PACKS),
+                    lambda built: replace(built, pin_runtime=True),
+                )
+            )
+    if not tasks:
+        raise ValueError("no SWE-bench cases selected")
+    return tuple(tasks)
 
 
 def _capability_case(
-    case: SWEbenchCase, snapshot_digest: str, submissions_root: Path
+    case: SWEbenchCase, parquet_sha256: str, submissions_root: Path
 ) -> CapabilityCase:
     return CapabilityCase(
         name=case.instance_id,
@@ -84,7 +99,7 @@ def _capability_case(
                 PatchCapture(case.instance_id, submissions_root),
             )
         ),
-        digest_tag=(f"{snapshot_digest}:{ENVELOPE_REVISION}:{case.instance_id}:{case.base_commit}"),
+        digest_tag=(f"{parquet_sha256}:{ENVELOPE_REVISION}:{case.instance_id}:{case.base_commit}"),
         prepare=_CaptureStart(case.instance_id, submissions_root),
     )
 
