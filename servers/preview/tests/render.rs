@@ -330,6 +330,7 @@ async fn markdown_inline_uses_the_compact_dark_page() {
     assert_eq!(image.get_pixel(0, 0).0, [38, 41, 41, 255]);
     let background = image.get_pixel(0, 0).0;
     let (mut min_x, mut min_y) = image.dimensions();
+    let mut max_x = 0;
     for (x, y, pixel) in image.enumerate_pixels() {
         if pixel
             .0
@@ -339,9 +340,19 @@ async fn markdown_inline_uses_the_compact_dark_page() {
         {
             min_x = min_x.min(x);
             min_y = min_y.min(y);
+            max_x = max_x.max(x);
         }
     }
     assert!((1..=24).contains(&min_x), "left inset is {min_x}px");
+    let right_inset = image.width() - max_x - 1;
+    assert!(
+        (1..=24).contains(&right_inset),
+        "right inset is {right_inset}px"
+    );
+    assert!(
+        min_x.abs_diff(right_inset) <= 1,
+        "horizontal insets are {min_x}px and {right_inset}px"
+    );
     assert!((1..=24).contains(&min_y), "top inset is {min_y}px");
     assert!(image.width() < image.height());
 }

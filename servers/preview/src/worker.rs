@@ -161,7 +161,7 @@ fn crop_page_margins(img: DynamicImage) -> DynamicImage {
         .max_by_key(|(_, count)| *count)
         .map(|(color, _)| color)
         .unwrap();
-    let (mut min_x, mut min_y) = (w, h);
+    let (mut min_x, mut min_y, mut max_x) = (w, h, 0);
     for y in 1..h - 1 {
         for x in 1..w - 1 {
             if rgba
@@ -175,6 +175,7 @@ fn crop_page_margins(img: DynamicImage) -> DynamicImage {
             {
                 min_x = min_x.min(x);
                 min_y = min_y.min(y);
+                max_x = max_x.max(x);
             }
         }
     }
@@ -183,8 +184,9 @@ fn crop_page_margins(img: DynamicImage) -> DynamicImage {
     }
     let margin = (w / PAGE_CONTENT_MARGIN_DIVISOR).max(1);
     let x0 = min_x.saturating_sub(margin).min((w - 1) / 2);
+    let x1 = (max_x + margin).min(w - 1);
     let y0 = min_y.saturating_sub(margin).min((h - 1) / 2);
-    img.crop_imm(x0, y0, w - 2 * x0, h - 2 * y0)
+    img.crop_imm(x0, y0, x1 - x0 + 1, h - 2 * y0)
 }
 
 #[cfg(test)]
@@ -192,13 +194,14 @@ mod tests {
     use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 
     #[test]
-    fn page_margin_crop_keeps_a_small_inset_and_the_page_shape() {
+    fn page_margin_crop_keeps_equal_horizontal_insets() {
         let mut image = RgbaImage::from_pixel(100, 160, Rgba([38, 41, 41, 255]));
         image.put_pixel(10, 8, Rgba([245, 245, 245, 255]));
         image.put_pixel(90, 100, Rgba([245, 245, 245, 255]));
         let cropped = super::crop_page_margins(DynamicImage::ImageRgba8(image));
-        assert_eq!(cropped.dimensions(), (86, 150));
+        assert_eq!(cropped.dimensions(), (87, 150));
         assert_eq!(cropped.get_pixel(3, 3), Rgba([245, 245, 245, 255]));
+        assert_eq!(cropped.get_pixel(83, 95), Rgba([245, 245, 245, 255]));
     }
 
     #[test]
@@ -222,7 +225,7 @@ mod tests {
         image.put_pixel(10, 8, Rgba([245, 245, 245, 255]));
         image.put_pixel(90, 100, Rgba([245, 245, 245, 255]));
         let cropped = super::crop_page_margins(DynamicImage::ImageRgba8(image));
-        assert_eq!(cropped.dimensions(), (86, 150));
+        assert_eq!(cropped.dimensions(), (87, 150));
         assert_eq!(cropped.get_pixel(3, 3), Rgba([245, 245, 245, 255]));
     }
 }
