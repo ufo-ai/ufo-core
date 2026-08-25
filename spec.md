@@ -705,10 +705,13 @@ landing mid-read shifts no boundary and every listing pages identically. A curso
 never minted is refused rather than answered with some other page. Shared files are the
 member's own conversations' artifacts, every conversation's for an admin, each carrying the
 signed TTL link a delivery would and paging by the same shared cursor, `shared_artifact.id`
-breaking a tie two files one turn shared in one instant would otherwise leave unbroken; opening
-one pins a viewer over the listing that renders what the page honestly can — an image inline,
-text up to a bounded read, and a plain refusal to preview anything else — leaving the download an
-explicit act rather than the click's default.
+breaking a tie two files one turn shared in one instant would otherwise leave unbroken. The
+Artifacts app lists a file when a member-admitted turn already stood in its conversation when it
+was shared, while a scheduled file from a machine lane stays on its Radar run. A member entering
+the conversation later does not move its earlier files into Artifacts. Opening one pins a viewer
+over the listing that renders what the page honestly can — an image inline, text up to a bounded
+read, and a plain refusal to preview anything else — leaving the download an explicit act rather
+than the click's default.
 
 Every object kind reaches the portal through two generic reads rather than a page of its own:
 `objects/{kind}` is one kind's rows and `objects/{kind}/{name}` is one row whole, each answering

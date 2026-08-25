@@ -12,8 +12,9 @@ through status, copies its bytes back into the conversation workspace so a turn 
 an earlier turn produced; status also mints a fresh TTL download link. Create and update raise
 `VerbNotSupported` naming `share_file`; delete removes every version's row and blob, after which
 already-minted links stop serving (the download route 404s an absent blob). A signed-in member
-reads the same rows in the portal under the same two scopes — the selected agent and the subjects
-their own conversation carries — with the bytes left behind the turn."""
+reads shares made after a member entered their conversation in the portal, under the same two
+scopes — the selected agent and the subjects their own conversation carries — while agent reads
+stay whole and the bytes stay behind the turn."""
 
 import hashlib
 import re
@@ -52,7 +53,7 @@ from ufo.objects import (
     object_page,
 )
 from ufo.schema import tables
-from ufo.schema.records import TurnContext
+from ufo.schema.records import MEMBER_ADMISSION, TurnContext
 from ufo.tools.context import ToolContext
 from ufo.turns.audience import audience_subjects, conversation_audience
 from ufo.workspace import ws_current
@@ -91,6 +92,21 @@ def _document_media() -> sa.ColumnElement[bool]:
     return sa.or_(
         *(lowered.like(prefix + "%") for prefix in MEDIA_DOCUMENT_PREFIXES),
         lowered.in_(MEDIA_DOCUMENT_TYPES),
+    )
+
+
+def _member_participated() -> sa.ColumnElement[bool]:
+    member_turn = tables.turn.alias("artifact_member_turn")
+    return (
+        sa.select(sa.literal(1))
+        .where(
+            member_turn.c.workspace_id == tables.turn.c.workspace_id,
+            member_turn.c.conversation_id == tables.turn.c.conversation_id,
+            member_turn.c.admission_source == MEMBER_ADMISSION,
+            member_turn.c.seq <= tables.turn.c.seq,
+        )
+        .correlate(tables.turn)
+        .exists()
     )
 
 
@@ -142,13 +158,20 @@ class ArtifactObjects:
     on `object_get`, so `apply` and `delete` fetching the current spec never write into the
     workspace as a side effect. The deploy's link minting rides construction — a listing row
     publishes the signed download and preview links the portal draws, and a deploy that mints no
-    artifact links lists the same rows with null links."""
+    artifact links lists the same rows with null links. The member projection is the Artifacts
+    index: it includes only shares made after a member entered that conversation. Agent reads stay
+    whole so a machine-lane file remains reusable by the agent that produced it."""
 
     public_base_url: str | None = None
     artifact_token_secret: str = ""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        rows = await self._rows(ctx.read_subjects, ctx.acting_member_id, query)
+        rows = await self._rows(
+            ctx.read_subjects,
+            ctx.acting_member_id,
+            query,
+            self._shares(ctx.read_subjects),
+        )
         return object_page(rows, query)
 
     async def member_page(
@@ -159,18 +182,21 @@ class ArtifactObjects:
         admin: bool,
         query: ObjectListQuery,
     ) -> ObjectPage:
-        """The shared files a signed-in member reads outside a turn: the rows `list` renders, over
-        the selected agent bound by the caller. Every reader — an admin included — reads the
-        subjects their own conversation carries, their own and the workspace-shared: a shared
-        file is conversation content, and content reads fence on readable audiences for everyone,
-        so a file shared into a room or into another member's private conversation is absent."""
+        """The selected agent's Artifacts index for one signed-in member: files shared after a
+        member entered their conversation, inside the subjects this reader's own conversation
+        carries. Every reader — an admin included — stays behind that audience fence, so another
+        member's private file and every room file remain absent."""
+        subjects = audience_subjects(conversation_audience(member_id))
         rows = await self._rows(
-            audience_subjects(conversation_audience(member_id)), member_id, query
+            subjects,
+            member_id,
+            query,
+            self._member_shares(subjects),
         )
         return object_page(rows, query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ArtifactSpec] | None:
-        shares = await self._find(ctx.read_subjects, name)
+        shares = await self._find(ctx.read_subjects, name, self._shares(ctx.read_subjects))
         return None if shares is None else _detail(shares)
 
     async def member_detail(
@@ -181,11 +207,12 @@ class ArtifactObjects:
         member_id: UUID,
         admin: bool,
     ) -> MemberObject[ArtifactSpec] | None:
-        """One shared file as the portal reads it — the row `list` renders beside the detail `get`
-        reads, on the same agent and reach `member_page` lists under. Bytes stay behind the
-        turn: the workspace copy `status` writes is not this read, though the row carries the same
-        signed links the listing publishes."""
-        shares = await self._find(audience_subjects(conversation_audience(member_id)), name)
+        """One file from the Artifacts index: the shares after a member entered its conversation,
+        on the same agent and audience reach `member_page` lists under. Bytes stay behind the turn:
+        the workspace copy `status` writes is not this read, though the row carries the same signed
+        links the listing publishes."""
+        subjects = audience_subjects(conversation_audience(member_id))
+        shares = await self._find(subjects, name, self._member_shares(subjects))
         if shares is None:
             return None
         sources = await self._sources((shares[0].conversation_id,))
@@ -198,7 +225,7 @@ class ArtifactObjects:
         *,
         expected_generation: UUID | None,
     ) -> dict[str, JsonValue] | None:
-        shares = await self._find(ctx.read_subjects, name)
+        shares = await self._find(ctx.read_subjects, name, self._shares(ctx.read_subjects))
         if shares is None:
             return None
         latest = shares[0]
@@ -255,7 +282,7 @@ class ArtifactObjects:
         *,
         expected_generation: UUID | None,
     ) -> None:
-        shares = await self._find(ctx.read_subjects, name)
+        shares = await self._find(ctx.read_subjects, name, self._shares(ctx.read_subjects))
         if shares is None:
             raise ValueError(f"no artifact named {name!r}")
         async with workspace_tx() as connection:
@@ -286,25 +313,31 @@ class ArtifactObjects:
         )
 
     async def _rows(
-        self, subjects: frozenset[str], viewer: UUID | None, query: ObjectListQuery
+        self,
+        subjects: frozenset[str],
+        viewer: UUID | None,
+        query: ObjectListQuery,
+        shares: sa.Select,
     ) -> tuple[ObjectRow, ...]:
-        groups = await self._groups(subjects, viewer, query)
+        groups = await self._groups(subjects, viewer, query, shares)
         sources = await self._sources(
             tuple({shares[0].conversation_id for _name, shares in groups})
         )
         return tuple(self._row(name, shares, viewer, sources) for name, shares in groups)
 
-    async def _find(self, subjects: frozenset[str], name: str) -> tuple[sa.Row, ...] | None:
-        """One named group whole. The name resolves against every identity the fence admits —
-        bounded by the workspace's distinct files rather than its shares — and the group's rows
-        arrive with no window, so a name read, a detail, or a delete answers the file whole even
-        when its newest share fell past the listing's scan."""
+    async def _find(
+        self, subjects: frozenset[str], name: str, shares: sa.Select
+    ) -> tuple[sa.Row, ...] | None:
+        """One named group whole inside the supplied projection. The name resolves against every
+        identity the audience fence admits — bounded by the workspace's distinct files rather than
+        its shares — and the projected rows arrive with no window, so a name read answers even when
+        its newest matching share fell past the listing's scan."""
         names = await self._identities(subjects)
         identity = next((candidate for candidate, held in names.items() if held == name), None)
         if identity is None:
             return None
         conversation_id, filename = identity
-        query = self._shares(subjects).where(
+        query = shares.where(
             tables.turn.c.conversation_id == conversation_id,
             tables.shared_artifact.c.filename == filename,
         )
@@ -315,7 +348,11 @@ class ArtifactObjects:
         return tuple(sorted(rows, key=lambda r: (r.created_at, r.blob_key), reverse=True))
 
     async def _groups(
-        self, subjects: frozenset[str], viewer: UUID | None, query: ObjectListQuery
+        self,
+        subjects: frozenset[str],
+        viewer: UUID | None,
+        query: ObjectListQuery,
+        shares: sa.Select,
     ) -> Sequence[tuple[str, tuple[sa.Row, ...]]]:
         """The reader's shares grouped per file, off the newest `ARTIFACT_SCAN_LIMIT` share rows
         their fence admits AFTER the read's own narrowing — the search and the column-expressible
@@ -325,7 +362,7 @@ class ArtifactObjects:
         vocabulary stays core's and anything a column cannot express is narrowed there. `_find`
         keeps answering any name whole, off its own unwindowed path. Names come off the whole
         identity set, so a file is called the same thing on and off the shelf."""
-        narrowed = self._shares(subjects)
+        narrowed = shares
         if query.query:
             like = f"%{query.query}%"
             narrowed = narrowed.where(
@@ -441,6 +478,9 @@ class ArtifactObjects:
                 tables.conversation.c.audience.in_(subjects),
             )
         )
+
+    def _member_shares(self, subjects: frozenset[str]) -> sa.Select:
+        return self._shares(subjects).where(_member_participated())
 
     async def _sources(self, conversation_ids: Sequence[UUID]) -> dict[UUID, str | None]:
         """Each conversation's opening source — the permalink its first turn arrived from — read

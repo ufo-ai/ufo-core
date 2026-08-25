@@ -107,7 +107,7 @@ from ufo.sandbox.session import (
     SandboxSpec,
 )
 from ufo.schema import tables
-from ufo.schema.records import MAIN_AGENT_ICON, Agent, Turn
+from ufo.schema.records import MAIN_AGENT_ICON, SCHEDULED_ADMISSION, Agent, Turn
 from ufo.sdk.objects import AgentTargetVerb
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
@@ -1766,13 +1766,20 @@ async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
     db: None, tmp_path: Path
 ) -> None:
     """`conversation` and `shared_at` ride the listing rows beside `filename` and `subject`, so one
-    session's files are reachable by filter and the newest share by order."""
+    session's files are reachable by filter and the newest share by order. The agent's listing
+    keeps a file produced in a machine lane: only the member projection narrows Artifacts."""
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
         agent_id = await _agent_row(workspace_id, name="assistant", is_main=True)
         first = await _turn_row(workspace_id, agent_id=agent_id)
         second = await _turn_row(workspace_id, agent_id=agent_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == first.id)
+                .values(admission_source=SCHEDULED_ADMISSION)
+            )
         first_ctx, _ = await _workspace_context(first, tmp_path / "one")
         second_ctx, _ = await _workspace_context(second, tmp_path / "two")
         await first_ctx.sandbox.bash("printf 'older' > alpha.txt")
@@ -2210,12 +2217,13 @@ async def test_artifact_delete_refuses_audience_narrowing_after_authorization(
 
         async def narrow_after_find(
             store: ArtifactObjects,
-            tool_ctx: ToolContext,
+            subjects: frozenset[str],
             name: str,
+            shares: sa.Select,
         ) -> tuple[sa.Row, ...] | None:
-            shares = await real_find(store, tool_ctx, name)
+            found = await real_find(store, subjects, name, shares)
             await _narrow_conversation(turn.conversation_id, bob)
-            return shares
+            return found
 
         monkeypatch.setattr(ArtifactObjects, "_find", narrow_after_find)
         with agent(turn.agent_id), pytest.raises(ValueError, match="changed while deleting"):
@@ -2372,17 +2380,18 @@ async def test_artifact_delete_refuses_when_a_version_is_taken_out_from_under_it
 
         async def take_one_version(
             store: ArtifactObjects,
-            tool_ctx: ToolContext,
+            subjects: frozenset[str],
             name: str,
+            shares: sa.Select,
         ) -> tuple[sa.Row, ...] | None:
-            shares = await real_find(store, tool_ctx, name)
+            found = await real_find(store, subjects, name, shares)
             async with workspace_tx() as connection:
                 await connection.execute(
                     sa.delete(tables.shared_artifact).where(
                         tables.shared_artifact.c.blob_key == first_key
                     )
                 )
-            return shares
+            return found
 
         monkeypatch.setattr(ArtifactObjects, "_find", take_one_version)
         with agent(turn.agent_id), pytest.raises(ValueError, match="lost a version while deleting"):

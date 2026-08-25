@@ -171,6 +171,7 @@ from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint, RunTokenCodec
 from ufo.schema import tables
 from ufo.schema.records import (
+    MEMBER_ADMISSION,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     SURFACE_COMMENT_ROUND_INDEX,
@@ -3799,6 +3800,66 @@ REPORTS_PATH = "/surface/web/objects/report"
 REPORTS_NEWEST = f"{REPORTS_PATH}?order_by=fired_at&order=desc"
 
 
+async def test_artifact_placement_follows_the_conversation_at_share_time(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=f"{agent_id}/m@example.com/{uuid4().hex}",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    fired = datetime(2026, 8, 14, 9, 0, tzinfo=UTC)
+    await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        conversation_id,
+        seq=1,
+        text="background",
+        fired=fired,
+        artifact=("background.md", "text/markdown"),
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=2,
+        inbound="keep future files here",
+        speaker_member_id=member_id,
+    )
+    await _seed_scheduled_run(
+        workspace_id,
+        agent_id,
+        conversation_id,
+        seq=3,
+        text="in the thread",
+        fired=fired + timedelta(minutes=1),
+        artifact=("thread.md", "text/markdown"),
+    )
+
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    listed = (await client.get(OBJECT_ARTIFACTS_PATH, headers=cookie)).json()
+    assert _names(listed) == ["thread.md"]
+
+    prefix = conversation_id.hex[:8]
+    background = await client.get(
+        f"{OBJECT_ARTIFACTS_PATH}/{prefix}-background-md?agent={agent_id}", headers=cookie
+    )
+    interactive = await client.get(
+        f"{OBJECT_ARTIFACTS_PATH}/{prefix}-thread-md?agent={agent_id}", headers=cookie
+    )
+    assert background.status_code == 404
+    assert interactive.status_code == 200
+
+    radar = (await client.get(f"{REPORTS_NEWEST}&agent={agent_id}", headers=cookie)).json()
+    assert {
+        artifact["filename"] for report in radar["objects"] for artifact in report["artifacts"]
+    } == {"background.md", "thread.md"}
+
+
 async def test_report_objects_list_scheduled_runs_with_output_and_files(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
@@ -4707,6 +4768,7 @@ async def test_the_artifact_index_reads_only_the_members_own_and_shared_files(
                 seq=1,
                 status="done",
                 inbound="ask",
+                admission_source=MEMBER_ADMISSION,
                 speaker_member_id=member_n,
                 terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
                 created_at=sa.func.now(),
