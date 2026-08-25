@@ -586,6 +586,15 @@ OPENROUTER_MODEL_SPECS = (
         context_window=1_000_000,
         reasoning=_REQUIRED_REASONS,
     ),
+    # The route accepts 1,050,000 tokens, and past 272,000 input tokens it bills 2x input and 1.5x
+    # output for the whole request, so the window is the one this rate is true at. The listing shows
+    # half of these rates under a 0.5 promotional discount that no route is held to.
+    _openrouter(
+        "openai/gpt-5.6-sol",
+        ModelPrice(4_000_000, 20_000_000, 400_000, 0, 0, 5_000_000),
+        "2026-02",
+        context_window=272_000,
+    ),
 )
 
 

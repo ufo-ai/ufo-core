@@ -182,6 +182,15 @@ BEDROCK_MODEL_SPECS = (
         OPENAI_CONTEXT_WINDOW,
         "responses",
     ),
+    # Global CRIS rates, as the luna row above: the model card leads with the in-region profile,
+    # which lists 10% over the global one these ids resolve to.
+    _openai(
+        "openai.gpt-5.6-sol",
+        ModelPrice(4_000_000, 20_000_000, 400_000, 0, 0, 5_000_000),
+        "2026-02",
+        OPENAI_CONTEXT_WINDOW,
+        "responses",
+    ),
 )
 
 

@@ -443,6 +443,7 @@ def test_manifest_registers_slug_pinned_specs() -> None:
         "z-ai/glm-5.3",
         "moonshotai/kimi-k3",
         "anthropic/claude-fable-5",
+        "openai/gpt-5.6-sol",
     }
     assert by_id["z-ai/glm-5.2"].price.output == 3_000_000
     assert by_id["z-ai/glm-5.2"].knowledge_cutoff == "2026-03"
@@ -501,6 +502,27 @@ def test_fable_5_route_carries_its_slug_price_window_and_required_reasoning() ->
     assert spec.reasoning.default_on
     assert not spec.reasoning.can_disable
     assert spec.wire_reasoning("off", ()) == "low"
+
+
+def test_gpt_56_sol_route_carries_its_slug_price_and_billed_window() -> None:
+    """The route accepts 1,050,000 tokens and bills 2x input plus 1.5x output for a whole request
+    over 272,000, which one rate per token class cannot express, so the row carries the window this
+    rate is true at. The row holds the undiscounted slug rate, which equals the direct openai row:
+    the listing halves it under a promotional discount the router applies to one route of seven, and
+    a ledger that books the discount charges half of what the other six routes cost. Reasoning
+    composes with tools here because this router sends its own normalised `reasoning` field rather
+    than the `reasoning_effort` the model refuses beside tools on Chat Completions (#568)."""
+    spec = {s.id: s for s in openrouter.manifest().models}["openai/gpt-5.6-sol"]
+    assert openrouter.openrouter_slug(spec.id) == "openai/gpt-5.6-sol"
+    assert spec.price.input == 4_000_000
+    assert spec.price.output == 20_000_000
+    assert spec.price.cache_read == 400_000
+    assert spec.price.cache_write_30m == 5_000_000
+    assert spec.context_window == 272_000
+    assert spec.knowledge_cutoff == "2026-02"
+    assert spec.accepts_image_input
+    tools = (ToolSchema(name="search", description="Search", input_schema={"type": "object"}),)
+    assert spec.wire_reasoning("high", tools) == "high"
 
 
 async def test_model_client_requires_its_key(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

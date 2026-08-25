@@ -32,6 +32,13 @@ def test_manifest_registers_mantle_specs() -> None:
     assert by_id["openai.gpt-5.6-luna"].price.cache_write_30m == 250_000
     assert by_id["openai.gpt-5.6-luna"].context_window == 272_000
     assert by_id["openai.gpt-5.6-luna"].knowledge_cutoff == "2026-02"
+    assert by_id["openai.gpt-5.6-sol"].api_surface == "responses"
+    assert by_id["openai.gpt-5.6-sol"].price.input == 4_000_000
+    assert by_id["openai.gpt-5.6-sol"].price.output == 20_000_000
+    assert by_id["openai.gpt-5.6-sol"].price.cache_read == 400_000
+    assert by_id["openai.gpt-5.6-sol"].price.cache_write_30m == 5_000_000
+    assert by_id["openai.gpt-5.6-sol"].context_window == 272_000
+    assert by_id["openai.gpt-5.6-sol"].knowledge_cutoff == "2026-02"
     assert by_id["anthropic.claude-opus-4-8"].knowledge_cutoff == "2026-01"
     assert by_id["anthropic.claude-opus-5"].context_window == 1_000_000
     assert by_id["anthropic.claude-opus-5"].knowledge_cutoff == "2026-05"

@@ -1530,6 +1530,23 @@ def test_catalog_registers_opus_5_with_its_long_context_window(tmp_path: Path) -
     assert spec.price.output == 25_000_000
 
 
+def test_catalog_registers_gpt_5_6_sol_on_the_responses_surface(tmp_path: Path) -> None:
+    """Sol shares the family's refusal of `tools` beside `reasoning_effort` on
+    `/v1/chat/completions` (#568), so it is called on Responses. The family accepts 1,050,000
+    tokens and bills a whole request over 272,000 at 2x input and 1.5x output, so the row carries
+    the window its registered rate is true at."""
+    registry = model_registry(_config(tmp_path), ())
+    spec = registry.spec("gpt-5.6-sol")
+    assert spec.provider == "openai"
+    assert spec.api_surface == "responses"
+    assert spec.context_window == 272_000
+    assert spec.knowledge_cutoff == "2026-02"
+    assert spec.price.input == 4_000_000
+    assert spec.price.output == 20_000_000
+    assert spec.price.cache_read == 400_000
+    assert spec.price.cache_write_30m == 5_000_000
+
+
 def test_core_registers_no_fable_row(tmp_path: Path) -> None:
     """Fable 5 requires 30-day retention and this org holds zero data retention, so the direct
     Anthropic wire answers 404 for it on every key. Core therefore ships no row: the model reaches a
@@ -1564,9 +1581,9 @@ def test_registry_rejects_a_background_jobs_model_no_spec_describes(tmp_path: Pa
     """Every background job's own model call resolves through `background_jobs_model`, so a knob
     naming no registered spec is a boot failure — not one failed job per workspace per tick."""
     with pytest.raises(
-        ValueError, match=r"models\.background_jobs_model 'gpt-5.6-sol' is not a registered"
+        ValueError, match=r"models\.background_jobs_model 'gpt-5.7-terra' is not a registered"
     ):
-        model_registry(_config(tmp_path, ModelsConfig(background_jobs_model="gpt-5.6-sol")), ())
+        model_registry(_config(tmp_path, ModelsConfig(background_jobs_model="gpt-5.7-terra")), ())
 
 
 def test_registry_registers_the_default_background_jobs_model_with_tool_use(tmp_path: Path) -> None:

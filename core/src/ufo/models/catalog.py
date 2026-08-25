@@ -133,6 +133,13 @@ def core_model_specs(anthropic_key_env: str, openai_key_env: str) -> tuple[Model
             anthropic_key_env,
         ),
         _openai(
+            "gpt-5.6-sol",
+            ModelPrice(4_000_000, 20_000_000, 400_000, 0, 0, 5_000_000),
+            "2026-02",
+            openai_key_env,
+            api_surface="responses",
+        ),
+        _openai(
             "gpt-5.6-terra",
             ModelPrice(2_000_000, 12_000_000, 200_000, 0, 0, 2_500_000),
             "2026-02",

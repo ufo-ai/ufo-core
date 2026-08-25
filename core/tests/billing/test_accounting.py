@@ -94,18 +94,19 @@ def test_unknown_model_prices_zero_never_raises() -> None:
 
 
 def test_the_gpt_5_6_rows_price_at_the_published_rates() -> None:
-    """Terra bills $2/$12 per Mtok and Luna $0.20/$1.20, each with cache reads at 0.1x input and
-    cache writes at 1.25x — the rate OpenAI bills a GPT-5.6 cache write at, which is why these two
-    rows carry a write rate above their input rate."""
+    """Sol bills $4/$20 per Mtok, Terra $2/$12 and Luna $0.20/$1.20, each with cache reads at 0.1x
+    input and cache writes at 1.25x — the rate OpenAI bills a GPT-5.6 cache write at, which is why
+    these rows carry a write rate above their input rate."""
     usage = Usage(
         input_tokens=1000,
         output_tokens=2000,
         cache_read_tokens=3000,
         cache_write_30m_tokens=4000,
     )
+    assert CORE_PRICING.micro_usd("gpt-5.6-sol", usage) == 65_200
     assert CORE_PRICING.micro_usd("gpt-5.6-terra", usage) == 36_600
     assert CORE_PRICING.micro_usd("gpt-5.6-luna", usage) == 3_660
-    for model in ("gpt-5.6-terra", "gpt-5.6-luna"):
+    for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
         price = CORE_PRICES[model]
         assert price.cache_write_5m == 0
         assert price.cache_write_30m == price.input * 5 // 4
