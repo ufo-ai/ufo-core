@@ -133,6 +133,7 @@ from evals.harness.target import (
     TargetResult,
     _current_turn_messages,
     _terminal_result,
+    _turn_windows,
     capability_output,
 )
 from evals.harness.timing import CaseTiming, StepTiming, TurnStep, TurnTiming
@@ -8361,6 +8362,240 @@ async def test_capability_merge_recovers_a_failed_childs_completed_steps(
     assert recovered.result == "old_text must occur exactly once"
     assert recovered.is_error
     assert "old_text must occur exactly once" in result.output.tool_errors
+
+
+@dataclass(frozen=True)
+class _ChildTurnSteps:
+    by_turn: dict[UUID, tuple[TurnStep, ...]]
+
+    async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]:
+        return self.by_turn.get(turn_id, ())
+
+
+def _completed_call_steps(name: str, call_id: str, closing: str = "") -> tuple[TurnStep, ...]:
+    call = ToolUseBlock(id=call_id, name=name, input={"path": "/workspace/app.tsx"})
+    messages = [
+        Message(role="assistant", content=(call,)),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id=call_id, content="done"),),
+        ),
+    ]
+    if closing:
+        messages.append(Message(role="assistant", content=(TextBlock(text=closing),)))
+    return tuple(
+        TurnStep(function_name="Engine._stream_once", messages=(message,)) for message in messages
+    )
+
+
+async def _merge_child_turns(
+    blob: FilesystemBlobStore,
+    workspace_id: UUID,
+    agent_id: UUID,
+    turns: tuple[tuple[str, str], ...],
+    transcript: tuple[Message, ...],
+    steps: dict[int, tuple[TurnStep, ...]],
+) -> CapabilityOutput:
+    parent_conversation_id = uuid4()
+    parent_turn_id = uuid4()
+    child_conversation_id = uuid4()
+    turn_ids: list[UUID] = []
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation),
+            [
+                {
+                    "id": parent_conversation_id,
+                    "workspace_id": workspace_id,
+                    "agent_id": agent_id,
+                    "surface": "eval",
+                    "queue_key": uuid4().hex,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": child_conversation_id,
+                    "workspace_id": workspace_id,
+                    "agent_id": agent_id,
+                    "surface": "eval",
+                    "queue_key": uuid4().hex,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=parent_turn_id,
+                workspace_id=workspace_id,
+                conversation_id=parent_conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="build the page",
+                terminal={"status": "done", "text": "Done.", "model": MODEL},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        for seq, (status, inbound) in enumerate(turns, start=1):
+            turn_id = uuid4()
+            turn_ids.append(turn_id)
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=child_conversation_id,
+                    agent_id=agent_id,
+                    seq=seq,
+                    status=status,
+                    inbound=inbound,
+                    parent_turn_id=parent_turn_id,
+                    terminal={"status": status, "text": "Done.", "model": MODEL},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    await Transcript(blob=blob, conversation_id=child_conversation_id).write(
+        Conversation(seq=len(turns), messages=transcript)
+    )
+    worker = StubWorker(blob, workspace_id, None)
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id, worker),
+        outcome=CorpusOutcome(ctx),
+        turn_steps=_ChildTurnSteps({turn_ids[index]: value for index, value in steps.items()}),
+        blob=blob,
+    )
+    merged, _descendant_ids, failure = await target._merge_descendants(
+        parent_turn_id, CapabilityOutput("", ())
+    )
+    assert failure == ""
+    return merged
+
+
+async def test_failed_child_steps_precede_a_done_followups_calls(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    followup = ToolUseBlock(id="bash-1", name="bash", input={"command": "ls"})
+    transcript = (
+        Message(role="user", content="task A"),
+        Message(role="user", content="follow up"),
+        Message(role="assistant", content=(followup,)),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="bash-1", content="ok"),)),
+        Message(role="assistant", content=(TextBlock(text="the follow-up answer"),)),
+    )
+
+    with ws(workspace_id):
+        merged = await _merge_child_turns(
+            blob,
+            workspace_id,
+            agent_id,
+            (("failed", "task A"), ("done", "follow up")),
+            transcript,
+            {0: _completed_call_steps("write", "write-1")},
+        )
+
+    assert [call.name for call in merged.calls] == ["write", "bash"]
+
+
+async def test_repeated_failed_child_inbounds_recover_each_turn(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    transcript = (
+        Message(role="user", content="delegated task"),
+        Message(role="user", content="delegated task"),
+    )
+
+    with ws(workspace_id):
+        merged = await _merge_child_turns(
+            blob,
+            workspace_id,
+            agent_id,
+            (("failed", "delegated task"), ("cancelled", "delegated task")),
+            transcript,
+            {
+                0: _completed_call_steps("write", "write-1"),
+                1: _completed_call_steps("edit", "edit-1"),
+            },
+        )
+
+    assert [call.name for call in merged.calls] == ["write", "edit"]
+
+
+async def test_failed_child_recovery_preserves_the_followup_closing(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    transcript = (
+        Message(role="user", content="task A"),
+        Message(role="user", content="follow up"),
+        Message(role="assistant", content=(TextBlock(text="the real closing answer"),)),
+    )
+
+    with ws(workspace_id):
+        merged = await _merge_child_turns(
+            blob,
+            workspace_id,
+            agent_id,
+            (("failed", "task A"), ("done", "follow up")),
+            transcript,
+            {0: _completed_call_steps("write", "write-1", "partial work from turn 1")},
+        )
+
+    assert [call.name for call in merged.calls] == ["write"]
+    assert [handoff.closing_chars for handoff in merged.handoffs] == [
+        len("the real closing answer")
+    ]
+
+
+def test_turn_windows_bounds_a_missing_inbound_by_the_next_known_turn() -> None:
+    messages = (
+        Message(role="assistant", content=(TextBlock(text="compacted context"),)),
+        Message(role="user", content="follow up"),
+        Message(role="assistant", content=(TextBlock(text="done"),)),
+    )
+
+    assert _turn_windows(messages, ("missing task", "follow up")) == ((1, 1), (1, 3))
+
+
+async def test_missing_child_inbound_does_not_poison_a_later_failed_turn_window(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    followup = ToolUseBlock(id="bash-1", name="bash", input={"command": "ls"})
+    transcript = (
+        Message(role="assistant", content=(TextBlock(text="compacted context"),)),
+        Message(role="user", content="follow up"),
+        Message(role="assistant", content=(followup,)),
+        Message(role="user", content=(ToolResultBlock(tool_use_id="bash-1", content="ok"),)),
+        Message(role="assistant", content=(TextBlock(text="the real closing answer"),)),
+    )
+
+    with ws(workspace_id):
+        merged = await _merge_child_turns(
+            blob,
+            workspace_id,
+            agent_id,
+            (("failed", "missing task"), ("failed", "follow up")),
+            transcript,
+            {
+                0: _completed_call_steps("write", "write-1", "partial failed answer"),
+                1: _completed_call_steps("edit", "edit-1"),
+            },
+        )
+
+    assert [call.name for call in merged.calls] == ["write", "bash"]
+    assert [handoff.closing_chars for handoff in merged.handoffs] == [
+        len("the real closing answer")
+    ]
 
 
 async def test_capability_merge_reads_a_followed_up_child_conversation_once(

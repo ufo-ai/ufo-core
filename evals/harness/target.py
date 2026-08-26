@@ -141,21 +141,51 @@ def _invoke_failure(conversation_id: UUID, error: Exception) -> TargetResult:
     )
 
 
+def _is_turn_inbound(message: Message, inbound: str) -> bool:
+    return (
+        message.role == "user"
+        and isinstance(message.content, str)
+        and (
+            message.content == inbound
+            or message.content.endswith(f"\n{inbound}")
+            or message.content.startswith(f"{inbound}\n\n<injected_context>")
+            or f"\n{inbound}\n\n<injected_context>" in message.content
+        )
+    )
+
+
 def _current_turn_messages(messages: tuple[Message, ...], inbound: str) -> tuple[Message, ...]:
     for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        if (
-            message.role == "user"
-            and isinstance(message.content, str)
-            and (
-                message.content == inbound
-                or message.content.endswith(f"\n{inbound}")
-                or message.content.startswith(f"{inbound}\n\n<injected_context>")
-                or f"\n{inbound}\n\n<injected_context>" in message.content
-            )
-        ):
+        if _is_turn_inbound(messages[index], inbound):
             return messages[index:]
     return messages
+
+
+def _turn_windows(
+    messages: tuple[Message, ...], inbounds: tuple[str, ...]
+) -> tuple[tuple[int, int], ...]:
+    starts: list[int | None] = []
+    search = 0
+    for inbound in inbounds:
+        index = next(
+            (
+                position
+                for position in range(search, len(messages))
+                if _is_turn_inbound(messages[position], inbound)
+            ),
+            None,
+        )
+        starts.append(index)
+        if index is not None:
+            search = index + 1
+    windows: list[tuple[int, int]] = []
+    for position, start in enumerate(starts):
+        end = next(
+            (candidate for candidate in starts[position + 1 :] if candidate is not None),
+            len(messages),
+        )
+        windows.append((end, end) if start is None else (start, end))
+    return tuple(windows)
 
 
 class CapabilityTarget(Protocol):
@@ -578,7 +608,7 @@ class InProcessTarget:
                         tables.turn.c.inbound,
                     )
                     .where(tables.turn.c.parent_turn_id == turn_id)
-                    .order_by(tables.turn.c.created_at)
+                    .order_by(tables.turn.c.created_at, tables.turn.c.seq)
                 )
             ).all()
         if wait_for_background:
@@ -600,7 +630,7 @@ class InProcessTarget:
                                 tables.turn.c.inbound,
                             )
                             .where(tables.turn.c.parent_turn_id == turn_id)
-                            .order_by(tables.turn.c.created_at)
+                            .order_by(tables.turn.c.created_at, tables.turn.c.seq)
                         )
                     ).all()
         conversations: dict[UUID, list[sa.Row]] = {}
@@ -634,18 +664,25 @@ class InProcessTarget:
                 )
             child_messages = decoded.messages
             if self.turn_steps is not None:
-                for turn in turns:
-                    current = _current_turn_messages(child_messages, turn.inbound)
+                windows = _turn_windows(decoded.messages, tuple(turn.inbound for turn in turns))
+                recovered: dict[int, tuple[Message, ...]] = {}
+                for turn, (start, end) in zip(turns, windows, strict=True):
                     if (
                         turn.status not in {"failed", "cancelled"}
-                        or capability_output(current).calls
+                        or capability_output(decoded.messages[start:end]).calls
                     ):
                         continue
                     steps = await self.turn_steps.steps(turn.id)
-                    child_messages = (
-                        *child_messages,
+                    recovered[end] = (
+                        *recovered.get(end, ()),
                         *(message for step in steps for message in step.messages),
                     )
+                if recovered:
+                    rebuilt = list(recovered.get(0, ()))
+                    for index, message in enumerate(decoded.messages):
+                        rebuilt.append(message)
+                        rebuilt.extend(recovered.get(index + 1, ()))
+                    child_messages = tuple(rebuilt)
             child = capability_output(child_messages)
             handoffs.append(
                 handoff_record(
