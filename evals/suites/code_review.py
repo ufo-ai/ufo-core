@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -17,6 +18,7 @@ from evals.harness.capability import (
     CapabilityOutput,
     CapabilityVerdict,
     DescribedGrader,
+    ToolInvocation,
     WorkspaceFile,
 )
 from evals.harness.harness import Json, JsonObject
@@ -25,17 +27,29 @@ from ufo.db import workspace_tx
 from ufo.schema import tables
 
 BASE_SHA = "08871cfcd60a9c407221af81ff22411754224c7e"
-HEAD_SHA = "cc7a893a45200cd4d7f51e0a1c227207f9c04375"
+HEAD_SHA = "52b8c52b2575d4eaa4403765de981824fe8c22bd"
 OLD_HEAD_SHA = "1111111111111111111111111111111111111111"
 PAGE_ID = UUID("20000000-0000-0000-0000-000000000001")
 PREEMPT_PAGE_ID = UUID("20000000-0000-0000-0000-000000000002")
+INSTRUCTION_PAGE_ID = UUID("20000000-0000-0000-0000-000000000003")
 SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
 PREEMPT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000002")
+INSTRUCTION_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000003")
 OLD_SPAWNS = (
     "40000000-0000-0000-0000-000000000001",
     "40000000-0000-0000-0000-000000000002",
 )
 FIXTURE_FILES = ("alpha.py", "beta.py", "gamma.py", "delta.py", "epsilon.py", "zeta.py")
+ROOT_INSTRUCTION = "Review all changed Python files."
+NESTED_INSTRUCTION = "Review src changes against supported behavior."
+CHECKOUT_PATTERN = re.compile(r"/workspace/code-review-[0-9a-f]{40}-(?:correctness|security)")
+REVIEW_FAILURES = (
+    "escapes /workspace",
+    "is not a regular file",
+    "Unable to read current working directory",
+    "index.lock",
+    "remote origin already exists",
+)
 FIXTURE_TIME = datetime(2026, 8, 25, tzinfo=UTC)
 GIT_ENV = {
     "GIT_AUTHOR_DATE": "2026-08-25T00:00:00Z",
@@ -53,6 +67,19 @@ index 351b79b..041b5f7 100644
  def value():
 -    return 0
 +    return 1
+diff --git a/src/AGENTS.md b/src/AGENTS.md
+new file mode 100644
+--- /dev/null
++++ b/src/AGENTS.md
+@@ -0,0 +1 @@
++Review src changes against supported behavior.
+diff --git a/src/CLAUDE.md b/src/CLAUDE.md
+new file mode 120000
+--- /dev/null
++++ b/src/CLAUDE.md
+@@ -0,0 +1 @@
++AGENTS.md
+\\ No newline at end of file
 diff --git a/src/beta.py b/src/beta.py
 index 351b79b..041b5f7 100644
 --- a/src/beta.py
@@ -96,7 +123,7 @@ index 351b79b..041b5f7 100644
 """
 WORKSPACE_FILES = (
     WorkspaceFile("review-target/README.md", b"# Review fixture\n"),
-    WorkspaceFile("review-target/AGENTS.md", b"Review all changed Python files.\n"),
+    WorkspaceFile("review-target/AGENTS.md", f"{ROOT_INSTRUCTION}\n".encode()),
     *(
         WorkspaceFile(f"review-target/src/{name}", b"def value():\n    return 0\n")
         for name in FIXTURE_FILES
@@ -194,6 +221,19 @@ async def _seed_preemption(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBl
     )
 
 
+async def _seed_instruction_read(
+    workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore
+) -> None:
+    await _seed_page(
+        workspace_id,
+        agent_id,
+        blob,
+        INSTRUCTION_PAGE_ID,
+        INSTRUCTION_SOURCE_ID,
+        HEAD_SHA,
+    )
+
+
 async def _git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
     process = await asyncio.create_subprocess_exec(
         "git",
@@ -260,6 +300,29 @@ def _call_evidence(output: CapabilityOutput, call_ids: frozenset[str]) -> list[J
     ]
 
 
+def _child_calls(output: CapabilityOutput) -> tuple[tuple[ToolInvocation, ...], ...]:
+    if output.timing is None:
+        return ()
+    calls = {call.call_id: call for call in output.calls}
+    return tuple(
+        tuple(
+            calls[step.call_id]
+            for step in turn.steps
+            if step.kind == "tool_call" and step.call_id in calls
+        )
+        for turn in output.timing.turns
+        if turn.role == "child"
+    )
+
+
+def _review_failures(output: CapabilityOutput) -> tuple[str, ...]:
+    texts = (
+        *output.tool_errors,
+        *(call.result for calls in _child_calls(output) for call in calls),
+    )
+    return tuple(text for text in texts if any(failure in text for failure in REVIEW_FAILURES))
+
+
 async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
     spawns = tuple(
         call
@@ -289,8 +352,13 @@ async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
         )
     if output.timing is None:
         return CapabilityVerdict(False, "the run recorded no timing", evidence)
+    failures = _review_failures(output)
+    evidence["checkout_failures"] = [*failures]
+    if failures:
+        return CapabilityVerdict(False, "a reviewer hit a known checkout failure", evidence)
     calls = {call.call_id: call for call in output.calls}
     child_batches: list[Json] = []
+    checkout_roots: set[str] = set()
     for turn in (turn for turn in output.timing.turns if turn.role == "child"):
         groups: dict[int, list[str]] = {}
         durable_groups: dict[int, list[str]] = {}
@@ -305,6 +373,12 @@ async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
             call = calls.get(step.call_id)
             if call is not None:
                 encoded = json.dumps(call.input)
+                checkout_roots.update(CHECKOUT_PATTERN.findall(encoded))
+                if "/tmp/" in encoded or encoded.startswith('"/tmp'):
+                    evidence["checkout_roots"] = [*sorted(checkout_roots)]
+                    return CapabilityVerdict(
+                        False, "a reviewer put repository work under /tmp", evidence
+                    )
                 bulk = bulk or sum(name in encoded for name in FIXTURE_FILES) >= 2
             if step.message_index is None:
                 if current_round:
@@ -323,12 +397,58 @@ async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
                 evidence,
             )
     evidence["children"] = child_batches
+    evidence["checkout_roots"] = [*sorted(checkout_roots)]
     if len(child_batches) != 2:
         return CapabilityVerdict(
             False, f"recorded {len(child_batches)} reviewer turns, expected 2", evidence
         )
+    expected_roots = {
+        f"/workspace/code-review-{HEAD_SHA}-correctness",
+        f"/workspace/code-review-{HEAD_SHA}-security",
+    }
+    if checkout_roots != expected_roots:
+        return CapabilityVerdict(
+            False, "the reviewers did not use distinct workspace checkout roots", evidence
+        )
     return CapabilityVerdict(
-        True, "two reviewers started together and each batched repository work", evidence
+        True,
+        "two reviewers started together, used isolated workspace checkouts, and batched work",
+        evidence,
+    )
+
+
+async def _grade_instruction_reads(output: CapabilityOutput) -> CapabilityVerdict:
+    children = _child_calls(output)
+    failures = _review_failures(output)
+    evidence: JsonObject = {
+        "child_count": len(children),
+        "checkout_failures": [*failures],
+        "instructions": [],
+    }
+    if failures:
+        return CapabilityVerdict(False, "a reviewer failed while reading instructions", evidence)
+    instruction_reads: list[Json] = []
+    read_flags: list[tuple[bool, bool]] = []
+    for calls in children:
+        result = "\n".join(call.result for call in calls if call.succeeded)
+        root_read = ROOT_INSTRUCTION in result
+        nested_read = NESTED_INSTRUCTION in result
+        found: JsonObject = {"root": root_read, "nested": nested_read}
+        instruction_reads.append(found)
+        read_flags.append((root_read, nested_read))
+    evidence["instructions"] = instruction_reads
+    if len(instruction_reads) != 2:
+        return CapabilityVerdict(
+            False, f"recorded {len(instruction_reads)} reviewer turns, expected 2", evidence
+        )
+    if any(not root or not nested for root, nested in read_flags):
+        return CapabilityVerdict(
+            False, "a reviewer did not read both applicable instruction files", evidence
+        )
+    return CapabilityVerdict(
+        True,
+        "both reviewers read the root and nested instruction files without a tool failure",
+        evidence,
     )
 
 
@@ -374,7 +494,7 @@ CASES = (
         message=_source_change(PAGE_ID),
         grader=DescribedGrader(
             "exactly two background reviewers start in one response and each reviewer batches "
-            "known independent repository operations",
+            "known independent repository operations from its own checkout under /workspace",
             _grade_parallel_review,
         ),
         workspace_files=WORKSPACE_FILES,
@@ -382,6 +502,20 @@ CASES = (
         prepare=_prepare_review,
         wait_for_background=True,
         digest_tag="code-review:two-reviewers:max-parallelism:v1",
+    ),
+    CapabilityCase(
+        name="code-review-reads-applicable-instructions",
+        message=_source_change(INSTRUCTION_PAGE_ID),
+        grader=DescribedGrader(
+            "both reviewers read regular root and nested AGENTS.md files without path or file "
+            "type failures",
+            _grade_instruction_reads,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_instruction_read,
+        prepare=_prepare_review,
+        wait_for_background=True,
+        digest_tag="code-review:instruction-files:v1",
     ),
     CapabilityCase(
         name="code-review-new-head-preempts-reviewers",

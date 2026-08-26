@@ -303,7 +303,7 @@ waits on. Running fully offline (`ufoctl ext dev ./my-extension`, no `--remote`)
 
 `extensions/sample` is untouched — it continues to prove the existing, unchanged first-party seam
 exactly as it does today. This RFC's seam gets its own sibling probe, `extensions/sample_js`, built
-the way `CLAUDE.md`'s testing doctrine prescribes: a real consumer (real manifest, real dispatch,
+the way `AGENTS.md`'s testing doctrine prescribes: a real consumer (real manifest, real dispatch,
 the real restricted context) proving the seam, not a fake — and the one fixture `gates.py`'s schema
 check validates. It grows with the units it proves (§9): at Unit A it proves the channel end to end
 (a locally-run Node process dispatching into `ufoctl serve`, no `runner`/WASM yet); once `runner`

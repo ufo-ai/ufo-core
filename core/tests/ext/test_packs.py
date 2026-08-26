@@ -257,7 +257,7 @@ def test_no_pack_selected_leaves_the_unnarrowed_extension_set() -> None:
 
 def test_every_shipped_skill_description_stays_a_routing_trigger() -> None:
     """A description rides in the skill index of every turn, so its length is a standing tax on
-    every workspace the pack serves — CLAUDE.md caps it at 50 words. Enforced here rather than
+    every workspace the pack serves — AGENTS.md caps it at 50 words. Enforced here rather than
     reviewed, because the cap is exactly the kind a growing description passes unnoticed."""
     described = {
         skill.name: len(skill.description.split())

@@ -202,7 +202,7 @@ image is still drawn straight off the file (the browser does that safely); a doc
   unconfigured or refuses the file. This is the one place core holds the inline bearer.
 - The web surface adds `POST /surface/web/preview`: a member session is the whole gate (the render
   is agent-agnostic), it reads one uploaded file, and answers the PNG. It admits no turn and stores
-  nothing — a **stateless display render**, the endpoint category CLAUDE.md names. SVG is safe here
+  nothing — a **stateless display render**, the endpoint category AGENTS.md names. SVG is safe here
   precisely because the page draws the service's raster, never the document's own bytes.
 - The composer's `usePickedPicture` posts a document to that route and draws the returned PNG as a
   `data:` URL (the page's policy admits `data:`, not `blob:`).

@@ -47,7 +47,7 @@ Every durable-config surface today is a bespoke, gap-ridden island:
 | Sources | `sync_source` registers via progressive disclosure (`extensions/sources/ufo_ext_sources/tools.py:279`) | Create-only — **no list, no remove**; a wrong source syncs forever |
 | Connector grants | `connect_account` → OAuth → `grant` row (`core/src/ufo/access/grants.py:251`, `tables.py:228-245`) | **No tool lists or revokes a grant at all** |
 | Credentials | `request_credentials` seals BYOK values into the `credential` table via private handoff (`core/src/ufo/access/credentials.py:106`, `tables.py:218-226`) | **No tool shows which slots exist or are filled; no unset at all** |
-| Agent | `Governance.propose_change`/`approve_proposal`, prompt-only CAS (`core/src/ufo/kinds/governance.py:28-115`); approval is an HTTP endpoint (`core/src/ufo/surfaces/cli.py:146-164`) | `model` is not updatable at all; approval is a member action outside chat — the thing `CLAUDE.md` names as forbidden |
+| Agent | `Governance.propose_change`/`approve_proposal`, prompt-only CAS (`core/src/ufo/kinds/governance.py:28-115`); approval is an HTTP endpoint (`core/src/ufo/surfaces/cli.py:146-164`) | `model` is not updatable at all; approval is a member action outside chat — the thing `AGENTS.md` names as forbidden |
 
 Sixteen core builtins exist (`core/src/ufo/tools/builtins.py:689-870`); none is CRUD over durable
 workspace config — all config CRUD lives in the per-extension islands above. `spec.md:95-99`
@@ -358,7 +358,7 @@ download route, which decides on blob presence.
 | `connect_account`, `request_credentials` | kept — secret-bearing handoffs; the speaker gates the granting act (the `connector` and `credential` kinds carry the read and revoke/unset halves) |
 | `todos`, `memory_update` | kept — conversation working state and data-plane writes, not workspace config (but see `memory` in §5) |
 
-Per `CLAUDE.md` §Completing work, each deletion lands whole in the unit that ships its
+Per `AGENTS.md` §Completing work, each deletion lands whole in the unit that ships its
 replacement, with a grep for the dead tool names as the tear-out proof. **A deleted tool's
 model-facing description survives as its kind's `guidance`** — `object_explain` returns it
 near-verbatim, so replacing a bespoke tool never costs the instructions that were tuned into it;
@@ -390,7 +390,7 @@ What those rows pin on the surface now — all already in §1–§2, none deferr
 5. Spec holds what a member authors or audits. Bulk payloads — page bodies, artifact bytes —
    stay in the kind's own storage, referenced from spec, so get stays bounded.
 6. Deleting a high-cardinality object clears derived state via jobs, never inline
-   (`CLAUDE.md` §Hot paths).
+   (`AGENTS.md` §Hot paths).
 7. Mutations gate on speaker role inside handlers — `member`, `source`, and `connector` use the
    same seam (`ctx.speaker_is_admin()`, finer grantor-style rules).
 

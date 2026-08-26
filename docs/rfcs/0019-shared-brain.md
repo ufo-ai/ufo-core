@@ -239,7 +239,7 @@ widening verb is built only if that number ever makes the tax real (deferred, wi
 Two units, each landing alone and proving a chain end-to-end. Nothing is declared before its
 producer and consumer land together. A Proof cell is the unit's acceptance chain — the
 end-to-end acts that demonstrate the seams compose — not its test matrix; every mechanism a
-Lands cell names gets its focused tests with its implementation (CLAUDE.md §Testing), whether
+Lands cell names gets its focused tests with its implementation (AGENTS.md §Testing), whether
 or not it appears in the chain.
 
 | Unit | Lands | Proof |

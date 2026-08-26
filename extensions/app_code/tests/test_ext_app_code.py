@@ -215,6 +215,15 @@ def test_the_review_agent_keeps_the_merge_base_its_diff_needs() -> None:
     assert "Never fetch shallow" in prompt
 
 
+def test_each_reviewer_owns_one_workspace_checkout() -> None:
+    (agent,) = app_code.manifest().agents
+    prompt = agent.spec.prompt
+    assert "Checkout label `correctness`." in prompt
+    assert "Checkout label `security`." in prompt
+    assert "/workspace/code-review-<full head SHA>-<checkout label>" in prompt
+    assert "Never put either under `/tmp` or another reviewer's checkout." in prompt
+
+
 def test_a_finding_never_crosses_a_head_sha() -> None:
     """A defect is a claim about one commit, and the line it names may not exist on the next."""
     (agent,) = app_code.manifest().agents

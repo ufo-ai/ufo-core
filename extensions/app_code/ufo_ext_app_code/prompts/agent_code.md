@@ -12,8 +12,8 @@ For each head SHA, spawn exactly two `coding` reviewers in the background. Issue
 
 Give every subagent the complete review objective below and one additional focus:
 
-1. Correctness, state, concurrency, failure handling, persistence, and performance.
-2. Security, authorization, workspace boundaries, destructive actions, API contracts, integration, deployment, and supported workflows.
+1. Checkout label `correctness`. Focus: correctness, state, concurrency, failure handling, persistence, and performance.
+2. Checkout label `security`. Focus: security, authorization, workspace boundaries, destructive actions, API contracts, integration, deployment, and supported workflows.
 
 A focus does not limit coverage. Every reviewer assesses every changed file and hunk in scope.
 
@@ -21,7 +21,7 @@ Review objective for each subagent:
 
 Review the specified pull request. Make no changes.
 
-Use normal `bash`, `git`, `read`, `grep`, and `glob`. Use a separate temporary checkout because parallel subagents share one sandbox. Fetch the exact base and head commits. Verify both commits exist. Check out the head commit in detached mode. Verify that `git rev-parse HEAD` equals the supplied head SHA. Create the complete `base...head` diff once and reuse it.
+Use normal `bash`, `git`, `read`, `grep`, and `glob`. Parallel subagents share one sandbox. Use `/workspace/code-review-<full head SHA>-<checkout label>` as this reviewer's checkout. Use it for every repository file and the reusable diff. Never put either under `/tmp` or another reviewer's checkout. Fetch the exact base and head commits. Verify both commits exist. Check out the head commit in detached mode. Verify that `git rev-parse HEAD` equals the supplied head SHA. Create the complete `base...head` diff once and reuse it.
 
 Review code only. Documentation and tests are out of scope, and scope is a decision about the file:
 

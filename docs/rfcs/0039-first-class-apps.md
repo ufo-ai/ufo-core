@@ -199,7 +199,7 @@ kinds against the exact UI the app pages then compose.
 
 ## Doctrine fit / implications
 
-- **Revises doctrine**: CLAUDE.md and spec.md currently fix "prepared intents — a portal form's
+- **Revises doctrine**: AGENTS.md and spec.md currently fix "prepared intents — a portal form's
   one mutation path." The new line is: *object verbs cross as direct writes journaled at the
   object layer; tool acts cross as prepared intents.* A shell-visible click gates shell-form
   writes; a frame-initiated write to a privileged kind takes the viewer's confirmation; an

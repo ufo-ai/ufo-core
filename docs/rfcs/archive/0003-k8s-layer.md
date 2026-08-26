@@ -207,7 +207,7 @@ k8s-free; egress still routes through core's own `EgressProxy` (the carrier only
 | `SubjectAccessReview` / dual-principal / caller-identity authz | contradicts principle 4 ("granted via connectors through chat — never via caller identity"; `docs/salvage.md:75`) | `grants.py` + the speaker-gates-the-grant model |
 | `ApiserverProxy` kubectl-rewrite / `metalcraft-agent-writer` token-mint | existed so an in-sandbox agent could edit its own CRDs; under "every member action happens in chat" that flows through `agents.propose_change` + grants | reserved on the core rewriter seam (`spec.md:103`); rebuilt in `selfhost-k8s` **only** if an enterprise deploy wants raw in-sandbox kubectl |
 | namespace-per-tenant + RLS + quota/RBAC package | product/ops config, not runtime code; core serves ONE workspace (`spec §Fixed decisions`) | `selfhost-k8s` tenant chart (§3.4, `deploy-via-k8s.md`) |
-| `m8t` CRD CRUD as a member surface | `CLAUDE.md`: the only endpoints are the chat transport + third-party plumbing; operator verbs are the `selfhost` CLI | `selfhost` CLI + `selfhost-k8s` apiserver |
+| `m8t` CRD CRUD as a member surface | `AGENTS.md`: the only endpoints are the chat transport + third-party plumbing; operator verbs are the `selfhost` CLI | `selfhost` CLI + `selfhost-k8s` apiserver |
 | HPA / ingress / TLS / autoscaling policy | deployment config, wrapping core | `selfhost-k8s` chart |
 
 ### 3.3 The egress proxy is core, and it is the rewriter seam

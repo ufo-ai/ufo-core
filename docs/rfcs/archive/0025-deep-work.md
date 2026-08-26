@@ -206,7 +206,7 @@ route. Its trigger:
 ### Removing `todos`
 
 `todos` owns no tables, so the removal drops the package, its section, its `ext_store` rows in the
-same migration (`CLAUDE.md`: "Removing an extension drops its tables *and* its `ext_store` rows in
+same migration (`AGENTS.md`: "Removing an extension drops its tables *and* its `ext_store` rows in
 the same migration — nothing else ever will"), its four pack entries
 (`packs/assistant_dev/ufo_pack_assistant.py:23`, `packs/assistant_hosted/…:32`,
 `packs/chief_of_staff/…:32`, and the yc pack), its `pyproject.toml` entries, and the two skills that

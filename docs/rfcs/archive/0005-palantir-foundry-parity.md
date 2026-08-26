@@ -10,7 +10,7 @@ date: 2026-07-06
 Status: **proposal, not adopted.** Gap-analysis + spec against Palantir's three developer surfaces
 (AIP Chatbot Studio, Foundry APIs, Developer Console applications). Nothing here is built; it exists
 so the direction can be decided from a concrete shape. It touches `spec.md` (§Surfaces, §Workspace
-model, §Extension system) and the `CLAUDE.md` "every member action happens in chat" rule.
+model, §Extension system) and the `AGENTS.md` "every member action happens in chat" rule.
 
 Sources: Palantir docs (URLs at the bottom); selfhost citations are `path:line`.
 
@@ -187,7 +187,7 @@ extracted-graph substrate is on the same trajectory, approached from the read en
 
 ## 4. P0 — scoped inbound API: machine principal + token + invoke surface
 
-**The doctrine question, answered.** `CLAUDE.md` forbids "bespoke end-user HTTP endpoints" and says
+**The doctrine question, answered.** `AGENTS.md` forbids "bespoke end-user HTTP endpoints" and says
 "every member action happens in chat." A **machine caller is not a member action** — it is exactly
 the "subsequent use is the wire's job" half of the grant doctrine. The **issuance** of an API token
 still happens in chat (an owner asks the agent, conversationally, to mint one), identical to how a
@@ -259,7 +259,7 @@ service-principal is the correct, least-privilege shape and is recommended.
 - **Grant-in-chat, agent-bound** (principle 4) — no caller-identity borrowing, no confused deputy.
 - **Governed self-improvement** (`trajectories.read` + `agents.propose_change`) — no Foundry analog.
 
-## 8. Doctrine delta (spec.md / CLAUDE.md)
+## 8. Doctrine delta (spec.md / AGENTS.md)
 
 - **§Workspace model / `member`.** "A human" → add `kind ∈ {human, service}`; a service principal is
   a non-human identity turns are attributed to, minted in chat, used on the wire.
@@ -269,7 +269,7 @@ service-principal is the correct, least-privilege shape and is recommended.
 - **§Extension system.** Note the api surface + `issue_api_token` tool + token table as an example
   extension (a new row in the acceptance-test table: "API surface / agent-as-function → surfaces,
   tools, credentials, invoke").
-- **CLAUDE.md.** Clarify that "every member action happens in chat" governs **member** actions; a
+- **AGENTS.md.** Clarify that "every member action happens in chat" governs **member** actions; a
   **machine** caller authenticated by a chat-issued token is the "subsequent use is the wire's job"
   clause, not an exception — exactly the grant model.
 - **§Agent loop / `agent` record.** Reconcile the promised agent shape (tool set, skills, model

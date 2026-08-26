@@ -150,7 +150,7 @@ the k8s backend is the managed version of the identical contract.
 - **Core exposes no inbound control API — by design.** Provisioning, schema, onboarding, and spend
   caps are driven by running core's **own CLI in the pod** (`selfhost init`/`migrate`/`spend cap`,
   `cli.py`) plus injected config/env — not by a bespoke admin HTTP endpoint (which core deliberately
-  lacks, `CLAUDE.md`: the only endpoints are the chat transport + third-party plumbing). The control
+  lacks, `AGENTS.md`: the only endpoints are the chat transport + third-party plumbing). The control
   plane orchestrates core the way any operator would: image + config + `exec`, never a back door.
 
 ## Phased plan

@@ -76,7 +76,7 @@ databases stay on disk, so you can reconstruct a run later.
 
 ## Measure a prompt change: evals.ablate
 
-The Prompts rule in `CLAUDE.md` requires an ablation for each change to text that a model reads: a
+The Prompts rule in `AGENTS.md` requires an ablation for each change to text that a model reads: a
 skill, a prompt section, or a corpus file. `python -m evals.ablate experiment.toml` runs the
 ablation.
 

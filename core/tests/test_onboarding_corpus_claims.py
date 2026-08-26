@@ -549,7 +549,7 @@ BANNED_COPY = (
 
 
 def test_the_corpus_carries_none_of_the_banned_copy() -> None:
-    """CLAUDE.md's user-facing copy rule bans the UFO metaphors from every word a member reads, and
+    """AGENTS.md's user-facing copy rule bans the UFO metaphors from every word a member reads, and
     this corpus is the vocabulary the agent answers a customer in. Pinned because the words were
     removed by hand: `identification` and `identified` were throughout it until they were caught in
     review, and nothing would have caught them coming back."""

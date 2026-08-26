@@ -346,7 +346,7 @@ diff would violate `docs/plan.md` and would answer a question nobody doubts.
 | R14 | Static infra | Carriers, hubs, indexes, embeds, models, cdp, brokers, connectors, memory; the sample split and the two-sided conformance gate | Per-extension suites land. Memory-recall evals hold. |
 | R15 | Components | The component-tier extensions | Each lands with tests. The floor test runs over every installed component. |
 | R16 | Operator surface and schema handover | `ufoctl` verbs, the onboarding RPC, bundle, store installs of `.wasm`; the migration runner, baseline, comparator; per-extension SQL role enforcement | init → serve → portal on SQLite, zero services. A bundle boots. The baseline equals the alembic head on both dialects, and Python stops owning the schema. |
-| R17 | Cutover + tear-out | dev, testing, prod swaps; delete `core/src` **except the permanent Python residue**; the spec.md + CLAUDE.md rewrite | Full eval suites at parity or better on Rust before prod. The Python shape greps to zero, save the named residue. |
+| R17 | Cutover + tear-out | dev, testing, prod swaps; delete `core/src` **except the permanent Python residue**; the spec.md + AGENTS.md rewrite | Full eval suites at parity or better on Rust before prod. The Python shape greps to zero, save the named residue. |
 
 Newly placed prerequisites that previously lived in no unit: `access/`, `sources/`, `billing/`,
 `runtime/` and fourteen smaller modules — about 11,500 lines. The permanent Python residue is

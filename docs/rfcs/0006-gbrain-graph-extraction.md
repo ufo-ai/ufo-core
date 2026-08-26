@@ -127,7 +127,7 @@ and rides the `page_change` hook the core cursor-runner drives.
   ranking-contribution seam and is out of scope here; gbrain's value is **traversal**, a query the
   extension owns directly.)
 - **Batch-at-interval, never inline.** Derived state is produced by a background sweep, never on a
-  write (CLAUDE.md hot-paths; "event-fired work must be unable to fire on events it caused"). The
+  write (AGENTS.md hot-paths; "event-fired work must be unable to fire on events it caused"). The
   extractor registers a `page_change` hook; the core batched cursor-runner replays the `PageFeed`
   off this extension's own cursor exactly as it does for `PageIndexer` — it never fires on page
   writes. `page_change` is the concrete data → memory seam (the runner over `PageFeed`); there is
@@ -157,7 +157,7 @@ handler receiving the scoped `ExtensionContext`. Structure mirrors `PageIndexer`
 3. Upsert entities (resolve/dedupe first) then edges in one `ctx.transaction()`; stamp `extracted_digest = page.digest`.
 4. Advance the cursor in `ctx.store`.
 
-**Bound every external payload next to the call** (CLAUDE.md): cap pages/batch (`LIMIT`), cap
+**Bound every external payload next to the call** (AGENTS.md): cap pages/batch (`LIMIT`), cap
 body chars per page, cap model output tokens.
 
 ### 5.4 Extraction contract (deterministic backbone + LLM tier)

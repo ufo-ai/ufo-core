@@ -339,7 +339,7 @@ one-shot makes two hard properties structural:
 
 - *Volume*: a monitor can never produce more turns than the agent explicitly armed. No cooldown
   tuning, no thundering monitor.
-- *Self-caused fires are impossible* (the CLAUDE.md invariant): the fired turn's own effects can
+- *Self-caused fires are impossible* (the AGENTS.md invariant): the fired turn's own effects can
   only be observed by a re-arm, whose inline probe bakes those effects into the new baseline.
 
 ### Bounds

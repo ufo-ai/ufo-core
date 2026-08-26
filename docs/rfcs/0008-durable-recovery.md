@@ -228,7 +228,7 @@ entity), so a re-executed step reconnects while distinct calls get distinct chil
 | **Child crashes** | its own DBOS workflow recovers under its `turn_id` (Level-1 step replay inside the child); the parent's `_await_terminal` poll is unaffected |
 | **Parent crashes** | the `wide_*` tool step re-runs; deterministic ids + idempotent admit + poll-existing → done entities skipped, in-flight children awaited, only unstarted entities spawned |
 
-**Doctrine reconciliation.** "Event-fired work must not re-fire on events it caused" (CLAUDE.md) is
+**Doctrine reconciliation.** "Event-fired work must not re-fire on events it caused" (AGENTS.md) is
 honored: the fan-out is driven by the tool call, not by a child-completion event, and the recovery is
 a deterministic re-derivation, never an event cascade. The bound is preserved — the re-run
 re-establishes the same semaphore (`delegation.py:56,101`) and the same `MAX_*_ENTITIES` cap; polling
@@ -292,7 +292,7 @@ plus the durable token record; both ends land together.
 
 **Doctrine.**
 
-- **Root-cause, not retry-masking** (CLAUDE.md hot paths). None of this is a retry, sleep, or timeout
+- **Root-cause, not retry-masking** (AGENTS.md hot paths). None of this is a retry, sleep, or timeout
   bump. It is *finer durable checkpointing on the existing durable substrate* — moving the DBOS
   memoization boundary from the turn edge inward. The only retries touched are the legitimate external
   ones (model/egress).

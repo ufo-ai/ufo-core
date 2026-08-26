@@ -74,7 +74,7 @@ package is absent fails loud at boot like any other missing pin (`loader.py:211-
 
 ## Resolve → install → pin (the pipeline, off the loop)
 
-One flow, run by the CLI (sync I/O off the loop is sanctioned for CLI/build — `CLAUDE.md`
+One flow, run by the CLI (sync I/O off the loop is sanctioned for CLI/build — `AGENTS.md`
 "Async-native"):
 
 1. **Resolve + install** — shell `uv pip install "<git-url>@<ref>"` (with `#subdirectory=…` when set).

@@ -244,7 +244,7 @@ Give the loop a second friction axis: a durable **feedback record** per turn, pr
 expresses (dis)satisfaction, consumed by the corpus (which trajectories are "bad") and by the grader
 (a human label is ground truth where present, displacing the LLM judge for that case).
 
-Every member action happens in chat (`CLAUDE.md`), so the signal is **not** a new end-user endpoint.
+Every member action happens in chat (`AGENTS.md`), so the signal is **not** a new end-user endpoint.
 Two producers, both already-shaped seams:
 
 | Producer | Mechanism | Notes |
