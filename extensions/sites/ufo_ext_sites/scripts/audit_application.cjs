@@ -95,7 +95,6 @@ function measure(floor) {
   };
 
   const text = [];
-  const aboveFold = [];
   const seen = new Set();
   let checked = 0;
   let underFloor = 0;
@@ -106,7 +105,6 @@ function measure(floor) {
     const box = element.getBoundingClientRect();
     const style = getComputedStyle(element);
     if (!visible(element, box)) continue;
-    if (box.bottom > 0 && box.top < window.innerHeight) aboveFold.push(words);
     const foreground = parse(style.color);
     if (!foreground) continue;
     const behind = backdrop(element);

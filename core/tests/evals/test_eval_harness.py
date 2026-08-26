@@ -1399,9 +1399,9 @@ class StubWorker:
     status: str = "done"
     artifact: tuple[str, bytes] | None = None
     child_transcript: tuple[Message, ...] | None = None
+    child_status: str = "done"
     child_transcript_missing: bool = False
     child_transcript_corrupt: bool = False
-    child_status: str = "done"
     child_followup_turns: int = 0
     child_artifact: tuple[str, bytes] | None = None
     child_conversation_id: UUID = field(default_factory=uuid4)
@@ -6993,6 +6993,7 @@ def test_eval_run_archive_renders_debug_evidence_and_escapes_script_data(tmp_pat
     assert "Preview app" in html
     assert "Preview interactive app" in html
     assert "Preview snapshot" in html
+    assert "Preview SVG design" in html
     assert "data:text/html;base64,PGgxPkFwcDwvaDE+" in html
     assert "APP_STATIC_PREVIEW_CSP" in html
     assert "APP_INTERACTIVE_PREVIEW_CSP" in html
@@ -8190,6 +8191,9 @@ async def test_capability_merge_waits_for_requested_background_children(db: None
     class CompletingOutcome:
         calls = 0
 
+        async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]:
+            return ()
+
         async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory:
             self.calls += 1
             await Transcript(blob=blob, conversation_id=conversation_id).write(
@@ -8215,7 +8219,11 @@ async def test_capability_merge_waits_for_requested_background_children(db: None
 
     outcome = CompletingOutcome()
     worker = StubWorker(blob, workspace_id, ())
-    target = replace(_delegating_target(blob, worker, agent_id, workspace_id), outcome=outcome)
+    target = replace(
+        _delegating_target(blob, worker, agent_id, workspace_id),
+        outcome=outcome,
+        turn_steps=outcome,
+    )
     with ws(workspace_id):
         async with workspace_tx() as connection:
             await connection.execute(
@@ -8251,6 +8259,77 @@ async def test_capability_merge_waits_for_requested_background_children(db: None
     assert descendant_ids == (child_turn_id,)
     assert outcome.calls == 1
     assert [call.name for call in merged.calls] == ["bash"]
+
+
+async def test_capability_merge_recovers_a_failed_childs_completed_steps(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    call = ToolUseBlock(
+        id="edit-1",
+        name="edit_application_source",
+        input={"edits": [{"old_text": "before", "new_text": "after"}]},
+    )
+    worker = StubWorker(
+        blob,
+        workspace_id,
+        _research_transcript(),
+        child_transcript=(Message(role="user", content="repair the source"),),
+        child_status="failed",
+    )
+
+    @dataclass(frozen=True)
+    class ChildSteps:
+        async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]:
+            if turn_id != worker.child_turn_id:
+                return ()
+            return (
+                TurnStep(
+                    function_name="Engine._stream_once",
+                    messages=(Message(role="assistant", content=(call,)),),
+                ),
+                TurnStep(
+                    function_name="Engine._dispatch_step",
+                    messages=(
+                        Message(
+                            role="user",
+                            content=(
+                                ToolResultBlock(
+                                    tool_use_id=call.id,
+                                    content="old_text must occur exactly once",
+                                    is_error=True,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id, worker),
+        outcome=CorpusOutcome(ctx),
+        turn_steps=ChildSteps(),
+        blob=blob,
+    )
+    case = CapabilityCase(
+        "failed-child",
+        "build the page",
+        required_tools_scorer(("edit_application_source",)),
+    )
+
+    with ws(workspace_id):
+        result = await target.run(case)
+
+    recovered = next(call for call in result.output.calls if call.name == "edit_application_source")
+    assert recovered.input == {"edits": [{"old_text": "before", "new_text": "after"}]}
+    assert recovered.result == "old_text must occur exactly once"
+    assert recovered.is_error
+    assert "old_text must occur exactly once" in result.output.tool_errors
 
 
 async def test_capability_merge_reads_a_followed_up_child_conversation_once(

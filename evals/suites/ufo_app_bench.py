@@ -46,6 +46,7 @@ from ufo_ext_eval_env.manifest import (
 )
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
+    APPLICATION_AUDIT_SERVER,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
     DESKTOP_WIDTH,
     MIN_CONTROLS,
@@ -178,6 +179,7 @@ APP_WORKSPACE_FILES = (
     WorkspaceFile("ufo-app/app.tsx", APP_PLACEHOLDER),
     WorkspaceFile("ufo-app/preview.html", APP_PREVIEW),
 )
+APP_DESIGN_PATH = f"{APP_WORKSPACE_ROOT}/application-design.svg"
 PROBE_OUTPUT = ".eval-output"
 PROBE_PORT = 8137
 PROBE_TIMEOUT_SECONDS = 120
@@ -1063,6 +1065,8 @@ class _AppBenchProbe:
             detail = result.stderr.strip() or result.stdout.strip() or "no command output"
             return ArtifactProbeResult(error=f"app probe failed: {detail[:500]}")
         paths = (
+            directory / f"{self.name}-design.html",
+            directory / f"{self.name}-design.svg",
             directory / f"{self.name}-interactive.html",
             directory / f"{self.name}-static.html",
             directory / f"{self.name}-audit.json",
@@ -1082,6 +1086,7 @@ class _AppBenchProbe:
     def _command(self) -> str:
         directory = f"/workspace/{PROBE_OUTPUT}/{self.name}"
         audit = base64.b64encode(AUDIT_CONTENT).decode()
+        server = base64.b64encode(APPLICATION_AUDIT_SERVER).decode()
         readiness = f"""python3 - <<'PY'
 import socket
 import time
@@ -1101,10 +1106,22 @@ PY"""
             'rm -rf "$capture"\n'
             'mkdir -p "$capture"\n'
             f"printf %s {shlex.quote(audit)} | base64 -d > /tmp/ufo-app-bench-audit.cjs\n"
+            f"printf %s {shlex.quote(server)} | base64 -d > /tmp/ufo-app-bench-server.py\n"
             f"test -s {APP_WORKSPACE_ROOT}/app.tsx\n"
+            f"test -s {APP_DESIGN_PATH}\n"
+            f'cp {APP_DESIGN_PATH} "$capture/{self.name}-design.svg"\n'
+            'printf \'%s\' \'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            "<style>html,body{margin:0;min-height:100%;background:#f5f5f5}main{padding:24px}"
+            "svg{display:block;width:100%;height:auto;background:white}</style></head>"
+            "<body><main>' "
+            f'> "$capture/{self.name}-design.html"\n'
+            f'cat {APP_DESIGN_PATH} >> "$capture/{self.name}-design.html"\n'
+            "printf '%s' '</main></body></html>' "
+            f'>> "$capture/{self.name}-design.html"\n'
             f"(fuser -k {PROBE_PORT}/tcp 2>/dev/null || true)\n"
-            f"nohup python3 -m http.server {PROBE_PORT} --bind 127.0.0.1 "
-            f"--directory {APP_WORKSPACE_ROOT} >/tmp/ufo-app-bench-server.log 2>&1 &\n"
+            f"nohup python3 /tmp/ufo-app-bench-server.py {APP_WORKSPACE_ROOT} {PROBE_PORT} "
+            ">/tmp/ufo-app-bench-server.log 2>&1 &\n"
             f"{readiness}\n"
             "node /tmp/ufo-app-bench-audit.cjs "
             f"http://localhost:{PROBE_PORT}/preview.html "

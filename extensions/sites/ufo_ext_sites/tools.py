@@ -57,6 +57,7 @@ from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, serve_port, workspac
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
+    APPLICATION_AUDIT_SERVER,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
     MAX_PRODUCT_QA_CONTROLS,
     ApplicationAuditContract,
@@ -760,11 +761,13 @@ async def _audit_builder_application(
     dark_path = f"{root}-dark.png"
     interactive_path = f"{root}-interactive.html"
     static_path = f"{root}-static.html"
+    server_path = f"{root}-server.py"
     await ctx.sandbox.write_file(script_path, APPLICATION_AUDIT_SCRIPT)
+    await ctx.sandbox.write_file(server_path, APPLICATION_AUDIT_SERVER)
     port = (
         APPLICATION_AUDIT_PORT_FLOOR + ctx.sandbox.conversation_id.int % APPLICATION_AUDIT_PORT_SPAN
     )
-    command = f"python3 -m http.server {port} --bind 0.0.0.0"
+    command = f"python3 {shlex.quote(server_path)} {shlex.quote(project)} {port}"
     await _serve(ctx, command, project, port, f"{root}.log")
     try:
         run = await ctx.sandbox.sh(

@@ -25,6 +25,21 @@ APPLICATION_AUDIT_REQUEST_CONTRACT_KEY = (
 )
 APPLICATION_AUDIT_TURN_CONTRACT_KEY = "application-builder/audit-contract/turn/{turn_id}"
 APPLICATION_AUDIT_ATTEMPT_KEY = "application-builder/audit-attempt/{turn_id}"
+APPLICATION_AUDIT_SERVER = b"""from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import os
+from pathlib import Path
+import sys
+
+os.chdir(Path(sys.argv[1]).resolve())
+
+class Handler(SimpleHTTPRequestHandler):
+    def translate_path(self, path):
+        if path == "/assets" or path.startswith("/assets/"):
+            path = "/dist" + path
+        return super().translate_path(path)
+
+ThreadingHTTPServer(("0.0.0.0", int(sys.argv[2])), Handler).serve_forever()
+"""
 AuditTerm = Annotated[str, Field(min_length=1, max_length=200)]
 AuditIssueCode = Literal[
     "audit_run",

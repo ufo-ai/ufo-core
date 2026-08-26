@@ -575,6 +575,7 @@ class InProcessTarget:
                         tables.turn.c.conversation_id,
                         tables.turn.c.status,
                         tables.turn.c.terminal,
+                        tables.turn.c.inbound,
                     )
                     .where(tables.turn.c.parent_turn_id == turn_id)
                     .order_by(tables.turn.c.created_at)
@@ -596,6 +597,7 @@ class InProcessTarget:
                                 tables.turn.c.conversation_id,
                                 tables.turn.c.status,
                                 tables.turn.c.terminal,
+                                tables.turn.c.inbound,
                             )
                             .where(tables.turn.c.parent_turn_id == turn_id)
                             .order_by(tables.turn.c.created_at)
@@ -630,10 +632,24 @@ class InProcessTarget:
                     tuple(descendant_ids),
                     f"child conversation {conversation_id} has a corrupt transcript",
                 )
-            child = capability_output(decoded.messages)
+            child_messages = decoded.messages
+            if self.turn_steps is not None:
+                for turn in turns:
+                    current = _current_turn_messages(child_messages, turn.inbound)
+                    if (
+                        turn.status not in {"failed", "cancelled"}
+                        or capability_output(current).calls
+                    ):
+                        continue
+                    steps = await self.turn_steps.steps(turn.id)
+                    child_messages = (
+                        *child_messages,
+                        *(message for step in steps for message in step.messages),
+                    )
+            child = capability_output(child_messages)
             handoffs.append(
                 handoff_record(
-                    conversation_id, decoded.messages, _terminal_result(settled[-1].terminal)
+                    conversation_id, child_messages, _terminal_result(settled[-1].terminal)
                 )
             )
             for turn in turns:

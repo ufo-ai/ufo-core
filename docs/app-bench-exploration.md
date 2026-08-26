@@ -323,6 +323,95 @@ seconds and makes three rejected source-edit calls before it repairs and deploys
 design-only SVG revisions next. A later repair must remove invalid edit shapes at the tool boundary
 without lowering the product checks.
 
+The two-revision screen rejects three required SVG versions. Control run `0154c307` and treatment
+run `96bceab8` both pass 0/3. Mean app score rises only from 0.846 to 0.867, below the 0.03 product
+gate, while median wall time rises from 396 to 484 seconds. Treatment workers write all three SVG
+versions, then make 23 source-edit calls; ten are rejected. The extra design rounds do not direct a
+useful repair and do not reduce source thrash. The revision change is reverted. Keep one SVG.
+
+The first source-edit diagnostic run `059f8598` ends on a Gemini provider error after 15 worker
+tools. Its failed child transcript keeps only the inbound request, so the report loses every worker
+tool name, input, and result. The eval harness now reconstructs completed model and tool steps for a
+failed or cancelled child whose current transcript has no calls. It does not change the production
+transcript or model context. The focused failed-child and timeout-trajectory tests pass on SQLite
+and Postgres.
+
+Repeated run `c021956d` retains the missing evidence. The worker rejects one disallowed source
+export, one malformed `<<<<` edit patch, and two exact repairs that reach compilation. Both exact
+repairs fail because the fresh worktree contains no generated `sdk/kit.js`. The case is invalid for
+source-edit comparison. Add a no-spend app-stack prerequisite for the generated kit, build it, and
+repeat before changing the edit input boundary.
+
+The app stack now requires generated `kit.js` and `kit.css` before database seed or model work.
+After the kit build, run `5a5961e1` compiles and admits one exact source repair. Product QA then
+shows a separate harness fault: the Vite page correctly requests root `/assets` URLs, while the
+framed audit server exposes those files only below `/dist/assets`. Keep the source evidence and fix
+the audit mount before another paid source-edit comparison.
+
+The audit server now maps root `/assets` requests to the staged `dist/assets` tree without changing
+the deployment build. A deterministic replay of the archived `5a5961e1` application loads all four
+views with 51 checked text nodes each, 15 controls, eight visible state changes, and no console
+errors. The same application now reaches its real contrast failures. The repeat `d5dc5532` ends
+before source work when Gemini returns an empty response twice, so it is excluded from the server
+gate.
+
+The five-case `app-builder-activity-line-keys` ablation tests one schema description against the
+unchanged control. Hard passes stay at zero because both arms still reach product failures. The
+claimed process boundary improves: parent delegation calls fall from 18 to five, over-length input
+errors fall from six to zero, complete one-worker processes rise from one to three, cost falls from
+$1.05 to $0.93, and summed case wall time falls from 1,402 to 1,294 seconds. Keep the activity-line
+description.
+
+The four-case `app-source-export-boundary` ablation compares the unchanged control, a worker prompt
+clause, and a source-field contract. Hard passes stay at zero because product checks fail later.
+Export rejections are three, three, and zero. Source read and edit calls are 24, 25, and six. Cost is
+$0.57, $0.54, and $0.48. Summed case wall time is 1,124, 1,199, and 1,080 seconds. Keep the local
+source-field contract and reject the prompt clause.
+
+The field arm also exposes one deterministic edit parser fault. The code-review worker sends 16
+valid search and replacement blocks with the standard `>>>>>>> REPLACE` closing marker. The typed
+input accepts only `>>>>>>>` and rejects the full batch. Accept both closing forms and keep the same
+exact-replacement checks in the handler.
+
+The four-case `app-source-import-boundary-exact` ablation tests one source-field clause against the
+unchanged export constraint. Hard passes stay at zero because product checks fail later. Imports
+outside `ufo/kit` fall from two to zero, initial source rejections fall from two to one, source read
+and edit calls fall from 34 to 15, cost falls from $0.58 to $0.54, and summed case wall time falls
+from 1,148 to 1,009 seconds. Keep the named-import clause.
+
+Every connected case in the new runs also reports no rendered desktop text. The archived audit
+files contain valid views and above-fold text, but the browser script does not return its computed
+`renderedText` or `renderedParts`; it also returns an older leaf-text approximation instead of its
+painted `aboveFoldText`. Return the computed fields and pass the text style and box in the existing
+visually-hidden check. This restores the existing connected-fact and copy grader contract without
+changing a model input.
+
+Combined run `51504079` at the rendered-text head passes `code-review-queue` and fails the other
+four cases on real fact, placement, action-copy, or contrast gates. Failed-case app scores range
+from 0.77 to 0.84. The `app-single-delegation` arm removes one repeated cached parent call but
+regresses `meeting-tasks` from pass to fail and raises cost from $0.67 to $0.97. Reject the wording.
+
+The combined-run SVGs locate the remaining fact loss. `pre-meeting-briefs` omits the same four facts
+in its SVG and page. `issue-owner` omits the same chat-review fact in both. `issue-planner` omits
+three facts in both and loses one more during implementation. `meeting-tasks` carries every fact
+into the page but fails placement and contrast. `code-review-queue` adds one fact during
+implementation and passes.
+
+The design-fact preflight tests the existing audit fact contract before accepting the SVG. Runs
+`873a665a` and `22dda176` stay at one of five hard passes. Cost falls from $0.73 to $0.70 and $0.67,
+but the passing case changes and other app scores move in both directions. The preflight does not
+prove SVG-to-source fidelity and depends on an eval-only contract. Revert it. The next SVG phase
+needs a product contract that measures implementation fidelity without exposing hidden grader
+facts.
+
+Exact SVG text is also not a usable fidelity contract. Only 10 to 22 of 39 to 56 SVG labels appear
+verbatim in most rendered pages because implementation splits, shortens, or rewrites composite
+labels. The SVGs use anonymous groups and no stable region ids. Capture the accepted SVG and a
+sandboxed static SVG preview in the HTML report before defining a structural region contract.
+Run `be872908-919a-4399-8437-0fc3d73402bf` proved the archive path on a failed
+`code-review-queue` case. The report retained the SVG, its static HTML preview, both app previews,
+the audit, and both screenshots.
+
 Do not test templates in this campaign.
 
 ## Stage A: Production target

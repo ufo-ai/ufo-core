@@ -709,7 +709,8 @@ function artifactsMarkup(attempt) {
     if (previewKey) previewArtifacts.set(previewKey, item);
     const previewLabel = /-interactive\.html?$/i.test(item.name)
       ? 'Preview interactive app'
-      : /-static\.html?$/i.test(item.name) ? 'Preview snapshot' : 'Preview app';
+      : /-static\.html?$/i.test(item.name) ? 'Preview snapshot'
+      : /-design\.html?$/i.test(item.name) ? 'Preview SVG design' : 'Preview app';
     const previewButton = previewKey
       ? `<button type="button" class="button" data-preview="${previewKey}">${previewLabel}</button>`
       : '';

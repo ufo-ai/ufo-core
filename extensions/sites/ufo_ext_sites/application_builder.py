@@ -210,7 +210,7 @@ ROOT_MOUNT = re.compile(
     r"\bmountApp\s*\(\s*document\.getElementById\(\s*['\"]root['\"]\s*\)\s*!?\s*,"
 )
 SOURCE_EDIT_PATCH = re.compile(
-    r"\A<<<<<<< SEARCH\n(?P<old>.*?)\n=======\n(?P<new>.*?)\n>>>>>>>\n?\Z",
+    r"\A<<<<<<< SEARCH\n(?P<old>.*?)\n=======\n(?P<new>.*?)\n>>>>>>>(?: REPLACE)?\n?\Z",
     re.DOTALL,
 )
 WORKSPACE_ROOT = PurePosixPath("/workspace")
@@ -417,7 +417,12 @@ class ApplicationBuildAcceptance:
 class WriteApplicationSourceInput(BaseModel):
     """The complete `app.tsx` source for the current typed build task."""
 
-    content: str = Field(min_length=1, max_length=APPLICATION_SOURCE_MAX_CHARS)
+    content: str = Field(
+        min_length=1,
+        max_length=APPLICATION_SOURCE_MAX_CHARS,
+        description="Complete app.tsx source. Use named ufo/kit imports and no export "
+        "declarations.",
+    )
 
 
 class WriteApplicationDesignInput(BaseModel):

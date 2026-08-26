@@ -18,6 +18,7 @@ from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
 import evals.stack as eval_stack
 from evals.stack import (
+    APPLICATION_BUILD_PRODUCTS,
     CREATION_DISABLED_JOBS,
     STACK_OWNER_EMAIL,
     EvalStack,
@@ -694,6 +695,10 @@ async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(
         out=tmp_path / "archive",
         repo_root=tmp_path,
     )
+    for path in APPLICATION_BUILD_PRODUCTS:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("built")
     events: list[str] = []
 
     async def no_databases(self: EvalStack) -> None:
@@ -753,6 +758,32 @@ async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(
 
     assert result.passed
     assert events == ["seed", "prepare", "serve"]
+
+
+async def test_app_stack_rejects_missing_build_products_before_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="app-products", config=template, args=("--only", "ufo-app-bench")),
+        root=tmp_path / "app-products",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    seeded = False
+
+    async def create_databases(self: EvalStack) -> None:
+        nonlocal seeded
+        seeded = True
+
+    monkeypatch.setattr(EvalStack, "_create_databases", create_databases)
+
+    with pytest.raises(RuntimeError, match="application eval requires generated build products"):
+        await stack.run(asyncio.Lock())
+
+    _close(stack)
+    assert not seeded
 
 
 def test_issue_recall_spec_needs_a_collector_endpoint_but_no_postgres(

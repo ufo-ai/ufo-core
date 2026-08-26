@@ -1,9 +1,12 @@
 import asyncio
+import http.client
 import json
 import re
 import shlex
 import subprocess
+import sys
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -24,6 +27,7 @@ from ufo_ext_sites import tools as sites_tools
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
+    APPLICATION_AUDIT_SERVER,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
     MAX_PRODUCT_QA_CONTROLS,
     ApplicationAuditContract,
@@ -451,6 +455,45 @@ def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
     assert all(len(issue.message) <= 500 for issue in verdict.issues)
 
 
+def test_application_audit_server_maps_root_assets(tmp_path: Path, unused_tcp_port: int) -> None:
+    project = tmp_path / "ufo-app"
+    asset = project / "dist" / "assets" / "app.js"
+    asset.parent.mkdir(parents=True)
+    asset.write_text("built application")
+    server = tmp_path / "application-audit-server.py"
+    server.write_bytes(APPLICATION_AUDIT_SERVER)
+    process = subprocess.Popen(
+        [sys.executable, str(server), str(project), str(unused_tcp_port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 2
+    try:
+        while True:
+            connection = http.client.HTTPConnection("127.0.0.1", unused_tcp_port, timeout=1)
+            try:
+                connection.request("GET", "/assets/app.js")
+                response = connection.getresponse()
+                body = response.read()
+            except OSError:
+                if process.poll() is not None:
+                    raise RuntimeError("application audit server stopped before serving") from None
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("application audit server did not start") from None
+                time.sleep(0.01)
+                continue
+            finally:
+                connection.close()
+            break
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2)
+
+    assert response.status == 200
+    assert body == b"built application"
+
+
 async def test_application_builder_audit_returns_feedback_to_the_same_worker(
     tmp_path: Path,
 ) -> None:
@@ -534,6 +577,10 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
     report = await _audit_builder_application(ctx, "/workspace/ufo-app")
     assert isinstance(report, ApplicationAuditReport)
     assert len(sandbox.shells) == 2
+    server_path = f"/workspace/.tool-output/application-audit/{ctx.turn.id}-server.py"
+    assert sandbox.writes[server_path] == APPLICATION_AUDIT_SERVER
+    launches = [command for command in sandbox.commands if "nohup" in command]
+    assert launches and all(server_path in command for command in launches)
     port_stops = [program for program, _args in sandbox.programs if program == PORT_STOP_PROG]
     assert len(port_stops) == 4
 
@@ -1396,7 +1443,7 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
                 "const { React } = (window as any).UfoAppKit;\n"
                 "=======\n"
                 "const { React } = UfoAppKit;\n"
-                ">>>>>>>"
+                ">>>>>>> REPLACE"
             ],
         }
     )
@@ -1950,6 +1997,9 @@ async def test_application_builder_write_tool_writes_only_the_contract_source(
     source = (
         'import { mountApp } from "ufo/kit";\nmountApp(document.getElementById("root")!, '
         "() => <main />);"
+    )
+    assert WriteApplicationSourceInput.model_fields["content"].description == (
+        "Complete app.tsx source. Use named ufo/kit imports and no export declarations."
     )
     result = await write_application_source(
         ctx,

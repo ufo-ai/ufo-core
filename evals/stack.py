@@ -49,6 +49,10 @@ STACK_OWNER_EMAIL = "evals@localhost"
 APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy"})
 CREATION_SUITES = frozenset({"new_application"})
 CREATION_DISABLED_JOBS = ("web:seed_homepages",)
+APPLICATION_BUILD_PRODUCTS = (
+    Path("extensions/sites/ufo_ext_sites/page/kit/kit.js"),
+    Path("extensions/sites/ufo_ext_sites/page/kit/kit.css"),
+)
 POSTGRES_NAME_LIMIT = 63
 READY_DEADLINE_SECONDS = 180.0
 READY_POLL_SECONDS = 0.5
@@ -315,6 +319,7 @@ class EvalStack:
 
     async def run(self, creation: asyncio.Lock) -> StackResult:
         try:
+            self._require_application_build_products()
             egress_binary = _egress_binary(self.repo_root)
             async with creation:
                 await self._create_databases()
@@ -353,6 +358,22 @@ class EvalStack:
             root=self.root,
             database_url=self.config.database.url,
         )
+
+    def _require_application_build_products(self) -> None:
+        selected = argparse.ArgumentParser(add_help=False)
+        selected.add_argument("--only", nargs="*", default=())
+        parsed, _ = selected.parse_known_args(self.spec.args)
+        if APP_SUITES.isdisjoint(parsed.only) and CREATION_SUITES.isdisjoint(parsed.only):
+            return
+        missing = tuple(
+            path for path in APPLICATION_BUILD_PRODUCTS if not (self.repo_root / path).is_file()
+        )
+        if missing:
+            names = ", ".join(str(path) for path in missing)
+            raise RuntimeError(
+                f"application eval requires generated build products: {names}; "
+                "run `pnpm -C extensions/web/frontend run build`"
+            )
 
     async def _create_databases(self) -> None:
         if self.admin_database_url is None:

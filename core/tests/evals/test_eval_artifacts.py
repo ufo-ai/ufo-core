@@ -279,7 +279,9 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
 
     assert "document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)" in source
     assert "document.caretRangeFromPoint" in source
-    assert "renderedParts" in source
+    assert "renderedText,\n    renderedParts,\n    aboveFoldText," in source
+    assert "aboveFoldText: aboveFold.join" not in source
+    assert "visuallyHidden(element, style, box)" not in source
     assert "script.setAttribute('src', await asDataUrl(resource))" in source
     assert "style.textContent = await inlineCssResources(css, resource.href)" in source
     assert "sheets.push(await inlineCssResources(css, sheet.href || location.href))" in source
@@ -1377,7 +1379,10 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         assert case.artifact_probe is not None
         assert isinstance(case.artifact_probe, _AppBenchProbe)
         probe_command = case.artifact_probe._command()
-        assert "--directory /workspace/ufo-app" in probe_command
+        assert "/tmp/ufo-app-bench-server.py /workspace/ufo-app" in probe_command
+        assert "test -s /workspace/ufo-app/application-design.svg" in probe_command
+        assert f'"$capture/{case.name}-design.html"' in probe_command
+        assert f'"$capture/{case.name}-design.svg"' in probe_command
         assert f"http://localhost:{PROBE_PORT}/preview.html" in probe_command
         assert "rglob('*.html')" not in probe_command
         assert f'"$capture/{case.name}-interactive.html"' in probe_command
