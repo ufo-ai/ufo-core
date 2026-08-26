@@ -1148,7 +1148,20 @@ CASES: tuple[SkillLoadCase, ...] = (
         "application-another-pr-babysitter",
         "We already have several apps. Add a pull request babysitter for our other repository.",
         expected="create-application",
-        forbidden=("first-run",),
+        forbidden=("first-run", "app-code-babysit"),
+    ),
+    SkillLoadCase(
+        "babysit-sweep-round",
+        "Run a babysitting round: clear what is failing on our open pull requests and merge the "
+        "green ones.",
+        expected="app-code-babysit",
+        forbidden=("create-application", "coding"),
+    ),
+    SkillLoadCase(
+        "babysit-not-for-one-review",
+        "Review pull request 2450 and tell me what would break.",
+        expects_no_load=True,
+        forbidden=("app-code-babysit", "create-application"),
     ),
     SkillLoadCase(
         "first-run-get-set-up",

@@ -1,19 +1,20 @@
 """The Code app: one workspace agent over one set of pull requests.
 
-It is named for what it works over, like every other default app. It arrives reviewing, and
-reviewing is the whole of what it does: the procedure it runs is `prompts/agent_code.md`,
-unchanged from the release that shipped it.
+It is named for what it works over, like every other default app. It arrives reviewing, and holds
+one more feature nobody has asked for yet: babysitting the pull requests it reviews until they
+merge or close. The review procedure it runs is `prompts/agent_code.md`; the babysitting procedure
+is a skill, for the reason `BABYSIT_SKILL` gives.
 
 The agent itself is not new. The `coding` extension shipped it as `code-review`, and this extension
 adopts that row rather than shipping a second one — the member's grants, its conversations and its
 own edits stand, and a migration moves the extension half of the provision identity here.
 
-**This app ships one feature, and that is a consequence of adopting a live row.** Provisioning
-writes a prompt when it creates a row and never again, because a prompt is a member's to edit — so
-an adopted agent keeps the instructions it already has. A second feature would be a band on the
-page, a control under it, and no instructions behind it in any workspace that already holds the
-reviewer, which is every workspace that has one. A feature this app can only offer to workspaces
-that do not exist yet is a dead control, and a dead control is worse than an absent one.
+**A second feature reaches an adopted row only as a skill.** Provisioning writes a prompt when it
+creates a row and never again, because a prompt is a member's to edit — so a procedure added to
+the prompt would reach new workspaces alone, and every workspace that already holds the reviewer
+would draw a control with no instructions behind it. A skill is a file this extension ships, so it
+arrives on the next deploy wherever the app is. What the prompt carries is the one line that sends
+the agent there, and that line is the only thing a member has to add by hand.
 """
 
 from pathlib import Path
@@ -32,6 +33,19 @@ NAME = "app_code"
 VERSION = "0.1.0"
 SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-code-home"
+BABYSIT_TASK = "pr-babysit"
+BABYSIT_SKILL = "app-code-babysit"
+"""Where the babysitting procedure lives.
+
+It is a skill and not prompt text, because a prompt is written into an agent row once and never
+again. A workspace that already holds this app would never meet a procedure added to the prompt
+later, and would draw a feature with no instructions behind it. A skill is a file this extension
+ships, so it reaches every workspace on the next deploy and stays one document.
+
+Babysitting is armed by a `scheduled_task`, not by the source trigger the review runs on. The
+`pull_requests` stream syncs `/repos/{owner}/{repo}/pulls`, so a finished check run and a commit
+status move no record and wake nothing — and a failing check is the first thing babysitting exists
+to clear. A clock is the only thing that sees it."""
 CODE_APP_AGENT_NAME = "code"
 """What this app's agent is called: the work it operates over, which is what every default app is
 named for.
@@ -89,5 +103,8 @@ def manifest() -> Manifest:
         name=NAME,
         version=VERSION,
         agents=(CODE_APP_AGENT,),
-        skills=(SkillSpec(path=SKILLS_ROOT / HOME_SKILL),),
+        skills=(
+            SkillSpec(path=SKILLS_ROOT / HOME_SKILL),
+            SkillSpec(path=SKILLS_ROOT / BABYSIT_SKILL),
+        ),
     )

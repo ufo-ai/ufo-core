@@ -35,7 +35,10 @@ def test_app_code_ships_the_one_agent_and_coding_ships_none() -> None:
     provision = manifest.agents[0]
     assert provision.spec.visibility == "workspace"
     assert provision.spec.purpose
-    assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-code-home"}
+    assert {path.name for path in (spec.path for spec in manifest.skills)} == {
+        "app-code-home",
+        "app-code-babysit",
+    }
 
 
 def test_the_app_ships_the_one_feature_its_adopted_row_can_run() -> None:
@@ -313,3 +316,93 @@ def test_the_page_says_what_the_app_is_for_in_the_provisions_own_words() -> None
     assert stated is not None
     drawn = "".join(re.findall(r'"([^"]*)"', stated[1]))
     assert drawn == app_code.CODE_APP_AGENT.spec.purpose
+
+
+BABYSIT_SKILL_FILE = SKILL_DIR.parent / "app-code-babysit" / "SKILL.md"
+
+
+def test_the_babysit_skill_holds_the_procedure_and_the_prompt_only_names_it() -> None:
+    """The procedure is a skill, not prompt text. A prompt is written into an agent row once and
+    never again, so a workspace that already holds this app would never meet a procedure added to
+    the prompt later — it would draw a feature with no instructions behind it. A skill is a file
+    this extension ships, so it reaches every workspace on the next deploy.
+
+    What the prompt carries is the one line that sends the agent there."""
+    # Matched on one line: a clause that wraps in the file is the same rule, and a test that broke
+    # on the wrap would send the next reader to re-flow prose rather than to fix a rule.
+    skill = " ".join(BABYSIT_SKILL_FILE.read_text().split())
+    for clause in (
+        "Merging is yours, and never a worker's.",
+        "the head SHA you verified is the head SHA you merge",
+        "never bypass protection",
+        "One escalation per pull request, failure and head SHA.",
+        "A pull request waiting on a decision stays waiting.",
+        "Never report a merge, a push, a comment, or a green check you have not read back",
+    ):
+        assert clause in skill, clause
+    (agent,) = app_code.manifest().agents
+    assert app_code.BABYSIT_SKILL in agent.spec.prompt
+    assert "Merging is yours" not in agent.spec.prompt
+
+
+def test_the_babysit_skill_names_no_workspace_of_its_own() -> None:
+    """The repository, the authors and the people to name are the member's answers, held in a file
+    the sweep writes. A shipped skill that named one workspace's would hand every other workspace
+    somebody else's repository and somebody else's colleagues.
+
+    This reads the class, not a list of the four names the procedure was ported from — a denylist
+    passes the moment the next workspace's names are the ones that leaked."""
+    skill = BABYSIT_SKILL_FILE.read_text()
+    prose = re.sub(r"`[^`]*`", "", skill)
+    assert re.findall(r"@[A-Za-z0-9][-\w]*", prose) == []
+    owner_repo = re.findall(r"\b[a-z0-9][-\w]*/[a-z0-9][-\w]{2,}\b", prose)
+    assert [held for held in owner_repo if not held.startswith(("repos/", "workspace/"))] == []
+    assert "settings.md" in skill
+
+
+def test_babysitting_is_armed_by_a_clock_and_says_why() -> None:
+    """A finished check moves no pull-request record. The `pull_requests` stream syncs
+    `/repos/{owner}/{repo}/pulls`, so the source wakes on the record alone and a red check — the
+    first thing babysitting exists to clear — arrives at nothing. The review's own trigger cannot
+    carry this feature, and the prompt says so where a reader would otherwise try it."""
+    (agent,) = app_code.manifest().agents
+    assert f"`scheduled_task` named `{app_code.BABYSIT_TASK}`" in agent.spec.prompt
+    assert "a check that finishes moves no pull-request record" in agent.spec.prompt
+    # The review's standing order is unchanged: a feature nobody armed declares nothing.
+    assert app_code.CODE_APP_AGENT.setup.standing == ("source_trigger",)
+    assert app_code.CODE_APP_AGENT.setup.schedule is None
+
+
+def test_the_worker_is_given_the_rules_it_is_bound_by() -> None:
+    """A worker reads its objective and nothing else. The skill is loaded by the parent, so a rule
+    left in the skill binds nobody — and the escalation rung reads
+    `/workspace/pr-babysitter/rules.md`, which something has to write."""
+    skill = BABYSIT_SKILL_FILE.read_text()
+    escalation = (
+        Path(coding.__file__).parent / "prompts" / "subagent_fable_escalation.md"
+    ).read_text()
+    path = "/workspace/pr-babysitter/rules.md"
+    assert path in escalation
+    assert path in skill
+    assert "the rules themselves in its objective" in skill
+    assert "does not load this skill, and it must not" in skill
+    # A worker that is not told the pull request is its to act on does the local work and pushes
+    # nothing, which makes the whole fix step inert.
+    assert "authorized to act on" in skill
+
+
+def test_the_merge_gate_holds_on_nothing_this_app_cannot_clear() -> None:
+    """`ufo review` publishes each finding as an inline comment, which opens a review thread. The
+    repository resolves none of them — nothing here calls `resolveReviewThread`, a worker may only
+    reply, and GitHub's own rule for `main` sets `required_review_thread_resolution` false — so a
+    gate counting those threads never comes true. Every pull request the review ever flagged would
+    sit unmerged until the 24-hour age-out drops it, with nobody named.
+
+    The verdict is the status the gate already reads, and it is published per head SHA, so the head
+    being merged answers every thread the review left on an older one."""
+    skill = " ".join(BABYSIT_SKILL_FILE.read_text().split())
+    merging = skill.split("## Merging", 1)[1].split("## ", 1)[0]
+    assert "no unresolved thread a person left" in merging
+    assert re.search(r"thread this app's own review left is not\b", merging)
+    assert "`ufo review` status on the head you merge is its answer" in merging
+    assert "Resolve nothing" in merging

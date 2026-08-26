@@ -1640,8 +1640,15 @@ def _app_rebuild_failures() -> list[str]:
     A member's page is built against the kit of the day it was built, and a redeploy takes the kit
     as it stands then — so a rebuild is how a page gains what the kit has since gained, and a page
     nobody rebuilds silently keeps the old one. The skill is the only place an agent reads that,
-    because the agent doing the rebuild is following the skill and nothing else."""
-    skills = sorted(ROOT.glob(f"extensions/app_*/ufo_ext_app_*/skills/*/{APP_HOME_SKILL_FILE}"))
+    because the agent doing the rebuild is following the skill and nothing else.
+
+    Home skills alone. An app ships other skills — a feature's own procedure — and none of them
+    builds a page, so asking them what a rebuild takes would demand a line about a page they never
+    touch."""
+    home = APP_HOME_SKILL.format(slug="*")
+    skills = sorted(
+        ROOT.glob(f"extensions/app_*/ufo_ext_app_*/skills/{home}/{APP_HOME_SKILL_FILE}")
+    )
     if not skills:
         return ["extensions/app_*: no app home skills found — the gate lost its subjects"]
     return [
