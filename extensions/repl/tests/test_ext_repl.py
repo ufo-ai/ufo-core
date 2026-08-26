@@ -38,9 +38,9 @@ class FakeSandbox:
     standing in for the process of an expired call writing on past its result — so the
     accumulate-then-run flow is exercised without a real container.
 
-    `sh` stands in for the task journal the interpreter is launched through: it answers as the
-    command the launch carries, and answers the liveness probe with `probe_pid` — the wrapper that
-    outlived an expired wait, empty for a sandbox that ran nothing."""
+    `bash_task` stands in for the task journal the interpreter is launched through, and `sh`
+    answers its liveness probe with `probe_pid` — the supervisor that outlived an expired wait,
+    empty for a sandbox that ran nothing."""
 
     files: dict[str, bytes] = field(default_factory=dict)
     probe_pid: str = ""
@@ -95,6 +95,12 @@ class FakeSandbox:
         if head == "python3":
             return self.python_result
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        self.timeouts.append(timeout_s)
+        return await self.bash(command)
 
     async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         if tasks.TASK_PROBE in script:

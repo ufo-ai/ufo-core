@@ -262,8 +262,11 @@ The sandbox is late-bound: the first operation that needs one creates it — a c
 skill load, a dial — and the turn's start creates nothing, so a turn that answers out of its
 context, calls a host-side tool, or only spawns a subagent leaves no container and no handle on the
 row. One create serves the whole turn, whichever of its operations races there first.
-An off-cluster carrier reaches the proxy only over TLS; the proxy token is never sent on plaintext
-transport. Each tool command gets a deployment-signed token naming its turn and acting member;
+Every model-generated shell command enters through `ufo run`, whichever carrier executes it. The
+verb owns its process group, task journal, and proxy lifetime. On an off-cluster carrier it gives
+the child a plaintext loopback proxy and carries that socket to the public proxy over TLS; the
+proxy token is never sent on plaintext transport off the box. Each tool command gets a
+deployment-signed token naming its turn and acting member;
 unbound commands name no member. Descendants retain the launching command's environment while later
 commands may carry another member. Every CONNECT also requires the named turn to remain running, or,
 for a probe token — the off-turn exec a jobs-role handler runs, which names a conversation and the
@@ -290,8 +293,10 @@ themselves connected, never a deploy default. The ops travel down the surface's 
 their results return as the client's next request (the rendezvous, §Extension surfaces); egress
 metering is cooperative there, since a command that ignores the proxy env reaches the member's own
 network, but the model sentinel is never exported, so no key leaks. The client gives each operation
-a merged CA bundle; an operation that invokes `gh` uses the client's embedded build whose verifier
-reads that bundle without changing the member's certificate store. A client-bound conversation
+a merged CA bundle; `ufo run` gives its child a plaintext loopback proxy and forwards to the
+deploy's public proxy over verified TLS for the command or supervised task's lifetime. An operation
+that invokes `gh` uses the client's embedded build whose verifier reads that bundle without changing
+the member's certificate store. A client-bound conversation
 with no connected terminal is unreachable — its turns and its file browser fail loud rather than
 running somewhere the member cannot see. The op logic runs natively in the client binary the
 deploy builds and serves, held to the server's op contracts by the client's own tests; a stale

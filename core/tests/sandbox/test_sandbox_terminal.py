@@ -243,7 +243,7 @@ async def test_create_binds_the_directory_and_the_metered_proxy() -> None:
     )
     assert handle.container_id == "/Users/member/proj"
     assert handle.runtime_root == f"$UFO_HOME/runs/{conversation_id.hex}"
-    assert handle.egress_env["HTTPS_PROXY"] == "https://run-token:@proxy.example.com"
+    assert handle.egress_env["HTTPS_PROXY"] == "https://run-token:ufo@proxy.example.com"
     assert handle.egress_env["UFO_EGRESS_CA_CERT"] == "ca-pem"
     assert handle.egress_env["UFO_CONVERSATION_ID"] == str(conversation_id)
 
@@ -254,7 +254,7 @@ async def test_create_without_a_public_proxy_fails_closed_on_loopback() -> None:
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/p", None)
     handle = await carrier.create(_spec(conversation_id, "/p"))
-    assert handle.egress_env["HTTP_PROXY"] == "http://run-token:@127.0.0.1:8080"
+    assert handle.egress_env["HTTP_PROXY"] == "http://run-token:ufo@127.0.0.1:8080"
 
 
 def _rendered_document(kind: str, page: int, text: str) -> bytes:
@@ -400,7 +400,7 @@ async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply(
     assert op.kind == "exec" and op.timeout_s == 30 and op.name == "exec"
     params = _op_params(op)
     assert params["argv"] == ["cat", "/Users/member/proj/a.txt"]
-    assert params["env"]["HTTP_PROXY"].startswith("http://run-token:@")
+    assert params["env"]["HTTP_PROXY"].startswith("http://run-token:ufo@")
     assert result.exit_code == 0 and result.stdout == "out\n"
 
 

@@ -286,7 +286,7 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - run: uv sync
+      - run: uv sync --no-install-package actionlint-py
       # The portal's Python tests read its built page, the app pages beside it, and the kit the
       # sites extension materialises into a fork's sandbox. The `web` job built all three once; a
       # missing artifact fails this step rather than letting the suite test an absent tree.
@@ -306,8 +306,10 @@ jobs:
         with:
           name: sandbox-client
           path: client/target/release
-      - run: chmod +x client/target/release/ufo
-      - run: make test SHARD="${{ matrix.shard }}"
+      - run: |
+          chmod +x client/target/release/ufo
+          echo "$GITHUB_WORKSPACE/client/target/release" >> "$GITHUB_PATH"
+      - run: UV_NO_SYNC=1 make test SHARD="${{ matrix.shard }}"
       # Artifact names take no `/`, so the shard is in the index here and spelled in full inside
       # each `run-summary.json`.
       - uses: actions/upload-artifact@v4

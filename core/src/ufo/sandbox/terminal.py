@@ -37,6 +37,7 @@ from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     EGRESS_CA_CERT_ENV,
     NO_PROXY_HOSTS,
+    PROXY_PASSWORD,
     RUNTIME_DIRNAME,
     UFO_HOME_ENV,
     WORKSPACE_DIR,
@@ -596,11 +597,12 @@ class TerminalCarrier:
         directory refuses by naming both, since a workspace that moves under a thread makes every
         earlier line of its transcript a lie.
 
-        The proxy env carries the run token in its userinfo, at the deploy's public proxy when one
-        is named and at the client's own loopback when not — where nothing answers, so a command
-        that honours the proxy env fails closed instead of leaking unmetered, one that ignores it
-        was never metered on this carrier anyway, and the re-authorization every exec runs keeps
-        its invariant that the proxy env carries the turn's token."""
+        The proxy env carries the run token in its userinfo. `ufo run` replaces a public URL with a
+        plaintext loopback for its child and forwards the bytes over verified TLS; with no public
+        URL the env names the client's own loopback, where nothing answers, so a command that
+        honours the env fails closed instead of leaking unmetered. A command that ignores it was
+        never metered on this carrier anyway, and the re-authorization every exec runs keeps its
+        invariant that the proxy env carries the turn's token."""
         bound = await self.terminals.arrived(spec.conversation_id, ARRIVAL_GRACE_SECONDS)
         if bound is None:
             raise TerminalGone(
@@ -614,9 +616,11 @@ class TerminalCarrier:
             )
         if spec.proxy.public_url is not None:
             parts = urlsplit(spec.proxy.public_url)
-            proxy_url = f"{parts.scheme}://{spec.run_token}:@{parts.netloc}{parts.path}"
+            proxy_url = (
+                f"{parts.scheme}://{spec.run_token}:{PROXY_PASSWORD}@{parts.netloc}{parts.path}"
+            )
         else:
-            proxy_url = f"http://{spec.run_token}:@127.0.0.1:{spec.proxy.port}"
+            proxy_url = f"http://{spec.run_token}:{PROXY_PASSWORD}@127.0.0.1:{spec.proxy.port}"
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=spec.workspace_host_path,
@@ -660,8 +664,10 @@ class TerminalCarrier:
         store into one bundle and points each CA variable there, since only the client knows both a
         path on its own disk and the roots the member already trusts — the container carriers reach
         the same bundle by installing the CA into the system store, which a member's machine is
-        never asked to accept. A `gh` operation uses the client's embedded Go 1.27 build, whose
-        verifier reads that bundle without changing the member's certificate store."""
+        never asked to accept. Model-generated shell commands invoke `ufo run`, whose child sees the
+        plaintext forward-proxy protocol standard clients speak while its public hop uses TLS. A
+        `gh` operation uses the client's embedded Go 1.27 build, whose verifier reads that bundle
+        without changing the member's certificate store."""
         root = _root(handle)
         return await self._exec(handle, host_argv(argv, root), timeout_s)
 

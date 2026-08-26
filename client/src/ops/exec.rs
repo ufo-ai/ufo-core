@@ -93,7 +93,13 @@ pub fn run_at_home(
     let gh = invokes_gh(&argv)
         .then(|| materialize_gh(workdir))
         .transpose()?;
-    let executable = if is_gh(program) {
+    let client = is_ufo_run(&argv)
+        .then(env::current_exe)
+        .transpose()
+        .map_err(|error| format!("could not locate this ufo client: {error}"))?;
+    let executable = if let Some(client) = &client {
+        client.as_path()
+    } else if is_gh(program) {
         gh.as_deref().unwrap_or_else(|| Path::new(program))
     } else {
         Path::new(program)
@@ -257,6 +263,16 @@ fn is_gh(word: &str) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case("gh") || name.eq_ignore_ascii_case("gh.exe"))
+}
+
+fn is_ufo_run(argv: &[String]) -> bool {
+    argv.first()
+        .and_then(|word| Path::new(word).file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("ufo") || name.eq_ignore_ascii_case("ufo.exe")
+        })
+        && argv.get(1).map(String::as_str) == Some("run")
 }
 
 fn invokes_gh(argv: &[String]) -> bool {
@@ -499,6 +515,21 @@ mod tests {
             "echo /usr/local/bin/gh".to_string()
         ]));
         assert!(!invokes_gh(&["rg".to_string(), "gh".to_string()]));
+    }
+
+    #[test]
+    fn recognizes_the_shared_run_verb_on_this_client() {
+        assert!(is_ufo_run(&[
+            "ufo".to_string(),
+            "run".to_string(),
+            "--".to_string(),
+            "bash".to_string(),
+        ]));
+        assert!(is_ufo_run(&[
+            "/usr/local/bin/ufo.exe".to_string(),
+            "run".to_string(),
+        ]));
+        assert!(!is_ufo_run(&["ufo".to_string(), "fs".to_string()]));
     }
 
     #[cfg(all(unix, debug_assertions))]

@@ -153,4 +153,19 @@ def test_test_shards_run_the_one_client_ci_built() -> None:
             "with": {"name": "sandbox-client", "path": "client/target/release"},
         }
     ]
-    assert any(step.get("run") == "chmod +x client/target/release/ufo" for step in shard["steps"])
+    assert any(
+        step.get("run")
+        == (
+            "chmod +x client/target/release/ufo\n"
+            'echo "$GITHUB_WORKSPACE/client/target/release" >> "$GITHUB_PATH"\n'
+        )
+        for step in shard["steps"]
+    )
+
+
+def test_test_shards_do_not_build_the_workflow_linter() -> None:
+    steps = _jobs()["test-shard"]["steps"]
+    assert any(step.get("run") == "uv sync --no-install-package actionlint-py" for step in steps)
+    assert any(
+        step.get("run") == 'UV_NO_SYNC=1 make test SHARD="${{ matrix.shard }}"' for step in steps
+    )

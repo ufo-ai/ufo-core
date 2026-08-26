@@ -29,6 +29,7 @@ from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
     COPY_IN_PROG,
     NO_PROXY_HOSTS,
+    PROXY_PASSWORD,
     SANDBOX_GID,
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
@@ -116,7 +117,9 @@ class DockerCarrier:
         process, so every request from a reused container would fail TLS until the new CA lands."""
         await self._reclaim_idle(spec.conversation_id)
         name = f"{CONTAINER_NAME_PREFIX}{spec.conversation_id}"
-        proxy_url = f"http://{spec.run_token}:@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
+        proxy_url = (
+            f"http://{spec.run_token}:{PROXY_PASSWORD}@{HOST_GATEWAY_NAME}:{spec.proxy.port}"
+        )
         egress_env = {
             "HTTP_PROXY": proxy_url,
             "HTTPS_PROXY": proxy_url,

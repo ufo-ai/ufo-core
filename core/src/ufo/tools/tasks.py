@@ -4,7 +4,7 @@ handles it is reached by. `bash` and the REPLs run through it, so a foreground b
 thing in each — how long the caller waits, never how long the work may take — and a command that
 outgrew it is reported the same way whichever tool asked.
 
-The journal lives under the conversation's `$UFO_HOME/runs/<id>/tasks`: the wrapper writes it, so
+The journal lives under the conversation's `$UFO_HOME/runs/<id>/tasks`: `ufo run` writes it, so
 the result of a launch survives the exec that made it and a dispatch step re-running after a crash
 reads the first run's outcome instead of repeating the command."""
 
@@ -23,7 +23,6 @@ EXEC_TIMEOUT_VITALS_SECONDS = 5
 EXEC_TIMEOUT_COMMAND_MAX_CHARS = 200
 EXEC_TIMEOUT_VITALS_CMD = "cat /proc/loadavg; free -m | tail -2; df -P /workspace | tail -1"
 BACKGROUND_TASKS_DIR = "tasks"
-TASK_SWEEP_MINUTES = 60
 TASK_PROBE_TIMEOUT_SECONDS = 5
 DETACHED_LEAD = "The command runs detached."
 MOVED_LEAD = "The command did not complete within its {applied_s}s timeout and continues detached."
@@ -36,73 +35,18 @@ BACKGROUND_DIRECTIVE = (
 that differs between a command detached on request and one that outgrew its wait. The log is the
 whole interface to a running command: it is read, never carried into the result, which would hand
 back a prefix that is already stale."""
-TASK_BASH = 'exec bash -c "$1" bash "$2" "$3" "$4"'
-"""Hand the launch to bash, replacing the shell rather than nesting inside it. Everything below
-rests on `set -m`, and dash — `/bin/sh` on the sandbox image — refuses monitor mode where there is
-no tty (`can't access tty; job control turned off`), which would leave every job in the launcher's
-own process group. From here down each part rides argv: the script, the task's base path and the
-command are positional parameters at every hop, so a command holding the delimiter and a workspace
-path holding a quote both arrive verbatim."""
-TASK_WRAPPER = (
-    'set -m; bash -lc "$2" > "$1.log" 2>&1 & child=$!; '
-    'trap "kill -- -$child 2>/dev/null" TERM INT; '
-    'echo $$ > "$1.pid"; '
-    'wait $child; echo $? > "$1.exit"'
-)
-"""The command's own parent: it redirects the command — not itself — into the log, so the log
-carries the command's interleaved output while the shell's job notices go nowhere, and it writes
-the exit code exactly once whether the command ended on its own or was stopped. `set -m` gives the
-command a process group of its own, so the trap's `kill -- -$child` reaches the descendants doing
-the work rather than the shell in front of them. The command runs under the login shell every bash
-call has always used, whose profile is what puts its tools on PATH. The wrapper writes its own pid
-only after the trap is armed, so no reader ever holds a pid whose kill would land before the
-trap — a stop the instant the handles return still signals."""
-TASK_LAUNCH = (
-    'dir=$(dirname "$2"); mkdir -p "$dir" || exit 1; '
-    f'find "$dir" -maxdepth 1 -name "*.exit" -mmin +{TASK_SWEEP_MINUTES} 2>/dev/null | '
-    'while read -r f; do rm -f "${f%.exit}.log" "${f%.exit}.pid" "$f"; done; '
-    'if [ ! -e "$2.pid" ]; then '
-    'set -m; nohup bash -c "$1" bash "$2" "$3" >/dev/null 2>&1 & task=$!; set +m; '
-    "fi; "
-    'for _ in $(seq 500); do [ -s "$2.pid" ] && break; sleep 0.01; done; '
-)
-"""Launch once per task, however many times the exec runs: the pid file is the record that this
-task's command is already launched, so a dispatch step re-running after a crash reattaches to the
-work instead of repeating it — the sandbox outlives the process that asked, and the launch script
-runs sandbox-side to completion whatever happens to the host, so the pid file and the launch are
-one fate. The wrapper starts in a process group of its own, which is what lets it outlive this
-launcher: a carrier ends an exec by killing the launcher's whole group, so a wrapper sharing that
-group dies with it and the exit code no reader would ever see (`set +m` immediately after keeps
-monitor mode's job notice off the result). The wrapper writes the pid file itself, past its trap,
-and the launch is complete only when it appears — so no reader ever holds a pid whose kill would
-land before the trap, and a reattach passes straight through. Completed tasks older than the sweep
-window go here, the one place every task passes through — the window outlives any crash recovery,
-so a journal is never swept before its reader arrives, and a task still running keeps its files
-whatever its age."""
-TASK_WAIT = (
-    'if [ -n "$task" ]; then wait "$task"; else '
-    'until [ -e "$2.exit" ] || ! kill -0 "$(cat "$2.pid")" 2>/dev/null; do sleep 0.2; done; fi; '
-    'code=$(cat "$2.exit" 2>/dev/null) || { echo "the command ended without an exit code" >&2; '
-    'exit 1; }; cat "$2.log"; exit "$code"'
-)
-"""Answer as the command itself — its output, its exit code — so a command that fits its budget
-costs the single exec it always did. A launch this exec performed is waited on directly, since the
-launcher is its parent; a reattached one belongs to a dead exec, so the wait falls back to watching
-for the exit file while the wrapper lives. The files stay: they are the journal a re-run of the
-same call reads its result from, gone only through the launch-time sweep."""
-TASK_DETACH = 'cat "$2.pid"'
 TASK_PROBE = (
     'pid=$(cat "$1.pid" 2>/dev/null) || exit 1; '
     'if [ -e "$1.exit" ] || kill -0 "$pid" 2>/dev/null; then printf %s "$pid"; fi'
 )
-"""Whether the work outlived the exec that launched it, answered by the wrapper's own pid: alive,
+"""Whether the work outlived the exec that launched it, answered by the supervisor's pid: alive,
 or already past its exit file. Silence is the sandbox failing to run the command at all, which is
 the one reading that must still be reported as an error."""
 
 
 @dataclass(frozen=True, slots=True)
 class TaskRun:
-    """One journal-launched command and what ended it. `pid` is the wrapper's, set only where the
+    """One journal-launched command and what ended it. `pid` is the supervisor's, set only where the
     wait expired with the work still alive — the reading that separates a command that outgrew its
     budget from a sandbox that never ran it, which no exit code can carry. `requested_s` is what
     the caller asked for before the cap, so a notice names a request the cap reduced at the moment
@@ -133,14 +77,7 @@ async def run_task(ctx: ToolContext, command: str, timeout_ms: int | None) -> Ta
     task = task_id(ctx)
     base = await ctx.sandbox.runtime_path(f"{BACKGROUND_TASKS_DIR}/{task}")
     display_base = await ctx.sandbox.runtime_display_path(f"{BACKGROUND_TASKS_DIR}/{task}")
-    result = await ctx.sandbox.sh(
-        TASK_BASH,
-        TASK_LAUNCH + TASK_WAIT,
-        TASK_WRAPPER,
-        base,
-        command,
-        timeout_s=timeout_s,
-    )
+    result = await ctx.sandbox.bash_task(command, base, detach=False, timeout_s=timeout_s)
     if result.timed_out_after_s is None:
         return TaskRun(
             task_id=task,
@@ -181,7 +118,7 @@ def task_handles(
     command detached from the start. `note` is what the asking tool must add about its own state,
     placed where it is read before the standing directive.
 
-    The pid is the wrapper's, so the advertised stop ends the work AND still writes the exit file —
+    The pid is the supervisor's, so the advertised stop ends the work and writes the exit file —
     the completion signal fires exactly once whether the command finished or was stopped."""
     lead = DETACHED_LEAD if applied_s is None else MOVED_LEAD.format(applied_s=applied_s)
     payload = {

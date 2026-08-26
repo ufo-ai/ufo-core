@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
 
 use ufo::clipboard::{self, Clip};
-use ufo::cmd::{fscli, llm, tools};
+use ufo::cmd::{fscli, llm, run, tools};
 #[cfg(unix)]
 use ufo::interrupt;
 use ufo::ops::{self, OpRuntime};
@@ -27,6 +27,7 @@ Usage: ufo [--resume [id]] [--remote] [--json] [message...]
        ufo login | logout
        ufo fs {read|write|edit|grep|glob|changes} <json>
        ufo llm [--model MODEL] [--max-tokens N] PROMPT
+       ufo run [--task PATH] [--detach] -- COMMAND [ARG...]
        ufo tool TOOL [--describe]
 
 Commands:
@@ -34,6 +35,7 @@ Commands:
   logout         Sign out.
   fs             Run one file op inside a sandbox and print its JSON result.
   llm            Ask a model one question through the sandbox's egress proxy.
+  run            Run a command with task state and sandbox egress.
   tool           Describe or call an object or connector tool with JSON.
 
 Options:
@@ -57,6 +59,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("fs") => process::exit(fscli::main(&args[1..])),
         Some("llm") => process::exit(llm::main(&args[1..])),
+        Some("run") => process::exit(run::main(&args[1..])),
         Some("tool") => process::exit(tools::main(&args[1..])),
         _ => {}
     }

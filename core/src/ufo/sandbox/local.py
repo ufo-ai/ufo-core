@@ -46,6 +46,7 @@ from ufo.sandbox.containment import (
 )
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
+    PROXY_PASSWORD,
     RUNTIME_DIRNAME,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
@@ -252,7 +253,7 @@ class LocalCarrier:
         await asyncio.to_thread(runtime_root.mkdir, parents=True, exist_ok=True)
         ca_path = self._scratch / CA_FILENAME
         await asyncio.to_thread(ca_path.write_bytes, spec.proxy.ca_cert.encode())
-        proxy_url = f"http://{spec.run_token}:@{LOCAL_PROXY_HOST}:{spec.proxy.port}"
+        proxy_url = f"http://{spec.run_token}:{PROXY_PASSWORD}@{LOCAL_PROXY_HOST}:{spec.proxy.port}"
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=LOCAL_CONTAINER_ID,

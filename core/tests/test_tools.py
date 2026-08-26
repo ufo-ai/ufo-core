@@ -70,6 +70,11 @@ class FakeSandbox:
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return self.bash_result
 
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        return self.bash_result
+
     async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         return self.bash_result
 

@@ -50,6 +50,7 @@ from ufo.sandbox.exec_env import (
 )
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
+    PROXY_PASSWORD,
     Carrier,
     DialTarget,
     ExecResult,
@@ -550,7 +551,7 @@ async def test_sandbox_authorizer_binds_run_token_and_cli_grants_to_the_acting_m
     agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
-    proxy = f"http://{common_token}:@proxy:8080"
+    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
     base = SandboxSession(
         carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
         handle=SandboxHandle(
@@ -576,7 +577,10 @@ async def test_sandbox_authorizer_binds_run_token_and_cli_grants_to_the_acting_m
     with ws(workspace_id), agent(agent_id):
         authorized = await authorizer.authorize(member_id)
 
-    basic = "Basic " + base64.b64encode(f"{authorized.handle.run_token}:".encode()).decode()
+    basic = (
+        "Basic "
+        + base64.b64encode(f"{authorized.handle.run_token}:{PROXY_PASSWORD}".encode()).decode()
+    )
     assert RUN_TOKENS.from_proxy_auth(basic) == RunToken(
         workspace_id=workspace_id,
         turn_id=turn.id,
@@ -603,7 +607,7 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
-    proxy = f"http://{common_token}:@proxy:8080"
+    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
 
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(
@@ -1210,7 +1214,7 @@ class _UniqueIdCarrier:
             self.created += 1
         if self.held is not None:
             await self.held.wait()
-        proxy = f"http://{spec.run_token}:@proxy:8080"
+        proxy = f"http://{spec.run_token}:{PROXY_PASSWORD}@proxy:8080"
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=spec.resume_id or f"sbx-{self.created}",

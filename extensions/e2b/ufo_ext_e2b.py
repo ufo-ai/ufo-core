@@ -11,11 +11,10 @@ through the filesystem API. `/workspace` is the sandbox's own disk and the only 
 conversation's files: the provider pauses an idle sandbox and keeps it indefinitely, and nothing
 here can drop one — a paused sandbox costs nothing, and reclaiming it would delete the workspace.
 
-A remote sandbox runs off-cluster, so it reaches the egress proxy at the proxy's externally-
-reachable public URL (not a host-local address): every command runs with `HTTP(S)_PROXY` dialing
-that URL, the turn's run token as the proxy basic-auth username so each metered request keys to the
-turn, the model sentinels the proxy swaps for the real key on the wire, and the proxy CA written
-into the sandbox so it terminates TLS the sandbox trusts.
+A remote sandbox runs off-cluster, so every workload enters through the baked `ufo run` verb. It
+gives standard clients a plaintext loopback forward proxy and carries that stream to the public
+proxy over TLS with the turn's run token. The model sentinels are swapped by the proxy on the wire,
+and the proxy CA is written into the sandbox so target TLS terminates under trust the sandbox holds.
 
 What the provider's clock does — measured against the live service 2026-07-28 on SDK 2.30.0, with
 the wider matrix on 2.35.0; transcripts in #826. None of it is inferable from the SDK's types, and
@@ -41,13 +40,14 @@ every lease decision below turns on it:
   it is version-dependent and cannot be named."""
 
 import asyncio
+import hashlib
 import os
 import shlex
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, overload
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from e2b import AsyncSandbox as E2BSdkSandbox
@@ -69,6 +69,7 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
+    client_binary,
     egress_proxy_env,
     sandbox_runtime_root,
     ufo_fs_file_op,
@@ -155,6 +156,11 @@ CAP_WORKLOAD_COMMAND = (
     f'echo {WORKLOAD_PIDS_MAX} > "$cg/pids.max" || exit 1; done'
 )
 WORKLOAD_CAP_TIMEOUT_SECONDS = 30
+E2B_CLIENT_TARGET = "x86_64-unknown-linux-musl"
+CLIENT_PATH = "/usr/local/bin/ufo"
+CLIENT_STAGING_PATH = "/root/.ufo-client"
+CLIENT_CHECK_TIMEOUT_SECONDS = 15
+CLIENT_INSTALL_TIMEOUT_SECONDS = 30
 
 
 class E2BCommandResult(Protocol):
@@ -267,6 +273,7 @@ class E2BCarrier:
     templates: Mapping[str, str]
     """One published template per sandbox size — the build allocates cpu and memory per tier, so
     which template a fresh sandbox is created from is what `SandboxSpec.size` decides."""
+    client: bytes = field(repr=False)
     sdk: E2BSdk = E2B_SDK
     clock: Callable[[], float] = time.monotonic
     resume_prepare_seconds: float = RESUME_PREPARE_TIMEOUT_SECONDS
@@ -294,6 +301,7 @@ class E2BCarrier:
     conversation and every subagent turn that inherited it, several of them running commands at
     once, so a stop keyed on the container alone would signal the groups of turns nobody cancelled.
     Emptied as each command ends, so no group is ever signalled twice or after the pid moved on."""
+    _client_ready: set[str] = field(default_factory=set)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Open the conversation's sandbox: the one `spec.resume_id` names, else the one this
@@ -307,18 +315,17 @@ class E2BCarrier:
         refusing instead would wedge every later turn of the conversation on a sandbox nothing can
         bring back.
 
-        Preparing the box — the CA into system trust, `/workspace` into place — runs on every open,
-        because the CA in hand is the only one the proxy will present and a resumed box may hold an
-        older one. On a box this call just opened it must succeed: nothing is installed yet, so an
-        unprepared box reaches no host and holds no workspace. On a resumed box it is already true
-        and this is a re-assertion, so it is bounded here and both its silence and a dropped
-        connection are tolerated: preparation runs through `envd`, which stops answering while a
-        loaded container thrashes and drops the connection when it comes back. The bound is this
-        repo's own because the SDK has none to offer — `request_timeout` covers a stream's setup and
-        send, never its read, so a silent `envd` holds a command open with nothing to expire. A
-        deferred preparation costs nothing: the trust store still holds the CA installed when the
-        box was made, the install command replaces it the first turn `envd` answers, and a command
-        meeting a container still too busy to talk gets the exit code `exec` maps for it.
+        Preparing the box — the current client, the CA in system trust, `/workspace` in place —
+        runs on every open. The client is established strictly because every workload enters
+        through `ufo run` and a box made by an earlier release may not hold that verb. The remaining
+        state on a resumed box is a re-assertion, so it is bounded here and both its
+        silence and a dropped connection are tolerated: preparation runs through `envd`, which
+        stops answering while a loaded container thrashes and drops the connection when it comes
+        back. The bound is this repo's own because the SDK has none to offer — `request_timeout`
+        covers a stream's setup and send, never its read, so a silent `envd` holds a command open
+        with nothing to expire. A deferred re-assertion costs nothing: the trust store and workspace
+        were installed when the box was made, and a command meeting a container still too busy to
+        talk gets the exit code `exec` maps for it.
 
         What makes deferring safe is which box it is allowed for: the one `spec.resume_id` names,
         and only that one. That id comes off the conversation's durable handle, which is written
@@ -353,8 +360,16 @@ class E2BCarrier:
         sandbox = await self._resume_or_open(spec, resume_id)
         if sandbox.sandbox_id == spec.resume_id:
             try:
+                async with asyncio.timeout(CLIENT_INSTALL_TIMEOUT_SECONDS):
+                    await self._ensure_client(sandbox)
+            except (TimeoutError, httpx.TransportError) as error:
+                self._drop(spec.conversation_id, "client")
+                raise SandboxUnreachable(
+                    f"sandbox {sandbox.sandbox_id} did not install its workload client"
+                ) from error
+            try:
                 async with asyncio.timeout(self.resume_prepare_seconds):
-                    await self._prepare(sandbox, spec.proxy.ca_cert)
+                    await self._prepare_runtime(sandbox, spec.proxy.ca_cert)
             except (TimeoutError, httpx.TransportError):
                 log(
                     "sandbox.e2b.prepare_deferred",
@@ -526,16 +541,42 @@ class E2BCarrier:
             ) from None
 
     async def _prepare(self, sandbox: E2BSandbox, ca_cert: str) -> None:
-        """Make the box usable: the proxy's CA in system trust, `/workspace` in place and owned by
-        the sandbox user, and the workload cgroups capped below the guest's memory so no command
-        can starve `envd` itself. Every step reaches `envd`, and none can be bounded from the
-        SDK — the command runs over a stream the SDK gives no read timeout at all, so a silent
-        `envd` holds it open with nothing to expire. The upload is bounded, but raises a class the
-        SDK leaves unmapped. A caller that needs this to end bounds the whole of it, in one
-        place."""
+        await self._ensure_client(sandbox)
+        await self._prepare_runtime(sandbox, ca_cert)
+
+    async def _prepare_runtime(self, sandbox: E2BSandbox, ca_cert: str) -> None:
+        """Put the proxy CA in system trust, own `/workspace` as the sandbox user, and cap the
+        workload cgroups below the guest's memory so no command can starve `envd` itself."""
         await self._install_ca(sandbox, ca_cert)
         await self._ensure_workspace(sandbox)
         await self._cap_workload(sandbox)
+
+    async def _ensure_client(self, sandbox: E2BSandbox) -> None:
+        if sandbox.sandbox_id in self._client_ready:
+            return
+        digest = hashlib.sha256(self.client).hexdigest()
+        check = f"test \"$(sha256sum {CLIENT_PATH} | cut -d' ' -f1)\" = {digest}"
+        try:
+            await sandbox.commands.run(check, user="root", timeout=CLIENT_CHECK_TIMEOUT_SECONDS)
+        except CommandExitException:
+            suffix = uuid4().hex
+            staging = f"{CLIENT_STAGING_PATH}-{suffix}"
+            replacement = f"{CLIENT_PATH}.next-{suffix}"
+            await sandbox.files.write(staging, self.client, user="root")
+            install = (
+                f"trap 'rm -f {staging} {replacement}' EXIT; "
+                f'echo "{digest}  {staging}" | sha256sum -c - >/dev/null && '
+                f"install -m 0555 {staging} {replacement} && "
+                f"mv -f {replacement} {CLIENT_PATH}"
+            )
+            try:
+                await sandbox.commands.run(
+                    install, user="root", timeout=CLIENT_INSTALL_TIMEOUT_SECONDS
+                )
+            except CommandExitException as error:
+                detail = (error.stderr or error.stdout or "").strip()
+                raise RuntimeError(f"sandbox client install failed: {detail}") from error
+        self._client_ready.add(sandbox.sandbox_id)
 
     def _leased(self, conversation_id: UUID) -> _Lease | None:
         """The conversation's lease, having dropped every lease whose deadline has passed. `destroy`
@@ -612,7 +653,7 @@ class E2BCarrier:
         The group is also the stop's whole reach: work a command detaches into a group of its own
         survives it by construction, which is how a bash call whose budget expires continues as
         the background task the tool hands back instead of dying with the launcher that waited on
-        it — the bash tool's launch script holds the other half of this contract. Nothing but this
+        it — `ufo run`'s supervisor holds the other half of this contract. Nothing but this
         ever stops what the group holds: no later call can name a group whose pid it never saw.
         A deadline that fires before the launch answers has no pid to name and nothing yet running
         behind it — and is the plainest reading of a gone channel there is, since detaching returns
@@ -938,7 +979,9 @@ def build_e2b_carrier() -> E2BCarrier:
     templates = os.environ.get(E2B_TEMPLATES_ENV)
     if not templates:
         raise RuntimeError(f"e2b carrier selected but {E2B_TEMPLATES_ENV} is not set")
-    return E2BCarrier(api_key=key, templates=sandbox_templates(templates))
+    mapped = sandbox_templates(templates)
+    binary = client_binary(target=E2B_CLIENT_TARGET).read_bytes()
+    return E2BCarrier(api_key=key, templates=mapped, client=binary)
 
 
 def manifest() -> Manifest:

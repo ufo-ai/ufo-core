@@ -83,8 +83,9 @@ class ShellCarrier:
     ) -> ExecResult:
         if argv[-1].startswith("wc -c"):
             return ExecResult(stdout=f"{self.sized}\n", stderr="", exit_code=0)
+        assert argv[:3] == ("ufo", "run", "--")
         process = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *argv[3:], stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
         return ExecResult(

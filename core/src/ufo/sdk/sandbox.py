@@ -5,6 +5,7 @@ over the sandbox value objects the session passes it — the seam a deploy swaps
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.ext.manifest import CarrierSpec as CarrierSpec
+from ufo.sandbox.client_binary import client_binary as client_binary
 from ufo.sandbox.containment import ContainmentError as ContainmentError
 from ufo.sandbox.containment import contained_file as contained_file
 from ufo.sandbox.containment import contained_leaf as contained_leaf
@@ -23,6 +24,7 @@ from ufo.sandbox.session import NO_PROXY_HOSTS as NO_PROXY_HOSTS
 from ufo.sandbox.session import NODE_GLOBAL_MODULES as NODE_GLOBAL_MODULES
 from ufo.sandbox.session import PLAYWRIGHT_BROWSERS_DIR as PLAYWRIGHT_BROWSERS_DIR
 from ufo.sandbox.session import PLAYWRIGHT_VERSION as PLAYWRIGHT_VERSION
+from ufo.sandbox.session import PROXY_PASSWORD as PROXY_PASSWORD
 from ufo.sandbox.session import SANDBOX_ENV as SANDBOX_ENV
 from ufo.sandbox.session import SANDBOX_GID as SANDBOX_GID
 from ufo.sandbox.session import SANDBOX_MODULE_BOOTSTRAP as SANDBOX_MODULE_BOOTSTRAP

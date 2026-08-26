@@ -309,6 +309,7 @@ inside it. Exempting loopback grants no reach a raw socket does not already have
 CA_STAGING_PATH = "/root/.ufo-egress-ca.pem"
 CA_SANDBOX_PATH = "/usr/local/share/ca-certificates/ufo-egress-ca.crt"
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
+PROXY_PASSWORD = "ufo"
 NODE_GLOBAL_MODULES = "/usr/local/lib/node_modules"
 PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
 PLAYWRIGHT_VERSION = "1.62.0"
@@ -351,15 +352,16 @@ itself moves only its own descendants, leaving every other exec on the tmpfs."""
 
 def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
     """The environment a remote sandbox's command runs under so its every call off the box routes
-    through the egress proxy: `HTTP(S)_PROXY` dial the proxy at its public base with the turn's run
-    token as the basic-auth username (so the proxy attributes and meters the request to the turn),
-    `NO_PROXY` exempts the sandbox's own loopback (reaching a service this turn started inside the
-    box is not egress), the model keys are the sentinels the proxy swaps for the real key on the
-    wire, and the CA is the one written into the sandbox so the proxy can terminate TLS the sandbox
-    trusts. The signed run token is URL-safe, so it drops into the URL's userinfo unescaped.
-    Off-cluster means the public base is required — absent it (the guard `serve` applies at boot),
-    the sandbox would have no metered route out, so this fails loud rather than build an open
-    sandbox."""
+    through the public egress proxy. `ufo run` gives its child a plaintext loopback endpoint and
+    carries that byte stream to this TLS URL, so standard clients including Python's `urllib` use
+    the forward-proxy protocol they implement while the run token remains encrypted off-box. The
+    token is the basic-auth username so the proxy attributes and meters each request to the turn;
+    the non-empty password makes `urllib` send authentication. `NO_PROXY` exempts the sandbox's own
+    loopback services, the model keys are the sentinels the proxy swaps for real keys on the wire,
+    and the CA is the one written into the sandbox so the proxy can terminate target TLS the
+    sandbox trusts. Off-cluster means the public base is required — absent it (the guard `serve`
+    applies at boot), the sandbox would have no metered route out, so this fails loud rather than
+    build an open sandbox."""
     if proxy.public_url is None:
         raise RuntimeError(
             "an off-cluster carrier runs outside the pod and needs a reachable egress proxy; "
@@ -371,7 +373,9 @@ def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
             "an off-cluster carrier requires an HTTPS [sandbox] proxy_public_url so its run "
             "token is encrypted in transit"
         )
-    proxy_url = f"https://{run_token}:@{parsed.netloc}"
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    authority = f"{host}:{parsed.port}" if parsed.port is not None else host
+    proxy_url = f"https://{run_token}:{PROXY_PASSWORD}@{authority}"
     return {
         "HTTP_PROXY": proxy_url,
         "HTTPS_PROXY": proxy_url,
@@ -954,7 +958,19 @@ class Sandbox:
         bound = await self._bound()
         return await bound.carrier.exec(
             bound.handle,
-            ("bash", "-lc", command),
+            ("ufo", "run", "--", "bash", "-lc", command),
+            timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        """Run or reattach one journaled bash command through the shared sandbox supervisor."""
+        bound = await self._bound()
+        flags = ("--detach",) if detach else ()
+        return await bound.carrier.exec(
+            bound.handle,
+            ("ufo", "run", "--task", base, *flags, "--", "bash", "-lc", command),
             timeout_s=timeout_s if timeout_s is not None else DEFAULT_EXEC_TIMEOUT_SECONDS,
         )
 

@@ -4,7 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from ufo_ext_e2b import CA_INSTALL_TIMEOUT_SECONDS, CA_STAGING_PATH, INSTALL_CA_COMMAND
+from ufo_ext_e2b import (
+    CA_INSTALL_TIMEOUT_SECONDS,
+    CA_STAGING_PATH,
+    INSTALL_CA_COMMAND,
+)
 
 from sandbox import proxy_gate
 
@@ -19,11 +23,11 @@ class _Result:
 class _Commands:
     results: list[_Result] = field(
         default_factory=lambda: [
-            _Result("000\n5", "Could not resolve proxy"),
-            _Result("000\n7", "Could not connect to proxy"),
-            _Result("000\n28", "Proxy connection timed out"),
-            _Result("000\n56", "Proxy connection reset"),
-            _Result("403\n56"),
+            _Result("000 pending Could not resolve proxy"),
+            _Result("000 pending Could not connect to proxy"),
+            _Result("000 pending Proxy connection timed out"),
+            _Result("000 pending Proxy connection reset"),
+            _Result("403"),
         ]
     )
     calls: list[tuple[str, str | None, float | None]] = field(default_factory=list)
@@ -97,15 +101,14 @@ def test_gate_installs_system_trust_then_waits_for_proxy_and_probes_tls(
         CA_INSTALL_TIMEOUT_SECONDS,
     )
     probes = [command for command, _, _ in sandbox.commands.calls[1:]]
-    assert len(probes) == len(proxy_gate.CURL_PROXY_PENDING_EXIT_CODES) + 1
-    assert all("--proxy-cacert" not in command for command in probes)
-    assert all("https://invalid-run-token:@sandbox-proxy.test" in command for command in probes)
-    assert all("%{http_connect}" in command for command in probes)
-    assert all("printf '\\n%s' $?" in command for command in probes)
-    assert all("|| true" not in command for command in probes)
-    assert clock.sleeps == [proxy_gate.PROBE_DELAY_SECONDS] * len(
-        proxy_gate.CURL_PROXY_PENDING_EXIT_CODES
+    assert len(probes) == 5
+    assert all("ufo run -- python3" in command for command in probes)
+    assert all(
+        "HTTPS_PROXY=https://invalid-run-token:ufo@sandbox-proxy.test" in command
+        for command in probes
     )
+    assert all(proxy_gate.PYTHON_PROXY_PROBE in command for command in probes)
+    assert clock.sleeps == [proxy_gate.PROBE_DELAY_SECONDS] * 4
     assert sandbox.killed
 
 
@@ -114,7 +117,7 @@ def test_gate_bounds_pending_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     sandbox = _Sandbox(
         commands=_Commands(
             results=[
-                _Result("000\n28", "Proxy connection timed out") for _ in range(pending_probes)
+                _Result("000 pending Proxy connection timed out") for _ in range(pending_probes)
             ]
         )
     )
@@ -127,7 +130,7 @@ def test_gate_bounds_pending_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proxy_gate, "monotonic", clock.monotonic)
     monkeypatch.setattr(proxy_gate, "sleep", clock.sleep)
 
-    with pytest.raises(RuntimeError, match="curl exit 28"):
+    with pytest.raises(RuntimeError, match="Proxy connection timed out"):
         proxy_gate.ProxyTlsGate("https://sandbox-proxy.test", "ca-pem", "ufo-sbx:build-1").run()
 
     assert len(sandbox.commands.calls[1:]) == pending_probes
@@ -144,10 +147,10 @@ def test_gate_bounds_pending_transport(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("result", "error"),
     [
-        (_Result("000\n35", "TLS handshake failed"), "curl exit 35"),
-        (_Result("000\n60", "SSL certificate problem"), "curl exit 60"),
-        (_Result("401\n0"), "curl exit 0"),
-        (_Result("403"), "malformed curl result"),
+        (_Result("000 fatal TLS handshake failed"), "TLS handshake failed"),
+        (_Result("000 fatal SSL certificate problem"), "SSL certificate problem"),
+        (_Result("401"), "got 401"),
+        (_Result("200"), "got 200"),
     ],
 )
 def test_gate_fails_fast_on_non_pending_results(

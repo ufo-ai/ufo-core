@@ -19,23 +19,45 @@ from ufo_ext_e2b import (
     sandbox_templates,
 )
 
-from ufo.sandbox.session import EGRESS_CA_CERT_ENV, SANDBOX_SIZES
+from ufo.sandbox.session import (
+    EGRESS_CA_CERT_ENV,
+    PROXY_PASSWORD,
+    SANDBOX_SIZES,
+)
 
-PROBE_URL = "https://api.anthropic.com/v1/messages"
 EXPECTED_CONNECT_STATUS = "403"
-PENDING_CONNECT_STATUS = "000"
+PENDING_CONNECT_STATUS = "000 pending "
 INVALID_RUN_TOKEN = "invalid-run-token"
 PROBE_TIMEOUT_SECONDS = 15
 PROXY_READY_TIMEOUT_SECONDS = 300
 PROBE_DELAY_SECONDS = 5
 SANDBOX_MARGIN_SECONDS = 30
-CURL_PROXY_PENDING_EXIT_CODES = frozenset({5, 7, 28, 56})
 SANDBOX_TIMEOUT_SECONDS = (
     CA_INSTALL_TIMEOUT_SECONDS
     + PROXY_READY_TIMEOUT_SECONDS
     + PROBE_TIMEOUT_SECONDS
     + SANDBOX_MARGIN_SECONDS
 )
+PYTHON_PROXY_PROBE = """\
+import urllib.error
+import urllib.request
+import ssl
+
+try:
+    urllib.request.urlopen("https://api.anthropic.com/v1/messages", timeout=10)
+except urllib.error.URLError as error:
+    detail = str(error)
+    if "403" in detail:
+        print("403")
+    elif isinstance(error.reason, ssl.SSLError):
+        print(f"000 fatal {detail}")
+    elif isinstance(error.reason, OSError):
+        print(f"000 pending {detail}")
+    else:
+        print(f"000 fatal {detail}")
+else:
+    print("200")
+"""
 
 
 @dataclass(frozen=True)
@@ -48,26 +70,24 @@ class ProxyTlsGate:
         parsed = urlsplit(self.public_url)
         if parsed.scheme != "https" or parsed.hostname is None:
             raise RuntimeError("sandbox proxy gate requires an HTTPS proxy URL")
-        proxy_url = f"https://{INVALID_RUN_TOKEN}:@{parsed.netloc}"
-        curl = shlex.join(
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        authority = f"{host}:{parsed.port}" if parsed.port is not None else host
+        proxy_url = f"https://{INVALID_RUN_TOKEN}:{PROXY_PASSWORD}@{authority}"
+        probe = shlex.join(
             (
-                "curl",
-                "--silent",
-                "--show-error",
-                "--connect-timeout",
-                "5",
-                "--max-time",
-                "10",
-                "--output",
-                "/dev/null",
-                "--write-out",
-                "%{http_connect}",
-                "--proxy",
-                proxy_url,
-                PROBE_URL,
+                "env",
+                f"HTTP_PROXY={proxy_url}",
+                f"HTTPS_PROXY={proxy_url}",
+                f"http_proxy={proxy_url}",
+                f"https_proxy={proxy_url}",
+                "ufo",
+                "run",
+                "--",
+                "python3",
+                "-c",
+                PYTHON_PROXY_PROBE,
             )
         )
-        probe = f"{curl}; printf '\\n%s' $?"
         sandbox = Sandbox.create(template=self.template, timeout=SANDBOX_TIMEOUT_SECONDS)
         try:
             sandbox.files.write(CA_STAGING_PATH, self.ca_cert, user="root")
@@ -77,26 +97,14 @@ class ProxyTlsGate:
                 timeout=CA_INSTALL_TIMEOUT_SECONDS,
             )
             last_status = ""
-            last_exit_code: int | None = None
-            last_error = ""
             deadline = monotonic() + PROXY_READY_TIMEOUT_SECONDS
             while True:
                 result = sandbox.commands.run(probe, timeout=PROBE_TIMEOUT_SECONDS)
-                probe_result = result.stdout.strip().splitlines()
-                if len(probe_result) != 2 or not probe_result[1].isdigit():
-                    raise RuntimeError(
-                        f"sandbox proxy TLS gate got malformed curl result: {result.stdout!r}"
-                    )
-                last_status, exit_code = probe_result
-                last_exit_code = int(exit_code)
-                last_error = result.stderr.strip()
+                last_status = result.stdout.strip()
                 if last_status == EXPECTED_CONNECT_STATUS:
                     print("sandbox proxy TLS gate passed")
                     return
-                if (
-                    last_status != PENDING_CONNECT_STATUS
-                    or last_exit_code not in CURL_PROXY_PENDING_EXIT_CODES
-                ):
+                if not last_status.startswith(PENDING_CONNECT_STATUS):
                     break
                 remaining = deadline - monotonic()
                 if remaining <= 0:
@@ -104,8 +112,7 @@ class ProxyTlsGate:
                 sleep(min(PROBE_DELAY_SECONDS, remaining))
             raise RuntimeError(
                 f"sandbox proxy TLS gate expected CONNECT {EXPECTED_CONNECT_STATUS}, "
-                f"got {last_status or 'no status'} with curl exit "
-                f"{last_exit_code if last_exit_code is not None else 'missing'}: {last_error}"
+                f"got {last_status or 'no status'}"
             )
         finally:
             sandbox.kill()

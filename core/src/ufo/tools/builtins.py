@@ -79,10 +79,6 @@ from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 from ufo.tools.registry import ToolDef
 from ufo.tools.tasks import (
     BACKGROUND_TASKS_DIR,
-    TASK_BASH,
-    TASK_DETACH,
-    TASK_LAUNCH,
-    TASK_WRAPPER,
     run_task,
     task_handles,
     task_id,
@@ -380,9 +376,7 @@ async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
     task = task_id(ctx)
     base = await ctx.sandbox.runtime_path(f"{BACKGROUND_TASKS_DIR}/{task}")
     display_base = await ctx.sandbox.runtime_display_path(f"{BACKGROUND_TASKS_DIR}/{task}")
-    started = await ctx.sandbox.sh(
-        TASK_BASH, TASK_LAUNCH + TASK_DETACH, TASK_WRAPPER, base, command
-    )
+    started = await ctx.sandbox.bash_task(command, base, detach=True)
     if started.exit_code != 0 or not started.stdout.strip():
         return ToolResult(
             content=(TextContent(text=started.stderr or "the command did not detach"),),

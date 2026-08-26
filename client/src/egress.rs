@@ -1,13 +1,22 @@
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::Arc;
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
+use mio::{Events, Interest, Poll, Token};
 
 const RESPONSE_HEAD_MAX_BYTES: usize = 64 * 1024;
 const RESPONSE_HEAD_DELIMITER_BYTES: usize = 4;
+const RELAY_BUFFER_BYTES: usize = 256 * 1024;
+const RELAY_CHUNK_BYTES: usize = 16 * 1024;
+const LOCAL: Token = Token(0);
+const UPSTREAM: Token = Token(1);
+const LOOPBACK_HOST: &str = "127.0.0.1";
+static LOOPBACK_PROXIES: OnceLock<Mutex<HashMap<(String, u16), u16>>> = OnceLock::new();
 
 #[derive(Debug, PartialEq)]
 struct Wiring {
@@ -15,7 +24,7 @@ struct Wiring {
     ca_file: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Proxy {
     tls: bool,
     host: String,
@@ -25,6 +34,255 @@ struct Proxy {
 
 trait Io: Read + Write {}
 impl<T: Read + Write> Io for T {}
+
+pub(crate) fn loopback_proxy_url(raw: &str, ca_file: Option<&str>) -> Result<String, String> {
+    let proxy = proxy_target(raw)?;
+    if !proxy.tls {
+        return Ok(raw.to_string());
+    }
+    let key = (proxy.host.clone(), proxy.port);
+    let proxies = LOOPBACK_PROXIES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut proxies = proxies
+        .lock()
+        .map_err(|_| "local proxy registry is unavailable".to_string())?;
+    let port = match proxies.get(&key) {
+        Some(port) => *port,
+        None => {
+            let port = start_loopback_proxy(proxy, tls_config(ca_file)?)?;
+            proxies.insert(key, port);
+            port
+        }
+    };
+    let authority = raw
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default()
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let userinfo = authority
+        .rsplit_once('@')
+        .map(|(userinfo, _)| format!("{userinfo}@"))
+        .unwrap_or_default();
+    Ok(format!("http://{userinfo}{LOOPBACK_HOST}:{port}"))
+}
+
+fn start_loopback_proxy(proxy: Proxy, config: Arc<rustls::ClientConfig>) -> Result<u16, String> {
+    let listener = TcpListener::bind((LOOPBACK_HOST, 0))
+        .map_err(|error| format!("could not bind the local egress proxy: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| format!("could not read the local egress proxy address: {error}"))?
+        .port();
+    thread::Builder::new()
+        .name("ufo-egress-proxy".to_string())
+        .spawn(move || {
+            for local in listener.incoming().flatten() {
+                let proxy = proxy.clone();
+                let config = config.clone();
+                let _ = thread::Builder::new()
+                    .name("ufo-egress-relay".to_string())
+                    .spawn(move || relay(local, &proxy, config));
+            }
+        })
+        .map_err(|error| format!("could not start the local egress proxy: {error}"))?;
+    Ok(port)
+}
+
+fn relay(local: TcpStream, proxy: &Proxy, config: Arc<rustls::ClientConfig>) -> Result<(), String> {
+    let upstream = dialed(&proxy.host, proxy.port, Duration::from_secs(30))?;
+    local
+        .set_nonblocking(true)
+        .and_then(|_| upstream.set_nonblocking(true))
+        .map_err(|error| format!("could not prepare the local egress relay: {error}"))?;
+    let mut local = mio::net::TcpStream::from_std(local);
+    let mut upstream = mio::net::TcpStream::from_std(upstream);
+    let mut poll =
+        Poll::new().map_err(|error| format!("could not poll the egress relay: {error}"))?;
+    poll.registry()
+        .register(&mut local, LOCAL, Interest::READABLE | Interest::WRITABLE)
+        .and_then(|_| {
+            poll.registry().register(
+                &mut upstream,
+                UPSTREAM,
+                Interest::READABLE | Interest::WRITABLE,
+            )
+        })
+        .map_err(|error| format!("could not register the egress relay: {error}"))?;
+    let name = rustls::pki_types::ServerName::try_from(proxy.host.clone())
+        .map_err(|error| format!("{} is not a TLS server name: {error}", proxy.host))?;
+    let mut tls = rustls::ClientConnection::new(config, name)
+        .map_err(|error| format!("could not open TLS to {}: {error}", proxy.host))?;
+    tls.set_buffer_limit(Some(RELAY_BUFFER_BYTES));
+    let mut events = Events::with_capacity(8);
+    let mut to_tls = VecDeque::new();
+    let mut to_local = VecDeque::new();
+    let mut local_closed = false;
+    let mut upstream_closed = false;
+    loop {
+        let mut moved = false;
+        while pump(
+            &mut local,
+            &mut upstream,
+            &mut tls,
+            &mut to_tls,
+            &mut to_local,
+        )? {
+            moved = true;
+        }
+        if !local_closed && to_tls.len() < RELAY_BUFFER_BYTES {
+            let (closed, read) = read_local(&mut local, &mut to_tls)?;
+            local_closed = closed;
+            moved |= read;
+            if local_closed {
+                tls.send_close_notify();
+            }
+        }
+        while pump(
+            &mut local,
+            &mut upstream,
+            &mut tls,
+            &mut to_tls,
+            &mut to_local,
+        )? {
+            moved = true;
+        }
+        if !upstream_closed && to_local.len() < RELAY_BUFFER_BYTES {
+            let (closed, read) = read_upstream(&mut upstream, &mut tls, &proxy.host)?;
+            upstream_closed = closed;
+            moved |= read;
+        }
+        if local_closed && to_tls.is_empty() && !tls.wants_write() {
+            return Ok(());
+        }
+        if upstream_closed && to_local.is_empty() {
+            return Ok(());
+        }
+        if moved {
+            continue;
+        }
+        poll.poll(&mut events, None)
+            .map_err(|error| format!("could not poll the egress relay: {error}"))?;
+    }
+}
+
+fn pump(
+    local: &mut mio::net::TcpStream,
+    upstream: &mut mio::net::TcpStream,
+    tls: &mut rustls::ClientConnection,
+    to_tls: &mut VecDeque<u8>,
+    to_local: &mut VecDeque<u8>,
+) -> Result<bool, String> {
+    let mut moved = false;
+    while !to_tls.is_empty() {
+        let front = to_tls.as_slices().0;
+        match tls.writer().write(front) {
+            Ok(0) => break,
+            Ok(written) => {
+                to_tls.drain(..written);
+                moved = true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(format!("could not write to the TLS relay: {error}")),
+        }
+    }
+    while tls.wants_write() {
+        match tls.write_tls(upstream) {
+            Ok(0) => break,
+            Ok(_) => moved = true,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(format!("could not write to the upstream proxy: {error}")),
+        }
+    }
+    while to_local.len() < RELAY_BUFFER_BYTES {
+        let mut chunk = [0u8; RELAY_CHUNK_BYTES];
+        let available = (RELAY_BUFFER_BYTES - to_local.len()).min(chunk.len());
+        match tls.reader().read(&mut chunk[..available]) {
+            Ok(0) => break,
+            Ok(read) => {
+                to_local.extend(&chunk[..read]);
+                moved = true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(format!("could not read from the TLS relay: {error}")),
+        }
+    }
+    while !to_local.is_empty() {
+        let front = to_local.as_slices().0;
+        match local.write(front) {
+            Ok(0) => return Err("the local proxy connection closed".to_string()),
+            Ok(written) => {
+                to_local.drain(..written);
+                moved = true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                return Err("the local proxy connection closed".to_string())
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not write to the local proxy client: {error}"
+                ))
+            }
+        }
+    }
+    Ok(moved)
+}
+
+fn read_local(
+    local: &mut mio::net::TcpStream,
+    pending: &mut VecDeque<u8>,
+) -> Result<(bool, bool), String> {
+    let mut chunk = [0u8; RELAY_CHUNK_BYTES];
+    let available = (RELAY_BUFFER_BYTES - pending.len()).min(chunk.len());
+    match local.read(&mut chunk[..available]) {
+        Ok(0) => Ok((true, false)),
+        Ok(read) => {
+            pending.extend(&chunk[..read]);
+            Ok((false, true))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok((false, false)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            Ok((true, false))
+        }
+        Err(error) => Err(format!("could not read the local proxy client: {error}")),
+    }
+}
+
+fn read_upstream(
+    upstream: &mut mio::net::TcpStream,
+    tls: &mut rustls::ClientConnection,
+    host: &str,
+) -> Result<(bool, bool), String> {
+    match tls.read_tls(upstream) {
+        Ok(0) => Ok((true, false)),
+        Ok(_) => {
+            tls.process_new_packets()
+                .map_err(|error| format!("{host} ended TLS: {error}"))?;
+            Ok((false, true))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok((false, false)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            Ok((true, false))
+        }
+        Err(error) => Err(format!("could not read {host}: {error}")),
+    }
+}
 
 pub(crate) fn post(
     url: &str,
@@ -298,25 +556,131 @@ fn env_nonempty(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+
+    fn relay_configs() -> (Arc<rustls::ClientConfig>, Arc<rustls::ServerConfig>) {
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec![LOOPBACK_HOST.to_string()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.der().clone()).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let client = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der());
+        let server = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], key.into())
+            .unwrap();
+        (Arc::new(client), Arc::new(server))
+    }
+
+    #[test]
+    fn the_loopback_proxy_carries_plain_connect_over_tls() {
+        let (client_config, server_config) = relay_configs();
+        let listener = TcpListener::bind((LOOPBACK_HOST, 0)).unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        let (captured, received) = mpsc::channel();
+        let payload = vec![b'x'; 1024 * 1024];
+        let expected_payload = payload.clone();
+        let request_head =
+            b"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic dG9rZW46dWZv\r\n\r\n";
+        let request_bytes = request_head.len() + 1024 * 1024;
+        thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let connection = rustls::ServerConnection::new(server_config).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut request = vec![0u8; request_bytes];
+            stream.read_exact(&mut request).unwrap();
+            captured.send(request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .unwrap();
+            stream.write_all(&payload).unwrap();
+            stream.flush().unwrap();
+        });
+        let proxy = Proxy {
+            tls: true,
+            host: LOOPBACK_HOST.to_string(),
+            port: upstream_port,
+            authorization: None,
+        };
+        let loopback_port = start_loopback_proxy(proxy, client_config).unwrap();
+        let mut stream = TcpStream::connect((LOOPBACK_HOST, loopback_port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream.write_all(request_head).unwrap();
+        stream.write_all(&vec![b'y'; 1024 * 1024]).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 Connection Established\r\n\r\n"));
+        let body = &response[b"HTTP/1.1 200 Connection Established\r\n\r\n".len()..];
+        assert_eq!(body.len(), expected_payload.len());
+        assert!(body.iter().all(|byte| *byte == b'x'));
+        let request = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(request.starts_with(request_head));
+        assert_eq!(request.len(), request_head.len() + 1024 * 1024);
+        assert!(request[request_head.len()..]
+            .iter()
+            .all(|byte| *byte == b'y'));
+    }
+
+    #[test]
+    fn an_https_proxy_becomes_one_reused_authenticated_loopback() {
+        let first = loopback_proxy_url("https://turn-a:ufo@proxy.invalid:8443", None).unwrap();
+        let second = loopback_proxy_url("https://turn-b:ufo@proxy.invalid:8443", None).unwrap();
+        assert!(first.starts_with("http://turn-a:ufo@127.0.0.1:"));
+        assert!(second.starts_with("http://turn-b:ufo@127.0.0.1:"));
+        assert_eq!(
+            first.rsplit_once(':').unwrap().1,
+            second.rsplit_once(':').unwrap().1
+        );
+        assert_eq!(
+            loopback_proxy_url("http://turn-a:ufo@proxy.invalid:8080", None).unwrap(),
+            "http://turn-a:ufo@proxy.invalid:8080"
+        );
+    }
+
+    #[test]
+    fn the_loopback_proxy_reads_the_named_ca_bundle() {
+        let path = std::env::temp_dir().join(format!("ufo-run-ca-{}.pem", std::process::id()));
+        std::fs::write(&path, b"not a certificate").unwrap();
+        let error =
+            loopback_proxy_url("https://turn:ufo@another-proxy.invalid:8443", path.to_str())
+                .unwrap_err();
+        std::fs::remove_file(path).unwrap();
+        assert!(error.contains("certificate"), "{error}");
+    }
 
     #[test]
     fn the_proxy_token_rides_a_header_and_leaves_the_url() {
-        let wired = wiring(Some("https://run-token:@sandbox-proxy.test"), None).unwrap();
+        let wired = wiring(Some("https://run-token:ufo@sandbox-proxy.test"), None).unwrap();
         let proxy = wired.proxy.unwrap();
         assert_eq!(proxy.host, "sandbox-proxy.test");
         assert_eq!(proxy.port, 443);
         assert!(proxy.tls);
         assert_eq!(
             proxy.authorization.as_deref(),
-            Some(format!("Basic {}", STANDARD.encode("run-token:")).as_str())
+            Some(format!("Basic {}", STANDARD.encode("run-token:ufo")).as_str())
         );
         let request = connect_request(&proxy, "preview.ufo.internal", 443);
         assert!(
             request.starts_with("CONNECT preview.ufo.internal:443 HTTP/1.1\r\n"),
             "{request}"
         );
-        assert!(request.contains("Proxy-Authorization: Basic cnVuLXRva2VuOg==\r\n"));
-        assert!(!request.contains("run-token:@"));
+        assert!(request.contains("Proxy-Authorization: Basic cnVuLXRva2VuOnVmbw==\r\n"));
+        assert!(!request.contains("run-token:ufo@"));
     }
 
     #[test]

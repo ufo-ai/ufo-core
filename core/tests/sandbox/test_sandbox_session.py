@@ -22,6 +22,7 @@ from ufo.sandbox.session import (
     DOCUMENT_READ_EXEC_TIMEOUT_SECONDS,
     NO_PROXY_HOSTS,
     PROXY_ENV_NAMES,
+    PROXY_PASSWORD,
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
     SENTINEL_MODEL_KEY,
@@ -75,7 +76,7 @@ def test_shell_path_expands_only_the_runtime_home_prefix() -> None:
 def test_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
     proxy = ProxyEndpoint(port=9, ca_cert="PEM", public_url="https://proxy.example.com")
     env = egress_proxy_env(proxy, "tok-123")
-    assert env["HTTPS_PROXY"] == "https://tok-123:@proxy.example.com"
+    assert env["HTTPS_PROXY"] == "https://tok-123:ufo@proxy.example.com"
     assert env["HTTP_PROXY"] == env["https_proxy"] == env["http_proxy"] == env["HTTPS_PROXY"]
     assert env["ANTHROPIC_API_KEY"] == SENTINEL_MODEL_KEY
     assert env["OPENAI_API_KEY"] == SENTINEL_MODEL_KEY
@@ -93,9 +94,7 @@ def test_egress_proxy_env_refuses_missing_or_http_url() -> None:
 
 
 def _basic(username: str) -> str:
-    """The Proxy-Authorization header an HTTP client sends for `http://<username>:@host` — Basic
-    base64 of `username:` (empty password), exactly what the container's proxy URL produces."""
-    return "Basic " + base64.b64encode(f"{username}:".encode()).decode()
+    return "Basic " + base64.b64encode(f"{username}:{PROXY_PASSWORD}".encode()).decode()
 
 
 def test_run_token_round_trips_encode_then_proxy_auth() -> None:
@@ -193,7 +192,7 @@ def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_ba
     conversation_id = uuid4()
     common = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
     member = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), uuid4()))
-    proxy = f"http://{common}:@proxy:9000"
+    proxy = f"http://{common}:{PROXY_PASSWORD}@proxy:9000"
     base = SandboxSession(
         carrier=_RecordingCarrier(),
         system_skill_archive=b"bundle",
@@ -239,7 +238,7 @@ def test_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
     turn_id = uuid4()
     common = RUN_TOKENS.encode(RunToken(uuid4(), turn_id))
     member = RUN_TOKENS.encode(RunToken(uuid4(), turn_id, uuid4()))
-    proxy = f"http://{common}:@proxy:9000"
+    proxy = f"http://{common}:{PROXY_PASSWORD}@proxy:9000"
     base = SandboxSession(
         carrier=_RecordingCarrier(),
         handle=SandboxHandle(

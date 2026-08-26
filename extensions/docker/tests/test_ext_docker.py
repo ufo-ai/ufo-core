@@ -118,7 +118,7 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     await carrier.exec(handle, ("bash", "-lc", "gh api user"), 30)
 
     exec_argv = calls[-1]
-    proxy_url = "http://turn-a:@host.docker.internal:8080"
+    proxy_url = "http://turn-a:ufo@host.docker.internal:8080"
     assert f"HTTPS_PROXY={proxy_url}" in exec_argv
     assert f"https_proxy={proxy_url}" in exec_argv
     assert f"NO_PROXY={NO_PROXY_HOSTS}" in exec_argv
@@ -275,9 +275,9 @@ async def test_attach_to_a_running_container_carries_the_second_turns_env(
     await carrier.exec(second, ("bash", "-lc", "gh api user"), 30)
 
     exec_argv = exec_calls[-1]
-    assert "HTTPS_PROXY=http://turn-b:@host.docker.internal:8080" in exec_argv
+    assert "HTTPS_PROXY=http://turn-b:ufo@host.docker.internal:8080" in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-b" in exec_argv
-    assert "HTTPS_PROXY=http://turn-a:@host.docker.internal:8080" not in exec_argv
+    assert "HTTPS_PROXY=http://turn-a:ufo@host.docker.internal:8080" not in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-a" not in exec_argv
 
 

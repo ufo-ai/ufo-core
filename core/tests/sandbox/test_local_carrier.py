@@ -428,7 +428,7 @@ async def test_exec_carries_the_egress_environment(tmp_path: Path) -> None:
     )
 
     proxy, sentinel, git_ca, cargo_ca = result.stdout.split("|")
-    assert proxy == f"http://{RUN_TOKEN}:@127.0.0.1:{PROXY_PORT}"
+    assert proxy == f"http://{RUN_TOKEN}:ufo@127.0.0.1:{PROXY_PORT}"
     assert sentinel == SENTINEL_MODEL_KEY
     # git and cargo (libcurl) ignore CURL_CA_BUNDLE, so they get their own CAINFO or a MITM'd host
     # fails their TLS. Both point at the same proxy CA the other consumers do.
@@ -910,8 +910,8 @@ async def test_exec_env_rides_the_handle_not_the_conversation(tmp_path: Path) ->
     result_a = await carrier.exec(first, probe, 30)
     result_b = await carrier.exec(second, probe, 30)
 
-    assert result_a.stdout == f"http://turn-a:@127.0.0.1:{PROXY_PORT}|none"
-    assert result_b.stdout == f"http://turn-b:@127.0.0.1:{PROXY_PORT}|sent-b"
+    assert result_a.stdout == f"http://turn-a:ufo@127.0.0.1:{PROXY_PORT}|none"
+    assert result_b.stdout == f"http://turn-b:ufo@127.0.0.1:{PROXY_PORT}|sent-b"
 
 
 async def test_background_descendant_keeps_its_authority_across_later_execs(
@@ -944,10 +944,10 @@ async def test_background_descendant_keeps_its_authority_across_later_execs(
     assert written.exit_code == 0
 
     assert (workspace / "first.txt").read_text() == (
-        f"http://member-a:@127.0.0.1:{PROXY_PORT}|sent-a"
+        f"http://member-a:ufo@127.0.0.1:{PROXY_PORT}|sent-a"
     )
     assert (workspace / "second.txt").read_text() == (
-        f"http://member-b:@127.0.0.1:{PROXY_PORT}|sent-b"
+        f"http://member-b:ufo@127.0.0.1:{PROXY_PORT}|sent-b"
     )
 
 

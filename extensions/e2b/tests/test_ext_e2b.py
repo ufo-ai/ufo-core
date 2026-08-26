@@ -42,6 +42,10 @@ from ufo_ext_e2b import (
     CA_INSTALL_TIMEOUT_SECONDS,
     CAP_WORKLOAD_COMMAND,
     CARRIER_NAME,
+    CLIENT_CHECK_TIMEOUT_SECONDS,
+    CLIENT_INSTALL_TIMEOUT_SECONDS,
+    CLIENT_PATH,
+    CLIENT_STAGING_PATH,
     CONVERSATION_METADATA_KEY,
     DIAL_LEASE_SECONDS,
     E2B_API_KEY_ENV,
@@ -70,6 +74,7 @@ from ufo_ext_e2b import (
 
 from ufo import o11y
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
+from ufo.sandbox.client_binary import client_binary
 from ufo.sandbox.select import select_carrier
 from ufo.sandbox.session import (
     CA_SANDBOX_PATH,
@@ -90,11 +95,7 @@ from ufo.sandbox.session import (
 )
 from ufo.tools.tasks import (
     MAX_COMMAND_TIMEOUT_MS,
-    TASK_BASH,
-    TASK_LAUNCH,
     TASK_PROBE,
-    TASK_WAIT,
-    TASK_WRAPPER,
 )
 
 
@@ -159,6 +160,7 @@ class _Handle:
 class _Commands:
     runs: list[tuple[str, str | None, float | None]] = field(default_factory=list)
     hangs: bool = False
+    hang_on: tuple[str, ...] = ()
     users: list[str | None] = field(default_factory=list)
     envs: list[dict[str, str] | None] = field(default_factory=list)
     result: _Result = field(default_factory=lambda: _Result("out", "", 0))
@@ -179,7 +181,7 @@ class _Commands:
     _next_pid: int = 2000
 
     async def outcome(self, cmd: str) -> _Result:
-        if self.hangs:
+        if self.hangs or any(token in cmd for token in self.hang_on):
             await asyncio.Event().wait()
         if any(token in cmd for token in self.fail_on):
             raise CommandExitException(stderr="", stdout="", exit_code=1, error="not mounted")
@@ -257,7 +259,7 @@ class _ProcessHandle:
 class _ProcessCommands:
     """envd as real processes: every command the carrier sends runs as a local shell, so what a
     signal ends and what survives it is read back from live pids and files rather than modelled.
-    Stands in for the transport only — the launched wrapper, its pid file and its exit file are
+    Stands in for the transport only — the launched supervisor, its pid file and its exit file are
     the real things asserted. The container's workspace path becomes `root`, and a host without a
     `setsid` binary gets one on PATH that does what util-linux's does for a non-leader — setsid(2),
     then exec.
@@ -465,6 +467,10 @@ def _templates(reference: str) -> dict[str, str]:
     return dict.fromkeys(SANDBOX_SIZES, reference)
 
 
+def _carrier(**kwargs: object) -> E2BCarrier:
+    return E2BCarrier(client=b"client-binary", **kwargs)
+
+
 def _spec(conversation: UUID, size: str | None = "small", turn: UUID | None = None) -> SandboxSpec:
     return SandboxSpec(
         conversation_id=conversation,
@@ -479,7 +485,7 @@ def _spec(conversation: UUID, size: str | None = "small", turn: UUID | None = No
 
 async def test_create_opens_the_template_of_the_specs_size() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(
+    carrier = _carrier(
         api_key="k",
         templates={"small": "tpl-s", "medium": "tpl-m", "large": "tpl-l"},
         sdk=sdk,
@@ -494,7 +500,7 @@ async def test_create_refuses_a_size_no_template_serves() -> None:
     """A spec with no size reaching a sizing carrier is a threading fault upstream, not a case to
     default quietly — the sandbox it would open is not the one the agent's row names."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
 
     with pytest.raises(RuntimeError, match="sandbox size"):
         await carrier.create(_spec(uuid4(), size=None))
@@ -505,7 +511,7 @@ async def test_resume_ignores_the_size_and_reconnects(monkeypatch: pytest.Monkey
     """An existing sandbox keeps the size it was created at: the resume path never consults the
     template map, so a changed agent setting shapes only the next fresh sandbox."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
     first = await carrier.create(_spec(uuid4(), size="small"))
 
     resumed = await carrier.create(
@@ -518,7 +524,7 @@ async def test_resume_ignores_the_size_and_reconnects(monkeypatch: pytest.Monkey
 
 async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="key-1", templates=_templates("tpl-1"), sdk=sdk)
+    carrier = _carrier(api_key="key-1", templates=_templates("tpl-1"), sdk=sdk)
     conversation = uuid4()
 
     handle = await carrier.create(_spec(conversation))
@@ -537,7 +543,7 @@ async def test_create_opens_a_sandbox_on_the_template_and_returns_its_handle() -
 
 async def test_create_disables_public_port_traffic() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
 
     await carrier.create(_spec(uuid4()))
 
@@ -549,7 +555,7 @@ async def test_create_fails_loud_when_no_traffic_token_returns() -> None:
     template that returns none at create leaves every port unreachable through the ingress, so the
     create is where that is caught."""
     sdk = _Sdk(traffic_access_token=None)
-    carrier = E2BCarrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
 
     with pytest.raises(RuntimeError, match="traffic access token"):
         await carrier.create(_spec(uuid4()))
@@ -557,15 +563,33 @@ async def test_create_fails_loud_when_no_traffic_token_returns() -> None:
 
 async def test_create_installs_the_proxy_ca_into_system_trust_as_root() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
 
     await carrier.create(_spec(uuid4()))
 
     sandbox = sdk.sandboxes["sbx-1"]
     assert sandbox.files.written == [(CA_STAGING_PATH, "ca-pem")]
     assert sandbox.files.write_users == ["root"]
-    assert sandbox.commands.runs[0] == (INSTALL_CA_COMMAND, None, CA_INSTALL_TIMEOUT_SECONDS)
-    assert sandbox.commands.users[0] == "root"
+    assert sandbox.commands.runs[1] == (INSTALL_CA_COMMAND, None, CA_INSTALL_TIMEOUT_SECONDS)
+    assert sandbox.commands.users[1] == "root"
+
+
+async def test_create_replaces_a_stale_workload_client() -> None:
+    sdk = _Sdk(command_fail_counts={CLIENT_PATH: 1})
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
+
+    await carrier.create(_spec(uuid4()))
+
+    sandbox = sdk.sandboxes["sbx-1"]
+    client_path, client_content = sandbox.files.written[0]
+    assert client_path.startswith(f"{CLIENT_STAGING_PATH}-")
+    assert client_content == b"client-binary"
+    assert sandbox.files.written[1] == (CA_STAGING_PATH, "ca-pem")
+    assert sandbox.commands.runs[0][2] == CLIENT_CHECK_TIMEOUT_SECONDS
+    assert client_path in sandbox.commands.runs[1][0]
+    assert f"{CLIENT_PATH}.next-" in sandbox.commands.runs[1][0]
+    assert sandbox.commands.runs[1][2] == CLIENT_INSTALL_TIMEOUT_SECONDS
+    assert sandbox.commands.users[:2] == ["root", "root"]
 
 
 async def test_every_preparation_caps_the_workload_cgroups_as_root() -> None:
@@ -573,11 +597,11 @@ async def test_every_preparation_caps_the_workload_cgroups_as_root() -> None:
     for a box this process did not prepare itself — so every preparation path re-asserts them, on
     the fresh box, the cached one, and the reconnected one alike."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     await carrier.create(_spec(conversation))
     await carrier.create(_spec(conversation))
-    other = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    other = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     await other.create(replace(_spec(conversation), resume_id="sbx-1"))
 
     commands = sdk.sandboxes["sbx-1"].commands
@@ -594,22 +618,21 @@ async def test_a_failed_trust_update_raises_a_named_ca_install_error() -> None:
     is the box's own deterministic answer, the same one a further attempt would get, so it is raised
     on the first attempt rather than retried."""
     sdk = _Sdk(command_fail_counts={"update-ca-certificates": 1})
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
 
     with pytest.raises(RuntimeError, match="sandbox CA install failed"):
         await carrier.create(_spec(uuid4()))
 
     runs = sdk.sandboxes["sbx-1"].commands.runs
-    assert [command for command, _, _ in runs] == [INSTALL_CA_COMMAND]
+    assert CLIENT_PATH in runs[0][0]
+    assert [command for command, _, _ in runs[1:]] == [INSTALL_CA_COMMAND]
 
 
 async def test_a_box_reached_off_the_cache_is_prepared_again_not_deferred() -> None:
     """No durable handle names this box — it is reached off this process's own cache — so nothing
     vouches for its preparation and the next open re-asserts it strictly rather than deferring."""
     sdk = _Sdk()
-    carrier = E2BCarrier(
-        api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01
-    )
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01)
     spec = _spec(uuid4())
 
     await carrier.create(spec)
@@ -626,7 +649,7 @@ async def test_a_cached_box_whose_preparation_failed_drops_its_lease() -> None:
     """The lease's deadline is evidence only while the container answers to it, and this one just
     did not — so it goes, and the next open reaches the provider instead of reading it back."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
     spec = _spec(uuid4())
 
     await carrier.create(spec)
@@ -645,7 +668,7 @@ async def test_a_dropped_ca_upload_is_tried_again_on_the_same_new_box(
         file_write_raises=httpx.ReadError("envd dropped the connection"),
         file_write_raise_count=1,
     )
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
     conversation = uuid4()
 
     with caplog.at_level(logging.INFO, logger="ufo"):
@@ -662,7 +685,8 @@ async def test_a_dropped_ca_upload_is_tried_again_on_the_same_new_box(
     ]
     sandbox = sdk.sandboxes["sbx-1"]
     assert sandbox.files.written == [(CA_STAGING_PATH, "ca-pem")]
-    assert [command for command, _, _ in sandbox.commands.runs] == [
+    assert CLIENT_PATH in sandbox.commands.runs[0][0]
+    assert [command for command, _, _ in sandbox.commands.runs[1:]] == [
         INSTALL_CA_COMMAND,
         ENSURE_WORKSPACE_COMMAND,
         CAP_WORKLOAD_COMMAND,
@@ -679,7 +703,7 @@ async def test_a_drop_that_outlasts_the_attempts_ends_the_turn_on_the_provider_f
         file_write_raises=httpx.ReadError("envd dropped the connection"),
         file_write_raise_count=PREPARE_ATTEMPTS,
     )
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
     conversation = uuid4()
 
     with pytest.raises(httpx.ReadError):
@@ -691,25 +715,20 @@ async def test_a_drop_that_outlasts_the_attempts_ends_the_turn_on_the_provider_f
     assert carrier._leased(conversation) is None
 
 
-async def test_a_resumed_box_whose_upload_drops_is_deferred(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_a_resumed_box_whose_client_upload_drops_fails_closed() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     opened = await carrier.create(_spec(conversation))
-    sdk.sandboxes[opened.container_id].files.raises = httpx.ReadError("envd dropped it")
+    sandbox = sdk.sandboxes[opened.container_id]
+    sandbox.commands.fail_counts[CLIENT_PATH] = 1
+    sandbox.files.raises = httpx.ReadError("envd dropped it")
 
-    restarted = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
-    with caplog.at_level(logging.INFO, logger="ufo"):
-        resumed = await restarted.create(
-            replace(_spec(conversation), resume_id=opened.container_id)
-        )
+    restarted = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    with pytest.raises(SandboxUnreachable, match="workload client"):
+        await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
 
-    assert resumed.container_id == opened.container_id
-    assert _events(caplog, "sandbox.e2b.prepare_deferred") == [
-        {"conversation_id": str(conversation), "sandbox_id": opened.container_id}
-    ]
+    assert restarted._leased(conversation) is None
 
 
 async def test_a_resume_the_control_plane_never_answers_is_retried(
@@ -719,7 +738,7 @@ async def test_a_resume_the_control_plane_never_answers_is_retried(
     before its first round. The provider's control plane is off this cluster and `connect` opens
     nothing, so re-issuing it converges on the one container the id names."""
     sdk = _Sdk(connect_faults=[httpx.ReadTimeout("timed out")])
-    carrier = E2BCarrier(
+    carrier = _carrier(
         api_key="k", templates=_templates("t"), sdk=sdk, resume_retry_delay_seconds=0.0
     )
     conversation = uuid4()
@@ -742,7 +761,7 @@ async def test_a_resume_the_control_plane_keeps_dropping_raises_bounded(
     and it never becomes a fresh box — the paused container the id names holds the workspace."""
     faults = [httpx.ReadTimeout("timed out")] * (RESUME_TRANSPORT_RETRIES + 1)
     sdk = _Sdk(connect_faults=list(faults))
-    carrier = E2BCarrier(
+    carrier = _carrier(
         api_key="k", templates=_templates("t"), sdk=sdk, resume_retry_delay_seconds=0.0
     )
     conversation = uuid4()
@@ -777,7 +796,7 @@ async def test_the_resume_backoff_doubles_and_the_whole_retry_is_wall_clock_boun
     monkeypatch.setattr(e2b_ext.asyncio, "sleep", record)
     faults = [httpx.ReadTimeout("timed out")] * (RESUME_TRANSPORT_RETRIES + 1)
     sdk = _Sdk(connect_faults=list(faults))
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     opened = await carrier.create(_spec(conversation))
 
@@ -796,7 +815,7 @@ async def test_a_control_plane_that_answers_nothing_at_all_ends_at_the_ceiling(
     allows — a third-party value this repo neither sets nor asserts."""
     conversation = uuid4()
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     opened = await carrier.create(_spec(conversation))
 
     async def never_answers(
@@ -809,7 +828,7 @@ async def test_a_control_plane_that_answers_nothing_at_all_ends_at_the_ceiling(
         raise AssertionError("unreachable")
 
     sdk.connect = never_answers  # type: ignore[method-assign]
-    stalling = E2BCarrier(
+    stalling = _carrier(
         api_key="k", templates=_templates("t"), sdk=sdk, resume_total_timeout_seconds=0.05
     )
 
@@ -825,7 +844,7 @@ async def test_a_fresh_box_is_not_lease_visible_until_it_is_prepared() -> None:
     working on and may be about to fail out of."""
     conversation = uuid4()
     sdk = _Sdk(file_write_raises=httpx.ReadError("connection broken"))
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, prepare_retry_seconds=0.0)
 
     with pytest.raises(httpx.ReadError):
         await carrier.create(_spec(conversation))
@@ -840,7 +859,7 @@ async def test_every_connect_in_the_carrier_retries_an_unanswered_control_plane(
     conversation = uuid4()
     clock = _Clock()
     sdk = _Sdk(clock=clock)
-    carrier = E2BCarrier(
+    carrier = _carrier(
         api_key="k", templates=_templates("t"), sdk=sdk, clock=clock, resume_retry_delay_seconds=0.0
     )
     opened = await carrier.create(_spec(conversation))
@@ -930,14 +949,14 @@ async def test_exec_runs_under_the_turn_egress_env() -> None:
     loopback, whose model keys are the sentinels the proxy swaps for the real key on the wire, and
     whose CA vars point at the written proxy CA."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
 
     await carrier.exec(handle, ("bash", "-lc", "curl https://example.com"), 60)
 
     envs = sdk.sandboxes["sbx-1"].commands.envs[-1]
     assert envs is not None
-    proxy_url = "https://run-token:@sandbox-proxy.test"
+    proxy_url = "https://run-token:ufo@sandbox-proxy.test"
     assert envs["HTTP_PROXY"] == proxy_url
     assert envs["HTTPS_PROXY"] == proxy_url
     assert envs["http_proxy"] == proxy_url
@@ -958,7 +977,7 @@ async def test_create_without_a_reachable_proxy_url_fails_loud() -> None:
     """The carrier's own fail-loud, behind the boot guard: an e2b spec whose proxy carries no public
     URL cannot build a metered egress env, so create raises rather than run an open sandbox."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     spec = SandboxSpec(
         conversation_id=uuid4(),
         image_ref="ufo-sandbox:latest",
@@ -972,7 +991,7 @@ async def test_create_without_a_reachable_proxy_url_fails_loud() -> None:
 
 async def test_create_with_a_plaintext_proxy_url_fails_loud() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     spec = SandboxSpec(
         conversation_id=uuid4(),
         image_ref="ufo-sandbox:latest",
@@ -990,7 +1009,7 @@ async def test_create_with_a_plaintext_proxy_url_fails_loud() -> None:
 
 async def test_dial_returns_the_per_port_host_and_traffic_header() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("tpl"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
 
     target = await carrier.dial(handle, 8000)
@@ -1011,7 +1030,7 @@ async def test_dial_omits_the_header_when_the_sandbox_carries_no_traffic_token()
         files=_Files(),
         traffic_access_token=None,
     )
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-1")
 
     target = await carrier.dial(handle, 9223)
@@ -1046,7 +1065,7 @@ async def test_dial_raises_sandbox_unreachable_when_the_sandbox_is_gone() -> Non
     maps it to `SandboxUnreachable`, the one error every carrier's `dial` raises, rather than
     leaking the e2b SDK's own exception type."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-1")
 
     with pytest.raises(SandboxUnreachable):
@@ -1055,7 +1074,7 @@ async def test_dial_raises_sandbox_unreachable_when_the_sandbox_is_gone() -> Non
 
 async def test_second_create_for_the_conversation_resumes_rather_than_recreates() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
 
     await carrier.create(_spec(conversation))
@@ -1077,11 +1096,11 @@ async def test_create_resumes_a_prior_process_sandbox_and_exec_works() -> None:
     new one, and rebuilds the egress env through create so the following exec never KeyErrors on a
     missing _egress — create is the one seam that seeds it, and every turn opens through create."""
     sdk = _Sdk()
-    first = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    first = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     opened = await first.create(_spec(conversation))
 
-    restarted = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    restarted = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     resumed = await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
 
     assert len(sdk.created) == 1
@@ -1096,21 +1115,21 @@ async def test_create_resumes_a_prior_process_sandbox_and_exec_works() -> None:
     assert result.exit_code == 0
 
 
-async def test_a_resumed_box_whose_command_stream_hangs_still_opens(
+async def test_a_resumed_box_whose_runtime_command_stream_hangs_still_opens(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The case the bound exists for, and the only one no SDK deadline reaches: `commands.run` goes
     out over a stream the SDK gives no read timeout, so a silent `envd` holds it open forever. The
     upload answers here, so the hang this tolerates is the command's alone."""
     sdk = _Sdk()
-    first = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    first = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     opened = await first.create(_spec(conversation))
     sandbox = sdk.sandboxes[opened.container_id]
     sandbox.files.written.clear()
-    sandbox.commands.hangs = True
+    sandbox.commands.hang_on = (INSTALL_CA_COMMAND,)
 
-    restarted = E2BCarrier(
+    restarted = _carrier(
         api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01
     )
     with caplog.at_level(logging.INFO, logger="ufo"):
@@ -1119,32 +1138,31 @@ async def test_a_resumed_box_whose_command_stream_hangs_still_opens(
         )
 
     assert resumed.container_id == opened.container_id
-    assert sandbox.files.written == [(CA_STAGING_PATH, "ca-pem")], (
-        "the upload answered during this resume; only the command hung"
-    )
+    assert sandbox.files.written == [(CA_STAGING_PATH, "ca-pem")]
     assert _events(caplog, "sandbox.e2b.prepare_deferred") == [
         {"conversation_id": str(conversation), "sandbox_id": opened.container_id}
     ]
 
 
-async def test_a_resumed_box_whose_upload_hangs_still_opens() -> None:
-    """The upload is bounded by the SDK but raises a class it never maps, so a bound that named
-    exception classes would miss it. It hangs before any command runs."""
+async def test_a_resumed_box_whose_client_upload_hangs_fails_closed() -> None:
     sdk = _Sdk()
-    first = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    first = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     opened = await first.create(_spec(conversation))
     sandbox = sdk.sandboxes[opened.container_id]
     sandbox.commands.runs.clear()
+    sandbox.commands.fail_counts[CLIENT_PATH] = 1
     sandbox.files.hangs = True
 
-    restarted = E2BCarrier(
+    restarted = _carrier(
         api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01
     )
-    resumed = await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
+    with pytest.raises(SandboxUnreachable, match="workload client"):
+        await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
 
-    assert resumed.container_id == opened.container_id
-    assert sandbox.commands.runs == []
+    assert len(sandbox.commands.runs) == 1
+    assert CLIENT_PATH in sandbox.commands.runs[0][0]
+    assert restarted._leased(conversation) is None
 
 
 async def test_a_fresh_box_is_never_served_on_a_deferral() -> None:
@@ -1153,9 +1171,7 @@ async def test_a_fresh_box_is_never_served_on_a_deferral() -> None:
     deferring branch would hand the turn a container that reaches no host."""
     sdk = _Sdk()
     sdk.command_hangs = True
-    carrier = E2BCarrier(
-        api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01
-    )
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01)
 
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.2):
@@ -1168,9 +1184,7 @@ async def test_a_replacement_for_a_lost_resume_id_is_never_deferred() -> None:
     a container that is gone, not for this one, which holds no CA and no `/workspace` — so its
     preparation is strict and has no deadline to expire into."""
     sdk = _Sdk(command_hangs=True)
-    carrier = E2BCarrier(
-        api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01
-    )
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01)
 
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.2):
@@ -1203,12 +1217,12 @@ async def test_a_deferred_preparation_is_counted(monkeypatch: pytest.MonkeyPatch
     a log line alone answers "did it happen once", never "is it getting worse"."""
     reader = _counters(monkeypatch)
     sdk = _Sdk()
-    first = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    first = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     opened = await first.create(_spec(conversation))
-    sdk.sandboxes[opened.container_id].commands.hangs = True
+    sdk.sandboxes[opened.container_id].commands.hang_on = (INSTALL_CA_COMMAND,)
 
-    restarted = E2BCarrier(
+    restarted = _carrier(
         api_key="k", templates=_templates("t"), sdk=sdk, resume_prepare_seconds=0.01
     )
     await restarted.create(replace(_spec(conversation), resume_id=opened.container_id))
@@ -1223,7 +1237,7 @@ async def test_a_command_that_timed_out_is_counted(monkeypatch: pytest.MonkeyPat
     records that it happened."""
     reader = _counters(monkeypatch)
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     sdk.sandboxes[handle.container_id].commands.raises = TimeoutException("probe hung")
 
@@ -1236,7 +1250,7 @@ async def test_a_command_that_timed_out_is_counted(monkeypatch: pytest.MonkeyPat
 
 async def test_exec_runs_the_joined_command_in_the_workspace_and_maps_the_result() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     sdk.sandboxes["sbx-1"].commands.result = _Result("hello\n", "", 0)
 
@@ -1253,7 +1267,7 @@ async def test_write_uploads_through_the_filesystem_api() -> None:
     """The bytes go through `files.write`, never the command line: inlining them is what e2b rejects
     once the payload is large, exactly when a caller offloads an oversized tool result."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     content = b"x" * (2 * 1024 * 1024)
 
@@ -1266,7 +1280,7 @@ async def test_write_uploads_through_the_filesystem_api() -> None:
 
 async def test_exec_maps_a_nonzero_exit_to_the_command_result() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     sdk.sandboxes["sbx-1"].commands.raises = CommandExitException(
         stderr="boom", stdout="partial", exit_code=3, error="boom"
@@ -1279,7 +1293,7 @@ async def test_exec_maps_a_nonzero_exit_to_the_command_result() -> None:
 
 async def test_exec_maps_a_timeout_to_the_timeout_code() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     sdk.sandboxes["sbx-1"].commands.raises = TimeoutException("timed out")
 
@@ -1295,7 +1309,7 @@ async def test_a_stopped_command_leads_its_own_process_group() -> None:
     shared group, so the pid the carrier signals must lead a group of the command's own or the
     signal reaches the carrier's other calls instead."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
 
     await carrier.exec(handle, ("bash", "-lc", "pytest -n auto"), 60)
@@ -1310,7 +1324,7 @@ async def test_a_command_the_deadline_stopped_is_no_longer_running() -> None:
     the next call in the same turn meets a box consumed by the run it believes it stopped. Nothing
     else can stop it — no later call knows the pid this one saw."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
     commands.raises = TimeoutException("timed out")
@@ -1329,7 +1343,7 @@ async def test_a_stop_the_sandbox_refuses_still_reports_the_deadline(
     replacing that outcome with an error about itself."""
     reader = _counters(monkeypatch)
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
     commands.raises = TimeoutException("timed out")
@@ -1493,7 +1507,7 @@ async def test_a_box_that_stopped_answering_refuses_the_next_command_at_once(
     what the one before it already established."""
     reader = _counters(monkeypatch)
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
     commands.raises = TimeoutException("timed out")
@@ -1512,7 +1526,7 @@ async def test_a_box_that_answers_again_is_used_again() -> None:
     """The mark records a fault, never a verdict: a channel that comes back is a working box, and
     the command that proved it goes on to run."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
     commands.raises = TimeoutException("timed out")
@@ -1536,7 +1550,7 @@ async def test_a_stop_the_box_answers_leaves_nothing_to_recheck() -> None:
     """A group already gone exits non-zero, which is the box answering. Only silence is the fault
     worth remembering, so the next command is not made to pay a probe for it."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
     commands.raises = TimeoutException("timed out")
@@ -1554,7 +1568,7 @@ async def test_a_command_that_ends_on_its_own_is_not_signalled() -> None:
     """A command that exits leaves nothing to stop, and a backgrounded descendant outliving the
     exec that launched it is how a turn starts a server."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
 
@@ -1568,7 +1582,7 @@ async def test_a_deadline_that_beats_the_launch_has_nothing_to_stop() -> None:
     behind it: the stop is skipped, not sent to a group that does not exist, and the caller is
     still told its own deadline fired."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
     commands.launch_never_answers = True
@@ -1586,7 +1600,7 @@ async def test_a_launch_the_box_cannot_answer_is_the_box_going_silent() -> None:
     again. Detaching returns as soon as the command has a pid, so a launch outlasting the caller's
     whole budget is a gone channel rather than slow work — the plainest reading of one there is."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
     commands.launch_never_answers = True
@@ -1655,15 +1669,13 @@ async def test_a_box_that_is_really_gone_earns_the_mark_again() -> None:
 async def test_the_deadline_stop_ends_the_launcher_and_spares_its_detached_task(
     tmp_path: Path,
 ) -> None:
-    """The bash tool never hands the carrier the command itself: its launcher forks a wrapper into
-    a process group of its own (`set -m`) and waits, precisely so a budget that expires moves the
-    command to the background rather than ending it. The deadline stop must therefore end the
-    launcher's group and nothing wider — one that reached the wrapper's group would kill the task
-    the caller is about to be told continues detached. Real processes prove the composition: the
-    launcher dies of the stop, the wrapper survives it, the probe the tool decides detachment by
-    answers a live pid, and the task's advertised stop still lands its exit code."""
+    """The bash tool hands the carrier `ufo run`: its launcher starts a task supervisor in its own
+    session and waits, so a budget that expires moves the command to the background rather than
+    ending it. The deadline stop must therefore end the launcher's group and nothing wider. Real
+    processes prove the composition: the launcher dies, the supervisor survives, the probe answers
+    its live pid, and the task's advertised stop still lands its exit code."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     commands = _ProcessCommands(root=tmp_path)
     sdk.sandboxes["sbx-live"] = _Sandbox(
         sandbox_id="sbx-live",
@@ -1673,7 +1685,16 @@ async def test_the_deadline_stop_ends_the_launcher_and_spares_its_detached_task(
     )
     handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-live")
     base = f"{tmp_path}/tasks/t-0001"
-    launch = ("sh", "-c", TASK_BASH, "sh", TASK_LAUNCH + TASK_WAIT, TASK_WRAPPER, base, "sleep 30")
+    launch = (
+        str(client_binary()),
+        "run",
+        "--task",
+        base,
+        "--",
+        "bash",
+        "-lc",
+        "sleep 30",
+    )
 
     result = await carrier.exec(handle, launch, 1)
 
@@ -1682,9 +1703,9 @@ async def test_the_deadline_stop_ends_the_launcher_and_spares_its_detached_task(
     assert await asyncio.wait_for(commands.launched[0].wait(), 10) == -9
     probe = await carrier.exec(handle, ("sh", "-c", TASK_PROBE, "sh", base), 5)
     assert probe.exit_code == 0
-    wrapper = probe.stdout.strip()
-    assert wrapper
-    stopped = await carrier.exec(handle, ("bash", "-lc", f'kill "{wrapper}"'), 5)
+    supervisor = probe.stdout.strip()
+    assert supervisor
+    stopped = await carrier.exec(handle, ("bash", "-lc", f'kill "{supervisor}"'), 5)
     assert stopped.exit_code == 0
     for _ in range(100):
         ended = await carrier.exec(
@@ -1701,9 +1722,9 @@ async def test_a_cancel_leaves_the_launcher_running_until_the_member_stop(tmp_pa
     """Proved on real processes: a cancelled exec leaves the launcher's group running, because the
     replay of a preempted step must find the work it launched still going, and only the member's
     stop ends it. That stop reaches exactly as far as the deadline's does — the launcher dies and
-    the wrapper it forked into a group of its own keeps running, log and exit file intact."""
+    the task supervisor keeps running, log and exit file intact."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     commands = _ProcessCommands(root=tmp_path)
     sdk.sandboxes["sbx-live"] = _Sandbox(
         sandbox_id="sbx-live",
@@ -1713,7 +1734,16 @@ async def test_a_cancel_leaves_the_launcher_running_until_the_member_stop(tmp_pa
     )
     handle = SandboxHandle(conversation_id=uuid4(), container_id="sbx-live")
     base = f"{tmp_path}/tasks/t-0002"
-    launch = ("sh", "-c", TASK_BASH, "sh", TASK_LAUNCH + TASK_WAIT, TASK_WRAPPER, base, "sleep 30")
+    launch = (
+        str(client_binary()),
+        "run",
+        "--task",
+        base,
+        "--",
+        "bash",
+        "-lc",
+        "sleep 30",
+    )
 
     running = asyncio.ensure_future(carrier.exec(handle, launch, 60))
     for _ in range(200):
@@ -1739,15 +1769,15 @@ async def test_a_cancel_leaves_the_launcher_running_until_the_member_stop(tmp_pa
     assert await asyncio.wait_for(launcher.wait(), 10) == -9
     probe = await carrier.exec(handle, ("sh", "-c", TASK_PROBE, "sh", base), 5)
     assert probe.exit_code == 0
-    wrapper = probe.stdout.strip()
-    assert wrapper
-    stopped = await carrier.exec(handle, ("bash", "-lc", f'kill "{wrapper}"'), 5)
+    supervisor = probe.stdout.strip()
+    assert supervisor
+    stopped = await carrier.exec(handle, ("bash", "-lc", f'kill "{supervisor}"'), 5)
     assert stopped.exit_code == 0
 
 
 def _leased(clock: _Clock) -> tuple[_Sdk, E2BCarrier]:
     sdk = _Sdk(clock=clock)
-    return sdk, E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=clock)
+    return sdk, _carrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=clock)
 
 
 def _events(caplog: pytest.LogCaptureFixture, name: str) -> list[dict[str, object]]:
@@ -1978,7 +2008,7 @@ async def test_a_process_that_reconnects_carries_the_lease_on_connect() -> None:
     clock = _Clock()
     sdk, opener = _leased(clock)
     handle = await opener.create(_spec(uuid4()))
-    restarted = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=clock)
+    restarted = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=clock)
 
     await restarted.exec(handle, ("bash", "-lc", "sleep 500"), 540)
 
@@ -2092,6 +2122,7 @@ TEMPLATES_ENV_VALUE = (
 def _clear_e2b_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(E2B_API_KEY_ENV, raising=False)
     monkeypatch.delenv(E2B_TEMPLATES_ENV, raising=False)
+    monkeypatch.delenv("UFO_CLIENT_BINARY", raising=False)
 
 
 def test_build_e2b_carrier_requires_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2113,6 +2144,7 @@ def test_build_e2b_carrier_reads_the_templates_and_key_from_the_environment(
     _clear_e2b_env(monkeypatch)
     monkeypatch.setenv(E2B_API_KEY_ENV, "sk-env")
     monkeypatch.setenv(E2B_TEMPLATES_ENV, TEMPLATES_ENV_VALUE)
+    monkeypatch.setenv("UFO_CLIENT_BINARY", __file__)
     carrier = build_e2b_carrier()
     assert carrier.api_key == "sk-env"
     assert carrier.templates == {
@@ -2152,6 +2184,7 @@ def test_config_backend_e2b_resolves_the_extension_contributed_carrier(
     _clear_e2b_env(monkeypatch)
     monkeypatch.setenv(E2B_API_KEY_ENV, "sk-env")
     monkeypatch.setenv(E2B_TEMPLATES_ENV, TEMPLATES_ENV_VALUE)
+    monkeypatch.setenv("UFO_CLIENT_BINARY", __file__)
     config = Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///carrier.db"),
         blob=BlobConfig(backend="filesystem", root=Path("blobs")),
@@ -2204,7 +2237,7 @@ async def test_exec_env_rides_the_handle_not_the_conversation() -> None:
     each exec runs under its own handle's run token, so egress attribution never leaks across turns
     and a later create never re-points an earlier turn's env."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     first = await carrier.create(replace(_spec(conversation), run_token="turn-a"))
     second = await carrier.create(replace(_spec(conversation), run_token="turn-b"))
@@ -2213,15 +2246,17 @@ async def test_exec_env_rides_the_handle_not_the_conversation() -> None:
     await carrier.exec(second, ("bash", "-lc", "true"), 60)
 
     envs = sdk.sandboxes["sbx-1"].commands.envs
-    assert envs[-2] is not None and envs[-2]["HTTPS_PROXY"] == "https://turn-a:@sandbox-proxy.test"
-    assert envs[-1] is not None and envs[-1]["HTTPS_PROXY"] == "https://turn-b:@sandbox-proxy.test"
+    assert envs[-2] is not None
+    assert envs[-2]["HTTPS_PROXY"] == "https://turn-a:ufo@sandbox-proxy.test"
+    assert envs[-1] is not None
+    assert envs[-1]["HTTPS_PROXY"] == "https://turn-b:ufo@sandbox-proxy.test"
 
 
 async def test_spec_env_joins_the_exec_env() -> None:
     """The engine's per-turn sentinel entries (a grant CLI credential like GH_TOKEN) ride the spec
     onto the handle and into every exec of that turn."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(
         replace(_spec(uuid4()), env={"GH_TOKEN": "UFO_SENTINEL_GRANT_acct-1"})
     )
@@ -2235,7 +2270,7 @@ async def test_spec_env_joins_the_exec_env() -> None:
 
 async def test_skill_programs_run_as_root() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     commands = sdk.sandboxes["sbx-1"].commands
 
@@ -2254,11 +2289,11 @@ async def test_skill_programs_run_as_root() -> None:
 
 async def test_create_provisions_ca_then_workspace_as_root_on_every_branch() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     await carrier.create(_spec(conversation))
     await carrier.create(_spec(conversation))
-    other = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    other = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     spec = replace(_spec(conversation), resume_id="sbx-1")
     await other.create(spec)
 
@@ -2271,7 +2306,7 @@ async def test_create_provisions_ca_then_workspace_as_root_on_every_branch() -> 
 
 async def test_create_fails_loud_when_the_workspace_setup_fails() -> None:
     sdk = _Sdk(command_fail_counts={"chown": 1})
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
 
     with pytest.raises(RuntimeError, match="workspace setup"):
         await carrier.create(_spec(uuid4()))
@@ -2279,7 +2314,7 @@ async def test_create_fails_loud_when_the_workspace_setup_fails() -> None:
 
 async def test_create_fails_loud_when_the_workload_cap_fails() -> None:
     sdk = _Sdk(command_fail_counts={"memory.max": 1})
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
 
     with pytest.raises(RuntimeError, match="workload cap"):
         await carrier.create(_spec(uuid4()))
@@ -2290,7 +2325,7 @@ async def test_read_streams_through_the_filesystem_api_and_closes_the_reader() -
     bounded pieces; the reader holds an open connection with no finalizer to release it, so it is
     closed even when the consumer stops after the first chunk."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     files = sdk.sandboxes["sbx-1"].files
     files.chunks = (b"produced-", b"bytes")
@@ -2310,7 +2345,7 @@ async def test_read_streams_through_the_filesystem_api_and_closes_the_reader() -
 
 async def test_read_of_an_absent_file_raises_file_not_found() -> None:
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     handle = await carrier.create(_spec(uuid4()))
     sdk.sandboxes["sbx-1"].files.missing = True
 
@@ -2324,7 +2359,7 @@ async def test_create_evicts_expired_leases_without_touching_the_provider() -> N
     bookkeeping — no pause, no kill, no reconnect for the evicted conversation — and its next
     touch reconnects from the durable handle exactly as a fresh process would."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=sdk.clock)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=sdk.clock)
     settled, fresh = uuid4(), uuid4()
     await carrier.create(_spec(settled))
     assert settled in carrier._live
@@ -2346,10 +2381,10 @@ async def test_attach_resumes_the_stored_sandbox_for_a_read() -> None:
     own answer through the connect that leases it, never the in-process cache's — with no egress
     env, since a read runs nothing that leaves the box."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     await carrier.create(_spec(conversation))
-    reader = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    reader = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
 
     attached = await reader.attach(replace(_spec(conversation), resume_id="sbx-1"))
 
@@ -2363,7 +2398,7 @@ async def test_attach_answers_absent_for_a_lost_or_never_opened_sandbox() -> Non
     """A read never provisions: no stored id, or an id the provider no longer has, answers None —
     and no fresh sandbox is created for it."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
 
     assert await carrier.attach(_spec(uuid4())) is None
     assert await carrier.attach(replace(_spec(uuid4()), resume_id="sbx-gone")) is None
@@ -2375,10 +2410,10 @@ async def test_create_prefers_the_named_resume_id_over_its_own_live_cache() -> N
     must converge on that sandbox even when this process's cache still holds its own losing one —
     a cache-first read would hand the loser back and carry its id over the winner's row."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     loser = await carrier.create(_spec(conversation))
-    winner = await E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk).create(
+    winner = await _carrier(api_key="k", templates=_templates("t"), sdk=sdk).create(
         _spec(conversation)
     )
     assert loser.container_id != winner.container_id
@@ -2394,7 +2429,7 @@ async def test_attach_answers_absent_for_a_sandbox_the_cache_outlived() -> None:
     present off the cache would raise where absence was promised. Attach asks the provider every
     time, sheds the dead cache entry, and answers None."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     opened = await carrier.create(_spec(conversation))
     assert conversation in carrier._live
@@ -2411,7 +2446,7 @@ async def test_a_lease_renewal_on_a_lost_sandbox_sheds_the_lease_and_raises() ->
     the next call reattaches from durable state instead of trusting a deadline the provider
     abandoned, and the loss surfaces rather than reading as a transport fault."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=sdk.clock)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk, clock=sdk.clock)
     conversation = uuid4()
     handle = await carrier.create(_spec(conversation))
     sdk.clock.now += SANDBOX_LEASE_SECONDS + 1
@@ -2428,10 +2463,10 @@ async def test_attach_connects_to_the_named_id_even_when_the_cache_holds_another
     that id — even while this process's cache still leases a different sandbox of the same
     conversation."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     cached = await carrier.create(_spec(conversation))
-    named = await E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk).create(
+    named = await _carrier(api_key="k", templates=_templates("t"), sdk=sdk).create(
         _spec(conversation)
     )
     assert cached.container_id != named.container_id
@@ -2448,7 +2483,7 @@ async def test_attach_without_a_named_id_answers_none_never_the_cache() -> None:
     cache still leases one — the row is the authority, and answering off the cache would hand a
     reader a sandbox no row references."""
     sdk = _Sdk()
-    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    carrier = _carrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()
     await carrier.create(_spec(conversation))
     connects = len(sdk.connected)
