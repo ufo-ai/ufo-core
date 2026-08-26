@@ -118,6 +118,7 @@ from ufo.indexing import EmbedClient, IndexBackend
 from ufo.loop.delivery import DeliverySweep
 from ufo.loop.profiles import CORE_SUBAGENT_PROFILES
 from ufo.loop.queue import Runtime, init_runtime
+from ufo.loop.steps import DurableTurnSteps
 from ufo.loop.subagents import SubagentRegistry
 from ufo.loop.tool_bridge import ToolBridge
 from ufo.media.document_renderer import DocumentRenderer
@@ -1040,6 +1041,7 @@ def _mount_shared_surfaces(
     )
     tailer = HubTailer(hub=hub, billing_url=billing_url)
     stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
+    turn_steps = DurableTurnSteps(client=dbos_client)
     system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())
     registered: dict[str, SurfaceSpec] = {}
     listeners = []
@@ -1090,6 +1092,7 @@ def _mount_shared_surfaces(
             _admitter=MemberAdmission(admission=admission, workspace_id=workspace_id),
             _tailer=tailer,
             _stopper=stopper,
+            _turn_steps=turn_steps,
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
             _key_slot_for=key_slot_for,

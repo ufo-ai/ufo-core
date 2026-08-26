@@ -29,6 +29,7 @@ from ufo_testsupport.surfaces import (
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.hub import InProcessHub
+from ufo.loop.engine import DispatchResult, StreamResult
 from ufo.models.interface import (
     Message,
     ReasoningItemBlock,
@@ -61,6 +62,24 @@ SECRET = "debug-token-secret"
 class _StubDbos:
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         raise AssertionError("the debug surface admits nothing")
+
+    async def list_workflow_steps_async(self, workflow_id: str) -> list[dict[str, object]]:
+        return [
+            {
+                "function_name": "TurnEngine._stream_once",
+                "started_at_epoch_ms": 1_777_215_600_123,
+                "completed_at_epoch_ms": 1_777_215_606_577,
+                "output": StreamResult(
+                    tool_calls=(ToolUseBlock(id="call-1", name="bash", input={"command": "pwd"}),)
+                ),
+            },
+            {
+                "function_name": "TurnEngine._dispatch_step",
+                "started_at_epoch_ms": 1_777_215_606_600,
+                "completed_at_epoch_ms": 1_777_215_726_705,
+                "output": DispatchResult(tool_use_id="call-1", text="/workspace", is_error=False),
+            },
+        ]
 
 
 def _mint(secret: str, workspace_id: UUID, email: str, ttl_seconds: int = 3600) -> str:
@@ -492,8 +511,9 @@ async def test_app_page_serves_the_built_app_and_fails_loud_unbuilt(debug, monke
         await client.get("/surface/debug", headers=_auth(token))
 
 
-async def test_workspace_meta_carries_the_slack_team(debug) -> None:
+async def test_workspace_meta_carries_the_slack_team(debug, monkeypatch) -> None:
     client, _, _ = debug
+    monkeypatch.setenv("DD_SITE", "us5.datadoghq.com")
     workspace_id, agent_id = await _seed_workspace()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -509,7 +529,11 @@ async def test_workspace_meta_carries_the_slack_team(debug) -> None:
         )
     token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
     meta = await client.get("/surface/debug/api/workspace", headers=_auth(token))
-    assert meta.json() == {"workspace_id": str(workspace_id), "slack_team": "T042"}
+    assert meta.json() == {
+        "workspace_id": str(workspace_id),
+        "slack_team": "T042",
+        "datadog_site": "us5.datadoghq.com",
+    }
 
 
 async def test_turns_and_detail_read_terminal_ledger_and_children(debug) -> None:
@@ -552,10 +576,29 @@ async def test_turns_and_detail_read_terminal_ledger_and_children(debug) -> None
     assert [entry["dimension"] for entry in body["ledger"]] == ["tokens"]
     assert [turn["id"] for turn in body["children"]] == [str(child)]
     assert body["children"][0]["subagent_profile"] == "research"
+    assert "steps" not in body
+    steps_response = await client.get(
+        f"/surface/debug/api/turns/{parent}/steps", headers=_auth(token)
+    )
+    assert steps_response.status_code == 200
+    steps = steps_response.json()
+    assert [(step["kind"], step["name"], step["duration_ms"]) for step in steps] == [
+        ("model", "model round", 6_454),
+        ("tool", "bash", 120_105),
+    ]
+    assert steps[0]["started_at"] == "2026-04-26T15:00:00.123000Z"
     missing = await client.get(f"/surface/debug/api/turns/{uuid4()}", headers=_auth(token))
     assert missing.status_code == 404
+    missing_steps = await client.get(
+        f"/surface/debug/api/turns/{uuid4()}/steps", headers=_auth(token)
+    )
+    assert missing_steps.status_code == 404
     malformed = await client.get("/surface/debug/api/turns/not-a-uuid", headers=_auth(token))
     assert malformed.status_code == 404
+    malformed_steps = await client.get(
+        "/surface/debug/api/turns/not-a-uuid/steps", headers=_auth(token)
+    )
+    assert malformed_steps.status_code == 404
 
 
 async def test_transcript_compactions_and_files_read_the_blobs_and_the_sandbox(debug) -> None:

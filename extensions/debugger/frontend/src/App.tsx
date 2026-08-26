@@ -71,7 +71,12 @@ export function App() {
         ) : fleet ? (
           <Fleet navigate={navigate} />
         ) : params.c ? (
-          <Session conversationId={params.c} selectedTurn={params.t} navigate={navigate} />
+          <Session
+            conversationId={params.c}
+            selectedTurn={params.t}
+            datadogSite={meta?.datadog_site ?? null}
+            navigate={navigate}
+          />
         ) : (
           <Conversations
             key={params.ws ?? "own"}

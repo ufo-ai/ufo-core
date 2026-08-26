@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 from pydantic import BaseModel
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
+    EMPTY_TURN_STEPS,
     UNREACHED_AMBIENT_REPLY,
     UNREACHED_STOPPER,
     no_member_skills,
@@ -88,6 +89,7 @@ def _context(workspace_id: UUID, surface: str) -> SurfaceContext:
         ),
         _tailer=HubTailer(hub=InProcessHub()),
         _stopper=UNREACHED_STOPPER,
+        _turn_steps=EMPTY_TURN_STEPS,
         _credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         _declared_slots=(),
         _artifact_token_secret="",

@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from ufo.ext.surface import Stopped
+from ufo.ext.surface import Stopped, TurnStep
 from ufo.models.interface import Message, ModelRequest
 from ufo.skills.runtime import RuntimeSkill, SkillRegistry
 from ufo.turns.ambient_reply import AmbientDecision, AmbientReplyClassifier
@@ -69,3 +69,12 @@ UNREACHED_SURFACE_MODEL = UnreachedSurfaceModel()
 
 
 UNREACHED_STOPPER = UnreachedStopper()
+
+
+@dataclass(frozen=True)
+class EmptyTurnSteps:
+    async def read(self, workflow_id: str) -> tuple[TurnStep, ...]:
+        return ()
+
+
+EMPTY_TURN_STEPS = EmptyTurnSteps()

@@ -765,6 +765,7 @@ spec:
             - name: DD_API_KEY
               valueFrom:
                 secretKeyRef: {name: datadog-api-key, key: DD_API_KEY}
+            - {name: DD_SITE, value: "${rum_site}"}
           volumeMounts:
             # The rendered shared-fleet config replaces the image's baked dev ufo.toml.
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}

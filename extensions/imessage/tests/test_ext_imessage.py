@@ -62,6 +62,7 @@ from ufo_ext_imessage.tools import (
 )
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
+    EMPTY_TURN_STEPS,
     UNREACHED_AMBIENT_REPLY,
     UNREACHED_STOPPER,
     no_member_skills,
@@ -224,6 +225,7 @@ def _context(workspace_id: UUID, tmp_path: Path, dbos: StubDbos) -> SurfaceConte
         ),
         _tailer=HubTailer(hub=InProcessHub()),
         _stopper=UNREACHED_STOPPER,
+        _turn_steps=EMPTY_TURN_STEPS,
         _credentials=CredentialStore(fernet=Fernet(Fernet.generate_key())),
         _artifact_token_secret="artifact-secret",
         _public_base_url="https://ufo.example.test",

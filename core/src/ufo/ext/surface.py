@@ -45,7 +45,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import sqlalchemy as sa
-from pydantic import BaseModel, JsonValue, ValidationError, field_validator
+from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validator
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -361,6 +361,12 @@ class TurnStopper(Protocol):
     that is not the named conversation's."""
 
     async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> "Stopped": ...
+
+
+class TurnStepSource(Protocol):
+    """Read one turn's durable workflow steps after the surface has gated its workspace."""
+
+    async def read(self, workflow_id: str) -> tuple["TurnStep", ...]: ...
 
 
 TERMINAL_TURN_STATUSES: tuple[str, ...] = ("done", "failed", "cancelled")
@@ -1483,6 +1489,25 @@ class LedgerEntry(BaseModel):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+class TurnStep(BaseModel):
+    """One durable workflow step with its recorded identity and wall-clock interval."""
+
+    number: int = Field(ge=1)
+    kind: Literal["model", "tool", "workflow"]
+    name: str
+    function_name: str
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_ms: int | None = Field(ge=0)
+
+    @field_validator("started_at", "completed_at")
+    @classmethod
+    def _aware_utc(cls, value: datetime | None) -> datetime | None:
+        if value is None or value.tzinfo is not None:
+            return value
+        return value.replace(tzinfo=UTC)
+
+
 class TurnDetail(BaseModel):
     """One turn with everything durable that hangs off it: the row itself (terminal outcome and
     context included), its accounting, and the subagent turns it spawned (`parent_turn_id`
@@ -1640,6 +1665,7 @@ class SurfaceContext:
     _admitter: MemberAdmitter
     _tailer: TurnTailer
     _stopper: TurnStopper
+    _turn_steps: TurnStepSource
     _credentials: CredentialStore | None
     _artifact_token_secret: str
     _public_base_url: str | None
@@ -3851,6 +3877,21 @@ class SurfaceContext:
             ),
             children=tuple(self._turn_record(child) for child in children),
         )
+
+    async def turn_steps(self, turn_id: UUID) -> tuple[TurnStep, ...] | None:
+        """One owned turn's durable DBOS steps, or None when it belongs to another workspace."""
+        async with workspace_tx() as connection:
+            turn = (
+                await connection.execute(
+                    sa.select(tables.turn.c.running_attempt).where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.workspace_id == self.workspace_id,
+                    )
+                )
+            ).one_or_none()
+        if turn is None:
+            return None
+        return await self._turn_steps.read(turn.running_attempt or str(turn_id))
 
     async def queued_arrivals(
         self, conversation_id: UUID, draining_turn_id: UUID | None

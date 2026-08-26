@@ -18,6 +18,7 @@ starts with `POST /surface/debug` carrying the bearer in its form body — never
 access log ever records it — which lands it as the httponly session cookie and redirects to the
 app."""
 
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID
@@ -47,6 +48,7 @@ from ufo.sdk.surfaces import SurfaceContext, SurfaceRoute
 SURFACE_DEBUG = "debug"
 SLACK_SURFACE = "slack"
 SLACK_TEAM_PREFIX = "team:"
+DATADOG_SITE_ENV = "DD_SITE"
 APP_FILE = Path(__file__).parent / "static" / "index.html"
 APP_HTML = APP_FILE.read_text() if APP_FILE.is_file() else None
 
@@ -73,7 +75,13 @@ async def workspace_meta(ctx: SurfaceContext, request: Request) -> Response:
         if installation is not None and installation.startswith(SLACK_TEAM_PREFIX)
         else None
     )
-    return JSONResponse({"workspace_id": str(ctx.workspace_id), "slack_team": slack_team})
+    return JSONResponse(
+        {
+            "workspace_id": str(ctx.workspace_id),
+            "slack_team": slack_team,
+            "datadog_site": os.environ.get(DATADOG_SITE_ENV),
+        }
+    )
 
 
 async def conversations(ctx: SurfaceContext, request: Request) -> Response:
@@ -153,6 +161,16 @@ async def turn(ctx: SurfaceContext, request: Request) -> Response:
     if detail is None:
         return JSONResponse({"error": "no such turn"}, status_code=404)
     return JSONResponse(detail.model_dump(mode="json"))
+
+
+async def turn_steps(ctx: SurfaceContext, request: Request) -> Response:
+    turn_id = _uuid_param(request, "turn_id")
+    if turn_id is None:
+        return JSONResponse({"error": "no such turn"}, status_code=404)
+    steps = await ctx.turn_steps(turn_id)
+    if steps is None:
+        return JSONResponse({"error": "no such turn"}, status_code=404)
+    return JSONResponse([step.model_dump(mode="json") for step in steps])
 
 
 async def stream(ctx: SurfaceContext, request: Request) -> Response:
@@ -238,5 +256,6 @@ ROUTES = (
         handler=workspace_file,
     ),
     SurfaceRoute(method="GET", path="api/turns/{turn_id}", handler=turn),
+    SurfaceRoute(method="GET", path="api/turns/{turn_id}/steps", handler=turn_steps),
     SurfaceRoute(method="GET", path="api/turns/{turn_id}/stream", handler=stream),
 )

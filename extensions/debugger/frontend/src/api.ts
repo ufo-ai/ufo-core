@@ -47,7 +47,21 @@ export type LedgerEntry = {
   created_at: string;
 };
 
-export type TurnDetail = { turn: Turn; ledger: LedgerEntry[]; children: Turn[] };
+export type TurnStep = {
+  number: number;
+  kind: "model" | "tool" | "workflow";
+  name: string;
+  function_name: string;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+};
+
+export type TurnDetail = {
+  turn: Turn;
+  ledger: LedgerEntry[];
+  children: Turn[];
+};
 
 export type ContentBlock =
   | { type: "text"; text: string }
@@ -112,7 +126,11 @@ export type FleetThread = {
 export type FleetListing = { workspaces: FleetWorkspace[]; threads: FleetThread[] };
 
 export type WorkspaceFile = { path: string; size_bytes: number; modified_at: string };
-export type WorkspaceMeta = { workspace_id: string; slack_team: string | null };
+export type WorkspaceMeta = {
+  workspace_id: string;
+  slack_team: string | null;
+  datadog_site: string | null;
+};
 
 const base = window.location.pathname.replace(/\/$/, "");
 
@@ -148,4 +166,24 @@ export function when(iso: string | null): string {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+export function timestamp(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+  });
+}
+
+export function duration(ms: number | null): string {
+  if (ms === null) return "running";
+  if (ms < 1_000) return `${ms.toLocaleString()} ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 2 : 1)} s`;
+  const minutes = Math.floor(ms / 60_000);
+  return `${minutes} min ${((ms % 60_000) / 1_000).toFixed(1)} s`;
 }

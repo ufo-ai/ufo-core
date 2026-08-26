@@ -130,6 +130,9 @@ from ufo.ext.surface import (
     TurnDetail as TurnDetail,
 )
 from ufo.ext.surface import (
+    TurnStep as TurnStep,
+)
+from ufo.ext.surface import (
     Writeback as Writeback,
 )
 from ufo.ext.surface import (

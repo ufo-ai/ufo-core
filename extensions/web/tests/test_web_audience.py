@@ -20,6 +20,7 @@ from ufo_ext_web.manifest import NAME
 from ufo_ext_web.surface import SURFACE_WEB, _open_conversation
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
+    EMPTY_TURN_STEPS,
     UNREACHED_AMBIENT_REPLY,
     UNREACHED_STOPPER,
     no_member_skills,
@@ -138,6 +139,7 @@ def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
         ),
         _tailer=HubTailer(hub=InProcessHub()),
         _stopper=UNREACHED_STOPPER,
+        _turn_steps=EMPTY_TURN_STEPS,
         _credentials=None,
         _declared_slots=(),
         _artifact_token_secret="",

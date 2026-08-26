@@ -20,6 +20,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
+    EMPTY_TURN_STEPS,
     UNREACHED_AMBIENT_REPLY,
     UNREACHED_STOPPER,
     no_member_skills,
@@ -57,6 +58,7 @@ from ufo.ext.surface import (
     SurfaceListenerRunner,
     SurfaceRoute,
     SurfaceSpec,
+    TurnStep,
     Writeback,
     WritebackPoller,
     fence_member_message,
@@ -132,6 +134,15 @@ class StubDbos:
 
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         self.enqueued.append(turn_id)
+
+
+@dataclass
+class RecordingTurnSteps:
+    read_workflows: list[str] = field(default_factory=list)
+
+    async def read(self, workflow_id: str) -> tuple[TurnStep, ...]:
+        self.read_workflows.append(workflow_id)
+        return ()
 
 
 @dataclass
@@ -276,6 +287,7 @@ def _context(
         ),
         _tailer=HubTailer(hub=InProcessHub()),
         _stopper=UNREACHED_STOPPER,
+        _turn_steps=EMPTY_TURN_STEPS,
         _credentials=store,
         _declared_slots=(),
         _artifact_token_secret="artifact-token-secret",
@@ -2833,12 +2845,21 @@ async def test_list_turns_returns_full_rows_oldest_first(db: None, tmp_path) -> 
 
 async def test_turn_detail_includes_ledger_and_subagent_children(db: None, tmp_path) -> None:
     workspace_id, agent_id, _ = await _seed()
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    turn_steps = RecordingTurnSteps()
+    context = replace(
+        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _turn_steps=turn_steps,
+    )
     conversation_id = await _conversation_row(workspace_id, queue_key="busy")
     parent = await _turn_row(workspace_id, conversation_id, agent_id, 1)
     child_conversation = await _conversation_row(workspace_id, queue_key="subagent:1")
     child = await _turn_row(workspace_id, child_conversation, agent_id, 1, parent_turn_id=parent)
     async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(running_attempt="resumed-workflow")
+            .where(tables.turn.c.id == parent)
+        )
         await connection.execute(
             sa.insert(tables.ledger).values(
                 id=uuid4(),
@@ -2863,10 +2884,14 @@ async def test_turn_detail_includes_ledger_and_subagent_children(db: None, tmp_p
     assert detail.ledger[0].amount == 1234
     assert [turn.id for turn in detail.children] == [child]
     assert detail.children[0].subagent_profile == "research"
+    assert turn_steps.read_workflows == []
+    assert await context.turn_steps(parent) == ()
+    assert turn_steps.read_workflows == ["resumed-workflow"]
     assert await context.turn_detail(uuid4()) is None
     foreign_workspace, _, _ = await _seed()
     foreign_context = _context(foreign_workspace, StubDbos(), FilesystemBlobStore(root=tmp_path))
     assert await foreign_context.turn_detail(parent) is None
+    assert await foreign_context.turn_steps(parent) is None
 
 
 async def test_read_transcript_gates_ownership_before_the_blob(db: None, tmp_path) -> None:

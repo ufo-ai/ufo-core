@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { get, money, TerminalFrame, Turn, TurnDetail, when } from "./api";
+import {
+  duration,
+  get,
+  money,
+  TerminalFrame,
+  timestamp,
+  Turn,
+  TurnDetail,
+  TurnStep,
+  when,
+} from "./api";
 import { Compactions } from "./Compactions";
 import { Files } from "./Files";
 import { Params } from "./nav";
@@ -36,6 +46,7 @@ async function timelineRootedAtParent(
 export function Session(props: {
   conversationId: string;
   selectedTurn: string | null;
+  datadogSite: string | null;
   navigate: (next: Partial<Params>) => void;
 }) {
   const [turns, setTurns] = useState<Turn[] | null>(null);
@@ -94,6 +105,7 @@ export function Session(props: {
             turn={turn}
             detail={details[turn.id] ?? null}
             selected={props.selectedTurn === turn.id}
+            datadogSite={props.datadogSite}
             navigate={props.navigate}
           />
         ))}
@@ -167,6 +179,7 @@ function TurnCard(props: {
   turn: Turn;
   detail: TurnDetail | null;
   selected: boolean;
+  datadogSite: string | null;
   navigate: (next: Partial<Params>) => void;
 }) {
   const { turn, detail } = props;
@@ -188,7 +201,13 @@ function TurnCard(props: {
         </span>
       </div>
       {props.selected && (
-        <TurnBody turn={turn} detail={detail} navigate={props.navigate} terminal={terminal} />
+        <TurnBody
+          turn={turn}
+          detail={detail}
+          terminal={terminal}
+          datadogSite={props.datadogSite}
+          navigate={props.navigate}
+        />
       )}
     </div>
   );
@@ -198,6 +217,7 @@ function TurnBody(props: {
   turn: Turn;
   detail: TurnDetail | null;
   terminal: TerminalFrame | null;
+  datadogSite: string | null;
   navigate: (next: Partial<Params>) => void;
 }) {
   const { turn, detail, terminal } = props;
@@ -228,6 +248,7 @@ function TurnBody(props: {
             <dt>traceparent</dt>
             <dd>
               <code>{turn.traceparent}</code>
+              <DatadogLinks turn={turn} site={props.datadogSite} />
             </dd>
           </>
         )}
@@ -250,6 +271,7 @@ function TurnBody(props: {
           <pre>{JSON.stringify(terminal, null, 2)}</pre>
         </details>
       )}
+      <Steps turnId={turn.id} />
       {detail && detail.ledger.length > 0 && (
         <details>
           <summary>ledger ({detail.ledger.length})</summary>
@@ -297,6 +319,85 @@ function TurnBody(props: {
       )}
       {LIVE_STATUSES.has(turn.status) && <Tail turnId={turn.id} />}
     </>
+  );
+}
+
+function Steps(props: { turnId: string }) {
+  const [steps, setSteps] = useState<TurnStep[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setSteps(null);
+    setError(null);
+    get<TurnStep[]>(`turns/${props.turnId}/steps`)
+      .then((loaded) => {
+        if (!cancelled) setSteps(loaded);
+      })
+      .catch((failure: Error) => {
+        if (!cancelled) setError(failure.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.turnId]);
+  if (error !== null) return <div className="error-text">{error}</div>;
+  if (steps === null) return <div className="meta">loading steps…</div>;
+  return (
+    <details open>
+      <summary>steps ({steps.length})</summary>
+      <table>
+        <thead>
+          <tr>
+            <th>started</th>
+            <th>duration</th>
+            <th>kind</th>
+            <th>step</th>
+          </tr>
+        </thead>
+        <tbody>
+          {steps.map((step) => (
+            <tr key={step.number}>
+              <td>{timestamp(step.started_at)}</td>
+              <td className="step-duration">{duration(step.duration_ms)}</td>
+              <td>{step.kind}</td>
+              <td>
+                {step.name} <code>{step.function_name}</code>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
+  );
+}
+
+function DatadogLinks(props: { turn: Turn; site: string | null }) {
+  const match = props.turn.traceparent?.match(
+    /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/i,
+  );
+  if (!props.site || !match) return null;
+  const query = `trace_id:${match[1]}`;
+  const start = Date.parse(props.turn.created_at) - 300_000;
+  const end = Date.parse(props.turn.updated_at ?? new Date().toISOString()) + 300_000;
+  const trace = new URL("/apm/traces", `https://${props.site}`);
+  trace.searchParams.set("query", query);
+  trace.searchParams.set("start", String(start));
+  trace.searchParams.set("end", String(end));
+  trace.searchParams.set("paused", "true");
+  const logs = new URL("/logs", `https://${props.site}`);
+  logs.searchParams.set("query", query);
+  logs.searchParams.set("from_ts", String(start));
+  logs.searchParams.set("to_ts", String(end));
+  logs.searchParams.set("live", "false");
+  return (
+    <span className="trace-links">
+      <a href={trace.toString()} target="_blank" rel="noopener">
+        trace
+      </a>
+      <a href={logs.toString()} target="_blank" rel="noopener">
+        logs
+      </a>
+    </span>
   );
 }
 

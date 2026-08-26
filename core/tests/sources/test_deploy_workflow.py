@@ -4205,6 +4205,7 @@ def test_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read(
     assert environment_tag.group(1) == environment
     hosted = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     assert "secretKeyRef: {name: datadog-api-key, key: DD_API_KEY}" in hosted
+    assert '- {name: DD_SITE, value: "${rum_site}"}' in hosted
 
 
 @pytest.mark.parametrize("environment", DEPLOY_ENVIRONMENTS)
