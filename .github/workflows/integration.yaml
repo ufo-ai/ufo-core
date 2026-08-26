@@ -47,6 +47,16 @@ jobs:
           --health-retries 15
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: extensions/web/frontend/pnpm-lock.yaml
+      - run: pnpm -C extensions/web/frontend install --frozen-lockfile
+      - run: pnpm -C extensions/web/frontend exec vite build --config vite.sdk.config.ts
       - uses: ./.github/actions/client-gh
         with:
           target: x86_64-unknown-linux-musl
@@ -76,6 +86,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - working-directory: client
         run: cargo build --release --target x86_64-unknown-linux-musl
+      - run: echo "$GITHUB_WORKSPACE/client/target/x86_64-unknown-linux-musl/release" >> "$GITHUB_PATH"
       # The docker-gated tests need the ~6-7 GB sandbox image, and building it is ~3.3 minutes of
       # this job. `sandbox-image.yml` publishes it from main under a tag keyed by the pinned
       # Dockerfile, so a tag that exists was built from this commit's definition on this base: pull
