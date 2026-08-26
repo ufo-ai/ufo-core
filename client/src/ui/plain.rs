@@ -52,6 +52,19 @@ impl Plain {
         self.say(text);
     }
 
+    pub fn activity(&mut self, text: &str, run: Option<&str>) {
+        match run {
+            None => {
+                self.steps += 1;
+                self.thinking = false;
+            }
+            Some(label) => {
+                self.steps += usize::from(self.runs_counted.insert(label.to_string()));
+            }
+        }
+        self.say(text);
+    }
+
     /// A member message replayed from the transcript.
     pub fn member(&mut self, text: &str) {
         self.line_break();

@@ -41,6 +41,10 @@ pub enum Directive {
     },
     Absorbed(Vec<String>),
     Note(String),
+    Activity {
+        text: String,
+        run: Option<String>,
+    },
     Txt(String),
     Status(String),
     Ask(String),
@@ -110,6 +114,10 @@ pub fn parse_line(line: &str) -> Directive {
             arrival_id: field(&fields, 2),
         },
         "absorbed" => Directive::Absorbed(fields.into_iter().filter(|id| !id.is_empty()).collect()),
+        "note" if fields.get(1).is_some_and(|kind| kind == "activity") => Directive::Activity {
+            text: field(&fields, 0),
+            run: fields.get(2).filter(|label| !label.is_empty()).cloned(),
+        },
         "note" => Directive::Note(field(&fields, 0)),
         "txt" => Directive::Txt(field(&fields, 0)),
         "status" => Directive::Status(field(&fields, 0)),
@@ -655,6 +663,20 @@ mod tests {
         );
         assert_eq!(parse_line("note\tdim"), Directive::Note("dim".into()));
         assert_eq!(
+            parse_line("note\tListing files.\tactivity"),
+            Directive::Activity {
+                text: "Listing files.".into(),
+                run: None,
+            }
+        );
+        assert_eq!(
+            parse_line("note\treviewer: Reading the diff.\tactivity\treviewer"),
+            Directive::Activity {
+                text: "reviewer: Reading the diff.".into(),
+                run: Some("reviewer".into()),
+            }
+        );
+        assert_eq!(
             parse_line("you\tmy words"),
             Directive::You("my words".into())
         );
@@ -776,6 +798,11 @@ mod tests {
             Directive::Say(text) => Some(("say", vec![text.clone()])),
             Directive::You(text) => Some(("you", vec![text.clone()])),
             Directive::Note(text) => Some(("note", vec![text.clone()])),
+            Directive::Activity { text, run } => {
+                let mut fields = vec![text.clone(), "activity".to_string()];
+                fields.extend(run.iter().cloned());
+                Some(("note", fields))
+            }
             Directive::Txt(text) => Some(("txt", vec![text.clone()])),
             Directive::Status(text) => Some(("status", vec![text.clone()])),
             Directive::Ask(prompt) => Some(("ask", vec![prompt.clone()])),

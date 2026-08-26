@@ -2542,6 +2542,67 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[cfg(unix)]
+#[test]
+fn generated_activity_accumulates_live_and_rolls_up() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "note\tReading the notes.\tactivity",
+                "note\tChecking the calendar.\tactivity",
+                "poll\t1",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["txt\tThe meeting is at four.", "ask\t>"],
+        },
+    ]);
+    let home = scratch_home("tty-generated-activity");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url));
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the turn's own post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+
+    let live = session.screen();
+    let reading = live.find("Reading the notes.").expect("the first activity");
+    let checking = live
+        .find("Checking the calendar.")
+        .expect("the second activity");
+    assert!(reading < checking, "activity accumulates in order: {live}");
+    assert!(
+        !live.contains("Completed"),
+        "the live steps stay open: {live}"
+    );
+
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the poll reconnects for the answer");
+    thread::sleep(Duration::from_millis(800));
+
+    let settled = session.screen();
+    assert!(
+        settled.contains("Completed 2 steps \u{25b8}"),
+        "the answer rolls the generated activity up: {settled}"
+    );
+    assert!(
+        settled.contains("The meeting is at four."),
+        "the answer remains below the rollup: {settled}"
+    );
+
+    session.press(b"\x03");
+    assert!(session.ended(), "Ctrl+C ends the session");
+    served.gateway.done();
+    session.reaped();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// A background run narrates while the parent writes its closing answer. The answer is the
 /// reply — the run's row never takes it into the rollup — and the rollup line and the run's own
 /// row open and close on a click, the run's rows standing behind its fold the way the web's do.
@@ -2554,8 +2615,8 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         reply_lines: &[
             "note\trunning spawn: reviewer",
             "txt\tThe reviewer is on it.",
-            "note\treviewer: running read: the diff",
-            "note\treviewer: running bash: cargo test",
+            "note\treviewer: Reading the diff.\tactivity\treviewer",
+            "note\treviewer: Running focused tests.\tactivity\treviewer",
             "ask\t>",
         ],
     }]);
@@ -2617,8 +2678,8 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
     let run_opened = session.screen();
     assert!(
         run_opened.contains("reviewer \u{25be}")
-            && run_opened.contains("    the diff")
-            && run_opened.contains("    cargo test"),
+            && run_opened.contains("    Reading the diff.")
+            && run_opened.contains("    Running focused tests."),
         "the run's row opens to everything it narrated: {run_opened}"
     );
     assert!(
@@ -2628,7 +2689,7 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
 
     session.press(click(run_row, run_col).as_bytes());
     assert!(
-        !session.screen().contains("the diff"),
+        !session.screen().contains("Reading the diff."),
         "a second click closes the run: {}",
         session.screen()
     );
@@ -2710,6 +2771,35 @@ fn a_piped_session_logs_every_step_and_counts_them() {
         thought < call && call < skill && skill < answer && answer < rollup,
         "a log stays in order and states the count at the end: {stdout}"
     );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_piped_session_logs_and_counts_generated_activity() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &[
+            "note\tReading the notes.\tactivity",
+            "note\tChecking the calendar.\tactivity",
+            "txt\tThe meeting is at four.\n",
+            "exit\t0",
+        ],
+    }]);
+    let home = scratch_home("plain-generated-activity");
+    let (stdout, code) = run_client(&served.url, &["go"], "", &home);
+    served.gateway.done();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    for line in [
+        "Reading the notes.",
+        "Checking the calendar.",
+        "Completed 2 steps",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "a piped session keeps {line}: {stdout}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&home);
 }
 

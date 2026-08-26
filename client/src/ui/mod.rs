@@ -381,6 +381,30 @@ impl<W: Write> App<W> {
         self.retained.push(Entry::Note(text.to_string()));
     }
 
+    pub fn activity(&mut self, text: &str, run: Option<&str>) {
+        self.status_text(text);
+        let Some(label) = run else {
+            self.step(Step::Note(text.to_string()), false);
+            return;
+        };
+        let prefix = format!("{label}: ");
+        let row = text.strip_prefix(&prefix).unwrap_or(text).to_string();
+        match self.runs_counted.insert(label.to_string()) {
+            true => self.step(
+                Step::Run {
+                    label: label.to_string(),
+                    rows: vec![row],
+                    opened: false,
+                },
+                false,
+            ),
+            false => {
+                self.flush_stream();
+                self.retained.push_under(label, row);
+            }
+        }
+    }
+
     /// One step of the running turn, `own` for a dispatch the turn made itself. Its own dispatch
     /// stands the open reply before it as the thought it is — text a round wrote before it
     /// dispatched work is intermediate by definition — so the reply the turn closes on is the
@@ -479,6 +503,7 @@ impl<W: Write> App<W> {
 
     pub fn begin_turn(&mut self) {
         self.working = true;
+        self.retained.begin_turn();
         self.prompt = PROMPT_IDLE.to_string();
         self.last_reply.clear();
         self.status.activity = Activity::Working {

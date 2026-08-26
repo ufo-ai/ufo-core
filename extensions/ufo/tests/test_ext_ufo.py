@@ -119,7 +119,7 @@ def test_frame_map_covers_every_live_frame() -> None:
     assert directives_for(TextDelta(text="hi"), streamed=False) == (b"txt\thi\n",)
     assert directives_for(TextDelta(text=""), streamed=False) == ()
     assert directives_for(Activity(text="Listing the workspace."), False) == (
-        b"status\tListing the workspace.\n",
+        b"note\tListing the workspace.\tactivity\n",
     )
     assert directives_for(Resumed(attempt="attempt-one"), False) == (
         b"note\tthe service restarted; this turn resumed\n",
@@ -133,11 +133,11 @@ def test_frame_map_covers_every_live_frame() -> None:
     )
     assert directives_for(run, False) == ()
     assert directives_for(run.model_copy(update={"activity": "Listing the workspace."}), False) == (
-        b"status\tUK sports news: Listing the workspace.\n",
+        b"note\tUK sports news: Listing the workspace.\tactivity\tUK sports news\n",
     )
     assert directives_for(
         run.model_copy(update={"name": "", "activity": "Loading demo guidance."}), False
-    ) == (b"status\tgeneral_purpose: Loading demo guidance.\n",)
+    ) == (b"note\tgeneral_purpose: Loading demo guidance.\tactivity\tgeneral_purpose\n",)
     assert directives_for(run.model_copy(update={"status": "done"}), False) == ()
     assert directives_for(CostTick(cost_micro_usd=55_000, tokens=3000), False) == (
         b"status\t3000 tok - $0.055000\n",
@@ -529,7 +529,7 @@ async def test_a_stream_that_will_be_resumed_names_where_it_got_to() -> None:
     )
     lines = _lines(out)
     assert lines == [
-        ["status", "Listing the folder."],
+        ["note", "Listing the folder.", "activity"],
         ["since", str(TURN), "7"],
         ["poll", "1"],
     ]
@@ -950,7 +950,7 @@ async def test_a_resumed_stream_does_not_reprint_what_the_terminal_already_showe
 
     assert [line[0] for line in resumed] == ["say", "ask", "since", "listen"]
     assert resumed[0] == ["say", "Listed."]
-    assert ["status", "Listing the folder."] in stale
+    assert ["note", "Listing the folder.", "activity"] in stale
 
 
 async def _post_unsend(

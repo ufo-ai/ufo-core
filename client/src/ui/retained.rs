@@ -117,6 +117,7 @@ pub struct Retained {
     grew: bool,
     dirty: bool,
     live_steps: Option<usize>,
+    turn_start: usize,
 }
 
 impl Retained {
@@ -133,6 +134,7 @@ impl Retained {
             grew: false,
             dirty: false,
             live_steps: None,
+            turn_start: 0,
         }
     }
 
@@ -148,20 +150,38 @@ impl Retained {
                 Some(at) if at > 0 => Some(at - 1),
                 _ => None,
             };
+            self.turn_start = self.turn_start.saturating_sub(1);
         }
         self.grew = true;
         self.dirty = true;
+    }
+
+    /// The next entries belong to a new turn.
+    pub fn begin_turn(&mut self) {
+        self.turn_start = self.entries.len();
     }
 
     /// One step of the running turn joins its rollup, opening one where the turn has none yet. A
     /// live rollup stands open, so the steps are read where they happened.
     pub fn push_step(&mut self, step: Step) {
         let Some(at) = self.live_steps else {
+            let reply = if self.entries.len() > self.turn_start
+                && matches!(self.entries.last(), Some(Entry::Markdown(_)))
+            {
+                self.drawn.pop();
+                self.shapes.pop();
+                self.entries.pop()
+            } else {
+                None
+            };
             self.push(Entry::Steps {
                 steps: vec![step],
                 fold: Fold::Live,
             });
             self.live_steps = Some(self.entries.len() - 1);
+            if let Some(reply) = reply {
+                self.push(reply);
+            }
             return;
         };
         if let Entry::Steps { steps, .. } = &mut self.entries[at] {
@@ -1034,6 +1054,52 @@ mod tests {
                 "reading the calendar next",
                 "running read: the calendar",
                 "loading skill: office/pptx",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_late_step_stays_above_the_reply_without_claiming_its_words() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.begin_turn();
+        retained.extend_markdown("The answer has started");
+        retained.push_step(Step::Note("Checking the result.".into()));
+        retained.extend_markdown(" and now ends.");
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "Checking the result.",
+                "The answer has started and now ends."
+            ]
+        );
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "Completed 1 step ▸",
+                "",
+                "The answer has started and now ends.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_turns_first_step_stays_below_the_previous_answer() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push(Entry::Markdown("The previous answer.".into()));
+        retained.begin_turn();
+        retained.push_step(Step::Note("Checking the result.".into()));
+        retained.push(Entry::Markdown("The new answer.".into()));
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "The previous answer.",
+                "Completed 1 step ▸",
+                "",
+                "The new answer.",
             ]
         );
     }

@@ -4,7 +4,7 @@
 {"wire": "workspace", "verb": "file", "fields": ["quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"], "line": "file\tquarterly report.pdf\t2048\thttps://ws.example/artifacts/a?exp=1&sig=2"}
 {"wire": "workspace", "verb": "install", "fields": [], "line": "install"}
 {"wire": "workspace", "verb": "listen", "fields": ["2"], "line": "listen\t2"}
-{"wire": "workspace", "verb": "note", "fields": ["running bash: ls"], "line": "note\trunning bash: ls"}
+{"wire": "workspace", "verb": "note", "fields": ["Listing files.", "activity"], "line": "note\tListing files.\tactivity"}
 {"wire": "workspace", "verb": "poll", "fields": ["1"], "line": "poll\t1"}
 {"wire": "workspace", "verb": "run", "fields": ["op-1", "exec", "exec", "120", "", "{\"argv\":[\"ls\"]}"], "line": "run\top-1\texec\texec\t120\t\t{\"argv\":[\"ls\"]}"}
 {"wire": "workspace", "verb": "say", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "say\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}

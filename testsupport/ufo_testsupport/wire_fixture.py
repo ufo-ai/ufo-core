@@ -46,7 +46,7 @@ CODEC_TORTURE = "tab\there \\ back\\slash and\nnewline — ufo"
 
 WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "txt": (CODEC_TORTURE,),
-    "note": ("running bash: ls",),
+    "note": ("Listing files.", "activity"),
     "status": ("12 tok - $0.000110",),
     "say": (CODEC_TORTURE,),
     "you": ("what I said",),

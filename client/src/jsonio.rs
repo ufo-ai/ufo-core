@@ -157,6 +157,7 @@ impl Driver {
             Directive::Say(text) => vec![Event::Message { text: text.clone() }],
             Directive::You(text) => vec![Event::MemberMessage { text: text.clone() }],
             Directive::Note(text) => vec![Event::Note { text: text.clone() }],
+            Directive::Activity { text, .. } => vec![Event::Status { text: text.clone() }],
             Directive::Status(text) => vec![Event::Status { text: text.clone() }],
             Directive::File { name, size, url } => vec![Event::FileShared {
                 name: name.clone(),
@@ -346,6 +347,15 @@ mod tests {
         assert_eq!(
             driver.on_directive(&Directive::Note("dim".into())),
             vec![Event::Note { text: "dim".into() }]
+        );
+        assert_eq!(
+            driver.on_directive(&Directive::Activity {
+                text: "Listing files.".into(),
+                run: None,
+            }),
+            vec![Event::Status {
+                text: "Listing files.".into()
+            }]
         );
         assert_eq!(
             driver.on_directive(&Directive::Status("12 tok".into())),
