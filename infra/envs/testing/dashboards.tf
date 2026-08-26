@@ -1208,3 +1208,182 @@ resource "datadog_dashboard" "evals" {
     }
   }
 }
+
+# The sandbox layer, by failure rather than by resource. A container fails in four distinguishable
+# ways and each has its own counter, so this board's job is to say which one happened — the
+# signatures are close enough that reading the wrong one sends the next hour in the wrong direction.
+# A container that stopped answering returns nothing and every later command pays its whole
+# deadline, which arrives as `exec timeouts` rather than as an error, and a filesystem with no room
+# left produces that same silence for an entirely different reason.
+#
+# What this board cannot show: nothing emits a gauge for a container's memory or disk. Every series
+# here is an event counter, so a container filling up is visible only once it starts failing. e2b's
+# own API holds the resource curves and keeps roughly fifteen minutes of them.
+#
+# One board for both fleets, in the root the deploy pipeline applies.
+
+resource "datadog_dashboard" "sandbox_health" {
+  title       = "ufo sandbox health"
+  layout_type = "ordered"
+
+  # Every query scopes to `$env` rather than a literal, so the board reads either fleet.
+  template_variable {
+    name             = "env"
+    prefix           = "env"
+    defaults         = ["testing"]
+    available_values = ["testing", "prod"]
+  }
+
+  widget {
+    note_definition {
+      content          = <<-EOT
+        Read `exec timeouts` first, by carrier. A command that outgrew its own budget and a
+        container that stopped answering both land there, and the second is the one that matters:
+        every later call on that container pays its full deadline, so one silent box accounts for a
+        burst rather than a rise. `containers that stopped answering` is the same event caught at
+        the launch instead of at the deadline, so the two move together — that one climbing while
+        `exec timeouts` stays flat is the detection working, not a regression.
+
+        `resumed unprepared` is a resumed container whose preparation exceeded its window, so its
+        commands ran with the CA install, the workspace check and the memory ceiling skipped. A
+        handful a week is normal; a rise means resumed boxes are serving turns unprepared.
+
+        `stops that missed the process group` fails no turn by itself, but it leaves the work
+        running inside the container, so it is read beside the timeouts that produced it.
+
+        Scratch files resolve to `/var/tmp`, the container's disk, not the memory-backed `/tmp`. A
+        test suite costs a few gigabytes of it, so disk is the axis that fills — and neither axis
+        has a series here.
+      EOT
+      background_color = "yellow"
+      font_size        = "14"
+      text_align       = "left"
+      show_tick        = false
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title = "exec timeouts"
+      request {
+        q          = "sum:ufo.sandbox_exec_timeout_total{$env}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title = "containers that stopped answering"
+      request {
+        q          = "sum:ufo.sandbox_unreachable_total{$env}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title = "resumed unprepared"
+      request {
+        q          = "sum:ufo.sandbox_prepare_deferred_total{$env}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title = "stops that missed the process group"
+      request {
+        q          = "sum:ufo.sandbox_exec_stop_failed_total{$env}.as_count()"
+        aggregator = "sum"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "exec timeouts by carrier"
+      request {
+        q            = "sum:ufo.sandbox_exec_timeout_total{$env} by {carrier}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "containers that stopped answering, by carrier"
+      request {
+        q            = "sum:ufo.sandbox_unreachable_total{$env} by {carrier}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "resumed unprepared, and stops that missed the group"
+      request {
+        q            = "sum:ufo.sandbox_prepare_deferred_total{$env}.as_count()"
+        display_type = "bars"
+      }
+      request {
+        q            = "sum:ufo.sandbox_exec_stop_failed_total{$env}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "bash wall-clock by profile — a container that stopped answering shows in the tail"
+      request {
+        q            = "p50:ufo.tool_call_ms{$env,tool:bash} by {profile}"
+        display_type = "line"
+      }
+      request {
+        q            = "p95:ufo.tool_call_ms{$env,tool:bash} by {profile}"
+        display_type = "line"
+      }
+      request {
+        q            = "p99:ufo.tool_call_ms{$env,tool:bash} by {profile}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    toplist_definition {
+      title = "which tool holds the longest calls"
+      request {
+        q = "top(p99:ufo.tool_call_ms{$env} by {tool}, 12, 'max', 'desc')"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "turn wall-clock by profile"
+      request {
+        q            = "p50:ufo.turn_ms{$env} by {profile}"
+        display_type = "line"
+      }
+      request {
+        q            = "p95:ufo.turn_ms{$env} by {profile}"
+        display_type = "line"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "egress through the proxy, as volume context for the rest"
+      request {
+        q            = "sum:ufo.sandbox_egress_total{$env} by {dimension}.as_count()"
+        display_type = "line"
+      }
+    }
+  }
+}
