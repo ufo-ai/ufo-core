@@ -1423,14 +1423,14 @@ async def _publish(self, frame: LiveFrame) -> None
 ##### `TurnEngine._publish_run`  (lines 2910–2943)
 
 ```
-async def _publish_run(self, activity: ToolCall | SkillLoad | None=None, status: str='') -> None
+async def _publish_run(self, activity: str='', status: str='') -> None
 ```
 
 **Purpose**: Mirrors subagent activity onto the root turn stream that user interfaces follow.
 
-**Data flow**: It receives optional tool or skill activity and optional status → if this is a subagent with lineage, builds a SubagentActivity frame → publishes it to the root turn hub stream.
+**Data flow**: It receives an optional generated activity line and optional status → if this is a subagent with lineage, builds a `SubagentActivity` frame → publishes it to the root turn hub stream.
 
-**Call relations**: TurnEngine.run announces subagent start, _dispatch_step announces subagent tool activity, and _commit announces subagent terminal status.
+**Call relations**: `TurnEngine.run` announces subagent start, activity generation announces the current step, and commit announces terminal status.
 
 *Call graph*: called by 3 (_commit, _dispatch_step, run); 2 external calls (__init__, log).
 

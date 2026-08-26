@@ -16,33 +16,27 @@ Artifacts are shared files the agent has deliberately produced for the user, wit
 ### Tool runtime surface
 These files describe how tool actions are presented, how shared artifacts are managed, and how tools are contextualized and registered for safe execution.
 
-### `core/src/ufo/activity.py`
+### `core/src/ufo/turns/activity.py`
 
 `domain_logic` · `during tool-call reporting`
 
-When the system decides to use a tool, it has an internal record of that tool call. That record may contain technical details and structured input data. This file converts that internal record into the simpler activity frame shown to a member, like a receipt that says, “I am loading this skill” or “I am calling this tool with these inputs.”
+When a tool enters dispatch, this file asks the background model for one short, goal-facing summary of that call. The request contains only the tool name and bounded arguments. The result is normalized to one line under 50 characters for every activity surface, including Slack.
 
-There are two cases. If the tool call is the special skill-loading tool, the file creates a SkillLoad activity using the requested skill name. This lets the user interface show skill loading as its own kind of event, rather than as an ordinary tool call.
-
-For every other tool, it creates a ToolCall activity. It includes the tool name, an optional human-written description from the input, and a compact preview of the full input. That preview is turned into JSON, which is a common text format for structured data, and then shortened if it is too long. This matters because activity streams should be readable; without the limit, one tool call with large input could flood the screen.
-
-In short, this file is a small translator between the system’s private tool-call shape and the public activity shape that people can comfortably read.
+Generation runs beside tool dispatch and has a bounded lifetime. A slow or failed summary produces no live label and never delays the tool or the main model loop.
 
 #### Function details
 
-##### `tool_activity`  (lines 12–25)
+##### `ActivitySummarizer.summarize`
 
 ```
-def tool_activity(call: ToolUseBlock) -> ToolCall | SkillLoad
+async def summarize(self, call: ToolUseBlock) -> str | None
 ```
 
-**Purpose**: Turns one internal tool-use record into the activity object that can be shown to a member. It treats skill loading as a special event, and summarizes all other tool calls with the tool name, a short input preview, and an optional description.
+**Purpose**: Generates the current member-facing step without delaying dispatch.
 
-**Data flow**: It receives a ToolUseBlock, which contains the tool name and its input data. If the name is the special load-skill tool, it reads the requested skill name from the input and returns a SkillLoad object, using an empty string if the name is missing or not text. Otherwise, it reads an optional user-facing description, converts the whole input into compact JSON text, cuts that preview down to 200 characters if needed, and returns a ToolCall object containing the tool name, preview, and description.
+**Data flow**: It receives one `ToolUseBlock`, bounds and serializes its arguments, sends that call alone to the background model, and returns a normalized line. Failure or timeout returns `None`.
 
-**Call relations**: This function is the bridge from a bound tool call to the activity stream. When called, it creates either a SkillLoad or ToolCall activity object for the rest of the system to display or publish. To build the ordinary tool preview, it relies on json.dumps to turn the input dictionary into readable structured text.
-
-*Call graph*: 3 external calls (__init__, __init__, dumps).
+**Call relations**: `TurnEngine` starts it in a detached task when a call enters dispatch, then publishes an `Activity` frame if the label finishes before the turn ends.
 
 
 ### `core/src/ufo/artifacts.py`

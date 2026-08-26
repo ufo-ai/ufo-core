@@ -1045,9 +1045,7 @@ async def _manage_billing(
         )
         result = await tool.handler(
             ctx,
-            tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "action": action} | extra
-            ),
+            tool.input_model.model_validate({"action": action} | extra),
         )
     return json.loads(result.content[0].text)
 

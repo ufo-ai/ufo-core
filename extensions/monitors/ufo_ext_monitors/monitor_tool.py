@@ -68,9 +68,6 @@ class MonitorInput(BaseModel):
     metadata: dict[str, JsonValue] | None = Field(
         default=None, description="State the fired turn needs."
     )
-    user_description: str = Field(
-        description="What you are watching, in plain language for the activity timeline."
-    )
 
 
 def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
@@ -117,7 +114,6 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
         reason=args.reason,
         next_steps=args.next_steps,
         metadata=args.metadata,
-        user_description=args.user_description,
         created_by_member_id=ctx.acting_member_id,
         baseline=baseline,
         next_probe_at=now + timedelta(minutes=args.interval_minutes),

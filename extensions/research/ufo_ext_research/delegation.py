@@ -36,7 +36,6 @@ class WideResearchInput(BaseModel):
     entities_file: str
     prompt_template: str
     output_schema_file: str
-    user_description: str
 
 
 async def _read_lines(ctx: ToolContext, path: str) -> list[str]:

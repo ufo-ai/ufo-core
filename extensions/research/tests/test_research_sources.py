@@ -145,9 +145,7 @@ async def test_retrieved_results_become_one_conversation_sources_slot(db: None) 
                 ext=ext,
                 search_provider=_SearchProvider(),
             ),
-            tool.input_model.model_validate(
-                {"queries": ["the subject"], "user_description": "researching"}
-            ),
+            tool.input_model.model_validate({"queries": ["the subject"]}),
         )
         assert result.is_error is False
         slot_context = ConversationSlotContext(

@@ -87,6 +87,7 @@ class ToolInvocation:
     has_result: bool = False
     is_error: bool = False
     call_id: str = ""
+    activity: str = ""
 
     @property
     def succeeded(self) -> bool:

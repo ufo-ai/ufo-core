@@ -487,9 +487,7 @@ async def test_describe_external_tools_builds_the_schema_from_configurable_props
     _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, tool_names=(GMAIL_ACTION,)
-        ),
+        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(GMAIL_ACTION,)),
     )
     payload = json.loads(result.content[0].text)
     schema = payload["schemas"][GMAIL_ACTION]["input_schema"]
@@ -518,9 +516,7 @@ async def test_describe_external_tools_marks_an_unknown_name_unresolved(
     _install_transport(monkeypatch, _pipedream_handler("ufo_ws"))
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, tool_names=(UNKNOWN_ACTION,)
-        ),
+        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(UNKNOWN_ACTION,)),
     )
     payload = json.loads(result.content[0].text)
     assert payload["unresolved"] == [UNKNOWN_ACTION]
@@ -538,9 +534,7 @@ async def test_describe_external_tools_reaches_the_action_listings_second_page(
     _install_transport(monkeypatch, _paged_actions_handler(recorded))
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
-        ),
+        DescribeExternalToolsInput(source_id=PROVIDER, query=DISCOVERY_QUERY),
     )
     listed = json.loads(result.content[0].text)["availableTools"]
     assert len(listed) == pipedream.ACTION_PAGE_LIMIT + 1
@@ -606,9 +600,7 @@ async def test_search_connector_tools_bounds_the_catalog_it_answers_with(
     _install_transport(monkeypatch, handle)
     result = await search_connector_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        SearchConnectorToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
-        ),
+        SearchConnectorToolsInput(source_id=PROVIDER, query=DISCOVERY_QUERY),
     )
     text = result.content[0].text
     payload = json.loads(text)
@@ -639,9 +631,7 @@ async def test_search_connector_tools_falls_back_to_top_actions_and_marks_the_an
     _install_transport(monkeypatch, handle)
     result = await search_connector_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        SearchConnectorToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
-        ),
+        SearchConnectorToolsInput(source_id=PROVIDER, query=DISCOVERY_QUERY),
     )
     payload = json.loads(result.content[0].text)
     assert [tool["slug"] for tool in payload["tools"]] == [GMAIL_ACTION]
@@ -672,7 +662,7 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
 
     begin = await connect_account_handler(
         _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
-        ConnectAccountInput(user_description=TOOL_NARRATION, provider=PROVIDER),
+        ConnectAccountInput(provider=PROVIDER),
     )
     request = ConnectRequest.model_validate_json(begin.content[0].text.splitlines()[1])
     async with workspace_tx() as connection:
@@ -725,7 +715,6 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_pipedre
             ctx,
             tool.input_model.model_validate(
                 {
-                    "user_description": TOOL_NARRATION,
                     "tool_name": GMAIL_ACTION,
                     "source_id": PROVIDER,
                     "arguments": {"to": "a@b.test"},
@@ -778,7 +767,6 @@ async def test_call_external_tool_executes_a_workspace_owned_grant(
                 speaker_member_id=member_id,
             ),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=GMAIL_ACTION,
                 source_id=PROVIDER,
                 arguments={"to": "a@b.test"},
@@ -871,7 +859,6 @@ async def test_call_external_tool_answers_an_unknown_key_with_the_closest_action
             await call_external_tool(
                 ctx,
                 CallExternalToolInput(
-                    user_description=TOOL_NARRATION,
                     tool_name=tool_name,
                     source_id=PROVIDER,
                     arguments={},
@@ -922,7 +909,6 @@ async def test_call_external_tool_with_a_stale_grant_says_reconnect(
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=GMAIL_ACTION,
                 source_id=PROVIDER,
                 arguments={},
@@ -971,7 +957,6 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=GMAIL_ACTION,
                 source_id=PROVIDER,
                 arguments={},
@@ -984,7 +969,6 @@ async def test_an_in_band_action_error_says_reconnect_only_for_a_stale_account(
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=GMAIL_ACTION,
                 source_id=PROVIDER,
                 arguments={},

@@ -101,7 +101,6 @@ async def test_update_status_round_trips_through_the_store(db: None, tmp_path: P
                     todos.TodoTask(description="build"),
                     todos.TodoTask(description="test"),
                 ),
-                user_description="tracking the launch",
             ),
         )
         board = json.loads(created.content[0].text)
@@ -112,7 +111,6 @@ async def test_update_status_round_trips_through_the_store(db: None, tmp_path: P
             ctx,
             todos.UpdateTodoStatusInput(
                 updates=(todos.TodoStatusUpdate(index=1, status="completed"),),
-                user_description="finished the build",
             ),
         )
         updated_board = json.loads(updated.content[0].text)
@@ -163,7 +161,6 @@ async def test_tasks_slot_distinguishes_no_board_from_an_empty_board(
             todos.UpdateTodoListInput(
                 title="Nothing queued",
                 tasks=(),
-                user_description="cleared the board",
             ),
         )
         assert await todos.TASKS_SLOT.summarize(slot_context) == 0
@@ -215,7 +212,6 @@ async def test_status_before_any_list_fails_loud(db: None, tmp_path: Path) -> No
             ctx,
             todos.UpdateTodoStatusInput(
                 updates=(todos.TodoStatusUpdate(index=1, status="completed"),),
-                user_description="nothing to update",
             ),
         )
 
@@ -229,7 +225,6 @@ async def test_an_out_of_range_index_fails_loud(db: None, tmp_path: Path) -> Non
             todos.UpdateTodoListInput(
                 title="Small",
                 tasks=(todos.TodoTask(description="only one"),),
-                user_description="one task",
             ),
         )
         with pytest.raises(ValueError, match="todo index 5 out of range"):
@@ -237,7 +232,6 @@ async def test_an_out_of_range_index_fails_loud(db: None, tmp_path: Path) -> Non
                 ctx,
                 todos.UpdateTodoStatusInput(
                     updates=(todos.TodoStatusUpdate(index=5, status="completed"),),
-                    user_description="bad index",
                 ),
             )
 
@@ -267,5 +261,5 @@ async def test_requires_the_extension_context(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="todos extension context"):
         await todos.update_todo_list(
             ctx,
-            todos.UpdateTodoListInput(title="x", tasks=(), user_description="d"),
+            todos.UpdateTodoListInput(title="x", tasks=()),
         )

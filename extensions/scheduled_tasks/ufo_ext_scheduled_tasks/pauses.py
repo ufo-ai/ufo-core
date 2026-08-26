@@ -67,7 +67,6 @@ class Pause:
     origin_seq: int
     origin_arrival_seq: int
     prompt: str
-    user_description: str
     created_by_member_id: UUID | None
     claim_id: str | None
     created_at: datetime
@@ -89,7 +88,6 @@ def _row(row: sa.RowMapping) -> Pause:
         origin_seq=row["origin_seq"],
         origin_arrival_seq=row["origin_arrival_seq"],
         prompt=row["prompt"],
-        user_description=row["user_description"],
         created_by_member_id=row["created_by_member_id"],
         claim_id=row["claimed_by"],
         created_at=_aware(row["created_at"]),
@@ -135,7 +133,6 @@ class PauseStore:
         origin_seq: int,
         origin_arrival_seq: int,
         prompt: str,
-        user_description: str,
         created_by_member_id: UUID | None,
     ) -> Pause:
         """Arm the conversation's pause, overwriting whatever it was waiting on before. A workflow
@@ -155,7 +152,7 @@ class PauseStore:
             "origin_seq": origin_seq,
             "origin_arrival_seq": origin_arrival_seq,
             "prompt": prompt,
-            "user_description": user_description,
+            "user_description": prompt,
             "created_by_member_id": created_by_member_id,
             "claimed_by": None,
             "claim_expires_at": None,

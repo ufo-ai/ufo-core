@@ -155,13 +155,11 @@ def test_manifest_declares_the_two_dynamic_tools_and_the_server_slot() -> None:
     assert set(mcp.ListMcpToolsInput.model_fields) == {
         "server",
         "tool_names",
-        "user_description",
     }
     assert set(mcp.CallMcpToolInput.model_fields) == {
         "server",
         "tool_name",
         "arguments",
-        "user_description",
     }
     (slot,) = mcp.manifest().credentials
     assert slot.name == "mcp_servers"
@@ -195,9 +193,7 @@ async def test_list_mcp_tools_browses_the_catalog_without_schemas(
     async with _serving() as client_for:
         monkeypatch.setattr(mcp, "mcp_client", client_for)
         ctx = await _tool_context()
-        result = await mcp._list_mcp_tools(
-            ctx, mcp.ListMcpToolsInput(user_description=TOOL_NARRATION, server=SERVER_NAME)
-        )
+        result = await mcp._list_mcp_tools(ctx, mcp.ListMcpToolsInput(server=SERVER_NAME))
     assert result.is_error is False
     payload = json.loads(result.content[0].text)
     assert payload["server"] == SERVER_NAME
@@ -221,9 +217,7 @@ async def test_list_mcp_tools_returns_full_schemas_for_named_tools(
         ctx = await _tool_context()
         result = await mcp._list_mcp_tools(
             ctx,
-            mcp.ListMcpToolsInput(
-                user_description=TOOL_NARRATION, server=SERVER_NAME, tool_names=("search",)
-            ),
+            mcp.ListMcpToolsInput(server=SERVER_NAME, tool_names=("search",)),
         )
     assert result.is_error is False
     payload = json.loads(result.content[0].text)
@@ -246,7 +240,6 @@ async def test_list_mcp_tools_rejects_a_tool_name_the_server_does_not_expose(
             await mcp._list_mcp_tools(
                 ctx,
                 mcp.ListMcpToolsInput(
-                    user_description=TOOL_NARRATION,
                     server=SERVER_NAME,
                     tool_names=("no_such_tool",),
                 ),
@@ -313,9 +306,7 @@ async def test_an_oversized_catalog_offloads_rather_than_refusing(
     async with _serving(_bulk_server(400)) as client_for:
         monkeypatch.setattr(mcp, "mcp_client", client_for)
         ctx = await _tool_context()
-        result = await mcp._list_mcp_tools(
-            ctx, mcp.ListMcpToolsInput(user_description=TOOL_NARRATION, server=SERVER_NAME)
-        )
+        result = await mcp._list_mcp_tools(ctx, mcp.ListMcpToolsInput(server=SERVER_NAME))
     assert result.is_error is False
     assert len(result.content[0].text) > mcp.MAX_LISTING_CHARS
     assert len(json.loads(result.content[0].text)["tools"]) == 400
@@ -334,7 +325,6 @@ async def test_a_reducible_schema_request_is_refused_through_the_tool(
             await mcp._list_mcp_tools(
                 ctx,
                 mcp.ListMcpToolsInput(
-                    user_description=TOOL_NARRATION,
                     server=SERVER_NAME,
                     tool_names=tuple(f"svc__tool_{index}" for index in range(50)),
                 ),
@@ -379,7 +369,6 @@ async def test_call_mcp_tool_parses_structured_content(
         result = await mcp._call_mcp_tool(
             ctx,
             mcp.CallMcpToolInput(
-                user_description=TOOL_NARRATION,
                 server=SERVER_NAME,
                 tool_name="search",
                 arguments={"query": "auth flow"},
@@ -398,7 +387,6 @@ async def test_call_mcp_tool_joins_text_content_when_unstructured(
         result = await mcp._call_mcp_tool(
             ctx,
             mcp.CallMcpToolInput(
-                user_description=TOOL_NARRATION,
                 server=SERVER_NAME,
                 tool_name="two_lines",
                 arguments={},
@@ -417,7 +405,6 @@ async def test_call_mcp_tool_sends_the_configured_bearer_token(
         result = await mcp._call_mcp_tool(
             ctx,
             mcp.CallMcpToolInput(
-                user_description=TOOL_NARRATION,
                 server=SERVER_NAME,
                 tool_name="whoami",
                 arguments={},
@@ -435,9 +422,7 @@ async def test_call_mcp_tool_surfaces_a_tool_error_as_is_error(
         ctx = await _tool_context()
         result = await mcp._call_mcp_tool(
             ctx,
-            mcp.CallMcpToolInput(
-                user_description=TOOL_NARRATION, server=SERVER_NAME, tool_name="boom", arguments={}
-            ),
+            mcp.CallMcpToolInput(server=SERVER_NAME, tool_name="boom", arguments={}),
         )
     assert result.is_error is True
     assert result.content[0].text == "no such record"
@@ -448,9 +433,7 @@ async def test_an_unconfigured_server_name_fails_loud(db: None) -> None:
     with pytest.raises(ValueError, match="no MCP server named 'other'"):
         await mcp._call_mcp_tool(
             ctx,
-            mcp.CallMcpToolInput(
-                user_description=TOOL_NARRATION, server="other", tool_name="x", arguments={}
-            ),
+            mcp.CallMcpToolInput(server="other", tool_name="x", arguments={}),
         )
 
 
@@ -460,7 +443,6 @@ async def test_call_mcp_tool_rejects_oversized_arguments(db: None) -> None:
         await mcp._call_mcp_tool(
             ctx,
             mcp.CallMcpToolInput(
-                user_description=TOOL_NARRATION,
                 server=SERVER_NAME,
                 tool_name="search",
                 arguments={"blob": "z" * (mcp.MAX_MCP_REQUEST_BYTES + 1)},

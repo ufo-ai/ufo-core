@@ -3,7 +3,7 @@
 import asyncio
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -22,7 +22,7 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.browser import CdpProvider
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.ext.context import TurnInvoker
+from ufo.ext.context import ModelAccess, TurnInvoker
 from ufo.ext.loader import (
     connector_clis,
     injecting_slots,
@@ -122,7 +122,12 @@ from ufo.skills.selection import (
 from ufo.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
 from ufo.tools.context import Spawn, UnknownSubagentProfile
 from ufo.tools.registry import ToolDef, ToolRegistry
-from ufo.turns.activity import SKILL_LOAD_TOOL, SKILL_SEARCH_TOOL
+from ufo.turns.activity import (
+    ACTIVITY_JOB,
+    SKILL_LOAD_TOOL,
+    SKILL_SEARCH_TOOL,
+    ActivitySummarizer,
+)
 from ufo.turns.audience import Audience, parse_audience
 from ufo.turns.contracts import Contract, output_contract
 from ufo.workspace import ws
@@ -678,6 +683,15 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             byok=byok,
             system_prompt=system_prompt,
             model=model,
+            activity_summarizer=ActivitySummarizer(
+                ModelAccess(
+                    replace(
+                        runtime.registry,
+                        auto_model=runtime.config.models.background_jobs_model,
+                    ),
+                    ACTIVITY_JOB,
+                )
+            ),
             provider=runtime.registry.spec(resolved.model).provider,
             reasoning=runtime.registry.spec(resolved.model).reasoning,
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),

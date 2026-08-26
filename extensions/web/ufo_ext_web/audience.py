@@ -118,10 +118,6 @@ async def web_audience(
 
 class WebAccessInput(BaseModel):
     email: str = Field(description="The workspace member's email address.")
-    user_description: str = Field(
-        description="Brief plain-language description for non-technical users, shown in the "
-        "activity timeline."
-    )
 
 
 def _refusal(text: str) -> ToolResult:
@@ -204,10 +200,6 @@ class PrivateTranscriptInput(BaseModel):
     conversation of any other agent is refused by the same wall the portal's routes answer on."""
 
     conversation_id: UUID = Field(description="The conversation whose transcript will be read.")
-    user_description: str = Field(
-        description="Brief plain-language description for non-technical users, shown in the "
-        "activity timeline."
-    )
 
 
 async def _read_private_transcript(ctx: ToolContext, args: PrivateTranscriptInput) -> ToolResult:

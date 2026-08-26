@@ -142,7 +142,7 @@ This file gives the agent a safe, consistent way to use a browser. Each browser 
 
 The important idea is that all browser tools in one turn reuse the same browser surface. That is like checking out one set of car keys for a trip instead of asking for new keys at every stop. The helper `_browser` creates the surface only when the first browser tool needs it, keeps it for the rest of the turn, and registers cleanup so the browser connection and any hosted browser session are released afterward.
 
-Most tool functions are thin wrappers. They remove `user_description`, which is meant for human-readable activity logs, then pass the practical arguments to the browser surface. Replies are returned as JSON text. Two tools do extra work with files: `computer` can save a screenshot into the shared workspace, and `wait_for_download` decodes downloaded bytes and writes them to the workspace. Without this file, the agent would not have the named browser tools, and browser sessions, screenshots, and downloads would not be connected cleanly to the rest of the system.
+Most tool functions are thin wrappers. They pass validated practical arguments to the browser surface and return replies as JSON text. Two tools do extra work with files: `computer` can save a screenshot into the shared workspace, and `wait_for_download` decodes downloaded bytes and writes them to the workspace. Without this file, the agent would not have the named browser tools, and browser sessions, screenshots, and downloads would not be connected cleanly to the rest of the system.
 
 #### Function details
 
@@ -199,7 +199,7 @@ async def _navigate(ctx: ToolContext, args: NavigateInput) -> ToolResult
 
 **Purpose**: Runs the browser navigation tool, such as opening a URL or moving through browser history. It is used when the agent needs to change what page is shown.
 
-**Data flow**: It receives the tool context and validated navigation input. It turns the input into a JSON-friendly dictionary, leaving out empty values and the human-only `user_description`. It sends that dictionary to the shared browser surface’s navigation method, then wraps the reply as JSON text for the agent.
+**Data flow**: It receives the tool context and validated navigation input. It turns the input into a JSON-friendly dictionary, leaving out empty values. It sends that dictionary to the shared browser surface’s navigation method, then wraps the reply as JSON text for the agent.
 
 **Call relations**: This function is registered as the handler for the `navigate` tool. When the agent calls that tool, `_navigate` gets the shared browser surface through `_browser`, hands off the navigation request, and uses `_json_result` to return the browser’s reply.
 
@@ -244,7 +244,7 @@ async def _tabs_close(ctx: ToolContext, args: TabsCloseInput) -> ToolResult
 
 **Purpose**: Closes a browser tab, usually the current tab or a specific tab named by its id. It is used when the agent is done with a page and wants to reduce clutter.
 
-**Data flow**: It receives the tool context and close-tab input. It converts the input to a JSON-friendly dictionary, omitting empty fields and the human-facing `user_description`. It sends the request to the browser surface and returns the browser’s reply as JSON text.
+**Data flow**: It receives the tool context and close-tab input. It converts the input to a JSON-friendly dictionary, omitting empty fields. It sends the request to the browser surface and returns the browser’s reply as JSON text.
 
 **Call relations**: This function is registered as the handler for the `tabs_close` tool. It follows the common pattern in this file: get the shared surface with `_browser`, hand off the tab operation, then package the reply with `_json_result`.
 
@@ -289,7 +289,7 @@ async def _get_page_text(ctx: ToolContext, args: GetPageTextInput) -> ToolResult
 
 **Purpose**: Extracts raw visible text from a browser page. It is useful when the agent needs the words on the page more than the full interactive structure.
 
-**Data flow**: It receives the tool context and optional tab information. It converts the input to a JSON-friendly dictionary, leaving out empty fields and `user_description`. It sends the request to the browser surface’s text extraction method and wraps the reply as JSON text.
+**Data flow**: It receives the tool context and optional tab information. It converts the input to a JSON-friendly dictionary, leaving out empty fields. It sends the request to the browser surface’s text extraction method and wraps the reply as JSON text.
 
 **Call relations**: This function is registered as the handler for the `get_page_text` tool. Like the other page-reading tools, it uses `_browser` to reuse the turn’s browser surface and `_json_result` to return the surface’s answer.
 

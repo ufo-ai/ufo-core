@@ -226,6 +226,12 @@ def test_registry_schemas_cover_every_tool() -> None:
     assert all(REQUESTED_BY not in schema.input_schema["properties"] for schema in speakerless)
 
 
+def test_builtin_tool_schema_has_no_user_description() -> None:
+    schema = REGISTRY.get("bash").schema().input_schema
+
+    assert "user_description" not in schema["properties"]
+
+
 def test_registry_reserves_the_message_authority_field() -> None:
     class CollidingInput(BaseModel):
         requested_by: str
@@ -249,7 +255,7 @@ def test_registry_reserves_the_message_authority_field() -> None:
 async def test_bash_combines_output_and_flags_nonzero_exit(tmp_path: Path) -> None:
     sandbox = FakeSandbox(bash_result=ExecResult(stdout="out", stderr="err", exit_code=1))
     ctx = make_context(sandbox, tmp_path)
-    result = await run("bash", ctx, command="do it", user_description="running a check")
+    result = await run("bash", ctx, command="do it")
     assert result.content[0].text == "outerr\nexit code: 1"
     assert result.is_error is True
 
@@ -257,9 +263,7 @@ async def test_bash_combines_output_and_flags_nonzero_exit(tmp_path: Path) -> No
 async def test_bash_silent_failure_reports_the_exit_code(tmp_path: Path) -> None:
     sandbox = FakeSandbox(bash_result=ExecResult(stdout="", stderr="", exit_code=56))
     ctx = make_context(sandbox, tmp_path)
-    result = await run(
-        "bash", ctx, command="curl -s https://blocked.example", user_description="fetching a page"
-    )
+    result = await run("bash", ctx, command="curl -s https://blocked.example")
     assert result.content[0].text == "exit code: 56"
     assert result.is_error is True
 
@@ -267,7 +271,7 @@ async def test_bash_silent_failure_reports_the_exit_code(tmp_path: Path) -> None
 async def test_bash_zero_exit_is_not_error(tmp_path: Path) -> None:
     sandbox = FakeSandbox(bash_result=ExecResult(stdout="ok", stderr="", exit_code=0))
     ctx = make_context(sandbox, tmp_path)
-    result = await run("bash", ctx, command="echo ok", user_description="running a check")
+    result = await run("bash", ctx, command="echo ok")
     assert result.is_error is False
     assert result.content[0].text == "ok"
 
@@ -291,7 +295,6 @@ async def test_edit_requires_read_before_write(tmp_path: Path) -> None:
             ctx,
             file_path="code.py",
             edits=[{"old_string": "x = 1", "new_string": "x = 2"}],
-            user_description="tweaking the script",
         )
 
 
@@ -317,7 +320,6 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
         ctx,
         file_path="notes.txt",
         content="old /workspace path\n",
-        user_description="writing notes",
     )
     assert json.loads(written.content[0].text) == {
         "created": True,
@@ -332,7 +334,6 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
         ctx,
         file_path="notes.txt",
         edits=[{"old_string": "/workspace", "new_string": "/workspace/final"}],
-        user_description="editing notes",
     )
     edited_payload = json.loads(edited.content[0].text)
     assert edited_payload["replacements"] == 1
@@ -346,7 +347,6 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
         ctx,
         file_path="large.txt",
         content="new\n" * 10_000,
-        user_description="writing a large file",
     )
     assert json.loads(large.content[0].text)["size_bytes"] == 40_000
     assert len(large.content[0].text) <= FILE_TOOL_RESULT_MAX_CHARS
@@ -361,7 +361,6 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
             ctx,
             file_path="escape/file.txt",
             content="outside\n",
-            user_description="writing outside",
         )
     assert not (outside / "file.txt").exists()
 
@@ -375,7 +374,6 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
             ctx,
             file_path="link.txt",
             content="inside\n",
-            user_description="writing a linked file",
         )
     assert outside_file.read_text() == "outside\n"
 
@@ -384,7 +382,6 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
         ctx,
         file_path="name\n+++ injected",
         content="safe\n",
-        user_description="writing a file",
     )
     assert json.loads(injected.content[0].text)["path"] == "name\n+++ injected"
     assert (workspace / "name\n+++ injected").read_text() == "safe\n"
@@ -414,7 +411,6 @@ def test_file_tool_paths_bound_the_serialized_envelope() -> None:
             {
                 "file_path": path,
                 "content": "x",
-                "user_description": "writing a file",
             }
         )
 
@@ -426,7 +422,6 @@ async def test_share_file_without_a_secret_fails_loud_and_writes_nothing(tmp_pat
             "share_file",
             ctx,
             files=[{"file_path": "report.txt"}],
-            user_description="sending the report",
         )
     assert not (tmp_path / "artifacts").exists()
 
@@ -511,7 +506,6 @@ async def test_ask_user_returns_the_structured_question_and_the_end_turn_directi
         ctx,
         title="Scope",
         questions=[{"question": "Which environment?", "header": "Deploy"}],
-        user_description="checking which environment",
     )
     assert result.is_error is False
     text = result.content[0].text
@@ -534,7 +528,6 @@ async def test_ask_user_folds_confirmation_as_a_question_with_options(tmp_path: 
                 "options": [{"label": "Send"}, {"label": "Cancel"}],
             }
         ],
-        user_description="confirming the send",
     )
     payload = json.loads(result.content[0].text.split("\n", 1)[1])
     assert [option["label"] for option in payload["questions"][0]["options"]] == [
@@ -546,7 +539,7 @@ async def test_ask_user_folds_confirmation_as_a_question_with_options(tmp_path: 
 async def test_ask_user_requires_at_least_one_question(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path)
     with pytest.raises(ValidationError):
-        await run("ask_user", ctx, title="Empty", questions=[], user_description="asking")
+        await run("ask_user", ctx, title="Empty", questions=[])
 
 
 async def _load_skill(ctx: ToolContext, name: str):
@@ -731,23 +724,19 @@ async def test_skill_search_ranks_matches_across_both_tiers(tmp_path: Path) -> N
     )
     ctx = replace(make_context(FakeSandbox(), tmp_path), skills=_member_tier(saved))
 
-    result = await run(
-        "skill_search", ctx, query="reconcile an invoice", user_description="finding a skill"
-    )
+    result = await run("skill_search", ctx, query="reconcile an invoice")
 
     lines = result.content[0].text.splitlines()
     assert lines[0] == "invoice-review: Load when a member asks to reconcile an invoice."
     assert not result.is_error
     assert all(":" in line for line in lines)
-    deploy_hit = await run(
-        "skill_search", ctx, query="sandbox container commands", user_description="finding a skill"
-    )
+    deploy_hit = await run("skill_search", ctx, query="sandbox container commands")
     assert deploy_hit.content[0].text.splitlines()[0].startswith("sandbox: ")
 
 
 async def test_skill_search_with_no_match_answers_the_searchable_total(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path)
-    result = await run("skill_search", ctx, query="zzzznothing", user_description="finding a skill")
+    result = await run("skill_search", ctx, query="zzzznothing")
     total = len(ctx.skills.all_cards())
     assert result.content[0].text == f"No matches among {total} loadable skills."
 
@@ -763,11 +752,9 @@ async def test_skill_search_clamps_its_limit_and_truncates_lines(tmp_path: Path)
 
     tool = REGISTRY.get("skill_search")
     with pytest.raises(ValidationError):
-        tool.input_model.model_validate(
-            {"query": "billing", "limit": 9, "user_description": "finding a skill"}
-        )
+        tool.input_model.model_validate({"query": "billing", "limit": 9})
 
-    result = await run("skill_search", ctx, query="billing", user_description="finding a skill")
+    result = await run("skill_search", ctx, query="billing")
     lines = result.content[0].text.splitlines()
     assert len(lines) == 8
     assert all(len(line) <= 200 for line in lines)
@@ -777,7 +764,7 @@ async def test_cancel_spawn_cancels_and_reports_status(tmp_path: Path) -> None:
     child = uuid4()
     control = StubSubagentControl()
     ctx = make_context(FakeSandbox(), tmp_path, subagents=control)
-    result = await run("cancel_spawn", ctx, spawn_id=str(child), user_description="x")
+    result = await run("cancel_spawn", ctx, spawn_id=str(child))
     assert control.cancelled == [child]
     assert json.loads(result.content[0].text) == {
         "spawn_id": str(child),
@@ -788,7 +775,7 @@ async def test_cancel_spawn_cancels_and_reports_status(tmp_path: Path) -> None:
 async def test_cancel_spawn_malformed_id_raises(tmp_path: Path) -> None:
     ctx = make_context(FakeSandbox(), tmp_path, subagents=StubSubagentControl())
     with pytest.raises(ValueError):
-        await run("cancel_spawn", ctx, spawn_id="not-a-uuid", user_description="x")
+        await run("cancel_spawn", ctx, spawn_id="not-a-uuid")
 
 
 async def test_message_spawn_forwards_the_message_keyed_on_the_call(tmp_path: Path) -> None:
@@ -804,7 +791,6 @@ async def test_message_spawn_forwards_the_message_keyed_on_the_call(tmp_path: Pa
         ctx,
         spawn_id=str(child),
         message="also check X",
-        user_description="x",
     )
     assert control.messaged == [(child, "also check X", "turn-1/message_spawn/call-2")]
     assert json.loads(result.content[0].text) == {"spawn_id": str(child), "status": "queued"}
@@ -818,7 +804,6 @@ async def test_message_spawn_without_an_idempotency_key_fails_loud(tmp_path: Pat
             ctx,
             spawn_id=str(uuid4()),
             message="also check X",
-            user_description="x",
         )
 
 
@@ -874,7 +859,6 @@ async def test_spawn_unknown_target_is_an_error_naming_the_valid_targets(
         ctx,
         target="assistant",
         payload={"task": "x"},
-        user_description="handing off the research",
     )
     assert result.is_error
     text = result.content[0].text
@@ -908,7 +892,6 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         target="research",
         payload={"task": "x"},
         background=True,
-        user_description="handing off the research",
     )
     assert recorded == [("turn-1/spawn/call-1", True)]
     assert not result.is_error
@@ -918,7 +901,6 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         ctx,
         target="research",
         payload={"task": "x"},
-        user_description="handing off the research",
     )
     assert recorded[1] == ("turn-1/spawn/call-1", False)
 

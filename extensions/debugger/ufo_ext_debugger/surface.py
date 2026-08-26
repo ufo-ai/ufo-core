@@ -31,16 +31,15 @@ from ufo.sdk.http import (
 )
 from ufo.sdk.hub import (
     Absorbed,
+    Activity,
     CostTick,
     LiveFrame,
     Parked,
     Reply,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
     TextDelta,
-    ToolCall,
 )
 from ufo.sdk.operator import FleetDirectory, bind_operator_session
 from ufo.sdk.surfaces import SurfaceContext, SurfaceRoute
@@ -182,10 +181,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             kind, payload = b"parked", frame.model_dump_json()
         case CostTick():
             kind, payload = b"cost", frame.model_dump_json()
-        case ToolCall():
-            kind, payload = b"tool", frame.model_dump_json()
-        case SkillLoad():
-            kind, payload = b"skill", frame.model_dump_json()
+        case Activity():
+            kind, payload = b"activity", frame.model_dump_json()
         case SubagentActivity():
             kind, payload = b"subagent_activity", frame.model_dump_json()
         case Absorbed():

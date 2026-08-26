@@ -43,24 +43,10 @@ class CostTick(BaseModel):
     tokens: int
 
 
-class ToolCall(BaseModel):
-    """A tool call entering dispatch, pushed so a surface shows live activity — 'running bash' — on
-    a long multi-tool turn instead of an idle bubble carrying only a cost meter. Non-terminal, and
-    distinguished from the other frames by its `tool` name and bounded args `preview`. `description`
-    is the model's plain-language `user_description` when the tool takes one — the activity-timeline
-    narration a surface shows in place of the raw args preview."""
+class Activity(BaseModel):
+    """The current one-line summary of a tool step."""
 
-    tool: str
-    preview: str
-    description: str = ""
-
-
-class SkillLoad(BaseModel):
-    """A skill mounting into the workspace as `load_skill` dispatches, pushed so a surface shows the
-    workflow the agent is pulling in. Non-terminal, and distinguished from a ToolCall by carrying
-    the `skill` name it loads rather than a tool name."""
-
-    skill: str
+    text: str
 
 
 class Absorbed(BaseModel):
@@ -114,19 +100,15 @@ class SubagentActivity(BaseModel):
     is blocked in the spawn. `turn_id` names the run, `parent_turn_id` the run it nests under, and
     `conversation_id` the record that holds its whole transcript; `name` is the display name the
     spawn gave the run, empty when it gave none, and `profile` stands in for it then. Three moments,
-    told apart by which fields carry values: all of `tool`, `skill`, and `status` empty marks the
-    run starting; `tool` with `description`/`preview` narrates a dispatch the way a ToolCall does,
-    `skill` a skill load; a non-empty `status` — the run's terminal status — ends its row."""
+    told apart by which fields carry values: empty `activity` and `status` marks the run starting;
+    `activity` carries its current tool-run summary; a non-empty `status` ends its row."""
 
     turn_id: UUID
     parent_turn_id: UUID
     conversation_id: UUID
     profile: str
     name: str = ""
-    tool: str = ""
-    description: str = ""
-    preview: str = ""
-    skill: str = ""
+    activity: str = ""
     status: str = ""
 
 
@@ -135,8 +117,7 @@ LiveFrame = (
     | Terminal
     | Parked
     | CostTick
-    | ToolCall
-    | SkillLoad
+    | Activity
     | Absorbed
     | Resumed
     | Reply
@@ -149,7 +130,7 @@ class Hub(Protocol):
     opaque cursor of the frame it appended, `subscribe(cursor)` replays the frames after that cursor
     before streaming live ones, and `covers` reports whether the hub still holds a cursor so a
     reconnecting surface knows to resume gaplessly or redraw. `latest_activity` peeks the newest
-    retained ToolCall or SkillLoad without subscribing — a status read's one-frame view of what a
+    retained Activity without subscribing — a status read's one-frame view of what a
     running turn is doing. Core ships the in-process backend; a shared backend an extension
     registers through its Manifest `hubs` point fans out across processes, which is what lifts the
     single-instance boot guard."""
@@ -162,7 +143,7 @@ class Hub(Protocol):
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool: ...
 
-    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None: ...
+    async def latest_activity(self, turn_id: UUID) -> Activity | None: ...
 
 
 def _offer(queue: asyncio.Queue[tuple[str, LiveFrame]], item: tuple[str, LiveFrame]) -> None:
@@ -287,10 +268,10 @@ class InProcessHub:
             earliest = stream.buffer[0][0]
         return int(earliest) <= int(cursor)
 
-    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
+    async def latest_activity(self, turn_id: UUID) -> Activity | None:
         """The newest activity frame among the last `ACTIVITY_PEEK_FRAMES` the ring retains for this
         turn — what the turn is doing right now, for a status read that never subscribes. None when
-        the hub holds no ring for the turn, or none of those frames is a ToolCall or SkillLoad.
+        the hub holds no ring for the turn, or none of those frames is an Activity.
 
         The bound is the peek's whole point: a turn only streaming text carries no activity frame
         at all, and searching a ten-thousand-frame ring to learn that is work a four-second poll
@@ -302,6 +283,6 @@ class InProcessHub:
             if stream is None:
                 return None
             for _cursor, frame in islice(reversed(stream.buffer), ACTIVITY_PEEK_FRAMES):
-                if isinstance(frame, ToolCall | SkillLoad):
+                if isinstance(frame, Activity):
                     return frame
         return None

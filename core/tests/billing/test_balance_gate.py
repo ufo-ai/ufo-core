@@ -434,7 +434,7 @@ async def test_entry_stays_the_stricter_line_once_the_grace_applies(db: None) ->
 def _billing_intent() -> ToolIntent:
     return ToolIntent(
         tool=BILLING_INTENT_TOOL,
-        input={"action": "autopay", "user_description": "Set automatic refills from the portal."},
+        input={"action": "autopay"},
     )
 
 
@@ -471,7 +471,7 @@ async def test_a_spent_balance_admits_the_step_before_the_refill(db: None) -> No
         await debit(connection, workspace_id, 5 * DOLLAR)
     portal = ToolIntent(
         tool=BILLING_INTENT_TOOL,
-        input={"action": "portal", "user_description": "Open the billing portal from the screen."},
+        input={"action": "portal"},
     )
     admitted = await Admission(dbos=StubDbos(), durable_surfaces=frozenset()).admit_member(
         workspace_id,
@@ -493,7 +493,7 @@ async def test_the_exemption_is_the_billing_verb_and_nothing_else(db: None) -> N
         await debit(connection, workspace_id, 5 * DOLLAR)
     other = ToolIntent(
         tool="memory_update",
-        input={"body": "note", "user_description": "Correct a memory from the portal."},
+        input={"body": "note"},
     )
     dbos = StubDbos()
     admitted = await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(

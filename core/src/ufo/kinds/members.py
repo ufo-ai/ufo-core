@@ -301,9 +301,6 @@ class AddMemberInput(BaseModel):
         description="Whether to email them that they were added, with a link to sign in. Set "
         "false only when the member asks you not to write to this person.",
     )
-    user_description: str = Field(
-        description="Who you are adding, in plain language for the activity timeline."
-    )
 
 
 @dataclass(frozen=True)

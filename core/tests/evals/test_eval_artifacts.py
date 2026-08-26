@@ -1101,7 +1101,7 @@ async def test_ufo_app_bench_rejects_a_failed_delegation_before_a_success() -> N
     base = _built_screen({})
     failed = ToolInvocation(
         APPLICATION_BUILDER_DELEGATION_TOOL,
-        {"user_description": "unused"},
+        {},
         "invalid input",
         has_result=True,
         is_error=True,

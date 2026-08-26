@@ -57,15 +57,14 @@ from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
 from ufo.hub import (
     Absorbed,
+    Activity,
     CostTick,
     InProcessHub,
     Parked,
     Reply,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
-    ToolCall,
 )
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
@@ -119,13 +118,9 @@ def test_directive_escapes_tabs_newlines_and_backslashes() -> None:
 def test_frame_map_covers_every_live_frame() -> None:
     assert directives_for(TextDelta(text="hi"), streamed=False) == (b"txt\thi\n",)
     assert directives_for(TextDelta(text=""), streamed=False) == ()
-    assert directives_for(ToolCall(tool="bash", preview="ls", description=""), False) == (
-        b"note\trunning bash: ls\n",
+    assert directives_for(Activity(text="Listing the workspace."), False) == (
+        b"status\tListing the workspace.\n",
     )
-    assert directives_for(ToolCall(tool="bash", preview="", description="listing"), False) == (
-        b"note\trunning bash: listing\n",
-    )
-    assert directives_for(SkillLoad(skill="demo"), False) == (b"note\tloading skill: demo\n",)
     assert directives_for(Resumed(attempt="attempt-one"), False) == (
         b"note\tthe service restarted; this turn resumed\n",
     )
@@ -137,12 +132,12 @@ def test_frame_map_covers_every_live_frame() -> None:
         name="UK sports news",
     )
     assert directives_for(run, False) == ()
-    assert directives_for(
-        run.model_copy(update={"tool": "bash", "description": "listing"}), False
-    ) == (b"note\tUK sports news: running bash: listing\n",)
-    assert directives_for(run.model_copy(update={"name": "", "skill": "demo"}), False) == (
-        b"note\tgeneral_purpose: loading skill: demo\n",
+    assert directives_for(run.model_copy(update={"activity": "Listing the workspace."}), False) == (
+        b"status\tUK sports news: Listing the workspace.\n",
     )
+    assert directives_for(
+        run.model_copy(update={"name": "", "activity": "Loading demo guidance."}), False
+    ) == (b"status\tgeneral_purpose: Loading demo guidance.\n",)
     assert directives_for(run.model_copy(update={"status": "done"}), False) == ()
     assert directives_for(CostTick(cost_micro_usd=55_000, tokens=3000), False) == (
         b"status\t3000 tok - $0.055000\n",
@@ -523,7 +518,7 @@ async def test_a_stream_that_will_be_resumed_names_where_it_got_to() -> None:
     the tail it opens next starts after that frame instead of at the ring's first. Without it every
     reconnect re-renders what the terminal already printed — and an op ends the stream, so a turn
     that runs three tools prints its first note three times."""
-    frames = _feed([("7", ToolCall(tool="glob", preview="", description="Listing the folder"))])
+    frames = _feed([("7", Activity(text="Listing the folder."))])
     out = b"".join(
         [
             chunk
@@ -534,7 +529,7 @@ async def test_a_stream_that_will_be_resumed_names_where_it_got_to() -> None:
     )
     lines = _lines(out)
     assert lines == [
-        ["note", "running glob: Listing the folder"],
+        ["status", "Listing the folder."],
         ["since", str(TURN), "7"],
         ["poll", "1"],
     ]
@@ -933,9 +928,7 @@ async def test_a_resumed_stream_does_not_reprint_what_the_terminal_already_showe
         """One reconnect onto a turn whose note is in the ring, carrying a cursor for `named`. The
         ring is dropped when a stream's last subscriber leaves, so each attempt publishes its
         own."""
-        printed = await hub.publish(
-            turn_id, ToolCall(tool="glob", preview="", description="Listing the folder")
-        )
+        printed = await hub.publish(turn_id, Activity(text="Listing the folder."))
         ending = asyncio.ensure_future(_end_when_tailed())
         try:
             async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
@@ -957,7 +950,7 @@ async def test_a_resumed_stream_does_not_reprint_what_the_terminal_already_showe
 
     assert [line[0] for line in resumed] == ["say", "ask", "since", "listen"]
     assert resumed[0] == ["say", "Listed."]
-    assert ["note", "running glob: Listing the folder"] in stale
+    assert ["status", "Listing the folder."] in stale
 
 
 async def _post_unsend(

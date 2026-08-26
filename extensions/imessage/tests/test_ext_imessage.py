@@ -436,12 +436,12 @@ async def test_a_project_change_requires_an_admin_then_rebinds(db: None, tmp_pat
         await admin.ext.installations.bind(SURFACE_IMESSAGE, "project:old")
         refused = await ImessageConnect(provider=lambda: provider).run(
             member,
-            ImessageConnectInput(phone_number="+14155550123", user_description="Connect my phone."),
+            ImessageConnectInput(phone_number="+14155550123"),
         )
         before = await admin.ext.installations.installation(SURFACE_IMESSAGE)
         connected = await ImessageConnect(provider=lambda: provider).run(
             admin,
-            ImessageConnectInput(phone_number="+14155550123", user_description="Connect my phone."),
+            ImessageConnectInput(phone_number="+14155550123"),
         )
         after = await admin.ext.installations.installation(SURFACE_IMESSAGE)
     assert json.loads(refused.content[0].text) == {
@@ -467,15 +467,13 @@ def test_manifest_declares_complete_durable_surface() -> None:
 
 
 def test_phone_and_queue_boundaries() -> None:
-    parsed = ImessageConnectInput(
-        phone_number="+1 415 555 0123", user_description="Connect my phone."
-    )
+    parsed = ImessageConnectInput(phone_number="+1 415 555 0123")
     assert parsed.phone_number == "+14155550123"
     queue = queue_key("iMessage;-;+14155550123", direct=True)
     assert conversation_from_queue(queue).id == "iMessage;-;+14155550123"
     assert conversation_from_queue(queue).direct
     with pytest.raises(ValueError, match=r"E\.164"):
-        ImessageConnectInput(phone_number="4155550123", user_description="Connect my phone.")
+        ImessageConnectInput(phone_number="4155550123")
     with pytest.raises(ValueError, match="queue key"):
         conversation_from_queue('["other","chat"]')
 
@@ -861,7 +859,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     tool_context = await _tool_context(workspace_id, member_id, tmp_path)
     dbos = StubDbos()
     context = _context(workspace_id, tmp_path, dbos)
-    args = ImessageConnectInput(phone_number=phone, user_description="Connect my phone.")
+    args = ImessageConnectInput(phone_number=phone)
     with ws(workspace_id):
         first = await tool.run(tool_context, args)
         second = await tool.run(tool_context, args)
@@ -974,7 +972,7 @@ async def test_the_pending_result_shares_the_opt_in_as_a_qr(db: None, tmp_path: 
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
-            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+            ImessageConnectInput(phone_number=phone),
         )
         stored = await tool_context.ext.store.get(claim_key(member_id, phone))
         shared = await _shared_artifacts()
@@ -1006,7 +1004,7 @@ async def test_an_expired_claim_can_move_to_another_member(db: None, tmp_path: P
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
-            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+            ImessageConnectInput(phone_number=phone),
         )
         stored = await tool_context.ext.store.get(claim_key(second_member_id, phone))
     replaced = PendingClaim.model_validate(stored)
@@ -1052,7 +1050,7 @@ async def test_a_concurrent_claim_write_is_not_overwritten(db: None, tmp_path: P
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
-            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+            ImessageConnectInput(phone_number=phone),
         )
         stored = await tool_context.ext.store.get(claim_key(member_id, phone))
     assert json.loads(result.content[0].text) == {
@@ -1078,11 +1076,11 @@ async def test_connect_answers_a_phone_the_surface_already_knows(db: None, tmp_p
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         mine = await tool.run(
             tool_context,
-            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+            ImessageConnectInput(phone_number=phone),
         )
         theirs = await tool.run(
             tool_context,
-            ImessageConnectInput(phone_number=other_phone, user_description="Connect my phone."),
+            ImessageConnectInput(phone_number=other_phone),
         )
         assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
     assert json.loads(mine.content[0].text) == {
@@ -1111,7 +1109,7 @@ async def test_connect_refuses_a_phone_another_member_is_connecting(
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
-            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+            ImessageConnectInput(phone_number=phone),
         )
         stored = await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(first_member_id, phone))
     assert json.loads(result.content[0].text) == {
@@ -1144,7 +1142,7 @@ async def test_an_unreadable_row_is_dropped_and_never_parks_the_surface(
         await tool_context.ext.installations.bind(SURFACE_IMESSAGE, provider.installation_id)
         result = await ImessageConnect(provider=lambda: provider).run(
             tool_context,
-            ImessageConnectInput(phone_number=phone, user_description="Connect my phone."),
+            ImessageConnectInput(phone_number=phone),
         )
         stored = await store.get(claim_key(member_id, phone))
     assert json.loads(result.content[0].text)["state"] == "pending"
@@ -1533,9 +1531,7 @@ async def test_a_second_workspace_connects_on_the_same_project(db: None, tmp_pat
                     (
                         await tool.run(
                             await _tool_context(workspace_id, admin_id, tmp_path),
-                            ImessageConnectInput(
-                                phone_number=phone, user_description="Connect my phone."
-                            ),
+                            ImessageConnectInput(phone_number=phone),
                         )
                     )
                     .content[0]

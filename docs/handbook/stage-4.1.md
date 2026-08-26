@@ -4242,30 +4242,17 @@ def checkpoints_after(self, elapsed_seconds: float) -> Iterator[float]
 *Call graph*: calls 1 internal fn (intervals).
 
 
-##### `TurnActivity.tool`  (lines 2854–2859)
+##### `TurnActivity.update`
 
 ```
-def tool(self, tool: str, description: str) -> None
+def update(self, summary: str) -> None
 ```
 
-**Purpose**: Records that the turn is currently doing a tool step. It turns internal tool names into readable words when no user-facing description exists.
+**Purpose**: Records the latest generated tool-step summary.
 
-**Data flow**: It clears streaming text, normalizes the description or tool slug, trims it, and stores it as the current activity.
+**Data flow**: It clears streaming text, normalizes whitespace, bounds the summary, and stores it as the current activity.
 
-**Call relations**: ThreadProgress._follow calls it when tool or subagent activity frames arrive.
-
-
-##### `TurnActivity.skill`  (lines 2861–2863)
-
-```
-def skill(self, skill: str) -> None
-```
-
-**Purpose**: Records that the turn is loading a skill. This gives long-running progress posts a clear current step.
-
-**Data flow**: It clears streaming text and stores a short “loading the skill” message.
-
-**Call relations**: ThreadProgress._follow calls it for SkillLoad frames.
+**Call relations**: `ThreadProgress._follow` calls it for main and subagent activity frames.
 
 
 ##### `TurnActivity.stream`  (lines 2865–2866)
@@ -5209,22 +5196,7 @@ def directives_for(frame: LiveFrame, streamed: bool, collect: tuple[CredentialPr
 
 **Call relations**: `stream_directives` calls this for each frame it reads from the live tail. It delegates details to `_activity`, `_subagent_note`, and `_answer`, and uses `directive` for the final wire format.
 
-*Call graph*: calls 4 internal fn (_activity, _answer, _subagent_note, directive); called by 1 (stream_directives).
-
-
-##### `_activity`  (lines 268–270)
-
-```
-def _activity(frame: ToolCall) -> str
-```
-
-**Purpose**: Turns a tool call into a short human-readable progress note. It tells the member which tool is running and includes a description or preview when available.
-
-**Data flow**: It receives a tool-call frame. It chooses the best detail text, combines it with the tool name, and returns a plain string such as “running search: looking up docs”.
-
-**Call relations**: `directives_for` calls this when it sees a normal tool-call frame, then wraps the returned text in a `note` directive.
-
-*Call graph*: called by 1 (directives_for).
+*Call graph*: calls 3 internal fn (_answer, _subagent_note, directive); called by 1 (stream_directives).
 
 
 ##### `_subagent_note`  (lines 273–283)

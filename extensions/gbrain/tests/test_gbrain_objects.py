@@ -219,9 +219,7 @@ async def _apply(ctx: ToolContext, manifest_text: str) -> dict[str, object]:
     tool = _TOOLS["object_apply"]
     result = await tool.handler(
         ctx,
-        tool.input_model.model_validate(
-            {"user_description": TOOL_NARRATION, "manifest": manifest_text}
-        ),
+        tool.input_model.model_validate({"manifest": manifest_text}),
     )
     assert result.is_error is False
     return json.loads(result.content[0].text)
@@ -231,9 +229,7 @@ async def _get(ctx: ToolContext, name: str) -> dict[str, object]:
     tool = _TOOLS["object_get"]
     result = await tool.handler(
         ctx,
-        tool.input_model.model_validate(
-            {"user_description": TOOL_NARRATION, "kind": GBRAIN_KIND, "name": name}
-        ),
+        tool.input_model.model_validate({"kind": GBRAIN_KIND, "name": name}),
     )
     assert result.is_error is False
     return yaml.safe_load(result.content[0].text)
@@ -243,7 +239,7 @@ async def _list_names(ctx: ToolContext) -> list[str]:
     tool = _TOOLS["object_list"]
     result = await tool.handler(
         ctx,
-        tool.input_model.model_validate({"user_description": TOOL_NARRATION, "kind": GBRAIN_KIND}),
+        tool.input_model.model_validate({"kind": GBRAIN_KIND}),
     )
     assert result.is_error is False
     return [row["name"] for row in json.loads(result.content[0].text)["objects"]]
@@ -339,9 +335,7 @@ async def test_wrong_name_refusal_hands_back_the_derived_name(db: None) -> None:
     ctx = _context(state, speaker_id=state.member_id)
     derived = gbrain_source_name(REPO, None, None)
     tool = _TOOLS["object_apply"]
-    args = tool.input_model.model_validate(
-        {"user_description": TOOL_NARRATION, "manifest": _manifest_text("my-wiki", repo=REPO)}
-    )
+    args = tool.input_model.model_validate({"manifest": _manifest_text("my-wiki", repo=REPO)})
     with ws(state.workspace_id), agent(state.agent_id), pytest.raises(ValueError, match=derived):
         await tool.handler(ctx, args)
     assert await _rows(state) == []
@@ -355,9 +349,7 @@ async def test_the_spec_names_exactly_one_origin(db: None) -> None:
         _manifest_text("gbrain-deadbeef", repo=REPO, root=ROOT),
         _manifest_text("gbrain-deadbeef"),
     ):
-        args = tool.input_model.model_validate(
-            {"user_description": TOOL_NARRATION, "manifest": manifest_text}
-        )
+        args = tool.input_model.model_validate({"manifest": manifest_text})
         with (
             ws(state.workspace_id),
             agent(state.agent_id),
@@ -366,7 +358,6 @@ async def test_the_spec_names_exactly_one_origin(db: None) -> None:
             await tool.handler(ctx, args)
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text("gbrain-deadbeef", root=ROOT, branch=BRANCH),
         }
     )
@@ -435,9 +426,7 @@ async def test_unsharing_is_delete_and_recreate(db: None) -> None:
     tool = _TOOLS["object_apply"]
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(ctx, _manifest_text(name, repo=REPO, shared=True))
-        args = tool.input_model.model_validate(
-            {"user_description": TOOL_NARRATION, "manifest": _manifest_text(name, repo=REPO)}
-        )
+        args = tool.input_model.model_validate({"manifest": _manifest_text(name, repo=REPO)})
         with pytest.raises(VerbNotSupported, match="delete"):
             await tool.handler(ctx, args)
     [row] = await _rows(state)
@@ -474,7 +463,6 @@ async def test_resync_pulls_the_sources_next_sync_to_now(db: None) -> None:
         assert fetched["spec"]["resync"] is False
         args = tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _manifest_text(name, repo=REPO, shared=True, resync=True),
             }
         )
@@ -514,9 +502,7 @@ async def test_delete_removes_the_source_and_tombstones_its_pages(db: None) -> N
             (
                 await delete_tool.handler(
                     ctx,
-                    delete_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": GBRAIN_KIND, "name": name}
-                    ),
+                    delete_tool.input_model.model_validate({"kind": GBRAIN_KIND, "name": name}),
                 )
             )
             .content[0]
@@ -559,7 +545,6 @@ async def test_object_list_shows_only_visible_sources(db: None) -> None:
                 stranger_ctx,
                 get_tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "kind": GBRAIN_KIND,
                         "name": private_name,
                     }

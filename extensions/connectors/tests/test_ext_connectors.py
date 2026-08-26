@@ -235,7 +235,7 @@ def test_call_external_tool_result_is_marked_untrusted() -> None:
 async def test_list_external_tools_filters_the_registry() -> None:
     result = await list_external_tools(
         _ctx(_registry()),
-        ListExternalToolsInput(queries=("widgets",), user_description="find widgets"),
+        ListExternalToolsInput(queries=("widgets",)),
     )
     rows = _payload(result)["connectors"]
     assert rows == [{"source_id": OTHER_PROVIDER, "label": OTHER_LABEL, "connected_accounts": []}]
@@ -244,9 +244,7 @@ async def test_list_external_tools_filters_the_registry() -> None:
 async def test_list_external_tools_select_prefix_fetches_one_by_exact_id() -> None:
     result = await list_external_tools(
         _ctx(_registry()),
-        ListExternalToolsInput(
-            queries=(f"select:{sample.CONNECTOR_PROVIDER}",), user_description="the sample"
-        ),
+        ListExternalToolsInput(queries=(f"select:{sample.CONNECTOR_PROVIDER}",)),
     )
     rows = _payload(result)["connectors"]
     assert [row["source_id"] for row in rows] == [sample.CONNECTOR_PROVIDER]
@@ -255,9 +253,7 @@ async def test_list_external_tools_select_prefix_fetches_one_by_exact_id() -> No
 async def test_list_external_tools_names_each_connected_account_owner_and_sharing() -> None:
     result = await list_external_tools(
         _ctx(_registry(), accounts=("acct-1", "acct-2")),
-        ListExternalToolsInput(
-            queries=(f"select:{sample.CONNECTOR_PROVIDER}",), user_description="the sample"
-        ),
+        ListExternalToolsInput(queries=(f"select:{sample.CONNECTOR_PROVIDER}",)),
     )
     (row,) = _payload(result)["connectors"]
     assert row["connected_accounts"] == [
@@ -270,7 +266,6 @@ async def test_describe_external_tools_fetches_schemas_from_the_broker() -> None
     result = await describe_external_tools(
         _ctx(_registry()),
         DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION,
             source_id=sample.CONNECTOR_PROVIDER,
             tool_names=(sample.BROKER_TOOL_SLUG,),
         ),
@@ -286,7 +281,6 @@ async def test_describe_external_tools_marks_an_unknown_name_unresolved() -> Non
     result = await describe_external_tools(
         _ctx(_registry()),
         DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION,
             source_id=sample.CONNECTOR_PROVIDER,
             tool_names=("NOT_A_REAL_SLUG",),
         ),
@@ -300,7 +294,6 @@ async def test_search_connector_tools_renders_the_brokers_search() -> None:
     result = await search_connector_tools(
         _ctx(_registry()),
         SearchConnectorToolsInput(
-            user_description=TOOL_NARRATION,
             source_id=sample.CONNECTOR_PROVIDER,
             query="list widgets",
         ),
@@ -327,7 +320,6 @@ async def test_search_connector_tools_falls_back_to_top_tools_and_marks_the_answ
     result = await search_connector_tools(
         _ctx(registry),
         SearchConnectorToolsInput(
-            user_description=TOOL_NARRATION,
             source_id=sample.CONNECTOR_PROVIDER,
             query="reserve the widget nobody has named yet",
         ),
@@ -344,7 +336,6 @@ async def test_call_external_tool_uses_the_only_connected_account() -> None:
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"limit": 2},
@@ -368,7 +359,6 @@ async def test_read_only_turn_redescribes_and_executes_a_connector_read() -> Non
     result = await call_external_tool(
         _ctx(registry, accounts=("acct-one",), connector_read_only=True),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="list_records",
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={},
@@ -397,7 +387,6 @@ async def test_read_only_turn_refuses_mutating_or_unclassified_connector_tools(s
         await call_external_tool(
             _ctx(registry, accounts=("acct-one",), connector_read_only=True),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=slug,
                 source_id=sample.CONNECTOR_PROVIDER,
                 arguments={},
@@ -414,7 +403,6 @@ async def test_call_external_tool_requires_a_choice_between_connected_accounts()
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=sample.BROKER_TOOL_SLUG,
                 source_id=sample.CONNECTOR_PROVIDER,
                 arguments={},
@@ -423,7 +411,6 @@ async def test_call_external_tool_requires_a_choice_between_connected_accounts()
     result = await call_external_tool(
         ctx,
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             account_id="acct-two",
@@ -688,7 +675,6 @@ async def test_call_external_tool_dispatches_a_slack_send_with_the_attribution()
     result = await call_external_tool(
         _ctx(registry, accounts=(SLACK_ACCOUNT,), provider=connector_tools.SLACK_PROVIDER),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=SLACK_SEND_SLUG,
             source_id=connector_tools.SLACK_PROVIDER,
             arguments={"channel": "C1", "text": "the plan is posted"},
@@ -708,14 +694,11 @@ async def test_call_external_tool_dispatches_a_slack_send_with_the_attribution()
 
 async def test_tools_fail_loud_without_the_registry_or_the_provider() -> None:
     with pytest.raises(RuntimeError, match="connector registry"):
-        await list_external_tools(
-            _ctx(None), ListExternalToolsInput(queries=("x",), user_description="d")
-        )
+        await list_external_tools(_ctx(None), ListExternalToolsInput(queries=("x",)))
     with pytest.raises(KeyError, match="no installed connector"):
         await call_external_tool(
             _ctx(_registry()),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="X",
                 source_id="unregistered",
                 arguments={},
@@ -805,7 +788,6 @@ async def test_call_external_tool_fetches_produced_files_into_the_workspace(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"file_output_urls": [f"file://{source}"]},
@@ -831,7 +813,6 @@ async def test_call_external_tool_stages_a_workspace_file_argument(tmp_path: Pat
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"media": {"workspace_file": "/workspace/report.csv"}},
@@ -852,7 +833,6 @@ async def test_a_produced_files_name_cannot_escape_its_workspace_dir(tmp_path: P
     result = await call_external_tool(
         _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="ANY",
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={},
@@ -886,7 +866,6 @@ async def test_a_produced_file_is_not_fetched_through_a_symlinked_connector_dir(
         await call_external_tool(
             _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="ANY",
                 source_id=sample.CONNECTOR_PROVIDER,
                 arguments={},
@@ -907,7 +886,6 @@ async def test_a_workspace_file_argument_cannot_climb_out_of_the_workspace(tmp_p
         await call_external_tool(
             _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=sample.BROKER_TOOL_SLUG,
                 source_id=sample.CONNECTOR_PROVIDER,
                 arguments={"media": {"workspace_file": "/workspace/sub/../../outside.txt"}},
@@ -933,7 +911,6 @@ async def test_a_workspace_file_argument_that_is_a_planted_symlink_is_refused(
         await call_external_tool(
             _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=sample.BROKER_TOOL_SLUG,
                 source_id=sample.CONNECTOR_PROVIDER,
                 arguments={"media": {"workspace_file": "/workspace/report.csv"}},
@@ -950,7 +927,6 @@ async def test_a_missing_workspace_file_argument_fails_loud(tmp_path: Path) -> N
         await call_external_tool(
             _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=sample.BROKER_TOOL_SLUG,
                 source_id=sample.CONNECTOR_PROVIDER,
                 arguments={"media": {"workspace_file": "/workspace/absent.pdf"}},
@@ -971,7 +947,6 @@ async def test_an_over_cap_workspace_file_is_rejected_before_staging(
         await call_external_tool(
             _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=sample.BROKER_TOOL_SLUG,
                 source_id=sample.CONNECTOR_PROVIDER,
                 arguments={"media": {"workspace_file": "/workspace/big.csv"}},
@@ -992,7 +967,6 @@ async def test_a_deduped_upload_slot_skips_the_put(tmp_path: Path) -> None:
     key = f"{sample.BROKER_UPLOAD_PREFIX}-{digest}-report.csv"
     ctx = _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace))
     call = CallExternalToolInput(
-        user_description=TOOL_NARRATION,
         tool_name=sample.BROKER_TOOL_SLUG,
         source_id=sample.CONNECTOR_PROVIDER,
         arguments={"media": {"workspace_file": "/workspace/report.csv"}},
@@ -1025,7 +999,6 @@ async def test_transfer_urls_are_passed_as_curl_url_operands() -> None:
     await call_external_tool(
         _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=_RecordingSandbox()),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="UPLOAD_FILE",
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"media": {"workspace_file": "/workspace/report.csv"}},
@@ -1048,7 +1021,6 @@ async def test_provider_marked_base64_text_is_decoded_inline(tmp_path: Path) -> 
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1077,7 +1049,6 @@ async def test_marked_binary_content_is_written_to_the_workspace_and_referenced(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1109,7 +1080,6 @@ async def test_marked_text_over_the_inline_cap_is_offloaded_not_inlined(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1142,7 +1112,6 @@ async def test_base64_shaped_values_are_untouched_without_the_providers_marker(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=arguments,
@@ -1165,7 +1134,6 @@ async def test_a_marked_field_that_is_not_base64_is_left_as_the_provider_sent_it
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"content": placeholder, "encoding": "base64", "name": "x.bin"},
@@ -1186,7 +1154,6 @@ async def test_a_base64_data_url_is_translated_like_a_marked_field(tmp_path: Pat
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1214,7 +1181,6 @@ async def test_the_walk_reaches_base64_nested_under_a_content_key(tmp_path: Path
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1246,7 +1212,6 @@ async def test_a_decoded_fields_name_cannot_escape_its_workspace_dir(tmp_path: P
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1265,7 +1230,6 @@ async def test_a_decoded_fields_name_cannot_escape_its_workspace_dir(tmp_path: P
     climbed = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1295,7 +1259,6 @@ async def test_a_decoded_payload_placed_twice_leaves_one_file(tmp_path: Path) ->
         "name": "report.png",
     }
     call = CallExternalToolInput(
-        user_description=TOOL_NARRATION,
         tool_name=sample.BROKER_TOOL_SLUG,
         source_id=sample.CONNECTOR_PROVIDER,
         arguments=arguments,
@@ -1335,7 +1298,6 @@ async def test_a_decoded_payload_is_not_placed_over_a_planted_symlink(tmp_path: 
         await call_external_tool(
             _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=sample.BROKER_TOOL_SLUG,
                 source_id=sample.CONNECTOR_PROVIDER,
                 arguments={
@@ -1359,7 +1321,6 @@ async def test_a_non_ascii_marked_field_is_left_as_the_provider_sent_it(tmp_path
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"content": placeholder, "encoding": "base64", "name": "note.txt"},
@@ -1391,7 +1352,6 @@ async def test_a_response_nested_past_the_depth_cap_survives_untranslated(tmp_pa
     result = await call_external_tool(
         _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="ANY",
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={},
@@ -1422,7 +1382,6 @@ async def test_a_field_over_the_decode_cap_is_never_decoded(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"content": encoded, "encoding": "base64", "name": "big.bin"},
@@ -1446,7 +1405,6 @@ async def test_a_node_marking_two_content_keys_translates_both(tmp_path: Path) -
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1489,7 +1447,6 @@ async def test_a_huge_non_data_url_string_is_never_scanned(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"summary": prose, "note": small},
@@ -1514,7 +1471,6 @@ async def test_one_invalid_sibling_does_not_hold_back_a_valid_marked_field(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1551,7 +1507,6 @@ async def test_the_same_payload_offloads_to_one_content_addressed_path(tmp_path:
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"records": [record(shot), record(shot), record(other)]},
@@ -1580,7 +1535,6 @@ async def test_a_marked_field_with_no_name_falls_back_for_both_name_and_mimetype
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"body": base64.b64encode(blob).decode(), "encoding": "base64"},
@@ -1604,7 +1558,6 @@ async def test_concurrent_calls_decoding_one_payload_never_expose_a_partial_file
     workspace.mkdir()
     blob = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 40
     call = CallExternalToolInput(
-        user_description=TOOL_NARRATION,
         tool_name=sample.BROKER_TOOL_SLUG,
         source_id=sample.CONNECTOR_PROVIDER,
         arguments={
@@ -1671,7 +1624,6 @@ async def test_decoded_bytes_are_never_written_straight_to_their_shared_path(
             sandbox=SandboxSession(carrier=recorder, handle=handle),
         ),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1842,7 +1794,6 @@ async def test_a_repeated_parent_object_crosses_once_and_expands_to_the_original
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=search,
@@ -1872,7 +1823,6 @@ async def test_a_single_repo_search_lands_inside_the_engine_inline_budget(tmp_pa
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=search,
@@ -1898,7 +1848,6 @@ async def test_a_cross_repo_search_still_offloads(tmp_path: Path) -> None:
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=search,
@@ -1918,7 +1867,6 @@ async def test_a_repeat_across_two_lists_points_at_the_first_occurrence(tmp_path
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -1948,7 +1896,6 @@ async def test_a_pointer_escapes_a_key_holding_a_slash_or_a_tilde(tmp_path: Path
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=arguments,
@@ -1969,7 +1916,6 @@ async def test_small_repeated_objects_are_left_whole(tmp_path: Path) -> None:
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"rows": [{"user": dict(stub)} for _ in range(20)]},
@@ -1987,7 +1933,6 @@ async def test_a_repeated_array_keeps_its_type(tmp_path: Path) -> None:
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={
@@ -2013,7 +1958,6 @@ async def test_objects_differing_only_in_key_order_both_cross_whole(tmp_path: Pa
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"a": repository, "b": reordered},
@@ -2042,7 +1986,6 @@ async def test_a_payload_that_uses_the_reference_key_itself_is_never_rewritten(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=arguments,
@@ -2064,7 +2007,6 @@ async def test_a_response_past_the_dedupe_cap_is_never_rewritten(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=search,
@@ -2088,7 +2030,6 @@ async def test_records_differing_only_in_a_leafs_type_are_never_collapsed(tmp_pa
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=arguments,
@@ -2118,7 +2059,6 @@ async def test_a_node_dense_response_is_never_walked(tmp_path: Path) -> None:
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments=dense,
@@ -2140,7 +2080,6 @@ async def test_a_record_whose_child_was_pointed_away_still_collapses_whole(
     result = await call_external_tool(
         _ctx(_registry(), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name=sample.BROKER_TOOL_SLUG,
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={"one": record, "two": dict(record), "three": dict(record)},
@@ -2178,7 +2117,6 @@ async def test_deep_subtrees_are_never_judged_identical_past_the_depth_cap(tmp_p
     result = await call_external_tool(
         _ctx(_file_registry(broker), accounts=("acct-one",), sandbox=await _sandbox(workspace)),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="ANY",
             source_id=sample.CONNECTOR_PROVIDER,
             arguments={},

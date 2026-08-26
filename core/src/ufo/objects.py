@@ -812,26 +812,16 @@ class ObjectListInput(BaseModel):
     order_by: str = "name"
     order: Literal["asc", "desc"] = "asc"
     cursor: str = ""
-    user_description: str = Field(
-        description="What you are looking up, in plain language for the activity timeline."
-    )
 
 
 class ObjectGetInput(BaseModel):
     kind: str
     name: str
     agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
-    user_description: str = Field(
-        description="Which item you are opening, in plain language for the activity timeline."
-    )
 
 
 class ObjectExplainInput(BaseModel):
     kind: str
-    user_description: str = Field(
-        description="What you are checking the rules for, in plain language for the activity "
-        "timeline."
-    )
 
 
 class ObjectApplyInput(BaseModel):
@@ -848,19 +838,12 @@ class ObjectApplyInput(BaseModel):
             "member-requested call."
         ),
     )
-    user_description: str = Field(
-        description="What you are setting up or changing, in plain language for the activity "
-        "timeline."
-    )
 
 
 class ObjectDeleteInput(BaseModel):
     kind: str
     name: str
     agent: str = Field(default="", description=AGENT_TARGET_DESCRIPTION)
-    user_description: str = Field(
-        description="What you are removing, in plain language for the activity timeline."
-    )
 
 
 @dataclass(frozen=True)

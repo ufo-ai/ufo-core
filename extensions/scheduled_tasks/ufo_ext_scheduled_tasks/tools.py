@@ -118,10 +118,6 @@ class PauseAndWaitInput(BaseModel):
     metadata: dict[str, JsonValue] | None = Field(
         default=None, description="State the resumed turn needs."
     )
-    user_description: str = Field(
-        description="What you are waiting on before you carry on, in plain language for the "
-        "activity timeline."
-    )
 
 
 def _require_scheduler(ext: ExtensionContext | None) -> ScheduleStore:
@@ -503,7 +499,6 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         origin_seq=ctx.turn.seq,
         origin_arrival_seq=await ext.conversation_arrival_seq(ctx.turn.conversation_id),
         prompt="Resume the paused workflow.\n" + json.dumps(wakeup),
-        user_description=args.user_description,
         created_by_member_id=ctx.acting_member_id,
     )
     payload = {

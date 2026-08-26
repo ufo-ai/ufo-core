@@ -318,9 +318,7 @@ async def _narrow(state: _Workspace, streams: tuple[str, ...]) -> None:
     with ws(state.workspace_id), agent(state.main_id):
         result = await _APPLY.handler(
             _turn_context(state),
-            _APPLY.input_model.model_validate(
-                {"user_description": "syncing less of asana", "manifest": manifest_text}
-            ),
+            _APPLY.input_model.model_validate({"manifest": manifest_text}),
         )
     assert result.is_error is False
 

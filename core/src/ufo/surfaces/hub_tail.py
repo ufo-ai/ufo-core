@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from ufo.billing.accounting import ALLOW, SpendEvaluator, applicable_caps_absent
 from ufo.billing.balance import balance_refusal_message, read_headroom
 from ufo.db import workspace_tx
-from ufo.hub import Hub, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.hub import Activity, Hub, LiveFrame, Parked, Terminal
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import PARKED, TerminalFrame
@@ -187,5 +187,5 @@ class HubTailer:
     ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
         return aclosing(tail_frames(self.hub, turn_id, since, self.billing_url))
 
-    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
+    async def latest_activity(self, turn_id: UUID) -> Activity | None:
         return await self.hub.latest_activity(turn_id)

@@ -1181,7 +1181,7 @@ async def test_an_intent_admission_stamps_the_turn_and_requires_a_speaker(
     conversation_id = await context.conversation_for("intent/one", conversation_audience(member_id))
     intent = ToolIntent(
         tool="object_apply",
-        input={"manifest": "kind: agent", "user_description": "apply settings"},
+        input={"manifest": "kind: agent"},
     )
     admitted = await context.admit(
         conversation_id, intent.model_dump_json(), speaker_member_id=member_id, intent=intent

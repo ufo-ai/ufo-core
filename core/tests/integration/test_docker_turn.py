@@ -42,11 +42,19 @@ from ufo.schema.records import Agent, Turn
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult
 from ufo.tools.registry import ToolRegistry
+from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import conversation_audience
 
 pytestmark = pytest.mark.docker
 
 MARKER = "sandbox-lives-42"
+
+
+class _ActivityModel:
+    model = "gpt-5.6-luna"
+
+    async def complete(self, _request: ModelRequest) -> str:
+        return "Working on the request."
 
 
 async def _unavailable_spawn(
@@ -79,7 +87,6 @@ class BashThenAnswerModel:
             partial_json=json.dumps(
                 {
                     "command": f"echo {MARKER}",
-                    "user_description": "checking the sandbox",
                 }
             ),
         )
@@ -174,6 +181,7 @@ async def test_turn_execs_bash_in_a_live_container(
         byok=False,
         system_prompt=rendered_prompt("run the marker"),
         model=model,
+        activity_summarizer=ActivitySummarizer(_ActivityModel()),
         provider="anthropic",
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(

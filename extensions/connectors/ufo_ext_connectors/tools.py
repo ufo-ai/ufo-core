@@ -204,9 +204,6 @@ class ListExternalToolsInput(BaseModel):
         "separate keywords, e.g. ['Microsoft', 'email'] not ['Microsoft email']. Multiple queries "
         "searched in parallel. Use 'select:<source_id>' to fetch a specific connector by exact ID.",
     )
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
-    )
 
 
 class DescribeExternalToolsInput(BaseModel):
@@ -218,10 +215,6 @@ class DescribeExternalToolsInput(BaseModel):
     )
     query: str = Field(
         default="", description="Discovery query to find matching tools when tool_names is omitted."
-    )
-    user_description: str = Field(
-        description="Which connected account you are checking what you can do with, in plain "
-        "language for the activity timeline."
     )
 
 
@@ -236,19 +229,11 @@ class CallExternalToolInput(BaseModel):
         description="Arguments for the connector tool as a dict. Pass {} for tools that take no "
         "parameters."
     )
-    user_description: str = Field(
-        description="What you are doing in the connected account, in plain language for the "
-        "activity timeline. Name the account, never the tool slug."
-    )
 
 
 class SearchConnectorToolsInput(BaseModel):
     source_id: str = Field(description="The connector source ID to search within.")
     query: str = Field(description="Search query to find matching tools in the connector.")
-    user_description: str = Field(
-        description="What you are hoping the connected account can do, in plain language for the "
-        "activity timeline."
-    )
 
 
 async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) -> ToolResult:

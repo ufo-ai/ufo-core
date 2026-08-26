@@ -362,9 +362,6 @@ class WebsiteInput(BaseModel):
     project_path: str | None = Field(
         default=None, description="Project directory to build in. Defaults to the workspace root."
     )
-    user_description: str = Field(
-        description="What you are building, in plain language for the activity timeline."
-    )
 
 
 class StartServerInput(BaseModel):
@@ -379,10 +376,6 @@ class StartServerInput(BaseModel):
     log_file: str | None = Field(
         default=None,
         description="File in the workspace to capture the server's stdout/stderr.",
-    )
-    user_description: str = Field(
-        description="What you are starting up so they can see it, in plain language for the "
-        "activity timeline."
     )
 
     @model_validator(mode="after")
@@ -401,25 +394,14 @@ class DeployWebsiteInput(BaseModel):
     site_name: str = Field(description="A name for the served site; it names the hosted link.")
     entry_point: str = Field(description="The entry file to serve, e.g. index.html.")
     visibility: Visibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
-    user_description: str = Field(
-        description="Which site you are putting online, in plain language for the activity "
-        "timeline."
-    )
 
 
 class DeployUfoApplicationInput(BaseModel):
     site_name: str = Field(description="A name for the application; it names the hosted link.")
-    user_description: str = Field(
-        description="Which application you are putting online, in plain language for the "
-        "activity timeline."
-    )
 
 
 class QaUfoApplicationInput(BaseModel):
-    user_description: str = Field(
-        description="The application checks you are running, in plain language for the activity "
-        "timeline."
-    )
+    pass
 
 
 class PublishWebsiteInput(BaseModel):
@@ -433,16 +415,10 @@ class PublishWebsiteInput(BaseModel):
     install_command: str | None = Field(
         default=None, description="Optional command to install dependencies before serving."
     )
-    user_description: str = Field(
-        description="Which app you are publishing, in plain language for the activity timeline."
-    )
 
 
 class SetHomepageInput(BaseModel):
     site: str = Field(description="The site object name from the deploy result.")
-    user_description: str = Field(
-        description="Which site becomes the homepage, in plain language for the activity timeline."
-    )
 
 
 def _json_result(payload: dict[str, object]) -> ToolResult:
@@ -938,7 +914,6 @@ async def deploy_ufo_application(ctx: ToolContext, args: DeployUfoApplicationInp
             project_path=APPLICATION_SCAFFOLD_PATH,
             site_name=args.site_name,
             entry_point="index.html",
-            user_description=args.user_description,
         ),
     )
 

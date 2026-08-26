@@ -103,7 +103,6 @@ class _PacedModel:
                     partial_json=json.dumps(
                         {
                             "command": "echo one",
-                            "user_description": BASH_USER_DESCRIPTION,
                         }
                     ),
                 )
@@ -119,7 +118,6 @@ class _PacedModel:
                     partial_json=json.dumps(
                         {
                             "command": "echo two",
-                            "user_description": BASH_USER_DESCRIPTION,
                         }
                     ),
                 )
@@ -144,9 +142,7 @@ class _CrashModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(
             id="c1",
-            partial_json=json.dumps(
-                {"command": "echo hi", "user_description": BASH_USER_DESCRIPTION}
-            ),
+            partial_json=json.dumps({"command": "echo hi"}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 

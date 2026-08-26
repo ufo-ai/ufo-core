@@ -290,9 +290,9 @@ assignment label. Keep sequential interaction contexts because the strict produc
 The earlier treatment `a28cd6f8` never reaches product QA and does not count.
 
 Step 4 accepts the fixed-root deployment boundary. The application profile now receives
-`deploy_ufo_application`, whose schema contains only `site_name` and `user_description`. The tool
-owns `/workspace/ufo-app` and `index.html`; the generic website profile keeps `deploy_website`.
-A focused tool test proves both fixed values and rejects access outside the application profile.
+`deploy_ufo_application`, whose schema contains only `site_name`. The tool owns
+`/workspace/ufo-app` and `index.html`; the generic website profile keeps `deploy_website`. A
+focused tool test proves both fixed values and rejects access outside the application profile.
 
 Matched `meeting-tasks` run `4dccd36d` completes two product QA calls and one deployment with no
 path argument or invalid `dist` call. Control `fcf0a9cc` stops in product QA. Both fail the unchanged
@@ -538,11 +538,9 @@ First screen:
   valid action evidence: concurrent case seeds overwrite one shared GitHub response, and the one
   surviving contract does not state the bridge argument order.
 - The second screen keeps one stable action list per GitHub tool and supplies structured `ufoWrite`
-  and `ufoRead` argument arrays. Two apps make the exact write. Both turns refuse because the
-  production web surface omits the object tool's required `user_description`. The third app
-  imitates the result in local storage and fails the source-independent action check.
-- The production surface and the eval driver supply the required activity description for object
-  apply and delete intents. The next screen passes the complete action proof for two of three apps.
+  and `ufoRead` argument arrays. Two apps make the exact write. The third app imitates the result
+  in local storage and fails the source-independent action check.
+- The next screen passes the complete action proof for two of three apps.
   `meeting-tasks` does not make the exact browser write.
 - Exact action wording does not move `meeting-tasks` in a matched three-repeat ablation. Both arms
   pass zero of three. The wording is removed.

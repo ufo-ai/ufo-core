@@ -46,7 +46,7 @@ from ufo.ext.manifest import (
     Stop,
     UserPromptSubmit,
 )
-from ufo.hub import InProcessHub, LiveFrame, ToolCall
+from ufo.hub import Activity, InProcessHub, LiveFrame
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     COMPACTION_KEEP_MESSAGES,
@@ -72,11 +72,19 @@ from ufo.surfaces.hub_tail import HubTailer
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult
 from ufo.tools.registry import ToolRegistry
+from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.turns.transcript import CompactionSummary
 from ufo.workspace import ws
 
 REWRITTEN_COMMAND = "echo modified"
+
+
+class _ActivityModel:
+    model = "gpt-5.6-luna"
+
+    async def complete(self, _request: ModelRequest) -> str:
+        return "Working on the request."
 
 
 class Args(BaseModel):
@@ -166,7 +174,7 @@ async def test_a_hook_reads_the_frames_and_the_end_of_the_turn_it_fires_under(db
     follow the turn without any way to re-enter it."""
     turn = await _seed_turn(uuid4())
     hub = InProcessHub()
-    await hub.publish(turn.id, ToolCall(tool="bash", preview="{}", description="migrating"))
+    await hub.publish(turn.id, Activity(text="Applying the migration."))
     seen: list[tuple[LiveFrame, bool]] = []
 
     async def watch(ctx: HookContext) -> HookOutcome:
@@ -187,7 +195,7 @@ async def test_a_hook_reads_the_frames_and_the_end_of_the_turn_it_fires_under(db
             None,
         )
         assert resolution.denied is None
-        assert seen == [(ToolCall(tool="bash", preview="{}", description="migrating"), False)]
+        assert seen == [(Activity(text="Applying the migration."), False)]
 
         async with workspace_tx() as connection:
             await connection.execute(
@@ -395,9 +403,7 @@ class BashThenAnswerModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(
             id="c1",
-            partial_json=json.dumps(
-                {"command": self.command, "user_description": "running a check"}
-            ),
+            partial_json=json.dumps({"command": self.command}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
@@ -415,12 +421,12 @@ class EchoAndBashModel:
         yield ToolCallStart(id="c1", name=sample.TOOL_NAME)
         yield ToolCallDelta(
             id="c1",
-            partial_json=json.dumps({"message": "hi", "user_description": "echoing the probe"}),
+            partial_json=json.dumps({"message": "hi"}),
         )
         yield ToolCallStart(id="c2", name="bash")
         yield ToolCallDelta(
             id="c2",
-            partial_json=json.dumps({"command": "echo hi", "user_description": "running a check"}),
+            partial_json=json.dumps({"command": "echo hi"}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
@@ -455,7 +461,7 @@ class CompactingModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(
             id="c1",
-            partial_json=json.dumps({"command": "echo hi", "user_description": "running a check"}),
+            partial_json=json.dumps({"command": "echo hi"}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
@@ -570,6 +576,7 @@ def _engine(
         byok=False,
         system_prompt=rendered_prompt("p"),
         model=model,
+        activity_summarizer=ActivitySummarizer(_ActivityModel()),
         provider="anthropic",
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(

@@ -681,7 +681,6 @@ def _tool_intent(
                     "action": "autopay",
                     "autopay_dollars": submitted.amount_dollars,
                     "autopay_below_dollars": submitted.below_dollars,
-                    "user_description": "Set automatic refills from the billing screen.",
                 },
             )
         case PaymentMethodIntent():
@@ -689,7 +688,6 @@ def _tool_intent(
                 tool="manage_billing",
                 input={
                     "action": "portal",
-                    "user_description": "Open the billing portal from the billing screen.",
                 },
             )
         case RestoreApplicationIntent():
@@ -698,7 +696,6 @@ def _tool_intent(
                 input={
                     "app_id": str(submitted.app_id),
                     "name": submitted.name,
-                    "user_description": f"Restore the app {submitted.name} from the portal.",
                 },
             )
         case TranscriptIntent():
@@ -706,7 +703,6 @@ def _tool_intent(
                 tool="read_private_transcript",
                 input={
                     "conversation_id": str(submitted.conversation_id),
-                    "user_description": "Open a private transcript from the portal.",
                 },
             )
         case CredentialIntent():
@@ -719,7 +715,6 @@ def _tool_intent(
                         "encrypted and never shown again."
                     ),
                     "prompts": [{"slot": slot.slot, "prompt": slot.description or slot.slot}],
-                    "user_description": f"Set credential {slot.slot} from the portal.",
                 },
             )
         case CorrectionIntent():
@@ -728,18 +723,17 @@ def _tool_intent(
                 input={
                     "body": submitted.body,
                     "source_ref": f"corrects memory/{submitted.corrects}",
-                    "user_description": "Correct a memory from the portal.",
                 },
             )
         case DigestRebuildIntent():
             return ToolIntent(
                 tool="rebuild_report_digest",
-                input={"user_description": "Write the radar entries again from the portal."},
+                input={},
             )
         case PageFactRebuildIntent():
             return ToolIntent(
                 tool="rebuild_page_facts",
-                input={"user_description": "Write the wiki's page facts again from the portal."},
+                input={},
             )
         case ToolingIntent():
             picked = set(submitted.providers)
@@ -749,18 +743,17 @@ def _tool_intent(
                 input={
                     "body": _tools_recorded(labels, body_max_chars),
                     "source_ref": "first run",
-                    "user_description": "Record what the team uses from the first run.",
                 },
             )
         case ConnectSlackIntent():
             return ToolIntent(
                 tool="slack_connect",
-                input={"user_description": "Connect Slack from the first run."},
+                input={},
             )
         case ConnectGitHubIntent():
             return ToolIntent(
                 tool="connect_github",
-                input={"user_description": "Connect GitHub from the first run."},
+                input={},
             )
         case AddMemberIntent():
             return ToolIntent(
@@ -768,18 +761,12 @@ def _tool_intent(
                 input={
                     "email": submitted.email,
                     "admin": submitted.admin,
-                    "user_description": f"Add {submitted.email} to the workspace from the portal.",
                 },
             )
         case AudienceIntent():
             return ToolIntent(
                 tool=submitted.verb,
-                input={
-                    "email": submitted.email,
-                    "user_description": (
-                        f"{submitted.verb} for {submitted.email} from the portal."
-                    ),
-                },
+                input={"email": submitted.email},
             )
         case ApplyIntent() if submitted.verb == "connect":
             return ToolIntent(
@@ -787,7 +774,6 @@ def _tool_intent(
                 input={
                     "provider": submitted.name,
                     "shared": bool((submitted.spec or {}).get("shared", False)),
-                    "user_description": f"Connect {submitted.name} from the portal.",
                 },
             )
         case ApplyIntent() if submitted.verb in {"delete", "detach"}:
@@ -796,9 +782,6 @@ def _tool_intent(
                 input={
                     "kind": submitted.kind,
                     "name": submitted.name,
-                    "user_description": (
-                        f"Delete {submitted.kind} {submitted.name} from the portal."
-                    ),
                 },
             )
         case ApplyIntent():
@@ -815,9 +798,6 @@ def _tool_intent(
                 input={
                     "manifest": manifest,
                     "create_only": submitted.create_only,
-                    "user_description": (
-                        f"Apply {submitted.kind} {submitted.name} from the portal."
-                    ),
                 },
             )
 

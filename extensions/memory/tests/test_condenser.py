@@ -2700,7 +2700,7 @@ async def test_rebuilding_the_page_facts_clears_the_cursor_the_deriver_rides(
         member_id = await _seed_admin(workspace_id)
         answered = await tool.handler(
             _rebuild_ctx(workspace_id, member_id),
-            RebuildPageFactsInput(user_description="write the page facts again"),
+            RebuildPageFactsInput(),
         )
         assert answered.content[0].text == memory_manifest.REBUILD_QUEUED
         assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) is None
@@ -2719,6 +2719,6 @@ async def test_only_an_admin_can_ask_for_the_page_facts_to_be_written_again(db: 
         with pytest.raises(ValueError, match=memory_manifest.REBUILD_ADMIN_ONLY):
             await tool.handler(
                 _rebuild_ctx(workspace_id, member_id),
-                RebuildPageFactsInput(user_description="write the page facts again"),
+                RebuildPageFactsInput(),
             )
         assert await scoped.get(memory_manifest.DERIVE_CURSOR_KEY) == "a-cursor"

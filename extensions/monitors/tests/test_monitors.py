@@ -96,9 +96,7 @@ def _object_tool(name: str) -> ToolDef:
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     assert result.is_error is False
     return result.content[0].text
 
@@ -230,7 +228,6 @@ def _input(name: str, command: str, **overrides: object) -> MonitorInput:
             "reason": "the CI run for pull request 42",
             "next_steps": "Read the new status and report it.",
             "metadata": {"pr": 42},
-            "user_description": TOOL_NARRATION,
             **overrides,
         }
     )
@@ -526,7 +523,6 @@ async def test_the_fire_body_walls_probe_output_and_escapes_its_own_delimiters(
         reason="the CI run",
         next_steps="Report it.",
         metadata=None,
-        user_description=TOOL_NARRATION,
         created_by_member_id=member_id,
         baseline="alpha\n",
         probes_run=13,

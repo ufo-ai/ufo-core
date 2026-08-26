@@ -77,15 +77,8 @@ export function resetStreams(): void {
   reattachTimer = NATIVE_TIMER;
 }
 
-export function eventLabel(event: ActivityEvent, phase: "active" | "done"): string {
-  switch (event.kind) {
-    case "note":
-      return event.text;
-    case "skill":
-      return (phase === "active" ? "Loading skill" : "Loaded skill") + " · " + event.name;
-    case "tool":
-      return event.description || (event.preview ? event.name + " " + event.preview : event.name);
-  }
+export function eventLabel(event: ActivityEvent, _phase: "active" | "done"): string {
+  return event.text || "Completed a step.";
 }
 
 /** What the agent last did, reading to the deepest end of the tree — the line a collapsed
@@ -97,45 +90,19 @@ export function latestActivity(events: ActivityEvent[], runs: SubagentRun[]): st
   return event ? eventLabel(event, "done") : "";
 }
 
-/** One `subagent_activity` frame off the wire: a run starting (no tool, skill, or status), one of
- *  its dispatches, or the terminal status that ends its row. */
+/** One `subagent_activity` frame off the wire: a run starting, its current activity, or terminal. */
 type RunFrame = {
   turn_id: string;
   parent_turn_id: string;
   conversation_id: string;
   profile: string;
   name: string;
-  tool: string;
-  description: string;
-  preview: string;
-  skill: string;
+  activity: string;
   status: string;
 };
 
 function runEvent(frame: RunFrame): ActivityEvent | null {
-  if (frame.tool) {
-    return {
-      kind: "tool",
-      name: frame.tool,
-      preview: frame.preview,
-      description: frame.description,
-    };
-  }
-  if (frame.skill) {
-    return { kind: "skill", name: frame.skill, preview: "", description: "" };
-  }
-  return null;
-}
-
-/** The narration a round wrote before it dispatched work, taken into the activity list as the step
- *  it is: the row stands where the text was written, between the calls it sits among, and the live
- *  bubble starts the next round clean so the closing answer is the only text it ever states. Only
- *  this turn's own dispatch cuts the text that way — a child's frame arrives on this stream at the
- *  child's pace, so it says nothing about where this turn's words end. */
-function noted(live: LiveTurn): LiveTurn {
-  const text = live.text.trim();
-  if (!text) return live;
-  return { ...live, text: "", events: live.events.concat({ kind: "note", text }) };
+  return frame.activity ? { kind: "activity", text: frame.activity } : null;
 }
 
 function holdsRun(runs: SubagentRun[], turnId: string): boolean {
@@ -146,7 +113,7 @@ function advanceRun(run: SubagentRun, frame: RunFrame): SubagentRun {
   const event = runEvent(frame);
   return {
     ...run,
-    ...(event ? { events: run.events.concat(event), current: eventLabel(event, "active") } : {}),
+    ...(event ? { events: run.events.concat(event), current: event.text } : {}),
     ...(frame.status ? { running: false, current: undefined } : {}),
   };
 }
@@ -422,35 +389,14 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
     });
   });
 
-  source.addEventListener("tool", (event) => {
+  source.addEventListener("activity", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
-    const entry: ActivityEvent = {
-      kind: "tool",
-      name: frame.tool,
-      preview: frame.preview ?? "",
-      description: frame.description ?? "",
-    };
-    onLive((streamed) => {
-      const live = noted(streamed);
-      return {
-        ...live,
-        events: live.events.concat(entry),
-        activity: eventLabel(entry, "active"),
-      };
-    });
-  });
-
-  source.addEventListener("skill", (event) => {
-    const frame = JSON.parse((event as MessageEvent).data);
-    const entry: ActivityEvent = { kind: "skill", name: frame.skill, preview: "", description: "" };
-    onLive((streamed) => {
-      const live = noted(streamed);
-      return {
-        ...live,
-        events: live.events.concat(entry),
-        activity: eventLabel(entry, "active"),
-      };
-    });
+    const entry: ActivityEvent = { kind: "activity", text: frame.text };
+    onLive((live) => ({
+      ...live,
+      events: live.events.concat(entry),
+      activity: entry.text,
+    }));
   });
 
   /** A turn the fleet picked back up after the process running it died takes a step of its own, so
@@ -459,11 +405,14 @@ function attach(chatKey: string, turnId: string, answering: boolean, reattach: b
    *  once the reply lands. */
   source.addEventListener("resumed", () => {
     const entry: ActivityEvent = { kind: "note", text: RESUMED_NOTE };
-    onLive((streamed) => {
-      const live = noted(streamed);
+    onLive((live) => {
+      const text = live.text.trim();
       return {
         ...live,
-        events: live.events.concat(entry),
+        text: "",
+        events: text
+          ? live.events.concat({ kind: "note", text }, entry)
+          : live.events.concat(entry),
         activity: eventLabel(entry, "active"),
       };
     });

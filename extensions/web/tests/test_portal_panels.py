@@ -961,9 +961,7 @@ def test_the_first_run_records_every_pick_inside_the_row_it_is_drawn_as() -> Non
         body = _tools_recorded(labels[:picked], MEMORY_BODY_MAX_CHARS)
         assert len(body) <= MEMORY_BODY_MAX_CHARS, (picked, len(body), body)
         assert body.startswith(TOOLING_PREFIX)
-        memory_manifest_module.MemoryUpdateInput(
-            body=body, user_description="Record what the team uses from the first run."
-        )
+        memory_manifest_module.MemoryUpdateInput(body=body)
 
 
 def test_the_first_run_says_how_many_picks_it_could_not_name() -> None:

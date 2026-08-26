@@ -63,9 +63,6 @@ class UpdateTodoListInput(BaseModel):
     tasks: tuple[TodoTask, ...] = Field(
         description="Complete list of tasks — this REPLACES the existing list entirely."
     )
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
-    )
 
 
 class TodoStatusUpdate(BaseModel):
@@ -76,9 +73,6 @@ class TodoStatusUpdate(BaseModel):
 class UpdateTodoStatusInput(BaseModel):
     updates: tuple[TodoStatusUpdate, ...] = Field(
         min_length=1, description="List of status updates to apply."
-    )
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
     )
 
 

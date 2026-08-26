@@ -126,15 +126,14 @@ from ufo.sdk.context import ExtensionContext, JsonValue, ScopedStore
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import (
     Absorbed,
+    Activity,
     CostTick,
     LiveFrame,
     Parked,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
     TextDelta,
-    ToolCall,
 )
 from ufo.sdk.manifest import HookContext, HookOutcome
 from ufo.sdk.o11y import log, warn
@@ -780,8 +779,6 @@ class SlackConversationSearch:
 
 STATUS_THINKING_TEXT = "Thinking…"
 STATUS_DESCRIBED_TEXT = "{description}…"
-STATUS_WORKING_TEXT = "Working… ({tool})"
-STATUS_SKILL_TEXT = "Loading skill {skill}…"
 STATUS_GENERATING_TEXT = "Generating…"
 STATUS_PICKED_UP_TEXT = "Picked up your message…"
 STATUS_RESUMED_TEXT = "Resumed after a restart…"
@@ -2630,9 +2627,9 @@ class FollowerContext(Protocol):
 class ThreadStatus:
     """Live feedback for one running turn through Slack's native channel- and DM-thread loading
     state (`assistant.threads.setStatus`): "Thinking…" the moment the turn is admitted, then the
-    turn's hub frames — each tool call as the model's own `user_description` of what it is doing for
-    the member ("Checking the invoice totals…"), the slug form standing in only for a call that gave
-    none, streamed text as "Generating…". That prose is the model's and unbounded, so it is cut with
+    turn's hub frames — each tool run as one model-written line saying what it is doing for
+    the member ("Checking the invoice totals…"), streamed text as "Generating…". That prose is
+    bounded at generation and cut again here with
     room kept for the trailing ellipsis rather than losing it to the STATUS_TEXT_LIMIT slice — that
     ellipsis is the only mark a cut line gets.
     A drain of the turn's arrivals says "Picked up your message…", which is the only answer a member
@@ -2786,18 +2783,12 @@ class ThreadStatus:
                     match frame:
                         case Terminal() | Parked():
                             return
-                        case ToolCall(tool=tool, description=description):
-                            stated = description.strip().rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
-                            text = (
-                                STATUS_DESCRIBED_TEXT.format(description=stated)
-                                if stated
-                                else STATUS_WORKING_TEXT.format(tool=tool)
-                            )
-                        case SkillLoad(skill=skill):
-                            text = STATUS_SKILL_TEXT.format(skill=skill)
-                        case SubagentActivity() if frame.tool or frame.skill:
+                        case Activity(text=activity) if activity:
+                            stated = activity.strip().rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
+                            text = STATUS_DESCRIBED_TEXT.format(description=stated)
+                        case SubagentActivity() if frame.activity:
                             label = frame.name or frame.profile
-                            worked = (frame.description or frame.skill or frame.tool).strip()
+                            worked = frame.activity.strip()
                             stated = f"{label}: {worked}".rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
                             text = STATUS_DESCRIBED_TEXT.format(description=stated)
                         case Absorbed():
@@ -2935,25 +2926,16 @@ class ProgressCadence:
 @dataclass
 class TurnActivity:
     """What a turn's tail has seen, reduced to its current member-facing activity. A tool step is
-    the model's own `user_description` of the call — what it is doing for the member, never the tool
-    it reached for; a call that gave none is named by its slug read as words, so no line a member
-    reads carries an internal identifier. Text in flight is only identified as response
-    preparation: its content may be unfinished narration or the final answer this post must not
-    preempt."""
+    the generated summary of the tool run — what it is doing for the member, never the tool it
+    reached for. Text in flight is only identified as response preparation: its content may be
+    unfinished narration or the final answer this post must not preempt."""
 
     activity: str = ""
     streaming: list[str] = field(default_factory=list)
 
-    def tool(self, tool: str, description: str) -> None:
+    def update(self, summary: str) -> None:
         self.streaming.clear()
-        humanized = " ".join(tool.replace("_", " ").replace("-", " ").split()).lower()
-        described = " ".join(description.split())
-        step = (described or humanized)[:PROGRESS_ACTIVITY_LIMIT]
-        self.activity = step
-
-    def skill(self, skill: str) -> None:
-        self.streaming.clear()
-        self.activity = f"loading the `{skill}` skill"[:PROGRESS_ACTIVITY_LIMIT]
+        self.activity = " ".join(summary.split())[:PROGRESS_ACTIVITY_LIMIT]
 
     def stream(self, text: str) -> None:
         self.streaming.append(text)
@@ -3062,17 +3044,14 @@ class ThreadProgress:
                     match frame:
                         case Terminal() | Parked():
                             return
-                        case ToolCall(tool=tool, description=description):
-                            activity.tool(tool, description)
-                        case SkillLoad(skill=skill):
-                            activity.skill(skill)
+                        case Activity(text=text) if text:
+                            activity.update(text)
                         case Resumed(attempt=attempt) if attempt not in announced:
                             announced.add(attempt)
                             resume_due = self._elapsed() + RESUME_NOTICE_GRACE_SECONDS
-                        case SubagentActivity() if frame.tool or frame.skill:
+                        case SubagentActivity() if frame.activity:
                             label = frame.name or frame.profile
-                            worked = frame.description or frame.skill or frame.tool
-                            activity.tool(frame.tool or frame.skill, f"{label}: {worked}")
+                            activity.update(f"{label}: {frame.activity}")
                         case TextDelta(text=text):
                             activity.stream(text)
                         case CostTick():

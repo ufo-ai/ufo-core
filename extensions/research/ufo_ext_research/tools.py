@@ -92,10 +92,6 @@ class SearchWebInput(BaseModel):
         description="Only return results from these domains, e.g. ['nytimes.com', 'reuters.com']. "
         "Leave unset for all domains. Use this instead of site: syntax in queries.",
     )
-    user_description: str = Field(
-        description="What you are looking up on the web, in plain language for the activity "
-        "timeline."
-    )
 
 
 class FetchUrlInput(BaseModel):
@@ -118,10 +114,6 @@ class FetchUrlInput(BaseModel):
         description="Bypass cache and force a real-time fetch. Costly — only use when cached "
         "content appears outdated or incorrect.",
     )
-    user_description: str = Field(
-        description="Brief plain-language description of what you're doing, shown in the activity "
-        "timeline."
-    )
 
 
 class SearchVerticalInput(BaseModel):
@@ -135,10 +127,6 @@ class SearchVerticalInput(BaseModel):
         description="A natural-language phrase for what you want, not a keyword list. E.g. "
         "'photographs of a golden retriever puppy', 'transformer architectures for machine "
         "translation', 'John Smith, the CTO of Acme'."
-    )
-    user_description: str = Field(
-        description="Brief plain-language description of what you're doing, shown in the activity "
-        "timeline."
     )
 
 

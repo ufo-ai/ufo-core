@@ -150,9 +150,7 @@ def _tool(name: str) -> ToolDef:
 
 
 async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     assert result.is_error is False
     return result.content[0].text
 

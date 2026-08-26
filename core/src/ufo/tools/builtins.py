@@ -153,10 +153,6 @@ class BashInput(BaseModel):
         "and a sandbox that suspends between turns advances it only while awake — use background "
         "for compute that needs no network past this turn: builds, test runs, data processing.",
     )
-    user_description: str = Field(
-        description="Brief plain-language description for non-technical users, shown in the "
-        "activity timeline. Never include raw commands or file paths.",
-    )
 
 
 class ReadInput(BaseModel):
@@ -170,10 +166,6 @@ class ReadInput(BaseModel):
         default=None,
         description="Number of lines/pages to read. Only provide if the file is too large to read "
         "at once.",
-    )
-    user_description: str = Field(
-        description="Which document you are opening, in plain language for the activity timeline. "
-        "Name the document, never the path."
     )
 
 
@@ -195,10 +187,6 @@ class WriteInput(BaseModel):
         description="Absolute path to the file to write, e.g. /workspace/output.json.",
     )
     content: str = Field(description="The text content to write to the file.")
-    user_description: str = Field(
-        description="What you are creating, in plain language for the activity timeline. Name the "
-        "document, never the path."
-    )
 
 
 class FileEdit(BaseModel):
@@ -217,10 +205,6 @@ class EditInput(BaseModel):
         description="List of edits to apply sequentially. Each edit is an object with old_string, "
         "new_string, and optionally replace_all.",
     )
-    user_description: str = Field(
-        description="What you are changing and where, in plain language for the activity timeline. "
-        "Name the document, never the path."
-    )
 
 
 class GlobInput(BaseModel):
@@ -232,10 +216,6 @@ class GlobInput(BaseModel):
         default=None,
         description="Absolute path to the directory to search in. If omitted, searches from the "
         "workspace root.",
-    )
-    user_description: str = Field(
-        description="What kind of files you are looking for, in plain language for the activity "
-        "timeline."
     )
 
 
@@ -254,10 +234,6 @@ class GrepInput(BaseModel):
         "'files_with_matches' (just filenames), 'count' (match counts per file).",
     )
     head_limit: int | None = Field(default=None, description="Limit output to first N results.")
-    user_description: str = Field(
-        description="What you are searching the files for, in plain language for the activity "
-        "timeline. Never include the raw pattern."
-    )
 
 
 class SharedFileSpec(BaseModel):
@@ -281,9 +257,6 @@ class ShareFileInput(BaseModel):
     files: list[SharedFileSpec] = Field(
         min_length=1, description="The files to share, delivered in this order."
     )
-    user_description: str = Field(
-        description="What you are sending them, in plain language for the activity timeline."
-    )
 
 
 class SpawnInput(BaseModel):
@@ -303,10 +276,6 @@ class SpawnInput(BaseModel):
         "a message arrives on this conversation is not stopped — it keeps running in the "
         "background and the result hands back its spawn id.",
     )
-    user_description: str = Field(
-        description="What you are handing off, in plain language for the activity timeline — the "
-        "work itself, never the target name."
-    )
     name: str = Field(
         default="",
         description="A short display name for this run, at most four words, e.g. 'UK sports news'.",
@@ -324,9 +293,6 @@ class LoadSkillInput(BaseModel):
 class SkillSearchInput(BaseModel):
     query: str = Field(description="Keywords naming the task or capability to find a skill for.")
     limit: int = Field(default=8, ge=1, le=8, description="Maximum results.")
-    user_description: str = Field(
-        description="What you are looking for, in plain language for the activity timeline."
-    )
 
 
 class ConnectAccountInput(BaseModel):
@@ -346,10 +312,6 @@ class ConnectAccountInput(BaseModel):
         "workspace main agent may name another agent. Use it when a member asks you to finish "
         "setting up an agent that cannot ask for itself.",
     )
-    user_description: str = Field(
-        description="Which account you are connecting them to, in plain language for the activity "
-        "timeline."
-    )
 
 
 class RequestCredentialsInput(BaseModel):
@@ -361,35 +323,21 @@ class RequestCredentialsInput(BaseModel):
         max_length=MAX_REQUESTED_SLOTS,
         description="The slots to fill and what to ask for each.",
     )
-    user_description: str = Field(
-        description="What you need from them, in plain language for the activity timeline. Name "
-        "the service, never the secret."
-    )
 
 
 class AskUserCall(AskUserInput):
     """The `ask_user` call: the question record the terminal frame carries, plus the activity
     narration that never reaches the frame."""
 
-    user_description: str = Field(
-        description="What you are checking with them, in plain language for the activity timeline."
-    )
-
 
 class CancelSpawnInput(BaseModel):
     spawn_id: str = Field(description="The spawn ID to cancel.")
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
-    )
 
 
 class MessageSpawnInput(BaseModel):
     spawn_id: str = Field(description="The spawn ID to message.")
     message: str = Field(
         description="The follow-up message to deliver, run as the spawn's next turn."
-    )
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
     )
 
 

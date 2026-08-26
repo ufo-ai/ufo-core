@@ -75,16 +75,15 @@ from ufo.ext.surface import (
 )
 from ufo.hub import (
     Absorbed,
+    Activity,
     CostTick,
     InProcessHub,
     LiveFrame,
     Parked,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
     TextDelta,
-    ToolCall,
 )
 from ufo.loop.queue import _load_turn
 from ufo.media.artifact_url import verify_artifact_url
@@ -6266,7 +6265,7 @@ async def test_a_channel_status_follows_the_turn_pins_the_text_and_clears_at_ter
         ).scalar_one()
     task = slack._STATUS_TASKS[turn_id]
 
-    await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="Reading the repo"))
+    await hub.publish(turn_id, Activity(text="Reading the repo"))
     deadline = time.monotonic() + 5
     while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 2:
         assert time.monotonic() < deadline, "status update never reached Slack"
@@ -6279,8 +6278,7 @@ async def test_a_channel_status_follows_the_turn_pins_the_text_and_clears_at_ter
             conversation_id=uuid4(),
             profile="general_purpose",
             name="UK sports news",
-            tool="fetch_url",
-            description="Searching the fixtures",
+            activity="Searching the fixtures",
         ),
     )
     while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 3:
@@ -6405,7 +6403,7 @@ async def test_the_status_holds_whatever_prose_the_model_gave_it(
         ).scalar_one()
     status_task = slack._STATUS_TASKS[turn_id]
 
-    async def _until(status: str, frame: ToolCall) -> None:
+    async def _until(status: str, frame: Activity) -> None:
         deadline = time.monotonic() + 5
         while not any(
             json.loads(r.content)["status"] == status
@@ -6416,16 +6414,12 @@ async def test_the_status_holds_whatever_prose_the_model_gave_it(
             await asyncio.sleep(0.01)
 
     await _until(
-        slack.STATUS_WORKING_TEXT.format(tool="bash"),
-        ToolCall(tool="bash", preview="{}", description=""),
-    )
-    await _until(
         "Reading the deploy log…",
-        ToolCall(tool="bash", preview="{}", description="Reading the deploy log…"),
+        Activity(text="Reading the deploy log…"),
     )
     overlong = "Reconciling every invoice line against the ledger " * 8
     cut = f"{overlong.strip()[: slack.STATUS_DESCRIPTION_LIMIT]}…"
-    await _until(cut, ToolCall(tool="bash", preview="{}", description=overlong))
+    await _until(cut, Activity(text=overlong))
     await _finish_turn(turn_id, "hi")
     await status_task
 
@@ -6438,10 +6432,9 @@ async def test_every_status_line_stays_inside_slacks_character_limit(
     db: None, tmp_path, monkeypatch
 ) -> None:
     """Slack refuses a `loading_messages` entry of 51 characters or more, and refuses the whole call
-    with it, so a line over the limit reaches nobody. Every value the templates interpolate is
-    unbounded upstream — the model's own `user_description`, a skill name, a tool slug — so each arm
-    of the follower is driven with one too long for the limit and the string Slack is handed is
-    measured, the cut prose still carrying the ellipsis that marks it unfinished."""
+    with it, so a line over the limit reaches nobody. The follower is driven with generated prose
+    too long for the limit and the string Slack is handed is measured, the cut still carrying the
+    ellipsis that marks it unfinished."""
     workspace_id, _ = await _seed()
     monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
     recorder: list[httpx.Request] = []
@@ -6478,25 +6471,21 @@ async def test_every_status_line_stays_inside_slacks_character_limit(
 
     described = "Handing the Star City Games collector fix to a coding agent"
     cut = f"{described[: slack.STATUS_DESCRIPTION_LIMIT]}…"
-    await _until(cut, ToolCall(tool="spawn", preview="{}", description=described))
-    slug = "reconcile_every_invoice_line_against_the_ledger"
-    await _until(
-        slack.STATUS_WORKING_TEXT.format(tool=slug)[: slack.STATUS_TEXT_LIMIT],
-        ToolCall(tool=slug, preview="{}", description=""),
-    )
+    await _until(cut, Activity(text=described))
     skill = "postgres/migrations-for-the-billing-ledger"
+    loading = f"Loading {skill}."
+    loading_cut = f"{loading.rstrip('.')[: slack.STATUS_DESCRIPTION_LIMIT]}…"
     await _until(
-        slack.STATUS_SKILL_TEXT.format(skill=skill)[: slack.STATUS_TEXT_LIMIT],
-        SkillLoad(skill=skill),
+        loading_cut,
+        Activity(text=loading),
     )
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
     await task
 
     assert len(described) > SLACK_LOADING_MESSAGE_LIMIT
-    assert len(slack.STATUS_WORKING_TEXT.format(tool=slug)) > SLACK_LOADING_MESSAGE_LIMIT
-    assert len(slack.STATUS_SKILL_TEXT.format(skill=skill)) > SLACK_LOADING_MESSAGE_LIMIT
+    assert len(loading) > SLACK_LOADING_MESSAGE_LIMIT
     sent = _sent()
-    assert len(sent) > 3
+    assert len(sent) > 2
     assert all(len(status) <= SLACK_LOADING_MESSAGE_LIMIT for status in sent), sent
     assert cut in sent
     assert len(cut) == SLACK_LOADING_MESSAGE_LIMIT
@@ -6623,7 +6612,7 @@ async def test_a_refused_status_line_costs_one_update_not_the_rest_of_the_turn(
             assert time.monotonic() < deadline, (
                 f"{status!r} reached Slack {len(_attempts(status))}x, wanted {count}"
             )
-            await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description=description))
+            await hub.publish(turn_id, Activity(text=description))
             await asyncio.sleep(0.01)
 
     await _until_attempts(refused, "Reconciling the ledger", 2)
@@ -6699,7 +6688,7 @@ async def test_a_refused_admission_line_is_not_remembered_as_shown(
             "the refused admission line was remembered as shown, so the frame asking for it was "
             "swallowed as already displayed"
         )
-        await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="Thinking"))
+        await hub.publish(turn_id, Activity(text="Thinking"))
         await asyncio.sleep(0.01)
     await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done", text="hi")))
     await task
@@ -6767,9 +6756,7 @@ async def test_a_quiet_stretch_with_nothing_shown_re_stamps_nothing(
     deadline = time.monotonic() + 5
     while filing not in _sent():
         assert time.monotonic() < deadline, "the frame's own line never reached Slack"
-        await hub.publish(
-            turn_id, ToolCall(tool="bash", preview="{}", description="Filing the result")
-        )
+        await hub.publish(turn_id, Activity(text="Filing the result"))
         await asyncio.sleep(0.01)
     assert _sent()[:2] == [slack.STATUS_THINKING_TEXT, filing], (
         "a quiet stretch with nothing shown wrote to the thread anyway"
@@ -6913,7 +6900,7 @@ async def test_a_cancelled_follower_leaves_the_status_standing(
         ).scalar_one()
     task = slack._STATUS_TASKS.pop(turn_id)
 
-    await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="Reading the repo"))
+    await hub.publish(turn_id, Activity(text="Reading the repo"))
     working = slack.STATUS_DESCRIBED_TEXT.format(description="Reading the repo")
     deadline = time.monotonic() + 5
     while not any(
@@ -6966,7 +6953,7 @@ async def test_a_parked_turn_clears_the_status(db: None, tmp_path, monkeypatch) 
             )
         ).scalar_one()
     task = slack._STATUS_TASKS[turn_id]
-    await hub.publish(turn_id, ToolCall(tool="bash", preview="{}"))
+    await hub.publish(turn_id, Activity(text="Running the next step."))
     deadline = time.monotonic() + 5
     while len(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)) < 2:
         assert time.monotonic() < deadline, "the status task never attached to the tail"
@@ -7045,9 +7032,7 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
             == slack.STATUS_DESCRIBED_TEXT.format(description="Priming the tail")
             for r in _requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)
         ):
-            await hub.publish(
-                first_id, ToolCall(tool="primer", preview="{}", description="Priming the tail")
-            )
+            await hub.publish(first_id, Activity(text="Priming the tail"))
             assert time.monotonic() < deadline, "the first turn's tail never started draining"
             await asyncio.sleep(0.01)
         async with workspace_tx() as connection:
@@ -7080,7 +7065,7 @@ async def test_newest_turn_owns_the_thread_status(db: None, tmp_path, monkeypatc
     second_task = slack._STATUS_TASKS[turns["C1:101.0"]]
     await hub.publish(
         turns["C1:101.0"],
-        ToolCall(tool="calendar", preview="{}", description="Checking the calendar"),
+        Activity(text="Checking the calendar"),
     )
     deadline = time.monotonic() + 5
     while not any(
@@ -7156,7 +7141,7 @@ async def test_the_writer_claim_returns_to_the_turn_still_running(
         while applying not in _sent():
             await hub.publish(
                 long_id,
-                ToolCall(tool="bash", preview="{}", description="applying the migration"),
+                Activity(text="applying the migration"),
             )
             assert time.monotonic() < deadline, "the long turn's tail never started draining"
             await asyncio.sleep(0.01)
@@ -7183,9 +7168,7 @@ async def test_the_writer_claim_returns_to_the_turn_still_running(
     writer = (workspace_id, "C1", "100.5")
     assert slack._THREAD_WRITERS[writer] == short_id
 
-    await hub.publish(
-        short_id, ToolCall(tool="read", preview="{}", description="reading the changelog")
-    )
+    await hub.publish(short_id, Activity(text="reading the changelog"))
     await _await_status(
         slack.STATUS_DESCRIBED_TEXT.format(description="reading the changelog"),
         "the newer turn never took the thread over",
@@ -7196,7 +7179,7 @@ async def test_the_writer_claim_returns_to_the_turn_still_running(
     assert slack._THREAD_WRITERS[writer] == long_id
     assert slack.STATUS_CLEAR_TEXT not in _sent()
 
-    await hub.publish(long_id, ToolCall(tool="bash", preview="{}", description="running the suite"))
+    await hub.publish(long_id, Activity(text="running the suite"))
     await _await_status(
         slack.STATUS_DESCRIBED_TEXT.format(description="running the suite"),
         "the long turn never got the thread back",
@@ -7266,10 +7249,8 @@ def test_a_progress_post_keeps_only_the_latest_step() -> None:
     activity = slack.TurnActivity()
     activity.stream("Checking whether the migration already applied ")
     activity.stream("before rerunning it.")
-    activity.tool("bash", "inspecting the alembic version table")
-    activity.tool("bash", "")
-    activity.tool("read_file", "")
-    activity.skill("postgres/migrations")
+    activity.update("inspecting the alembic version table")
+    activity.update("loading the `postgres/migrations` skill")
 
     text = activity.report(725.0)
 
@@ -7288,22 +7269,16 @@ def test_a_progress_post_keeps_only_the_latest_step() -> None:
 
 
 def test_a_progress_post_names_the_work_never_a_tool() -> None:
-    """Nothing a member reads in a progress post is an internal identifier. A described call is
-    reported in the model's words; a call that described nothing is named by its slug read as words,
-    which a connector's shouted name needs most; and no line carries a slug verbatim, a slug in
-    backticks, or a per-tool count."""
+    """Nothing a member reads in a progress post is an internal identifier."""
     activity = slack.TurnActivity()
-    activity.tool("bash", "Reading the deploy log")
+    activity.update("Reading the deploy log")
     assert activity.current_step() == "Reading the deploy log"
-    activity.tool("GITHUB_LIST_PULL_REQUESTS", "")
-    assert activity.current_step() == "github list pull requests"
-    activity.tool("read-file", "   ")
-    activity.tool("bash", "Restarting the worker")
+    activity.update("Restarting the worker")
 
     text = activity.report(200.0)
 
     assert text == "Restarting the worker · 3m in"
-    assert "GITHUB_LIST_PULL_REQUESTS" not in text
+    assert "bash" not in text
     assert "`" not in text
     assert not re.search(r"x\s?\d", text)
 
@@ -7321,7 +7296,7 @@ def test_repeated_progress_posts_keep_only_the_latest_step() -> None:
         "Formatting the diff",
         "Pushing the branch",
     ):
-        activity.tool("bash", description)
+        activity.update(description)
 
     assert activity.report(1_200.0) == "Pushing the branch · 20m in"
     assert activity.report(2_400.0) == "Pushing the branch · 40m in"
@@ -7332,7 +7307,7 @@ def test_a_progress_post_bounds_the_model_supplied_text() -> None:
     activity = slack.TurnActivity()
     activity.stream("a" * 5_000)
     for index in range(6):
-        activity.tool(f"tool{index}", f"{index}" * 5_000)
+        activity.update(f"{index}" * 5_000)
 
     text = activity.report(60.0)
 
@@ -7342,15 +7317,15 @@ def test_a_progress_post_bounds_the_model_supplied_text() -> None:
 
 def test_a_progress_step_is_one_bounded_line() -> None:
     activity = slack.TurnActivity()
-    activity.tool("bash", "Ran migrations\nwaited; for the lock")
-    activity.tool("read_file", "Checking the schema")
+    activity.update("Ran migrations\nwaited; for the lock")
+    activity.update("Checking the schema")
 
     assert activity.report(60.0) == "Checking the schema · 1m in"
 
 
 def test_a_single_progress_call_is_not_repeated_below_the_current_step() -> None:
     activity = slack.TurnActivity()
-    activity.tool("bash", "applying the migration")
+    activity.update("applying the migration")
 
     assert activity.report(60.0) == "applying the migration · 1m in"
 
@@ -7360,7 +7335,7 @@ def test_every_shape_a_tool_free_checkpoint_can_render() -> None:
     assert slack.TurnActivity().report(300.0) is None
 
     stalled = slack.TurnActivity()
-    stalled.tool("bash", "running the integration suite")
+    stalled.update("running the integration suite")
 
     assert stalled.report(4_500.0) == "running the integration suite · 1h 15m in"
 
@@ -7478,9 +7453,7 @@ async def test_a_long_turn_posts_interim_progress_in_thread_without_terminalizin
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, TextDelta(text="Rerunning the migration against a clean database."))
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="applying the migration"))
     deadline = time.monotonic() + 10
     while len([p for p in _progress_posts(recorder) if "applying the migration" in p["text"]]) < 2:
         assert time.monotonic() < deadline, "the turn's progress never reached the thread twice"
@@ -7598,9 +7571,7 @@ async def test_a_progress_post_re_stamps_the_status_it_blanked(
     await _arm_followers(workspace_id, turn_id, hub)
     progress_task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="applying the migration"))
     deadline = time.monotonic() + 10
     while not _progress_posts(recorder) or not _statuses_after_the_first_post(recorder):
         assert time.monotonic() < deadline, "the progress post never re-stamped the status"
@@ -7645,7 +7616,7 @@ async def test_a_turn_shorter_than_the_first_interval_posts_no_progress(
     await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="a quick look"))
+    await hub.publish(turn_id, Activity(text="a quick look"))
     await _finish_turn(turn_id, "hi")
     await asyncio.wait_for(task, timeout=10)
 
@@ -8092,7 +8063,7 @@ async def test_a_reply_to_a_still_running_turn_does_not_double_its_progress(
 
     deadline = time.monotonic() + 10
     for step in ("bash", "grep"):
-        await hub.publish(turn_id, ToolCall(tool=step, preview="{}", description=f"{step} step"))
+        await hub.publish(turn_id, Activity(text=f"{step} step"))
         while not [
             post
             for post in _progress_posts(recorder)
@@ -8175,9 +8146,7 @@ async def test_a_cost_tick_is_absorbed_without_reporting_anything(
 
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)
 
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="applying the migration"))
     while not _progress_posts(recorder):
         assert time.monotonic() < deadline, "the tool call after the ticks never reported"
         await asyncio.sleep(0.01)
@@ -8258,9 +8227,7 @@ async def test_a_turns_first_progress_post_carries_the_footer_and_no_later_one_r
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, CostTick(cost_micro_usd=1_234, tokens=567))
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="applying the migration"))
     deadline = time.monotonic() + 10
     while len(_progress_posts(recorder)) < 3:
         assert time.monotonic() < deadline, "the turn never reached a third checkpoint"
@@ -8291,7 +8258,7 @@ async def test_an_unpriced_first_progress_post_carries_the_footers_links_alone(
     await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(turn_id, SkillLoad(skill="postgres/migrations"))
+    await hub.publish(turn_id, Activity(text="Loading database guidance."))
     deadline = time.monotonic() + 10
     while not _progress_posts(recorder):
         assert time.monotonic() < deadline, "the loading skill never reached a checkpoint"
@@ -8327,7 +8294,7 @@ async def test_the_first_posts_footer_survives_slow_arming(db: None, tmp_path, m
     await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(turn_id, SkillLoad(skill="postgres/migrations"))
+    await hub.publish(turn_id, Activity(text="Loading database guidance."))
     deadline = time.monotonic() + 10
     while not _progress_posts(recorder):
         assert time.monotonic() < deadline, "the delayed reporter never reached a checkpoint"
@@ -8374,9 +8341,7 @@ async def test_a_first_progress_posts_footer_withholds_the_operator_fields_the_r
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, CostTick(cost_micro_usd=1_234, tokens=567))
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="applying the migration"))
     deadline = time.monotonic() + 10
     while not _progress_posts(recorder):
         assert time.monotonic() < deadline, "the tool call never reached a checkpoint"
@@ -8416,12 +8381,10 @@ async def test_a_loading_skill_reaches_the_progress_post(db: None, tmp_path, mon
     await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(turn_id, SkillLoad(skill="postgres/migrations"))
+    await hub.publish(turn_id, Activity(text="Loading database guidance."))
     deadline = time.monotonic() + 10
     while not [
-        p
-        for p in _progress_posts(recorder)
-        if "loading the `postgres/migrations` skill" in str(p["text"])
+        p for p in _progress_posts(recorder) if "Loading database guidance." in str(p["text"])
     ]:
         assert time.monotonic() < deadline, "a loading skill never reached the thread"
         await asyncio.sleep(0.01)
@@ -8531,9 +8494,7 @@ async def test_a_checkpoint_before_any_activity_skips_instead_of_posting(
         for record in caplog.records
     )
 
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="applying the migration"))
     while not [r for r in caplog.records if r.message == "slack.thread_progress.posted"]:
         assert time.monotonic() < deadline, "the first real signal never reached the thread"
         await asyncio.sleep(0.01)
@@ -8573,7 +8534,7 @@ async def test_a_checkpoint_that_comes_due_after_the_turn_committed_posts_nothin
             await _finish_turn(turn_id, "migrated")
             await hub.publish(
                 turn_id,
-                ToolCall(tool="bash", preview="{}", description="still working, apparently"),
+                Activity(text="still working, apparently"),
             )
             committed.set()
         return response
@@ -8601,9 +8562,7 @@ async def test_a_checkpoint_that_comes_due_after_the_turn_committed_posts_nothin
             ).scalar_one()
         await _arm_followers(workspace_id, turn_id, hub)
         task = slack._PROGRESS_TASKS[turn_id]
-        await hub.publish(
-            turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-        )
+        await hub.publish(turn_id, Activity(text="applying the migration"))
         await asyncio.wait_for(task, timeout=10)
     assert committed.is_set(), "the reporter never posted while the turn ran"
     assert posts() == 1, "a checkpoint posted after the turn had committed"
@@ -8801,9 +8760,7 @@ async def test_a_submit_admitted_turn_posts_progress_in_the_submitted_thread(
     await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="checking the release")
-    )
+    await hub.publish(turn_id, Activity(text="checking the release"))
     deadline = time.monotonic() + 10
     while not [p for p in _progress_posts(recorder) if "checking the release" in str(p["text"])]:
         assert time.monotonic() < deadline, "the clicked turn's progress never reached the thread"
@@ -8863,9 +8820,7 @@ async def test_a_rejected_progress_post_costs_an_update_and_not_the_reply(
     await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="applying the migration"))
     deadline = time.monotonic() + 10
     while not [r for r in caplog.records if r.message == "slack.thread_progress.failed"]:
         assert time.monotonic() < deadline, "the rejected post never reached the event log"
@@ -9038,9 +8993,7 @@ async def test_a_resumed_execution_reports_the_wait_from_the_turns_own_start(
     await _arm_followers(workspace_id, turn_id, hub, age=timedelta(hours=4))
     task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="applying the migration"))
     deadline = time.monotonic() + 10
     while not _progress_posts(recorder):
         assert time.monotonic() < deadline, "the resumed turn never reported"
@@ -9118,9 +9071,7 @@ async def test_a_recovered_turn_arms_a_new_status_follower(
 
     recovered = slack._STATUS_TASKS[turn_id]
     assert recovered is not dying
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview="{}", description="Applying the migration")
-    )
+    await hub.publish(turn_id, Activity(text="Applying the migration"))
     working = slack.STATUS_DESCRIBED_TEXT.format(description="Applying the migration")
     deadline = time.monotonic() + 10
     while working not in _statuses(recorder):
@@ -9227,7 +9178,7 @@ async def test_a_dm_reporter_posts_in_the_thread_the_reply_will_land_in(
     await _arm_followers(workspace_id, turn_id, hub)
     task = slack._PROGRESS_TASKS[turn_id]
 
-    await hub.publish(turn_id, ToolCall(tool="bash", preview="{}", description="migrating"))
+    await hub.publish(turn_id, Activity(text="migrating"))
     deadline = time.monotonic() + 10
     while not _progress_posts(recorder):
         assert time.monotonic() < deadline, "the DM turn never reported"

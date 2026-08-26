@@ -62,9 +62,6 @@ class PlanObjectiveInput(BaseModel):
         "back to failing when someone else's work lands. A step with no accepts closes on your "
         "word alone and guarantees nothing.",
     )
-    user_description: str = Field(
-        description="What you are planning, in plain language for the activity timeline."
-    )
 
 
 class RecordStepInput(BaseModel):
@@ -80,9 +77,6 @@ class RecordStepInput(BaseModel):
         max_length=2_000,
         description="What you actually did or what is blocking, naming the state you changed.",
     )
-    user_description: str = Field(
-        description="What you are recording, in plain language for the activity timeline."
-    )
 
 
 class RunIndependentStepsInput(BaseModel):
@@ -91,17 +85,11 @@ class RunIndependentStepsInput(BaseModel):
     profile: str = Field(
         description="The subagent profile each step is delegated to, e.g. 'coding'."
     )
-    user_description: str = Field(
-        description="What you are dispatching, in plain language for the activity timeline."
-    )
 
 
 class ReadObjectiveInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(description="The objective's name.")
-    user_description: str = Field(
-        description="What you are checking, in plain language for the activity timeline."
-    )
 
 
 def _require_ext(ctx: ToolContext) -> ExtensionContext:

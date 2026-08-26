@@ -229,7 +229,6 @@ async def test_browser_task_creates_one_run_and_returns_its_result_and_files(
                 url="https://shop.test",
                 task="read the price",
                 task_name="Price check",
-                user_description="checking a price",
             ),
         )
 
@@ -261,9 +260,7 @@ async def test_the_api_key_never_reaches_the_presigned_storage_host(
     with ws(workspace_id):
         await _tool("browser_task").handler(
             _context(_Sandbox(), tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
     (download,) = [r for r in api.requests if r.url.host == "files.browser-use.test"]
     assert browser_use.API_KEY_HEADER not in download.headers
@@ -284,7 +281,6 @@ async def test_browser_task_cancels_the_run_when_its_timeout_expires(
                 task="t",
                 task_name="Wedged",
                 timeout_minutes=0,
-                user_description="d",
             ),
         )
     assert api.sent("POST", f"/api/v4/runs/{RUN_ID}/cancel")
@@ -336,7 +332,6 @@ async def test_a_model_supplied_path_cannot_break_out_of_the_cat_command(
                 entities_file=evil,
                 prompt_template="visit {entity}",
                 output_schema_file="schema.json",
-                user_description="d",
             ),
         )
     assert sandbox.commands[0] == f"cat {shlex.quote(evil)}"
@@ -355,9 +350,7 @@ async def test_a_vendor_side_cancellation_keeps_its_output_and_is_not_called_a_t
     with ws(workspace_id):
         result = await _tool("browser_task").handler(
             _context(_Sandbox(), tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="Dashboard stop", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="Dashboard stop"),
         )
     assert not api.sent("POST", f"/api/v4/runs/{RUN_ID}/cancel")
     assert result.is_error
@@ -374,9 +367,7 @@ async def test_a_failed_run_surfaces_its_error_text_as_an_error(
     with ws(workspace_id):
         result = await _tool("browser_task").handler(
             _context(_Sandbox(), tmp_path),
-            BrowserTaskInput(
-                url="https://blocked.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://blocked.test", task="t", task_name="n"),
         )
     assert result.is_error
     assert json.loads(result.content[0].text)["result"] == "site blocked the agent"
@@ -397,9 +388,7 @@ async def test_an_output_file_past_the_size_bound_is_reported_not_written(
     with ws(workspace_id):
         result = await _tool("browser_task").handler(
             _context(sandbox, tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
     assert list(sandbox.writes) == ["/workspace/small.csv"]
     payload = json.loads(result.content[0].text)
@@ -420,9 +409,7 @@ async def test_a_listing_the_count_bound_cut_short_says_so(
     with ws(workspace_id):
         result = await _tool("browser_task").handler(
             _context(_Sandbox(), tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
     assert json.loads(result.content[0].text)["more_files_exist"] is True
 
@@ -440,9 +427,7 @@ async def test_an_output_path_escaping_the_workspace_is_a_fault(
     ):
         await _tool("browser_task").handler(
             _context(sandbox, tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
     assert not sandbox.writes
 
@@ -477,9 +462,7 @@ async def test_an_output_path_is_not_written_through_a_planted_symlink(
     with ws(workspace_id), pytest.raises(ContainmentError):
         await _tool("browser_task").handler(
             _context(session, tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
 
     assert list(outside.iterdir()) == []
@@ -495,9 +478,7 @@ async def test_a_failed_output_download_fails_loud_rather_than_writing_an_error_
     with ws(workspace_id), pytest.raises(browser_use.BrowserUseError, match="403"):
         await _tool("browser_task").handler(
             _context(sandbox, tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
     assert not sandbox.writes
 
@@ -525,9 +506,7 @@ async def test_a_malformed_file_listing_fails_loud(
     with ws(workspace_id), pytest.raises(browser_use.BrowserUseError, match=expected):
         await _tool("browser_task").handler(
             _context(_Sandbox(), tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
 
 
@@ -551,9 +530,7 @@ async def test_a_create_response_missing_a_field_faults_as_a_browser_use_error(
     with ws(workspace_id), pytest.raises(browser_use.BrowserUseError, match=expected):
         await _tool("browser_task").handler(
             _context(_Sandbox(), tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
 
 
@@ -567,9 +544,7 @@ async def test_a_2xx_answer_that_is_not_json_fails_loud(
     with ws(workspace_id), pytest.raises(browser_use.BrowserUseError, match="non-JSON body"):
         await _tool("browser_task").handler(
             _context(_Sandbox(), tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
 
 
@@ -581,9 +556,7 @@ async def test_a_non_2xx_answer_fails_loud_with_its_status_and_body(
     with ws(workspace_id), pytest.raises(browser_use.BrowserUseError, match="402"):
         await _tool("browser_task").handler(
             _context(_Sandbox(), tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
 
 
@@ -602,7 +575,6 @@ async def test_a_task_over_the_send_bound_is_refused_rather_than_truncated(
                 url="https://shop.test",
                 task="x" * (browser_use.MAX_TASK_CHARS + 1),
                 task_name="n",
-                user_description="d",
             ),
         )
     assert not api.sent("POST", "/api/v4/runs")
@@ -624,7 +596,6 @@ async def test_wide_browse_runs_each_entity_on_the_batch_model_and_collects_rows
                 entities_file="entities.txt",
                 prompt_template="visit {entity}",
                 output_schema_file="schema.json",
-                user_description="d",
             ),
         )
 
@@ -662,7 +633,6 @@ async def test_one_failing_entity_does_not_discard_its_siblings_paid_results(
                 entities_file="entities.txt",
                 prompt_template="visit {entity}",
                 output_schema_file="schema.json",
-                user_description="d",
             ),
         )
     rows = {
@@ -692,7 +662,6 @@ async def test_wide_browse_reattaches_a_recorded_run_instead_of_paying_twice(
                 entities_file="entities.txt",
                 prompt_template="visit {entity}",
                 output_schema_file="schema.json",
-                user_description="d",
             ),
         )
     assert not api.sent("POST", "/api/v4/runs")
@@ -715,7 +684,6 @@ async def test_a_keyed_browser_task_reattaches_the_run_its_first_attempt_bought(
                 url="https://shop.test",
                 task="read the price",
                 task_name="Price check",
-                user_description="checking a price",
             ),
         )
     assert not api.sent("POST", "/api/v4/runs")
@@ -745,7 +713,6 @@ async def test_a_reattached_run_its_earlier_attempt_cancelled_reports_the_timeou
                 url="https://shop.test",
                 task="read the price",
                 task_name="Price check",
-                user_description="checking a price",
             ),
         )
     assert not api.sent("POST", "/api/v4/runs")
@@ -768,7 +735,6 @@ async def test_a_reattached_run_the_vendor_ended_keeps_its_output(
                 url="https://shop.test",
                 task="read the price",
                 task_name="Price check",
-                user_description="checking a price",
             ),
         )
     assert not api.sent("POST", "/api/v4/runs")
@@ -792,7 +758,6 @@ async def test_a_keyed_timeout_cancel_marks_the_recorded_run(
                 task="t",
                 task_name="Wedged",
                 timeout_minutes=0,
-                user_description="d",
             ),
         )
         recorded = await ctx.ext.store.get("run/idem")
@@ -817,7 +782,6 @@ async def test_the_mark_is_durable_before_the_cancel_is_attempted(
                     task="t",
                     task_name="Wedged",
                     timeout_minutes=0,
-                    user_description="d",
                 ),
             )
         recorded = await ctx.ext.store.get("run/idem")
@@ -841,7 +805,6 @@ async def test_a_keyed_run_records_its_handle_so_a_later_attempt_can_find_it(
                 entities_file="entities.txt",
                 prompt_template="visit {entity}",
                 output_schema_file="schema.json",
-                user_description="d",
             ),
         )
         recorded = await ctx.ext.store.get("run/idem/a.test")
@@ -864,7 +827,6 @@ async def test_an_unreadable_schema_file_fails_loud_like_an_unreadable_entities_
                 entities_file="entities.txt",
                 prompt_template="visit {entity}",
                 output_schema_file="missing.json",
-                user_description="d",
             ),
         )
     assert not api.sent("POST", "/api/v4/runs")
@@ -882,9 +844,7 @@ async def test_a_non_https_output_url_is_refused_before_it_is_fetched(
     with ws(workspace_id), pytest.raises(browser_use.BrowserUseError, match="not https"):
         await _tool("browser_task").handler(
             _context(sandbox, tmp_path),
-            BrowserTaskInput(
-                url="https://shop.test", task="t", task_name="n", user_description="d"
-            ),
+            BrowserTaskInput(url="https://shop.test", task="t", task_name="n"),
         )
     assert not sandbox.writes
     assert not [r for r in api.requests if r.url.host == "169.254.169.254"]

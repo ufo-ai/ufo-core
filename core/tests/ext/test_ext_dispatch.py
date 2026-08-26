@@ -37,10 +37,18 @@ from ufo.schema.records import Agent, Turn, Usage
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 EXTENSION = "sample"
+
+
+class _ActivityModel:
+    model = "gpt-5.6-luna"
+
+    async def complete(self, _request: ModelRequest) -> str:
+        return "Working on the request."
 
 
 async def _identify_workspace(request: object, auth: object) -> None:
@@ -248,6 +256,7 @@ def _engine(
         byok=False,
         system_prompt=rendered_prompt("p"),
         model=model,
+        activity_summarizer=ActivitySummarizer(_ActivityModel()),
         provider="anthropic",
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
         compaction=Compaction(

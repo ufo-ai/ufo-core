@@ -187,9 +187,7 @@ def _tool_ctx(
 
 async def _run(name: str, ctx: ToolContext, **args: object) -> ToolResult:
     tool = MEMORY_TOOLS[name]
-    return await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    return await tool.handler(ctx, tool.input_model.model_validate({**args}))
 
 
 async def test_memory_update_then_search_recalls_in_a_new_conversation(
@@ -254,9 +252,7 @@ async def test_user_prompt_submit_hook_injects_and_observes_a_recalled_fact(
                 artifact_token_secret="",
                 ext=ext,
             ),
-            memory.MemoryUpdateInput(
-                body="the vault code is 4821", user_description=TOOL_NARRATION
-            ),
+            memory.MemoryUpdateInput(body="the vault code is 4821"),
         )
         await _indexer(embed).run()
         async with workspace_tx() as connection:
@@ -416,12 +412,9 @@ def test_memory_update_offers_the_item_classes_an_agent_records() -> None:
         memory.MemoryUpdateInput(
             body="a ledger of the whole sweep",
             item_class="semantic",
-            user_description=TOOL_NARRATION,
         )
     assert refused.value.errors()[0]["loc"] == ("item_class",)
-    recorded = memory.MemoryUpdateInput(
-        body="Acme Corp — Moved the launch to March.", user_description=TOOL_NARRATION
-    )
+    recorded = memory.MemoryUpdateInput(body="Acme Corp — Moved the launch to March.")
     assert recorded.item_class == "fact"
 
 
@@ -1239,9 +1232,7 @@ async def test_the_memory_kind_filters_and_orders_on_its_declared_fields(
         tool = next(tool for tool in verbs.tools() if tool.name == "object_list")
         result = await tool.handler(
             alice_ctx,
-            tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "kind": MEMORY_KIND, **args}
-            ),
+            tool.input_model.model_validate({"kind": MEMORY_KIND, **args}),
         )
         assert result.is_error is False
         return json.loads(result.content[0].text)["objects"]

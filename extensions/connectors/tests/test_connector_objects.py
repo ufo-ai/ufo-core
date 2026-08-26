@@ -184,9 +184,7 @@ def _object_tool(name: str) -> ToolDef:
 
 
 async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     assert result.is_error is False
     return result.content[0].text
 
@@ -441,7 +439,6 @@ async def test_connect_stays_the_only_create_path(
     apply_tool = _object_tool("object_apply")
     args = apply_tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": yaml.safe_dump(
                 {
                     "kind": kind,
@@ -518,7 +515,6 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
                 ctx,
                 apply_tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": yaml.safe_dump(
                             {
                                 "kind": CONNECTOR_GRANT_KIND,
@@ -545,7 +541,6 @@ async def test_object_verbs_touch_only_the_turn_agents_binding(db: None) -> None
                 ctx,
                 delete_tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "kind": CONNECTOR_GRANT_KIND,
                         "name": GMAIL_ALICE_NAME,
                     }
@@ -618,7 +613,6 @@ async def test_cross_agent_attach_admits_the_owner_or_a_shared_connection_only(d
         )
         args = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _share_manifest("alice@example.com", False),
                 "agent": "pr-babysitter",
             }
@@ -686,7 +680,6 @@ async def test_only_the_main_agent_attaches_for_another_agent(db: None) -> None:
         )
         args = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _share_manifest("alice@example.com", False),
                 "agent": "pr-babysitter",
             }
@@ -1126,7 +1119,6 @@ async def test_revoke_admits_the_grantor_and_the_owner_only(db: None) -> None:
         )
         args = delete_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "kind": CONNECTOR_GRANT_KIND,
                 "name": GMAIL_ALICE_NAME,
             }
@@ -1214,7 +1206,6 @@ async def test_only_the_grantor_may_widen_and_an_admin_may_narrow(db: None) -> N
         )
         widen = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _share_manifest("alice@example.com", True),
             }
         )
@@ -1228,7 +1219,6 @@ async def test_only_the_grantor_may_widen_and_an_admin_may_narrow(db: None) -> N
         )
         args = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _share_manifest("alice@example.com", False),
             }
         )
@@ -1252,7 +1242,6 @@ async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> N
         )
         different_account = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _share_manifest("bob@example.com", False),
             }
         )
@@ -1263,7 +1252,6 @@ async def test_apply_still_refuses_everything_but_the_shared_flip(db: None) -> N
 
         create = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _share_manifest("bob@example.com", False, name=GMAIL_BOB_NAME),
             }
         )
@@ -1332,7 +1320,6 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
                 stranger_ctx,
                 get_tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "kind": CONNECTOR_GRANT_KIND,
                         "name": private_name,
                     }
@@ -1432,7 +1419,6 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
                 speakerless,
                 apply_tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _share_manifest("alice@example.com", True),
                     }
                 ),
@@ -1442,7 +1428,6 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
                 speakerless,
                 delete_tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "kind": CONNECTOR_GRANT_KIND,
                         "name": GMAIL_ALICE_NAME,
                     }

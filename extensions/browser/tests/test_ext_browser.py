@@ -5,7 +5,7 @@ the selected cdp provider and cached against the turn. Two seams are proved here
 Chrome. The inversion: a fake `CdpProvider` on the context is leased exactly once per turn, the
 built surface is cached across tool calls, and its `aclose` (which releases the lease) is registered
 on `ctx.cleanup` for the loop to drain. The marshalling: the tools' own params shape, dropped
-`user_description`, blank-tab default, and workspace writes, asserted by seeding a recording
+blank-tab defaults and workspace writes, asserted by seeding a recording
 stand-in into the per-turn cache so `_browser` returns it — a dependency stand-in, never the thing
 asserted. The BUA engine keeps its own live-CDP end-to-end proof in test_browser_engine.py."""
 
@@ -617,9 +617,7 @@ def _recording_context(
 
 async def _run(name: str, ctx: ToolContext, **args: object) -> object:
     tool = next(tool for tool in BROWSER_TOOLS if tool.name == name)
-    return await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    return await tool.handler(ctx, tool.input_model.model_validate({**args}))
 
 
 def test_manifest_declares_the_browser_tools_and_profile() -> None:
@@ -696,13 +694,13 @@ async def test_the_surface_is_built_once_per_turn_leased_and_released_on_cleanup
     ctx = _context(WritesCarrier(), tmp_path, cdp_provider=provider)
 
     with pytest.raises(_StopAtConnect):
-        await _run("navigate", ctx, url="https://x.test", user_description="open")
+        await _run("navigate", ctx, url="https://x.test")
     surface = browser_tools._TURN_SURFACES[ctx.cleanup]
     assert isinstance(surface, BuaSurface)
     assert len(provider.leases) == 1
 
     with pytest.raises(_StopAtConnect):
-        await _run("read_page", ctx, user_description="inspect")
+        await _run("read_page", ctx)
     assert browser_tools._TURN_SURFACES[ctx.cleanup] is surface
     assert len(provider.leases) == 1
 
@@ -718,23 +716,22 @@ async def test_the_surface_leases_with_the_turns_sandbox(tmp_path: Path) -> None
     provider = FakeCdpProvider()
     ctx = _context(WritesCarrier(), tmp_path, cdp_provider=provider)
     with pytest.raises(_StopAtConnect):
-        await _run("navigate", ctx, url="https://x.test", user_description="open")
+        await _run("navigate", ctx, url="https://x.test")
     assert provider.leased_sandboxes == [ctx.sandbox]
 
 
 async def test_a_tool_without_a_cdp_provider_fails_loud(tmp_path: Path) -> None:
     ctx = _context(WritesCarrier(), tmp_path, cdp_provider=None)
     with pytest.raises(RuntimeError, match="no cdp provider is configured"):
-        await _run("navigate", ctx, url="x", user_description="")
+        await _run("navigate", ctx, url="x")
 
 
-async def test_navigate_marshals_params_and_drops_user_description(tmp_path: Path) -> None:
+async def test_navigate_marshals_params(tmp_path: Path) -> None:
     surface = RecordingSurface(reply={"tab_id": 1, "url": "https://example.com/"})
     result = await _run(
         "navigate",
         _recording_context(surface, WritesCarrier(), tmp_path),
         url="example.com",
-        user_description="open",
         tab_id=2,
     )
     assert surface.calls[-1] == ("navigate", {"url": "example.com", "tab_id": 2})
@@ -753,17 +750,15 @@ async def test_tabs_create_defaults_to_blank(tmp_path: Path) -> None:
     await _run(
         "tabs_create",
         _recording_context(surface, WritesCarrier(), tmp_path),
-        user_description="new",
     )
     assert surface.calls[-1] == ("tabs_create", {"url": "about:blank"})
 
 
-async def test_read_page_excludes_user_description_keeps_filter(tmp_path: Path) -> None:
+async def test_read_page_keeps_filter(tmp_path: Path) -> None:
     surface = RecordingSurface(reply={"tree": "root"})
     await _run(
         "read_page",
         _recording_context(surface, WritesCarrier(), tmp_path),
-        user_description="inspect",
         depth=2,
         filter="interactive",
     )
@@ -801,7 +796,6 @@ async def test_computer_saves_screenshot_into_the_workspace(tmp_path: Path) -> N
         "computer",
         _recording_context(surface, carrier, tmp_path),
         actions=[{"action": "screenshot"}],
-        user_description="shoot",
         save_to_workspace=True,
     )
     assert surface.calls[-1][0] == "computer"
@@ -821,7 +815,6 @@ async def test_computer_without_save_writes_nothing(tmp_path: Path) -> None:
         "computer",
         _recording_context(surface, carrier, tmp_path),
         actions=[{"action": "left_click", "coordinate": [1, 2]}],
-        user_description="click",
     )
     assert carrier.writes == []
     assert surface.calls[-1] == (
@@ -839,9 +832,7 @@ async def test_wait_for_download_writes_the_file_and_reports_its_path(tmp_path: 
             "size": 9,
         }
     )
-    result = await _run(
-        "wait_for_download", _recording_context(surface, carrier, tmp_path), user_description="dl"
-    )
+    result = await _run("wait_for_download", _recording_context(surface, carrier, tmp_path))
     assert ("/workspace/downloads/report.pdf", b"pdf-bytes") in carrier.writes
     assert json.loads(result.content[0].text) == {
         "file_path": "downloads/report.pdf",

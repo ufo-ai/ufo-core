@@ -81,7 +81,6 @@ async def test_a_report_names_the_workspace_and_links_to_the_turn_that_made_it(
             ctx,
             ReportProblemInput(
                 origin="fault",
-                user_description="reporting the broken Gmail connection",
                 symptom="the gmail connection returns 401 on every call",
                 next_action="reconnect the account or check the broker's token refresh",
                 object_ref="connection/gmail",
@@ -112,7 +111,6 @@ async def test_a_member_request_reports_under_its_own_origin(
             _context(workspace_id, tmp_path),
             ReportProblemInput(
                 origin="member_request",
-                user_description="reporting the empty daily brief",
                 symptom="the daily brief has been empty for three days",
                 next_action="read the brief job's last three runs",
             ),
@@ -134,7 +132,6 @@ async def test_a_deploy_that_publishes_no_base_url_reports_the_ids_alone(
             ctx,
             ReportProblemInput(
                 origin="fault",
-                user_description="reporting the empty Slack token slot",
                 symptom="the slack_bot_token slot is empty",
                 next_action="ask the workspace admin to refill the slot",
             ),
@@ -153,7 +150,6 @@ def test_an_error_class_carries_neither_a_dump_nor_a_url() -> None:
         with pytest.raises(ValidationError):
             ReportProblemInput(
                 origin="fault",
-                user_description="reporting a failing stream",
                 symptom="a stream fails on every run",
                 next_action="read the stream's last run",
                 error_class=over_bound,
@@ -168,4 +164,4 @@ def test_the_manifest_declares_the_tool_and_its_two_origins() -> None:
     properties = tool.input_model.model_json_schema()["properties"]
     assert properties["origin"]["enum"] == ["fault", "member_request"]
     assert set(properties) >= {"symptom", "next_action", "object_ref", "error_class"}
-    assert tool.input_model.model_fields["user_description"].is_required()
+    assert "user_description" not in tool.input_model.model_fields

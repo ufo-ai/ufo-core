@@ -26,7 +26,7 @@ from redis.exceptions import RedisError
 from ufo_ext_redis_hub.stream_hub import STREAM_PREFIX, RedisStreamHub
 from ufo_testsupport.plugin import integration_dependency_available
 
-from ufo.hub import CostTick, LiveFrame, Parked, SkillLoad, Terminal, ToolCall
+from ufo.hub import Activity, CostTick, LiveFrame, Parked, Terminal
 from ufo.models.interface import TextDelta
 from ufo.schema.records import TerminalFrame
 
@@ -41,8 +41,7 @@ FRAMES: tuple[LiveFrame, ...] = (
     Terminal(frame=TerminalFrame(status="done", text="answer", model="claude-opus-4-8")),
     Parked(message="over a spend cap"),
     CostTick(cost_micro_usd=110, tokens=10),
-    ToolCall(tool="bash", preview='{"command":"ls"}'),
-    SkillLoad(skill="memory"),
+    Activity(text="Listing the workspace."),
 )
 
 

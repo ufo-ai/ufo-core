@@ -107,7 +107,7 @@ async def test_object_write_admits_an_object_apply_intent(member) -> None:
     assert intent.tool == "object_apply"
     manifest = json.loads(intent.input["manifest"])
     assert manifest == {"kind": "scheduled_task", "name": "daily", "spec": {"cron": "0 9"}}
-    assert intent.input["user_description"] == ("Apply scheduled_task daily from the application.")
+    assert set(intent.input) == {"manifest"}
     assert ctx.queue_key == f"intent/{main_id}/{EMAIL}"
     assert ctx.speaker == member_id
 
@@ -147,7 +147,6 @@ async def test_object_remove_admits_an_object_delete_intent(member) -> None:
     assert intent.input == {
         "kind": "scheduled_task",
         "name": "daily",
-        "user_description": "Delete scheduled_task daily from the application.",
     }
 
 

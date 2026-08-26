@@ -129,9 +129,7 @@ def _tool(name: str) -> ToolDef:
 
 
 async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     assert result.is_error is False
     return result.content[0].text
 
@@ -217,7 +215,6 @@ async def test_member_get_reports_role_and_seat_and_delete_is_refused(db: None) 
                 admin,
                 delete_tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "kind": MEMBER_KIND,
                         "name": str(member_id),
                     }
@@ -232,7 +229,6 @@ async def test_child_agent_cannot_change_another_members_role(db: None) -> None:
             _context(workspace_id, child_agent, admin_id),
             _tool("object_apply").input_model.model_validate(
                 {
-                    "user_description": TOOL_NARRATION,
                     "manifest": _manifest(member_id, True),
                 }
             ),
@@ -246,7 +242,6 @@ async def test_last_admin_cannot_be_removed(db: None) -> None:
             _context(workspace_id, main_agent, admin_id),
             _tool("object_apply").input_model.model_validate(
                 {
-                    "user_description": TOOL_NARRATION,
                     "manifest": _manifest(admin_id, False),
                 }
             ),
@@ -279,7 +274,6 @@ async def test_demoted_admin_cannot_finish_a_role_change(
     tool = _tool("object_apply")
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest(target, True),
         }
     )
@@ -574,7 +568,7 @@ async def test_a_listing_member_still_cannot_change_a_role(db: None) -> None:
         await _tool("object_apply").handler(
             _context(workspace_id, main_agent, member_id),
             _tool("object_apply").input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "manifest": _manifest(admin_id, False)}
+                {"manifest": _manifest(admin_id, False)}
             ),
         )
 
@@ -696,7 +690,7 @@ async def test_object_apply_names_the_verb_that_creates_a_member(db: None) -> No
         await _tool("object_apply").handler(
             _context(workspace_id, main_agent, admin_id),
             _tool("object_apply").input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "manifest": _manifest(uuid4(), False)}
+                {"manifest": _manifest(uuid4(), False)}
             ),
         )
 

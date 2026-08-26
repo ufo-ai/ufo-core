@@ -55,7 +55,7 @@ the wrapper and a model expose one validating interface, so `spawn` holds one co
 
 ### One verb
 
-`spawn(target, payload, background, name, user_description)` replaces `spawn_subagent`;
+`spawn(target, payload, background, name)` replaces `spawn_subagent`;
 `message_subagent`/`cancel_subagent` become `message_spawn`/`cancel_spawn` unchanged — they key on
 child turn ids and never cared what kind of child. The child of a spawn is a spawn, and "subagent"
 stays the name of a profile (RFC 0030: subagents stay subagents). A profile target keeps its

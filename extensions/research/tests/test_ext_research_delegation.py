@@ -116,7 +116,6 @@ async def test_wide_research_fans_the_research_profile_over_deduped_entities(
                 "entities_file": "entities.txt",
                 "prompt_template": "research {entity}",
                 "output_schema_file": "schema.json",
-                "user_description": "batch",
             }
         ),
     )
@@ -147,7 +146,6 @@ async def test_wide_research_keys_each_child_on_the_call_and_entity(tmp_path: Pa
                 "entities_file": "entities.txt",
                 "prompt_template": "research {entity}",
                 "output_schema_file": "schema.json",
-                "user_description": "batch",
             }
         ),
     )
@@ -168,7 +166,6 @@ async def test_wide_research_caps_the_entity_count(tmp_path: Path) -> None:
                     "entities_file": "entities.txt",
                     "prompt_template": "research {entity}",
                     "output_schema_file": "schema.json",
-                    "user_description": "batch",
                 }
             ),
         )
@@ -203,7 +200,6 @@ async def test_a_real_shell_reads_hostile_paths_literally(tmp_path: Path) -> Non
                 "entities_file": entities,
                 "prompt_template": "research {entity}",
                 "output_schema_file": schema,
-                "user_description": "batch",
             }
         ),
     )

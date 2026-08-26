@@ -359,10 +359,6 @@ class ManageBillingInput(BaseModel):
         default=None,
         description="For autopay: refill once the balance falls to this many US dollars.",
     )
-    user_description: str = Field(
-        description="What you are doing with their billing, in plain language for the activity "
-        "timeline."
-    )
 
 
 async def manage_billing(ctx: ToolContext, args: ManageBillingInput) -> ToolResult:

@@ -164,7 +164,6 @@ async def _arm(
         reason="the CI run for pull request 42",
         next_steps="Read the new status and report it.",
         metadata={"pr": 42},
-        user_description=TOOL_NARRATION,
         created_by_member_id=member_id,
         baseline=baseline,
         next_probe_at=now - timedelta(seconds=1) if due else now + timedelta(minutes=5),

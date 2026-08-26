@@ -157,11 +157,9 @@ export type CredentialRequest = {
   prompts: CredentialPrompt[];
 };
 
-/** One thing an agent did, as a conversation states it: a tool it dispatched, a skill it mounted,
- *  or a line it wrote between the two. */
+/** One thing an agent did, as a conversation states it: a tool-run summary or a line it wrote. */
 export type ActivityEvent =
-  | { kind: "tool"; name: string; preview: string; description: string }
-  | { kind: "skill"; name: string; preview: string; description: string }
+  | { kind: "activity"; text: string }
   | { kind: "note"; text: string };
 
 /** One subagent run beneath the reply that spawned it: the work it did, what it answered, and the

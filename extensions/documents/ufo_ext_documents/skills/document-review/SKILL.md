@@ -153,8 +153,7 @@ spawn(
   - Issue types: [list the relevant issue types, e.g., "spelling_grammar, narrative_logic, non_public_info, verify_public_data, numerical_consistency"]
   """,
   task_name="document_review",
-  subagent_type="asset",
-  user_description="Reviewing your document"
+  subagent_type="asset"
 )
 ```
 

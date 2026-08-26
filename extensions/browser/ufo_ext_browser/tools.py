@@ -14,7 +14,7 @@ from dataclasses import replace
 from typing import Literal
 from weakref import WeakKeyDictionary
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, JsonValue
 
 from ufo.sdk.tools import ImageContent, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_browser.bua.backend import BuaSurface
@@ -28,41 +28,28 @@ _TURN_SURFACES: "WeakKeyDictionary[object, BuaSurface]" = WeakKeyDictionary()
 
 class NavigateInput(BaseModel):
     url: str
-    user_description: str
     tab_id: int | None = None
 
 
 class TabsContextInput(BaseModel):
-    user_description: str = Field(
-        description="What you are checking about the pages you have open, in plain language for "
-        "the activity timeline."
-    )
+    pass
 
 
 class TabsCreateInput(BaseModel):
-    user_description: str
     url: str | None = None
 
 
 class TabsCloseInput(BaseModel):
-    user_description: str = Field(
-        description="Which page you are done with, in plain language for the activity timeline."
-    )
     tab_id: int | None = None
 
 
 class UploadFileInput(BaseModel):
-    user_description: str = Field(
-        description="What you are uploading and where, in plain language for the activity "
-        "timeline. Name the document, never the path."
-    )
     ref: str
     files: tuple[str, ...]
     tab_id: int | None = None
 
 
 class ReadPageInput(BaseModel):
-    user_description: str
     depth: int | None = None
     filter: Literal["all", "interactive", "viewport"] | None = None
     ref_id: str | None = None
@@ -70,18 +57,15 @@ class ReadPageInput(BaseModel):
 
 
 class GetPageTextInput(BaseModel):
-    user_description: str
     tab_id: int | None = None
 
 
 class FindInput(BaseModel):
-    user_description: str
     query: str
     tab_id: int | None = None
 
 
 class FormInputInput(BaseModel):
-    user_description: str
     ref: str
     value: JsonValue
     tab_id: int | None = None
@@ -89,14 +73,12 @@ class FormInputInput(BaseModel):
 
 class ComputerInput(BaseModel):
     actions: tuple[dict[str, JsonValue], ...]
-    user_description: str
     tab_id: int | None = None
     save_to_workspace: bool | None = None
     path: str | None = None
 
 
 class WaitForDownloadInput(BaseModel):
-    user_description: str
     guid: str | None = None
     path: str | None = None
     timeout: int | None = None
@@ -139,9 +121,7 @@ def _required_str(value: JsonValue, field: str) -> str:
 
 
 async def _navigate(ctx: ToolContext, args: NavigateInput) -> ToolResult:
-    reply = await _browser(ctx).navigate(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
-    )
+    reply = await _browser(ctx).navigate(args.model_dump(mode="json", exclude_none=True))
     return _json_result(reply)
 
 
@@ -155,51 +135,37 @@ async def _tabs_create(ctx: ToolContext, args: TabsCreateInput) -> ToolResult:
 
 
 async def _tabs_close(ctx: ToolContext, args: TabsCloseInput) -> ToolResult:
-    reply = await _browser(ctx).tabs_close(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
-    )
+    reply = await _browser(ctx).tabs_close(args.model_dump(mode="json", exclude_none=True))
     return _json_result(reply)
 
 
 async def _upload_file(ctx: ToolContext, args: UploadFileInput) -> ToolResult:
-    reply = await _browser(ctx).upload_file(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
-    )
+    reply = await _browser(ctx).upload_file(args.model_dump(mode="json", exclude_none=True))
     return _json_result(reply)
 
 
 async def _read_page(ctx: ToolContext, args: ReadPageInput) -> ToolResult:
-    reply = await _browser(ctx).read_page(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
-    )
+    reply = await _browser(ctx).read_page(args.model_dump(mode="json", exclude_none=True))
     return _json_result(reply)
 
 
 async def _get_page_text(ctx: ToolContext, args: GetPageTextInput) -> ToolResult:
-    reply = await _browser(ctx).get_page_text(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
-    )
+    reply = await _browser(ctx).get_page_text(args.model_dump(mode="json", exclude_none=True))
     return _json_result(reply)
 
 
 async def _find(ctx: ToolContext, args: FindInput) -> ToolResult:
-    reply = await _browser(ctx).find(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
-    )
+    reply = await _browser(ctx).find(args.model_dump(mode="json", exclude_none=True))
     return _json_result(reply)
 
 
 async def _form_input(ctx: ToolContext, args: FormInputInput) -> ToolResult:
-    reply = await _browser(ctx).form_input(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
-    )
+    reply = await _browser(ctx).form_input(args.model_dump(mode="json", exclude_none=True))
     return _json_result(reply)
 
 
 async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult:
-    reply = await _browser(ctx).computer(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
-    )
+    reply = await _browser(ctx).computer(args.model_dump(mode="json", exclude_none=True))
     if args.save_to_workspace is True:
         path = args.path or DEFAULT_SCREENSHOT_PATH
         screenshot = _required_str(reply.get("screenshot_base64"), "screenshot_base64")
@@ -219,7 +185,7 @@ async def _computer(ctx: ToolContext, args: ComputerInput) -> ToolResult:
 
 async def _wait_for_download(ctx: ToolContext, args: WaitForDownloadInput) -> ToolResult:
     download = await _browser(ctx).wait_for_download(
-        args.model_dump(mode="json", exclude_none=True, exclude={"user_description"})
+        args.model_dump(mode="json", exclude_none=True)
     )
     filename = _required_str(download.get("filename"), "filename")
     content = _required_str(download.get("content_base64"), "content_base64")

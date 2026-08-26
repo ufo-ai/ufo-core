@@ -53,8 +53,8 @@ Three duplications sit on top of that, all introduced by wave 2 and all in the w
    (`core/src/ufo/schema/records.py:40-49`) carries the same closed set again in core, where
    `run_intent` re-validates the stored row after the database round-trip.
 2. **The envelope→call translation is a hand-written `match`.** `_tool_intent` (`panels.py:102-171`)
-   maps each intent shape to a `ToolIntent`, composing tool inputs — every `user_description`, and
-   for credentials a whole `reason` sentence — in the web layer. That is callee copy authored in
+   maps each intent shape to a `ToolIntent`, composing tool inputs and, for credentials, a whole
+   `reason` sentence in the web layer. That is callee copy authored in
    the caller.
 3. **The engine names each out-of-band payload.** `_final_act` (`engine.py:518`) has **three**
    `(tool name, payload model)` pairs across **five** call sites: the intent path lifts
@@ -104,8 +104,7 @@ member must never supply: `ObjectApplyInput` and `ObjectDeleteInput` both carry 
 three conditions — the turn's agent not main, a typed subagent, or no speaker — none of which a
 portal intent on the main agent's lane trips, and it consults no web audience, while `_panel_gate`
 walls only the *path* agent. A member-supplied `agent` on the main agent's lane would therefore
-mutate an agent the 404 wall excludes. Both models also require `user_description` (`:722`, `:732`), which is the audit line the callee authors, not a
-text box a member fills. So the member submits its own narrow model, and `compose` — authored by
+mutate an agent the 404 wall excludes. So the member submits its own narrow model, and `compose` — authored by
 the callee — builds the callee's input from it plus an `ActionContext` carrying the server-held
 values (the path agent, the acting member, the resolved slot). One producer per field, and no
 callee field reaches the browser unless its declaration puts it there.
@@ -262,9 +261,8 @@ duplication this RFC removes, reintroduced one field later. The line held here i
 *layout* enters core: no widget, no order, no grouping, no CSS hook. If a second surface wants
 different words, that is a translation concern and a real one, recorded below.
 
-**One shape.** `describe` is gone: `user_description` has exactly one producer, `compose`, and the
-member never sees the field. `submit_model` is the one thing the browser posts and the one thing
-validated.
+**One shape.** `describe` is gone. Tool activity is generated from the admitted call outside its
+input; `submit_model` is the one thing the browser posts and the one thing validated.
 
 **Both ends or neither.** `intent` and `submit_model` ship with the lane and `compose` with the
 first ported mutation, all in unit 1. `label` and `confirm` have no reader until the generator in

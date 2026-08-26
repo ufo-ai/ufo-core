@@ -358,7 +358,10 @@ class KitchenSink:
                             role="user",
                             content=(
                                 ToolResultBlock(
-                                    tool_use_id="call-child", content="4 matches", activity=True
+                                    tool_use_id="call-child",
+                                    content="4 matches",
+                                    activity=True,
+                                    activity_text="Checking the scrolling components.",
                                 ),
                             ),
                         ),
@@ -439,7 +442,12 @@ class KitchenSink:
             Message(
                 role="user",
                 content=(
-                    ToolResultBlock(tool_use_id="call-1", content="484 lines", activity=True),
+                    ToolResultBlock(
+                        tool_use_id="call-1",
+                        content="484 lines",
+                        activity=True,
+                        activity_text="Reviewing the chat scrolling behavior.",
+                    ),
                 ),
             ),
             Message(
@@ -461,7 +469,14 @@ class KitchenSink:
             ),
             Message(
                 role="user",
-                content=(ToolResultBlock(tool_use_id="call-2", content="4 files", activity=True),),
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="call-2",
+                        content="4 files",
+                        activity=True,
+                        activity_text="Checking related scrolling code.",
+                    ),
+                ),
             ),
             Message(
                 role="assistant",

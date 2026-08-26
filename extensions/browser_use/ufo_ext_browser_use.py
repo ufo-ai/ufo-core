@@ -322,9 +322,6 @@ class BrowserTaskInput(BaseModel):
         description="Wall-clock budget for the whole session; the task is cancelled when it "
         "expires.",
     )
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
-    )
 
 
 class WideBrowseInput(BaseModel):
@@ -341,9 +338,6 @@ class WideBrowseInput(BaseModel):
         "schema to a file first with the write tool, then pass the path here. The file must be a "
         "JSON object defining the output structure with snake_case property keys and 'title' on "
         "each property."
-    )
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
     )
 
 

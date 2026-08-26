@@ -213,7 +213,6 @@ class ProofModel:
                 partial_json=json.dumps(
                     {
                         "command": f"printf hello > /workspace/{PROOF_FILENAME}",
-                        "user_description": "writing the proof file",
                     }
                 ),
             )

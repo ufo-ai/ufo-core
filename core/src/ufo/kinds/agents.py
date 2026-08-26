@@ -562,9 +562,6 @@ class RestoreApplicationInput(BaseModel):
             "when a live app holds that one."
         )
     )
-    user_description: str = Field(
-        description="Which app you are restoring, in plain language for the activity timeline."
-    )
 
 
 @dataclass(frozen=True)

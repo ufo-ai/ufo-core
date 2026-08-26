@@ -952,16 +952,13 @@ async def test_tool_dispatches_with_its_scoped_context(db: None, tmp_path: Path)
         artifact_token_secret="",
         ext=ext_by_tool[tool.name],
     )
-    args = tool.input_model.model_validate(
-        {"message": "conformance-echo", "user_description": "echoing the probe"}
-    )
+    args = tool.input_model.model_validate({"message": "conformance-echo"})
     with ws(workspace_id):
         result = await tool.handler(context, args)
         assert result.is_error is False
         scoped = ScopedStore(extension=sample.NAME)
         assert await scoped.get(sample.TOOL_KEY) == {
             "message": "conformance-echo",
-            "user_description": "echoing the probe",
         }
 
 
@@ -980,9 +977,7 @@ async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_pa
     with ws(first):
         write = await note.handler(
             _tool_context(first, ext_by_tool[note.name], tmp_path),
-            note.input_model.model_validate(
-                {"text": "first note", "user_description": "noting the first"}
-            ),
+            note.input_model.model_validate({"text": "first note"}),
         )
         assert write.is_error is False
         assert write.content[0].text == "first note"
@@ -993,9 +988,7 @@ async def test_extension_owns_a_table_through_its_own_migration(db: None, tmp_pa
     with ws(second):
         await note.handler(
             _tool_context(second, other_ext[note.name], tmp_path),
-            note.input_model.model_validate(
-                {"text": "second note", "user_description": "noting the second"}
-            ),
+            note.input_model.model_validate({"text": "second note"}),
         )
 
     async with workspace_tx() as connection:
@@ -1059,9 +1052,7 @@ async def test_connector_execute_tool_resolves_the_bound_account_without_the_san
         grants=grants,
         ext=ext_by_tool[tool.name],
     )
-    args = tool.input_model.model_validate(
-        {"tool_name": "sample_list", "user_description": "listing the sample widgets"}
-    )
+    args = tool.input_model.model_validate({"tool_name": "sample_list"})
     idempotency_key = f"{context.turn.id}/{sample.CONNECTOR_EXECUTE_TOOL_NAME}/c1"
     with ws(workspace_id), agent(agent_id):
         result = await tool.handler(replace(context, idempotency_key=idempotency_key), args)

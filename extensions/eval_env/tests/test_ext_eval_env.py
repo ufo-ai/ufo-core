@@ -141,7 +141,6 @@ async def test_send_email_lands_a_durable_sent_row(db: None) -> None:
     result = await call_external_tool(
         _ctx(workspace_id),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="send_email",
             source_id=env.EMAIL_PROVIDER,
             arguments={"to": [BOB], "subject": "Dinner", "body": "Friday at 7pm works."},
@@ -187,7 +186,6 @@ async def test_list_emails_reads_the_seeded_folder_with_filtering(db: None) -> N
     everything = await call_external_tool(
         _ctx(workspace_id),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="list_emails",
             source_id=env.EMAIL_PROVIDER,
             arguments={},
@@ -196,7 +194,6 @@ async def test_list_emails_reads_the_seeded_folder_with_filtering(db: None) -> N
     filtered = await call_external_tool(
         _ctx(workspace_id),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="list_emails",
             source_id=env.EMAIL_PROVIDER,
             arguments={"query": "budget"},
@@ -216,7 +213,6 @@ async def test_calendar_lifecycle_updates_and_cancels_durably(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="create_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={
@@ -232,7 +228,6 @@ async def test_calendar_lifecycle_updates_and_cancels_durably(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="update_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={
@@ -249,7 +244,6 @@ async def test_calendar_lifecycle_updates_and_cancels_durably(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="cancel_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={"event_id": created["id"]},
@@ -273,7 +267,6 @@ async def test_updating_a_missing_event_fails_loud(db: None) -> None:
         await call_external_tool(
             _ctx(workspace_id),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="update_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={"event_id": str(uuid4()), "title": "renamed"},
@@ -291,7 +284,6 @@ async def test_describe_exposes_the_catalog_schemas() -> None:
     result = await describe_external_tools(
         _ctx(uuid4()),
         DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION,
             source_id=env.EMAIL_PROVIDER,
             tool_names=("send_email",),
         ),
@@ -310,7 +302,6 @@ async def test_app_providers_return_only_the_seeded_tool_response(db: None) -> N
         result = await call_external_tool(
             _ctx(workspace_id, APP_GRANTS),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="list_issues",
                 source_id=env.GITHUB_PROVIDER,
                 arguments={},
@@ -326,7 +317,6 @@ async def test_an_unseeded_app_tool_fails_loud(db: None) -> None:
         await call_external_tool(
             _ctx(workspace_id, APP_GRANTS),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="list_pull_requests",
                 source_id=env.GITHUB_PROVIDER,
                 arguments={},
@@ -470,7 +460,6 @@ async def test_call_without_a_grant_fails_loud() -> None:
         await call_external_tool(
             _ctx(uuid4(), grants=()),
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="send_email",
                 source_id=env.EMAIL_PROVIDER,
                 arguments={"to": [BOB], "subject": "s", "body": "b"},
@@ -482,7 +471,6 @@ async def test_describe_backfills_discovery_and_marks_unknown_unresolved() -> No
     result = await describe_external_tools(
         _ctx(uuid4()),
         DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION,
             source_id=env.EMAIL_PROVIDER,
             tool_names=("send_email", "bogus"),
             query="email",
@@ -506,7 +494,6 @@ async def test_list_events_reads_the_calendar_with_filtering(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="create_event",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={"title": title, "start": start, "end": end, "attendees": []},
@@ -517,7 +504,6 @@ async def test_list_events_reads_the_calendar_with_filtering(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="list_events",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={},
@@ -528,7 +514,6 @@ async def test_list_events_reads_the_calendar_with_filtering(db: None) -> None:
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name="list_events",
                 source_id=env.CALENDAR_PROVIDER,
                 arguments={"query": "sync"},
@@ -577,7 +562,6 @@ async def _searched(workspace_id: UUID, query: str) -> str:
     result = await call_external_tool(
         _ctx(workspace_id),
         CallExternalToolInput(
-            user_description=TOOL_NARRATION,
             tool_name="search_code",
             source_id=env.CODE_PROVIDER,
             arguments={"query": query},

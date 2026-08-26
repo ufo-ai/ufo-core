@@ -104,15 +104,6 @@ class RemoteClient:
         wait_seconds: float,
     ) -> UUID:
         """Run one member turn through `ufo --remote --json` and return its durable turn id."""
-        async with workspace_tx() as connection:
-            baseline = (
-                await connection.execute(
-                    sa.select(sa.func.coalesce(sa.func.max(tables.turn.c.seq), 0)).where(
-                        tables.turn.c.workspace_id == workspace_id,
-                        tables.turn.c.conversation_id == conversation_id,
-                    )
-                )
-            ).scalar_one()
         home = self.home_root / str(conversation_id)
         token = mint_token(self.token_secret, str(workspace_id), email, REMOTE_TOKEN_TTL)
         await asyncio.to_thread(self._write_credentials, home, token)
@@ -126,6 +117,7 @@ class RemoteClient:
             }
         )
         process: asyncio.subprocess.Process | None = None
+        admitted: list[UUID] = []
         try:
             try:
                 async with asyncio.timeout(wait_seconds):
@@ -141,12 +133,10 @@ class RemoteClient:
                         stderr=asyncio.subprocess.PIPE,
                         env=env,
                     )
-                    stdout, stderr = await process.communicate()
+                    stdout, stderr = await self._read_session(process, admitted)
             except TimeoutError as error:
                 await self._stop(process)
-                raise RemoteTurnTimeout(
-                    await self._turn_id(workspace_id, conversation_id, baseline)
-                ) from error
+                raise RemoteTurnTimeout(admitted[-1] if admitted else None) from error
             except BaseException:
                 await self._stop(process)
                 raise
@@ -164,33 +154,41 @@ class RemoteClient:
         event_types = tuple(event.get("type") for event in events)
         if event_types[0] != "session_start" or "turn_end" not in event_types:
             raise RuntimeError(f"ufo remote session returned incomplete JSON events: {event_types}")
-        turn_id = await self._turn_id(workspace_id, conversation_id, baseline)
-        if turn_id is None:
+        if len(admitted) != 1:
             detail = (stderr or stdout).decode("utf-8", "replace").strip()[-1000:]
-            raise RuntimeError(f"ufo remote session admitted no turn: {detail}")
-        return turn_id
+            raise RuntimeError(f"ufo remote session admitted {len(admitted)} turns: {detail}")
+        return admitted[0]
+
+    @staticmethod
+    async def _read_session(
+        process: asyncio.subprocess.Process, admitted: list[UUID]
+    ) -> tuple[bytes, bytes]:
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("ufo remote session pipes are unavailable")
+        lines: list[bytes] = []
+        stderr_task = asyncio.create_task(process.stderr.read())
+        try:
+            while line := await process.stdout.readline():
+                lines.append(line)
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                match event:
+                    case {"type": "message_sent", "turn_id": str(turn_id)}:
+                        admitted.append(UUID(turn_id))
+            await process.wait()
+            return b"".join(lines), await stderr_task
+        finally:
+            if not stderr_task.done():
+                stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
 
     @staticmethod
     async def _stop(process: asyncio.subprocess.Process | None) -> None:
         if process is not None and process.returncode is None:
             process.kill()
             await process.wait()
-
-    @staticmethod
-    async def _turn_id(workspace_id: UUID, conversation_id: UUID, baseline: int) -> UUID | None:
-        async with workspace_tx() as connection:
-            return (
-                await connection.execute(
-                    sa.select(tables.turn.c.id)
-                    .where(
-                        tables.turn.c.workspace_id == workspace_id,
-                        tables.turn.c.conversation_id == conversation_id,
-                        tables.turn.c.seq > baseline,
-                    )
-                    .order_by(tables.turn.c.seq.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
 
     @staticmethod
     def _write_credentials(home: Path, token: str) -> None:
@@ -705,7 +703,6 @@ class WorkspaceDriver:
             tool="object_apply",
             input={
                 "manifest": manifest,
-                "user_description": f"Apply {kind} {name} from the application.",
             },
         )
         admitted = await MemberAdmission(

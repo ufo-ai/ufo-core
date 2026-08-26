@@ -81,7 +81,7 @@ from ufo.billing.accounting import (
 )
 from ufo.blob import BlobNotFound, FleetBlobStore, WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
-from ufo.hub import LiveFrame, SkillLoad, ToolCall
+from ufo.hub import Activity, LiveFrame
 from ufo.kinds.agent_setup import AgentSetup, SetupState, pending_setup, setup_state
 from ufo.kinds.governance import prompt_digest
 from ufo.media.artifact_url import (
@@ -343,14 +343,14 @@ class TurnTailer(Protocol):
 
     A tail is a scope: it holds a hub subscription and the tasks feeding it, and the block's exit
     releases them — a surface that renders one frame and answers included. `latest_activity` is
-    the tail's peek half: the newest ToolCall or SkillLoad the hub retains for a turn, no
+    the tail's peek half: the newest Activity the hub retains for a turn, no
     subscription held."""
 
     def tail(
         self, turn_id: UUID, since: str = ""
     ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]: ...
 
-    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None: ...
+    async def latest_activity(self, turn_id: UUID) -> Activity | None: ...
 
 
 class TurnStopper(Protocol):
@@ -2534,7 +2534,7 @@ class SurfaceContext:
         the scope ends the subscription and the tasks behind it, however the block ends."""
         return self._tailer.tail(turn_id, since)
 
-    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
+    async def latest_activity(self, turn_id: UUID) -> Activity | None:
         """The newest activity frame the hub retains for a turn — what a running turn is doing
         right now — or None when it retains none. A peek through the same injected tailer `tail`
         rides, holding no subscription."""

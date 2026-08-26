@@ -551,9 +551,7 @@ def _bind(
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> dict[str, object]:
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     payload = json.loads(result.content[0].text)
     assert isinstance(payload, dict)
     return payload
@@ -2135,9 +2133,7 @@ async def _get(
     tool, ctx = _tool("object_get", conversation_audience(speaker_member_id), blob=blob)
     result = await tool.handler(
         _bind(ctx, workspace, conversation_id, speaker_member_id),
-        tool.input_model.model_validate(
-            {"user_description": TOOL_NARRATION, "kind": SITE_KIND, "name": name}
-        ),
+        tool.input_model.model_validate({"kind": SITE_KIND, "name": name}),
     )
     fetched = yaml.safe_load(result.content[0].text)
     assert isinstance(fetched, dict)
@@ -3458,9 +3454,7 @@ async def test_a_reset_to_shipped_leaves_no_source_to_shadow_the_next_fork(db: N
 async def _dispatch_get(tool: ToolDef, ctx: ToolContext, name: str) -> dict[str, object]:
     result = await tool.handler(
         ctx,
-        tool.input_model.model_validate(
-            {"user_description": TOOL_NARRATION, "kind": SITE_KIND, "name": name}
-        ),
+        tool.input_model.model_validate({"kind": SITE_KIND, "name": name}),
     )
     fetched = yaml.safe_load(result.content[0].text)
     assert isinstance(fetched, dict)

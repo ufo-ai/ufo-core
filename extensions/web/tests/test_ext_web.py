@@ -136,16 +136,15 @@ from ufo.ext.surface import (
 )
 from ufo.hub import (
     Absorbed,
+    Activity,
     CostTick,
     InProcessHub,
     LiveFrame,
     Parked,
     Reply,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
-    ToolCall,
 )
 from ufo.kinds.members import ADD_MEMBER_GATE
 from ufo.loop import queue as loop_queue
@@ -206,7 +205,14 @@ from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.surfaces.artifacts import router as artifacts_router
 from ufo.tools.context import ToolContext
 from ufo.turns.subjects import SHARED_SUBJECT, member_subject
-from ufo.turns.transcript import CompactionSummary, CompactionWindow, Conversation, compaction_key
+from ufo.turns.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+    decode,
+    encode,
+)
 from ufo.turns.untrusted import wall
 from ufo.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
 from ufo.workspace import ws
@@ -309,17 +315,10 @@ STREAM_GATE = StreamGate()
 CREDENTIAL_FERNET = Fernet(Fernet.generate_key())
 
 
-def test_sse_tags_tool_and_skill_activity_frames() -> None:
-    tool = _sse("7", ToolCall(tool="bash", preview='{"command":"ls"}'))
-    assert tool.startswith(b"id: 7\nevent: tool\ndata: ")
-    assert json.loads(tool.split(b"data: ", 1)[1]) == {
-        "tool": "bash",
-        "preview": '{"command":"ls"}',
-        "description": "",
-    }
-    skill = _sse("", SkillLoad(skill="demo"))
-    assert skill.startswith(b"event: skill\ndata: ")
-    assert json.loads(skill.split(b"data: ", 1)[1]) == {"skill": "demo"}
+def test_sse_tags_activity_frames() -> None:
+    activity = _sse("7", Activity(text="Checking the workspace."))
+    assert activity.startswith(b"id: 7\nevent: activity\ndata: ")
+    assert json.loads(activity.split(b"data: ", 1)[1]) == {"text": "Checking the workspace."}
 
 
 def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
@@ -331,8 +330,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
         Terminal: Terminal(frame=TerminalFrame(status="done", text="t")),
         Parked: Parked(message="m"),
         CostTick: CostTick(cost_micro_usd=1, tokens=2),
-        ToolCall: ToolCall(tool="bash", preview="ls"),
-        SkillLoad: SkillLoad(skill="s"),
+        Activity: Activity(text="Checking the workspace."),
         Absorbed: Absorbed(arrivals=()),
         Resumed: Resumed(attempt="attempt-one"),
         Reply: Reply(id=uuid4(), text="sent"),
@@ -348,8 +346,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
         Terminal: b"event: terminal\n",
         Parked: b"event: parked\n",
         CostTick: b"event: cost\n",
-        ToolCall: b"event: tool\n",
-        SkillLoad: b"event: skill\n",
+        Activity: b"event: activity\n",
         Absorbed: b"event: absorbed\n",
         Resumed: b"event: resumed\n",
         Reply: b"event: reply\n",
@@ -384,7 +381,6 @@ def test_transcript_projection_keeps_tool_activity_and_elides_results() -> None:
                         name="bash",
                         input={
                             "command": "uv run pytest",
-                            "user_description": "Running the focused tests",
                             "requested_by": "internal-message-ref",
                         },
                     ),
@@ -394,8 +390,18 @@ def test_transcript_projection_keeps_tool_activity_and_elides_results() -> None:
             Message(
                 role="user",
                 content=(
-                    ToolResultBlock(tool_use_id="call-1", content="1 passed", activity=True),
-                    ToolResultBlock(tool_use_id="call-2", content="mounted", activity=True),
+                    ToolResultBlock(
+                        tool_use_id="call-1",
+                        content="1 passed",
+                        activity=True,
+                        activity_text="Running the focused tests.",
+                    ),
+                    ToolResultBlock(
+                        tool_use_id="call-2",
+                        content="mounted",
+                        activity=True,
+                        activity_text="Loading coding guidance.",
+                    ),
                 ),
             ),
             Message(role="user", content="End the turn now."),
@@ -410,22 +416,82 @@ def test_transcript_projection_keeps_tool_activity_and_elides_results() -> None:
             "text": "The tests pass.",
             "events": [
                 {"kind": "note", "text": "Let me check."},
-                {
-                    "kind": "tool",
-                    "name": "bash",
-                    "preview": (
-                        '{"command":"uv run pytest","user_description":"Running the focused tests"}'
-                    ),
-                    "description": "Running the focused tests",
-                },
-                {
-                    "kind": "skill",
-                    "name": "coding",
-                    "preview": "",
-                    "description": "",
-                },
+                {"kind": "activity", "text": "Running the focused tests."},
+                {"kind": "activity", "text": "Loading coding guidance."},
             ],
         },
+    ]
+
+
+def test_transcript_projection_reads_stored_activity_after_a_rewrite() -> None:
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content="<context>source: web</context>\nInspect it."),
+            Message(
+                role="assistant",
+                content=(
+                    ToolUseBlock(
+                        id="call-1",
+                        name="bash",
+                        input={"command": "ls", "user_description": "Listing the workspace."},
+                    ),
+                    ToolUseBlock(id="call-2", name="load_skill", input={"name": "coding"}),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(tool_use_id="call-1", content="README.md", activity=True),
+                    ToolResultBlock(tool_use_id="call-2", content="mounted", activity=True),
+                ),
+            ),
+            Message(role="assistant", content="Done."),
+        ),
+    )
+    rewritten = decode(encode(conversation))
+
+    rendered = _rendered_messages(rewritten.messages)
+
+    assert rendered == [
+        {"role": "user", "text": "Inspect it."},
+        {
+            "role": "assistant",
+            "text": "Done.",
+            "events": [
+                {"kind": "activity", "text": "Listing the workspace."},
+                {"kind": "activity", "text": "Loading skill · coding"},
+            ],
+        },
+    ]
+
+
+def test_transcript_projection_omits_an_empty_generated_activity() -> None:
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content="<context>source: web</context>\nInspect it."),
+            Message(
+                role="assistant",
+                content=(ToolUseBlock(id="call-1", name="bash", input={"command": "ls"}),),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="call-1",
+                        content="README.md",
+                        activity=True,
+                        activity_text="",
+                    ),
+                ),
+            ),
+            Message(role="assistant", content="Done."),
+        )
+    )
+
+    assert rendered == [
+        {"role": "user", "text": "Inspect it."},
+        {"role": "assistant", "text": "Done."},
     ]
 
 
@@ -444,20 +510,50 @@ def test_subagent_activity_keeps_the_text_a_run_wrote_between_its_calls() -> Non
             ),
             Message(
                 role="user",
-                content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="call-1",
+                        content="…",
+                        activity=True,
+                        activity_text="Reading the changelog.",
+                    ),
+                ),
             ),
         )
     )
 
     assert events == [
         {"kind": "note", "text": "Reading the changelog first."},
-        {
-            "kind": "tool",
-            "name": "fetch_url",
-            "preview": '{"url":"https://x/y"}',
-            "description": "",
-        },
+        {"kind": "activity", "text": "Reading the changelog."},
     ]
+
+
+def test_subagent_activity_reads_a_stored_tool_description_after_a_rewrite() -> None:
+    conversation = Conversation(
+        seq=1,
+        messages=(
+            Message(role="user", content="{}"),
+            Message(
+                role="assistant",
+                content=(
+                    ToolUseBlock(
+                        id="call-1",
+                        name="fetch_url",
+                        input={"url": "https://x/y", "user_description": "Reading the source."},
+                    ),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+            ),
+        ),
+    )
+    rewritten = decode(encode(conversation))
+
+    events = _subagent_activity(rewritten.messages)
+
+    assert events == [{"kind": "activity", "text": "Reading the source."}]
 
 
 FORCE_FINISHED_PROSE = "The filing deadline is March 31."
@@ -470,7 +566,14 @@ FORCE_FINISHED_RUN = (
     ),
     Message(
         role="user",
-        content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+        content=(
+            ToolResultBlock(
+                tool_use_id="call-1",
+                content="…",
+                activity=True,
+                activity_text="Fetching deadline sources.",
+            ),
+        ),
     ),
     Message(role="assistant", content=FORCE_FINISHED_PROSE),
     Message(role="user", content=FINISH_PROMPT),
@@ -486,14 +589,7 @@ def test_a_force_finished_run_states_its_prose_once() -> None:
     events = _subagent_activity(FORCE_FINISHED_RUN)
     output = _run_answer(FORCE_FINISHED_PAYLOAD)
 
-    assert events == [
-        {
-            "kind": "tool",
-            "name": "fetch_url",
-            "preview": '{"url":"https://x/y"}',
-            "description": "",
-        }
-    ]
+    assert events == [{"kind": "activity", "text": "Fetching deadline sources."}]
     assert output == FORCE_FINISHED_PROSE
     assert [event for event in events if event.get("text") == FORCE_FINISHED_PROSE] == []
 
@@ -519,7 +615,11 @@ def test_transcript_projection_does_not_move_activity_between_turns() -> None:
                 role="user",
                 content=(
                     ToolResultBlock(
-                        tool_use_id="call-1", content="exit 1", is_error=True, activity=True
+                        tool_use_id="call-1",
+                        content="exit 1",
+                        is_error=True,
+                        activity=True,
+                        activity_text="Checking the command outcome.",
                     ),
                 ),
             ),
@@ -534,14 +634,7 @@ def test_transcript_projection_does_not_move_activity_between_turns() -> None:
         {
             "role": "assistant",
             "text": "It failed.",
-            "events": [
-                {
-                    "kind": "tool",
-                    "name": "bash",
-                    "preview": '{"command":"false"}',
-                    "description": "",
-                }
-            ],
+            "events": [{"kind": "activity", "text": "Checking the command outcome."}],
         },
         {"role": "user", "text": "Try something else."},
         {"role": "assistant", "text": "Done."},
@@ -561,7 +654,14 @@ def test_transcript_projection_keeps_mid_turn_narration_as_steps_of_the_reply() 
             ),
             Message(
                 role="user",
-                content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="call-1",
+                        content="…",
+                        activity=True,
+                        activity_text="Reading the changelog.",
+                    ),
+                ),
             ),
             Message(
                 role="assistant",
@@ -572,7 +672,14 @@ def test_transcript_projection_keeps_mid_turn_narration_as_steps_of_the_reply() 
             ),
             Message(
                 role="user",
-                content=(ToolResultBlock(tool_use_id="call-2", content="v1", activity=True),),
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="call-2",
+                        content="v1",
+                        activity=True,
+                        activity_text="Checking the release tags.",
+                    ),
+                ),
             ),
             Message(role="assistant", content=(TextBlock(text="It shipped Tuesday."),)),
         )
@@ -585,19 +692,9 @@ def test_transcript_projection_keeps_mid_turn_narration_as_steps_of_the_reply() 
             "text": "It shipped Tuesday.",
             "events": [
                 {"kind": "note", "text": "Reading the changelog first."},
-                {
-                    "kind": "tool",
-                    "name": "read",
-                    "preview": '{"file_path":"CHANGELOG.md"}',
-                    "description": "",
-                },
+                {"kind": "activity", "text": "Reading the changelog."},
                 {"kind": "note", "text": "Checking the tags now."},
-                {
-                    "kind": "tool",
-                    "name": "bash",
-                    "preview": '{"command":"git tag"}',
-                    "description": "",
-                },
+                {"kind": "activity", "text": "Checking the release tags."},
             ],
         },
     ]
@@ -624,7 +721,14 @@ def test_transcript_projection_states_a_drained_round_as_the_steps_it_wrote() ->
             ),
             Message(
                 role="user",
-                content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="call-1",
+                        content="…",
+                        activity=True,
+                        activity_text="Reading the changelog.",
+                    ),
+                ),
             ),
             Message(
                 role="user",
@@ -643,12 +747,7 @@ def test_transcript_projection_states_a_drained_round_as_the_steps_it_wrote() ->
             "text": "",
             "events": [
                 {"kind": "note", "text": "Reading the changelog first."},
-                {
-                    "kind": "tool",
-                    "name": "read",
-                    "preview": '{"file_path":"CHANGELOG.md"}',
-                    "description": "",
-                },
+                {"kind": "activity", "text": "Reading the changelog."},
             ],
         },
         {"role": "user", "text": "Any news?"},
@@ -687,7 +786,14 @@ def test_transcript_projection_flushes_activity_for_an_empty_answer() -> None:
             ),
             Message(
                 role="user",
-                content=(ToolResultBlock(tool_use_id="call-1", content="", activity=True),),
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="call-1",
+                        content="",
+                        activity=True,
+                        activity_text="Running the requested command.",
+                    ),
+                ),
             ),
             Message(role="assistant", content=""),
             Message(role="user", content="<context>source: web</context>\nContinue."),
@@ -700,14 +806,7 @@ def test_transcript_projection_flushes_activity_for_an_empty_answer() -> None:
         {
             "role": "assistant",
             "text": "",
-            "events": [
-                {
-                    "kind": "tool",
-                    "name": "bash",
-                    "preview": '{"command":"true"}',
-                    "description": "",
-                }
-            ],
+            "events": [{"kind": "activity", "text": "Running the requested command."}],
         },
         {"role": "user", "text": "Continue."},
         {"role": "assistant", "text": "Done."},
@@ -729,32 +828,29 @@ def test_transcript_projection_bounds_trailing_activity_and_skips_rejected_calls
             Message(
                 role="user",
                 content=(
-                    ToolResultBlock(tool_use_id="accepted", content="done", activity=True),
+                    ToolResultBlock(
+                        tool_use_id="accepted",
+                        content="done",
+                        activity=True,
+                        activity_text="Running the requested command.",
+                    ),
                     ToolResultBlock(tool_use_id="rejected", content="ValueError", is_error=True),
                 ),
             ),
         )
     )
 
-    expected = json.dumps({"command": command}, separators=(",", ":"))
     assert rendered == [
         {"role": "user", "text": "Run it."},
         {
             "role": "assistant",
             "text": "",
-            "events": [
-                {
-                    "kind": "tool",
-                    "name": "bash",
-                    "preview": expected[:200] + "…",
-                    "description": "",
-                }
-            ],
+            "events": [{"kind": "activity", "text": "Running the requested command."}],
         },
     ]
 
 
-def test_transcript_projection_guards_activity_labels() -> None:
+def test_transcript_projection_keeps_generated_activity_labels() -> None:
     rendered = _rendered_messages(
         (
             Message(role="user", content="<context>source: web</context>\nRun it."),
@@ -762,14 +858,24 @@ def test_transcript_projection_guards_activity_labels() -> None:
                 role="assistant",
                 content=(
                     ToolUseBlock(id="skill", name="load_skill", input={"name": 7}),
-                    ToolUseBlock(id="tool", name="bash", input={"user_description": 7}),
+                    ToolUseBlock(id="tool", name="bash", input={}),
                 ),
             ),
             Message(
                 role="user",
                 content=(
-                    ToolResultBlock(tool_use_id="skill", content="done", activity=True),
-                    ToolResultBlock(tool_use_id="tool", content="done", activity=True),
+                    ToolResultBlock(
+                        tool_use_id="skill",
+                        content="done",
+                        activity=True,
+                        activity_text="Loading the requested guidance.",
+                    ),
+                    ToolResultBlock(
+                        tool_use_id="tool",
+                        content="done",
+                        activity=True,
+                        activity_text="Running the requested command.",
+                    ),
                 ),
             ),
             Message(role="assistant", content="Done."),
@@ -780,13 +886,8 @@ def test_transcript_projection_guards_activity_labels() -> None:
         "role": "assistant",
         "text": "Done.",
         "events": [
-            {"kind": "skill", "name": "", "preview": "", "description": ""},
-            {
-                "kind": "tool",
-                "name": "bash",
-                "preview": '{"user_description":7}',
-                "description": "",
-            },
+            {"kind": "activity", "text": "Loading the requested guidance."},
+            {"kind": "activity", "text": "Running the requested command."},
         ],
     }
 
@@ -1538,7 +1639,12 @@ async def test_transcript_route_returns_durable_tool_activity(
                 Message(
                     role="user",
                     content=(
-                        ToolResultBlock(tool_use_id="call-1", content="/workspace", activity=True),
+                        ToolResultBlock(
+                            tool_use_id="call-1",
+                            content="/workspace",
+                            activity=True,
+                            activity_text="Checking the current directory.",
+                        ),
                     ),
                 ),
                 Message(role="assistant", content="Done."),
@@ -1569,7 +1675,14 @@ async def test_transcript_route_returns_durable_tool_activity(
                 ),
                 Message(
                     role="user",
-                    content=(ToolResultBlock(tool_use_id="call-2", content="…", activity=True),),
+                    content=(
+                        ToolResultBlock(
+                            tool_use_id="call-2",
+                            content="…",
+                            activity=True,
+                            activity_text="Reading the lockfile.",
+                        ),
+                    ),
                 ),
             ),
         ),
@@ -1594,14 +1707,7 @@ async def test_transcript_route_returns_durable_tool_activity(
         {
             "role": "assistant",
             "text": "Done.",
-            "events": [
-                {
-                    "kind": "tool",
-                    "name": "bash",
-                    "preview": '{"command":"pwd"}',
-                    "description": "",
-                }
-            ],
+            "events": [{"kind": "activity", "text": "Checking the current directory."}],
             "subagents": [
                 {
                     "profile": "general_purpose",
@@ -1609,12 +1715,7 @@ async def test_transcript_route_returns_durable_tool_activity(
                     "conversation_id": str(child_conversation),
                     "events": [
                         {"kind": "note", "text": "Checking the lockfile."},
-                        {
-                            "kind": "tool",
-                            "name": "read",
-                            "preview": '{"path":"uv.lock"}',
-                            "description": "",
-                        },
+                        {"kind": "activity", "text": "Reading the lockfile."},
                     ],
                     "output": "Nothing is stale.",
                     "subagents": [
@@ -2575,7 +2676,7 @@ async def test_agents_status_fences_the_turn_aggregate_to_the_readers_conversati
         status="running",
         at=base + timedelta(minutes=5),
     )
-    await hub.publish(running, ToolCall(tool="bash", preview='{"command":"cat secrets.txt"}'))
+    await hub.publish(running, Activity(text="Checking the private notes."))
     owner = (
         await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={my_token}"})
     ).json()
@@ -2583,7 +2684,7 @@ async def test_agents_status_fences_the_turn_aggregate_to_the_readers_conversati
         {
             "agent_id": str(agent_id),
             "turn": "running",
-            "activity": 'bash {"command":"cat secrets.txt"}',
+            "activity": "Checking the private notes.",
             "next_run_at": None,
             "last_active_at": (base + timedelta(minutes=5)).isoformat(),
             "last_failed": True,
@@ -2608,10 +2709,8 @@ async def test_agents_status_narrates_the_running_turn_from_the_hubs_newest_acti
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, WorkspaceBlobStore, ConversationSandbox],
 ) -> None:
-    """`activity` is the hub's newest ToolCall or SkillLoad for the running turn, composed the way
-    the transcript's activity rail labels it: the model's description when it gave one, else the
-    tool with its args preview, and a skill load names the skill. A running turn the hub holds no
-    frames for states nothing."""
+    """`activity` is the hub's newest generated summary for the running turn. A running turn the
+    hub holds no frames for states nothing."""
     client, workspace_id, agent_id = web
     _config, hub, _blob, _sandboxes = dbos_runtime
     _admin, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
@@ -2630,17 +2729,12 @@ async def test_agents_status_narrates_the_running_turn_from_the_hubs_newest_acti
     quiet = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
     assert quiet["turn"] == "running"
     assert quiet["activity"] is None
-    await hub.publish(turn_id, ToolCall(tool="bash", preview='{"command":"ls"}'))
-    bare = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
-    assert bare["activity"] == 'bash {"command":"ls"}'
-    await hub.publish(
-        turn_id, ToolCall(tool="bash", preview='{"command":"ls"}', description="Checking the queue")
-    )
+    await hub.publish(turn_id, Activity(text="Checking the queue."))
     described = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
-    assert described["activity"] == "Checking the queue"
-    await hub.publish(turn_id, SkillLoad(skill="call-triage"))
+    assert described["activity"] == "Checking the queue."
+    await hub.publish(turn_id, Activity(text="Loading call triage."))
     loading = (await client.get(STATUS_PATH, headers=headers)).json()["statuses"][0]
-    assert loading["activity"] == "Loading skill · call-triage"
+    assert loading["activity"] == "Loading call triage."
 
 
 async def test_agents_status_marks_the_latest_terminal_failure_until_a_later_run_clears_it(
@@ -7557,7 +7651,14 @@ async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children
                 ),
                 Message(
                     role="user",
-                    content=(ToolResultBlock(tool_use_id="call-1", content="…", activity=True),),
+                    content=(
+                        ToolResultBlock(
+                            tool_use_id="call-1",
+                            content="…",
+                            activity=True,
+                            activity_text="Fetching the requested page.",
+                        ),
+                    ),
                 ),
             ),
         ),
@@ -7572,14 +7673,7 @@ async def test_terminal_stream_carries_the_turns_child_work_and_its_own_children
         "profile": "general_purpose",
         "name": "",
         "conversation_id": str(child_conversation),
-        "events": [
-            {
-                "kind": "tool",
-                "name": "fetch_url",
-                "preview": '{"url":"https://x/y"}',
-                "description": "",
-            }
-        ],
+        "events": [{"kind": "activity", "text": "Fetching the requested page."}],
         "output": "It shipped Tuesday.",
         "subagents": [
             {
@@ -10389,7 +10483,7 @@ def test_the_first_run_connect_steps_prepare_the_install_tools_verbatim() -> Non
         submitted = PanelIntent.model_validate({"submitted": {"verb": verb}}).submitted
         prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
         assert prepared.tool == tool
-        assert set(prepared.input) == {"user_description"}
+        assert prepared.input == {}
 
 
 def test_the_rebuild_intents_prepare_their_own_extensions_tools_verbatim() -> None:
@@ -10404,7 +10498,7 @@ def test_the_rebuild_intents_prepare_their_own_extensions_tools_verbatim() -> No
         submitted = PanelIntent.model_validate({"submitted": {"verb": verb}}).submitted
         prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
         assert prepared.tool == tool
-        assert set(prepared.input) == {"user_description"}
+        assert prepared.input == {}
 
 
 def test_a_rebuild_outcome_carries_the_tools_own_account_of_what_it_queued() -> None:
@@ -13280,7 +13374,12 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
                 Message(
                     role="user",
                     content=(
-                        ToolResultBlock(tool_use_id="private-call", content="done", activity=True),
+                        ToolResultBlock(
+                            tool_use_id="private-call",
+                            content="done",
+                            activity=True,
+                            activity_text="Listing the private files.",
+                        ),
                     ),
                 ),
             ),
@@ -13334,12 +13433,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
                     "conversation_id": str(child_conversation),
                     "events": [
                         {"kind": "note", "text": "Reading the private file."},
-                        {
-                            "kind": "tool",
-                            "name": "bash",
-                            "preview": '{"command":"ls"}',
-                            "description": "",
-                        },
+                        {"kind": "activity", "text": "Listing the private files."},
                     ],
                     "output": "ok",
                     "subagents": [],
@@ -13653,7 +13747,6 @@ async def test_durable_todo_board_fills_the_typed_tasks_slot(
                     todos.TodoTask(description="Render the board", status="in_progress"),
                     todos.TodoTask(description="Verify the flow", status="pending"),
                 ),
-                user_description="Track the slot rollout",
             ),
         )
         assert await ScopedStore(extension=todos.NAME).get(

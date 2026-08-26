@@ -28,37 +28,40 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("a tool frame decodes its complete description, and uses its tool and preview when absent", async () => {
+test("an activity frame decodes its complete description", async () => {
   const stream = await streaming();
-  stream.emit("tool", { description: "Reading the calendar", tool: "cal", preview: "list" });
+  const label = "Reading the calendar."
+  stream.emit("activity", { text: label });
   // The open fold states the step too, so the line is the one reading it out.
-  const dock = await screen.findByText("Reading the calendar", { selector: ".sr-only" });
+  const dock = await screen.findByText(label, { selector: ".sr-only" });
   const decoded = dock.parentElement!.querySelector("[data-slot=decode-text]")!;
-  expect(decoded.textContent).toHaveLength("Reading the calendar".length);
-  expect(decoded.textContent).not.toBe("Reading the calendar");
+  expect(decoded.textContent).toHaveLength(label.length);
+  expect(decoded.textContent).not.toBe(label);
   expect(decoded.textContent?.replaceAll(" ", "")).not.toMatch(/[A-Za-z]/);
   // A space is a break between words rather than a cell, so it is the only character without one.
   expect(decoded.querySelectorAll("[data-slot=decode-cell]")).toHaveLength(
-    "Reading the calendar".replaceAll(" ", "").length,
+    label.replaceAll(" ", "").length,
   );
   expect(decoded.querySelector("[data-slot=decode-cell]")?.className).toContain(
     "w-(--size-decode-cell)",
   );
-  stream.emit("tool", { tool: "bash", preview: "ls -la" });
-  expect(await screen.findByText("bash ls -la", { selector: ".sr-only" })).toBeTruthy();
+  stream.emit("activity", { text: "Listing the workspace." });
+  expect(await screen.findByText("Listing the workspace.", { selector: ".sr-only" })).toBeTruthy();
 });
 
-test("a skill frame names the skill being loaded", async () => {
+test("an activity frame names the guidance being loaded", async () => {
   const stream = await streaming();
-  stream.emit("skill", { skill: "calendar-triage" });
-  expect(await screen.findByText("Loading skill · calendar-triage")).toBeTruthy();
+  stream.emit("activity", { text: "Loading calendar guidance." });
+  expect(
+    await screen.findByText("Loading calendar guidance.", { selector: ".sr-only" }),
+  ).toBeTruthy();
 });
 
 test("a settled turn states its latest call and opens onto the ones before it", async () => {
   const stream = await streaming();
-  stream.emit("tool", { tool: "bash", preview: "ls" });
-  stream.emit("tool", { tool: "read", preview: "notes.md" });
-  stream.emit("skill", { skill: "calendar-triage" });
+  stream.emit("activity", { text: "Listing the workspace." });
+  stream.emit("activity", { text: "Reading the notes." });
+  stream.emit("activity", { text: "Loading calendar guidance." });
   stream.emit("terminal", {
     status: "done",
     text: "Looked it over.",
@@ -69,18 +72,20 @@ test("a settled turn states its latest call and opens onto the ones before it", 
 
   const summary = await screen.findByText("Completed 3 steps");
   expect(summary.closest("summary")).toBeTruthy();
-  expect(screen.queryByText("bash ls")).toBeNull();
-  expect(screen.queryByText("Loading skill · calendar-triage")).toBeNull();
+  expect(screen.queryByText("Listing the workspace.")).toBeNull();
+  expect(screen.queryByText("Loading calendar guidance.")).toBeNull();
 
   await userEvent.click(summary);
-  expect(screen.getByText("bash ls").closest("details")).toBe(summary.closest("details"));
-  expect(screen.getByText("read notes.md")).toBeTruthy();
-  expect(screen.getByText("Loaded skill · calendar-triage")).toBeTruthy();
+  expect(screen.getByText("Listing the workspace.").closest("details")).toBe(
+    summary.closest("details"),
+  );
+  expect(screen.getByText("Reading the notes.")).toBeTruthy();
+  expect(screen.getByText("Loading calendar guidance.")).toBeTruthy();
 });
 
 test("one tool call states itself, with nothing more behind it", async () => {
   const stream = await streaming();
-  stream.emit("tool", { tool: "bash", preview: "ls" });
+  stream.emit("activity", { text: "Listing the workspace." });
   stream.emit("terminal", {
     status: "done",
     text: "Done.",
@@ -90,58 +95,51 @@ test("one tool call states itself, with nothing more behind it", async () => {
   });
   const summary = await screen.findByText("Completed 1 step");
   expect(summary.closest("summary")).toBeTruthy();
-  expect(screen.queryByText("bash ls")).toBeNull();
+  expect(screen.queryByText("Listing the workspace.")).toBeNull();
 
   await userEvent.click(summary);
-  expect(screen.getByText("bash ls")).toBeTruthy();
+  expect(screen.getByText("Listing the workspace.")).toBeTruthy();
 });
 
-test("a thought a tool call interrupted becomes a step, in the order it was written", async () => {
+test("a late activity frame leaves the reply already streaming where it stands", async () => {
   const stream = await streaming();
-  stream.emit("message", { text: "Reading the changelog first." });
-  expect(await screen.findByText(saying("Reading the changelog first."))).toBeTruthy();
+  const answer = "It shipped Tuesday.";
+  stream.emit("message", { text: answer });
+  expect(await screen.findByText(saying(answer))).toBeTruthy();
 
-  stream.emit("tool", { tool: "read", preview: "CHANGELOG.md" });
-  stream.emit("message", { text: "It shipped Tuesday." });
+  stream.emit("activity", { text: "Reading the changelog." });
+  expect(screen.getByText(saying(answer))).toBeTruthy();
   stream.emit("terminal", {
     status: "done",
-    text: "It shipped Tuesday.",
+    text: answer,
     model: "opus",
     tokens: 5,
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Completed 2 steps");
-  expect(screen.queryByText("Reading the changelog first.")).toBeNull();
-  expect(screen.getByText("It shipped Tuesday.")).toBeTruthy();
+  const summary = await screen.findByText("Completed 1 step");
+  expect(screen.getByText(answer)).toBeTruthy();
 
   await userEvent.click(summary);
   const rows = summary.closest("details")!.querySelectorAll("li");
-  expect([...rows].map((row) => row.textContent)).toEqual([
-    "Reading the changelog first.",
-    "read CHANGELOG.md",
-  ]);
+  expect([...rows].map((row) => row.textContent)).toEqual(["Reading the changelog."]);
 });
 
-test("the fold a running turn writes into stands open on its thoughts among its calls", async () => {
+test("the fold a running turn writes into stands open on its steps", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Reading the changelog first." });
-  stream.emit("tool", { tool: "read", preview: "CHANGELOG.md" });
-  await waitFor(() =>
-    expect(screen.queryByText(saying("Reading the changelog first."))).toBeNull(),
-  );
+  stream.emit("activity", { text: "Reading the changelog." });
+  expect(await screen.findByText(saying("Reading the changelog first."))).toBeTruthy();
 
   const fold = document.querySelector("details") as HTMLDetailsElement;
   await waitFor(() => expect(fold.open).toBe(true));
 
   stream.emit("message", { text: "Checking the tags now." });
-  stream.emit("tool", { tool: "bash", preview: "git tag" });
+  stream.emit("activity", { text: "Checking the release tags." });
   await waitFor(() =>
     expect([...fold.querySelectorAll("li")].map((row) => row.textContent)).toEqual([
-      "Reading the changelog first.",
-      "read CHANGELOG.md",
-      "Checking the tags now.",
-      "bash git tag",
+      "Reading the changelog.",
+      "Checking the release tags.",
     ]),
   );
 });
@@ -152,7 +150,7 @@ test("the fold a running turn writes into stands open on its thoughts among its 
 // opens the fold, so it cannot see what that event leaves behind.
 test("the fold the running turn stood open folds when the turn settles", async () => {
   const stream = await streaming();
-  stream.emit("tool", { tool: "bash", preview: "ls" });
+  stream.emit("activity", { text: "Listing the workspace." });
   const fold = (await waitFor(() => document.querySelector("details")!)) as HTMLDetailsElement;
   await waitFor(() => expect(fold.open).toBe(true));
 
@@ -166,14 +164,14 @@ test("the fold the running turn stood open folds when the turn settles", async (
 
   expect(await screen.findByText("Completed 1 step")).toBeTruthy();
   await waitFor(() => expect(document.querySelector("details")!.open).toBe(false));
-  expect(screen.queryByText("bash ls")).toBeNull();
+  expect(screen.queryByText("Listing the workspace.")).toBeNull();
 });
 
 // The member's own toggle is the one state that outlives the default, so the frames a running turn
 // keeps emitting must not open the fold again behind the member who folded it away.
 test("a member who folds a running turn away keeps it away over the frames after it", async () => {
   const stream = await streaming();
-  stream.emit("tool", { tool: "read", preview: "CHANGELOG.md" });
+  stream.emit("activity", { text: "Reading the changelog." });
 
   const fold = document.querySelector("details") as HTMLDetailsElement;
   await waitFor(() => expect(fold.open).toBe(true));
@@ -183,30 +181,29 @@ test("a member who folds a running turn away keeps it away over the frames after
   await delivered();
   expect(fold.open).toBe(false);
 
-  stream.emit("skill", { skill: "calendar-triage" });
-  expect(await screen.findByText("Loading skill · calendar-triage")).toBeTruthy();
+  stream.emit("activity", { text: "Loading calendar guidance." });
+  expect(await screen.findByText("Loading calendar guidance.")).toBeTruthy();
   await delivered();
   expect(fold.open).toBe(false);
 });
 
-test("a thought a skill load interrupted stays a step when the turn is stopped", async () => {
+test("an activity stays a step when the turn is stopped", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Loading the triage skill." });
-  stream.emit("skill", { skill: "calendar-triage" });
+  stream.emit("activity", { text: "Loading calendar guidance." });
   stream.emit("terminal", { status: "cancelled" });
 
-  const summary = await screen.findByText("Completed 2 steps");
-  expect(screen.getByText("Stopped.")).toBeTruthy();
+  const summary = await screen.findByText("Completed 1 step");
+  expect(document.body.textContent).toContain("Stopped.");
 
   await userEvent.click(summary);
-  expect(screen.getByText("Loading the triage skill.")).toBeTruthy();
-  expect(screen.getByText("Loaded skill · calendar-triage")).toBeTruthy();
+  expect(screen.getByText("Loading calendar guidance.")).toBeTruthy();
 });
 
-test("a thought a subagent's dispatch interrupted stands ahead of the run's row", async () => {
+test("a subagent's dispatch stands ahead of the run's row", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Handing the research off." });
-  stream.emit("tool", { tool: "spawn_subagent", preview: "general_purpose" });
+  stream.emit("activity", { text: "Delegating the research." });
   stream.emit("subagent_activity", {
     turn_id: "88888888-8888-4888-8888-888888888888",
     parent_turn_id: TURN_ID,
@@ -227,13 +224,10 @@ test("a thought a subagent's dispatch interrupted stands ahead of the run's row"
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Completed 3 steps");
+  const summary = await screen.findByText("Completed 2 steps");
   await userEvent.click(summary);
   const log = document.body.textContent ?? "";
-  expect(log.indexOf("Handing the research off.")).toBeLessThan(
-    log.indexOf("spawn_subagent general_purpose"),
-  );
-  expect(log.indexOf("spawn_subagent general_purpose")).toBeLessThan(
+  expect(log.indexOf("Delegating the research.")).toBeLessThan(
     log.indexOf("Subagent · general_purpose"),
   );
 });
@@ -241,7 +235,7 @@ test("a thought a subagent's dispatch interrupted stands ahead of the run's row"
 test("a run's frame leaves the answer the turn has already streamed where it stands", async () => {
   const stream = await streaming();
   const answer = "The research runs on; I will say what it finds.";
-  stream.emit("tool", { tool: "spawn_subagent", preview: "general_purpose" });
+  stream.emit("activity", { text: "Delegating the research." });
   stream.emit("message", { text: answer });
   expect(await screen.findByText(saying(answer))).toBeTruthy();
 
@@ -272,16 +266,16 @@ test("a run's frame leaves the answer the turn has already streamed where it sta
   await userEvent.click(summary);
   const rows = summary.closest("details")!.querySelectorAll(":scope > ul > li");
   expect([...rows].map((row) => row.textContent)).toEqual([
-    "spawn_subagent general_purpose",
+    "Delegating the research.",
     "Subagent · general_purpose",
   ]);
   expect(screen.getByText(saying(answer))).toBeTruthy();
 });
 
-test("a thought flushed to a step survives the drain that ends its round", async () => {
+test("an activity survives the drain that ends its round", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Reading the changelog first." });
-  stream.emit("tool", { tool: "read", preview: "CHANGELOG.md" });
+  stream.emit("activity", { text: "Reading the changelog." });
   stream.emit("absorbed", { arrivals: [ARRIVAL_ID] });
   stream.emit("message", { text: "It shipped Tuesday." });
   stream.emit("terminal", {
@@ -292,15 +286,10 @@ test("a thought flushed to a step survives the drain that ends its round", async
     cost_micro_usd: 1_000_000,
   });
 
-  // The round the drain closed wrote a thought and dispatched a call. Both are the work behind the
-  // reply it settled as, and a drain is not a reason to lose them.
-  const summary = await screen.findByText("Completed 2 steps");
+  const summary = await screen.findByText("Completed 1 step");
   await userEvent.click(summary);
   const rows = summary.closest("details")!.querySelectorAll("li");
-  expect([...rows].map((row) => row.textContent)).toEqual([
-    "Reading the changelog first.",
-    "read CHANGELOG.md",
-  ]);
+  expect([...rows].map((row) => row.textContent)).toEqual(["Reading the changelog."]);
   expect(screen.getByText("It shipped Tuesday.")).toBeTruthy();
 });
 
@@ -430,7 +419,7 @@ test("the consent link stands after the page re-reads the transcript", async () 
 
 test("a connect turn that ends wordless keeps the control it posted", async () => {
   const stream = await streaming();
-  stream.emit("tool", { tool: "connect_account", preview: "" });
+  stream.emit("activity", { text: "Connecting Gmail." });
   stream.emit("connect", { provider: "gmail", label: "Gmail", turn: TURN_ID });
   await screen.findByRole("link", { name: "Connect Gmail" });
 

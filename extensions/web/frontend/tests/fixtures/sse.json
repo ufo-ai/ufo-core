@@ -4,16 +4,12 @@
     "data": "{\"text\":\"Looking at the workspace…\"}"
   },
   {
-    "event": "tool",
-    "data": "{\"tool\":\"bash\",\"preview\":\"ls -la\",\"description\":\"Listing the workspace\"}"
-  },
-  {
-    "event": "skill",
-    "data": "{\"skill\":\"calendar-triage\"}"
+    "event": "activity",
+    "data": "{\"text\":\"Listing the workspace.\"}"
   },
   {
     "event": "subagent_activity",
-    "data": "{\"turn_id\":\"99999999-9999-4999-8999-999999999999\",\"parent_turn_id\":\"77777777-7777-4777-8777-777777777777\",\"conversation_id\":\"55555555-5555-4555-8555-555555555555\",\"profile\":\"deep_research\",\"name\":\"Calendar check\",\"tool\":\"fetch_url\",\"description\":\"Reading the calendar\",\"preview\":\"\",\"skill\":\"\",\"status\":\"\"}"
+    "data": "{\"turn_id\":\"99999999-9999-4999-8999-999999999999\",\"parent_turn_id\":\"77777777-7777-4777-8777-777777777777\",\"conversation_id\":\"55555555-5555-4555-8555-555555555555\",\"profile\":\"deep_research\",\"name\":\"Calendar check\",\"activity\":\"Reading the calendar.\",\"status\":\"\"}"
   },
   {
     "event": "cost",

@@ -144,7 +144,7 @@ async def _run(name: str, provider: SearchProvider | None, **args: object):
     tool = _tool(name)
     return await tool.handler(
         _context(provider),
-        tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args}),
+        tool.input_model.model_validate({**args}),
     )
 
 
@@ -175,14 +175,12 @@ def test_tool_descriptions_are_the_ported_verbatim_strings_and_untrusted() -> No
         "start_published_date",
         "end_published_date",
         "allowed_domains",
-        "user_description",
     }
     assert set(research_tools.FetchUrlInput.model_fields) == {
         "url",
         "prompt",
         "max_length",
         "force_fetch",
-        "user_description",
     }
     schema = by_name["search_vertical"].schema().input_schema
     assert set(schema["properties"]["vertical"]["enum"]) == {
@@ -255,7 +253,6 @@ def test_search_web_bounds_the_result_count_and_rejects_a_malformed_date() -> No
         research_tools.SearchWebInput.model_validate(
             {
                 "queries": ["x"],
-                "user_description": TOOL_NARRATION,
                 "num_results": research_tools.MAX_SEARCH_RESULTS + 1,
             }
         )
@@ -263,7 +260,6 @@ def test_search_web_bounds_the_result_count_and_rejects_a_malformed_date() -> No
         research_tools.SearchWebInput.model_validate(
             {
                 "queries": ["x"],
-                "user_description": TOOL_NARRATION,
                 "start_published_date": "last week",
             }
         )
@@ -304,7 +300,6 @@ async def test_search_vertical_folds_the_vertical_into_the_query() -> None:
         provider,
         vertical="academic",
         query="graph transformers",
-        user_description="papers",
     )
     assert result.is_error is False
     assert provider.queries[-1].vertical == "academic"
@@ -320,7 +315,6 @@ async def test_fetch_url_maps_the_page_and_passes_the_extraction_prompt() -> Non
         prompt="summarize it",
         max_length=999_999,
         force_fetch=True,
-        user_description="read it",
     )
     assert result.is_error is False
     request = provider.fetches[-1]
@@ -341,7 +335,7 @@ async def test_fetch_url_maps_the_page_and_passes_the_extraction_prompt() -> Non
 
 async def test_fetch_url_is_gated_when_the_provider_cannot_fetch() -> None:
     provider = _FakeSearchProvider(supports_fetch=False)
-    result = await _run("fetch_url", provider, url="https://ex.test", user_description="read it")
+    result = await _run("fetch_url", provider, url="https://ex.test")
     assert result.is_error is True
     assert result.content[0].text == research_tools.FETCH_UNSUPPORTED_MESSAGE
     assert provider.fetches == []
@@ -349,9 +343,7 @@ async def test_fetch_url_is_gated_when_the_provider_cannot_fetch() -> None:
 
 async def test_fetch_url_walls_every_page_with_crawler_provenance() -> None:
     provider = _FakeSearchProvider()
-    result = await _run(
-        "fetch_url", provider, url="https://api.github.com/user", user_description="read it"
-    )
+    result = await _run("fetch_url", provider, url="https://api.github.com/user")
     assert result.is_error is False
     reply = json.loads(result.content[0].text)
     assert reply["provenance"] == research_tools.CRAWLER_PROVENANCE
@@ -362,7 +354,7 @@ async def test_web_tools_fail_loud_without_a_search_provider() -> None:
     with pytest.raises(RuntimeError, match="no search provider is configured"):
         await _run("search_web", None, queries=["x"])
     with pytest.raises(RuntimeError, match="no search provider is configured"):
-        await _run("fetch_url", None, url="https://ex.test", user_description="x")
+        await _run("fetch_url", None, url="https://ex.test")
 
 
 def test_web_prompt_section_renders_into_the_shell() -> None:

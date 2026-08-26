@@ -70,9 +70,6 @@ class ReportProblemInput(BaseModel):
             "for it to be reported."
         )
     )
-    user_description: str = Field(
-        description="What you are reporting, in plain language for the activity timeline."
-    )
     symptom: str = Field(
         max_length=SYMPTOM_MAX_CHARS,
         description="The observable failure in one sentence.",

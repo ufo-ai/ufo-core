@@ -70,7 +70,6 @@ def _send(arguments: dict[str, JsonValue], slug: str = SLACK_SEND_SLUG) -> CallE
         tool_name=slug,
         source_id=connector_tools.SLACK_PROVIDER,
         arguments=arguments,
-        user_description="posting the plan in the launch channel",
     )
 
 
@@ -237,7 +236,6 @@ async def test_an_unreadable_store_never_denies_the_members_send() -> None:
             tool_name=SLACK_SEND_SLUG,
             source_id="gmail",
             arguments={"to": "a@b.test", "text": SENT_TEXT},
-            user_description="mailing the plan",
         ),
     ],
     ids=["read", "empty_text", "other_provider"],

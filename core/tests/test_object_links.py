@@ -285,9 +285,7 @@ async def _get(tools: dict[str, ToolDef], ctx: ToolContext, kind: str, name: str
     tool = tools["object_get"]
     result: ToolResult = await tool.handler(
         ctx,
-        tool.input_model.model_validate(
-            {"user_description": LINK_NARRATION, "kind": kind, "name": name}
-        ),
+        tool.input_model.model_validate({"kind": kind, "name": name}),
     )
     assert result.is_error is False
     block = result.content[0]
@@ -330,9 +328,7 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
         search = MEMORY_TOOLS["memory_search"]
         found: ToolResult = await search.handler(
             _tool_ctx(workspace_id, blob, ext=memory_ext),
-            search.input_model.model_validate(
-                {"user_description": LINK_NARRATION, "queries": ("Acme renewal",)}
-            ),
+            search.input_model.model_validate({"queries": ("Acme renewal",)}),
         )
         hit = next(line for line in found.content[0].text.splitlines() if DERIVED_FACT in line)
         ref = SEARCH_REF.search(hit)
@@ -402,7 +398,6 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
                         hidden,
                         get_tool.input_model.model_validate(
                             {
-                                "user_description": LINK_NARRATION,
                                 "kind": CONVERSATION_KIND,
                                 "name": str(private_conversation),
                             }
@@ -413,7 +408,6 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
                     own,
                     get_tool.input_model.model_validate(
                         {
-                            "user_description": LINK_NARRATION,
                             "kind": CONVERSATION_KIND,
                             "name": str(other_agent_conversation),
                         }
@@ -426,7 +420,6 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
                     own,
                     apply_tool.input_model.model_validate(
                         {
-                            "user_description": LINK_NARRATION,
                             "manifest": yaml.safe_dump(
                                 {
                                     "kind": CONVERSATION_KIND,
@@ -443,7 +436,6 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
                     own,
                     delete_tool.input_model.model_validate(
                         {
-                            "user_description": LINK_NARRATION,
                             "kind": CONVERSATION_KIND,
                             "name": str(shared_conversation),
                         }
@@ -454,7 +446,6 @@ async def test_conversation_kind_gates_on_audience_and_refuses_mutation(db: None
                     own,
                     delete_tool.input_model.model_validate(
                         {
-                            "user_description": LINK_NARRATION,
                             "kind": CONVERSATION_KIND,
                             "name": str(other_agent_conversation),
                         }
@@ -511,9 +502,7 @@ async def test_conversation_kind_lists_only_visible_rows(db: None) -> None:
         async def _names(ctx: ToolContext) -> list[dict[str, object]]:
             result = await list_tool.handler(
                 ctx,
-                list_tool.input_model.model_validate(
-                    {"user_description": LINK_NARRATION, "kind": CONVERSATION_KIND}
-                ),
+                list_tool.input_model.model_validate({"kind": CONVERSATION_KIND}),
             )
             return json.loads(result.content[0].text)["objects"]
 
@@ -582,9 +571,7 @@ async def test_superseded_memory_leaves_search_and_links_to_its_replacement(
         search = MEMORY_TOOLS["memory_search"]
         found: ToolResult = await search.handler(
             _tool_ctx(workspace_id, blob, ext=memory_ext),
-            search.input_model.model_validate(
-                {"user_description": LINK_NARRATION, "queries": ("fleet migration",)}
-            ),
+            search.input_model.model_validate({"queries": ("fleet migration",)}),
         )
         assert str(old_id) not in found.content[0].text
         assert str(new_id) in found.content[0].text
@@ -601,9 +588,7 @@ async def test_superseded_memory_leaves_search_and_links_to_its_replacement(
         listing_tool = tools["object_list"]
         listing: ToolResult = await listing_tool.handler(
             ctx,
-            listing_tool.input_model.model_validate(
-                {"user_description": LINK_NARRATION, "kind": MEMORY_KIND}
-            ),
+            listing_tool.input_model.model_validate({"kind": MEMORY_KIND}),
         )
         names = [row["name"] for row in json.loads(listing.content[0].text)["objects"]]
         assert str(new_id) in names
@@ -685,9 +670,7 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 _tool_ctx(workspace_id, blob, member_id=other_id, ext=memory_ext),
-                get_tool.input_model.model_validate(
-                    {"user_description": LINK_NARRATION, "kind": MEMORY_KIND, "name": str(item_id)}
-                ),
+                get_tool.input_model.model_validate({"kind": MEMORY_KIND, "name": str(item_id)}),
             )
 
 
@@ -712,17 +695,13 @@ async def test_malformed_relations_kinds_and_target_names_fail_at_the_boundary(
         with pytest.raises(UnknownKind):
             await get_tool.handler(
                 ctx,
-                get_tool.input_model.model_validate(
-                    {"user_description": LINK_NARRATION, "kind": "entity", "name": "acme"}
-                ),
+                get_tool.input_model.model_validate({"kind": "entity", "name": "acme"}),
             )
         for kind in (MEMORY_KIND, CONVERSATION_KIND):
             with pytest.raises(UnknownObject):
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate(
-                        {"user_description": LINK_NARRATION, "kind": kind, "name": "not-a-uuid"}
-                    ),
+                    get_tool.input_model.model_validate({"kind": kind, "name": "not-a-uuid"}),
                 )
 
 

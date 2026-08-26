@@ -74,7 +74,7 @@ def wrote(path: str, content: str, call_id: str = "w1") -> Message:
             ToolUseBlock(
                 id=call_id,
                 name="write",
-                input={"file_path": path, "content": content, "user_description": "the report"},
+                input={"file_path": path, "content": content},
             ),
         ),
     )
@@ -149,7 +149,6 @@ def test_an_edit_counts_the_text_it_inserted() -> None:
                     input={
                         "file_path": "/workspace/notes.md",
                         "edits": [{"old_string": "x", "new_string": REPORT}],
-                        "user_description": "extend",
                     },
                 ),
             ),

@@ -267,16 +267,10 @@ NOTE_TABLE = sa.Table(
 
 class EchoInput(BaseModel):
     message: str
-    user_description: str = Field(
-        description="What you are echoing, in plain language for the activity timeline."
-    )
 
 
 class NoteInput(BaseModel):
     text: str
-    user_description: str = Field(
-        description="What you are noting down, in plain language for the activity timeline."
-    )
 
 
 class ProbeTask(BaseModel):
@@ -818,10 +812,6 @@ class _SampleBroker:
 
 class ConnectorExecuteInput(BaseModel):
     tool_name: str = "sample_list"
-    user_description: str = Field(
-        description="What you are doing in the connected account, in plain language for the "
-        "activity timeline."
-    )
 
 
 async def _connector_execute(ctx: ToolContext, args: ConnectorExecuteInput) -> ToolResult:

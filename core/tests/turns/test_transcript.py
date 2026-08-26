@@ -92,6 +92,28 @@ def test_decode_accepts_a_blob_without_system_or_injected() -> None:
     assert conversation.injected is None
 
 
+def test_decode_accepts_a_tool_call_with_the_removed_description_arg() -> None:
+    conversation = decode(
+        lz4.frame.compress(
+            b'{"seq":1,"messages":['
+            b'{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash",'
+            b'"input":{"command":"ls","user_description":"Listing files"}}]},'
+            b'{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1",'
+            b'"content":"README.md"}]}]}'
+        )
+    )
+    assistant = conversation.messages[0].content
+    result = conversation.messages[1].content
+    assert isinstance(assistant, tuple)
+    assert isinstance(result, tuple)
+    call = assistant[0]
+    outcome = result[0]
+    assert isinstance(call, ToolUseBlock)
+    assert call.input == {"command": "ls", "user_description": "Listing files"}
+    assert isinstance(outcome, ToolResultBlock)
+    assert (outcome.activity, outcome.activity_text) == (False, "")
+
+
 async def test_read_missing_returns_none(tmp_path: Path) -> None:
     assert await _transcript(tmp_path).read() is None
 

@@ -105,9 +105,7 @@ class SpeakingModel:
         for span in self.spans:
             yield TextDelta(text=_span(self.message, span))
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "true", "user_description": "checking"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -328,9 +326,7 @@ class WorkingThenClosingSpanModel:
             return
         yield TextDelta(text="Working on it. ")
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "true", "user_description": "checking"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -409,9 +405,7 @@ class ForcedClosingSpanModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "true", "user_description": "checking"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -464,9 +458,7 @@ class UnclosedSpanModel:
             return
         yield TextDelta(text=f'<reply-to message="{ANSWERED}">half a thought')
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "true", "user_description": "checking"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -746,7 +738,7 @@ async def test_a_spoken_reply_and_the_closing_reply_reach_a_durable_surface_in_o
                 yield ToolCallStart(id="m1", name="bash")
                 yield ToolCallDelta(
                     id="m1",
-                    partial_json='{"command": "true", "user_description": "running a check"}',
+                    partial_json='{"command": "true"}',
                 )
                 yield Usage(input_tokens=2, output_tokens=2)
                 return

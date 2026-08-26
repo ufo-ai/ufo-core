@@ -6,7 +6,7 @@ The skill is the one copy of the standard. A member's agent reaches it with `loa
 an entry in a reply; the job reads the same words as its system prompt and writes the stored entry
 the portal's digest draws. Two callers, one set of rules."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import JobSpec, owner_candidates
@@ -38,11 +38,6 @@ async def write_digests(ctx: ExtensionContext) -> None:
 
 class RebuildReportDigestInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    user_description: str = Field(
-        description="Why the entries are being written again, in plain language for the activity "
-        "timeline."
-    )
 
 
 async def rebuild_report_digest_handler(

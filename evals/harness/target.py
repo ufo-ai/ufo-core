@@ -890,6 +890,7 @@ def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:
                         has_result=result is not None,
                         call_id=block.id,
                         is_error=result.is_error if result is not None else False,
+                        activity=result.activity_text if result is not None else "",
                     )
                 )
                 if result is not None and result.is_error:

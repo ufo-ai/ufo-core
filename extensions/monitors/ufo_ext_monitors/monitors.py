@@ -121,7 +121,6 @@ class Monitor:
     reason: str
     next_steps: str
     metadata: dict[str, JsonValue] | None
-    user_description: str
     created_by_member_id: UUID | None
     baseline: str
     probes_run: int
@@ -155,7 +154,6 @@ def _row(row: sa.RowMapping) -> Monitor:
         reason=row["reason"],
         next_steps=row["next_steps"],
         metadata=row["metadata"],
-        user_description=row["user_description"],
         created_by_member_id=row["created_by_member_id"],
         baseline=row["baseline"],
         probes_run=row["probes_run"],
@@ -225,7 +223,6 @@ class MonitorStore:
         reason: str,
         next_steps: str,
         metadata: dict[str, JsonValue] | None,
-        user_description: str,
         created_by_member_id: UUID | None,
         baseline: str,
         next_probe_at: datetime,
@@ -248,7 +245,7 @@ class MonitorStore:
                             reason=reason,
                             next_steps=next_steps,
                             metadata=metadata,
-                            user_description=user_description,
+                            user_description=reason,
                             created_by_member_id=created_by_member_id,
                             baseline=baseline,
                             probes_run=0,

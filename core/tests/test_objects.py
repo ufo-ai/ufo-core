@@ -241,7 +241,7 @@ def _object_tools() -> dict[str, ToolDef]:
 
 async def _text(tools: dict[str, ToolDef], tool_name: str, ctx: ToolContext, **args: object) -> str:
     tool = tools[tool_name]
-    payload = {"user_description": OBJECT_NARRATION, **args}
+    payload = {**args}
     result: ToolResult = await tool.handler(ctx, tool.input_model.model_validate(payload))
     assert result.is_error is False
     block = result.content[0]
@@ -290,7 +290,6 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
                 ctx,
                 list_tool.input_model.model_validate(
                     {
-                        "user_description": OBJECT_NARRATION,
                         "kind": sample.WIDGET_KIND,
                         "filters": {"colour": "teal"},
                     }
@@ -301,7 +300,6 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
                 ctx,
                 list_tool.input_model.model_validate(
                     {
-                        "user_description": OBJECT_NARRATION,
                         "kind": sample.WIDGET_KIND,
                         "order_by": "weight",
                     }
@@ -354,7 +352,6 @@ async def test_widget_crud_round_trips_through_the_verbs(db: None) -> None:
                 ctx,
                 get_tool.input_model.model_validate(
                     {
-                        "user_description": OBJECT_NARRATION,
                         "kind": sample.WIDGET_KIND,
                         "name": "anvil",
                     }
@@ -379,9 +376,7 @@ async def test_relic_reads_and_refuses_every_mutation(db: None) -> None:
         with pytest.raises(VerbNotSupported, match="read-only"):
             await apply_tool.handler(
                 ctx,
-                apply_tool.input_model.model_validate(
-                    {"user_description": OBJECT_NARRATION, "manifest": relic}
-                ),
+                apply_tool.input_model.model_validate({"manifest": relic}),
             )
 
         delete_tool = tools["object_delete"]
@@ -390,7 +385,6 @@ async def test_relic_reads_and_refuses_every_mutation(db: None) -> None:
                 ctx,
                 delete_tool.input_model.model_validate(
                     {
-                        "user_description": OBJECT_NARRATION,
                         "kind": sample.RELIC_KIND,
                         "name": sample.RELIC_NAME,
                     }
@@ -409,7 +403,7 @@ async def test_widget_delete_gates_on_the_owner(db: None) -> None:
 
         delete_tool = tools["object_delete"]
         args = delete_tool.input_model.model_validate(
-            {"user_description": OBJECT_NARRATION, "kind": sample.WIDGET_KIND, "name": "guarded"}
+            {"kind": sample.WIDGET_KIND, "name": "guarded"}
         )
         with pytest.raises(AdminRequired):
             await delete_tool.handler(_tool_context(workspace_id), args)
@@ -429,9 +423,7 @@ async def test_apply_refusals_name_their_cause(db: None) -> None:
     async def apply(manifest: str) -> None:
         await apply_tool.handler(
             _tool_context(workspace_id),
-            apply_tool.input_model.model_validate(
-                {"user_description": OBJECT_NARRATION, "manifest": manifest}
-            ),
+            apply_tool.input_model.model_validate({"manifest": manifest}),
         )
 
     with ws(workspace_id):
@@ -1002,9 +994,7 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
         assert joiner_fetched["spec"]["internet_access_allowed"] is False
 
         apply_tool = tools["object_apply"]
-        args = apply_tool.input_model.model_validate(
-            {"user_description": OBJECT_NARRATION, "manifest": manifest}
-        )
+        args = apply_tool.input_model.model_validate({"manifest": manifest})
         with pytest.raises(AdminRequired):
             await apply_tool.handler(_tool_context(workspace_id, speaker_member_id=joiner), args)
         with pytest.raises(AdminRequired):
@@ -1012,7 +1002,6 @@ async def test_agent_kind_updates_model_admin_gated_and_returns_prompt(db: None)
 
         prompt_write = apply_tool.input_model.model_validate(
             {
-                "user_description": OBJECT_NARRATION,
                 "manifest": yaml.safe_dump(
                     {
                         "kind": AGENT_KIND,
@@ -1133,7 +1122,6 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
         apply_tool = tools["object_apply"]
         narrow_main = apply_tool.input_model.model_validate(
             {
-                "user_description": OBJECT_NARRATION,
                 "manifest": yaml.safe_dump(
                     {
                         "kind": AGENT_KIND,
@@ -1153,7 +1141,6 @@ async def test_agent_kind_visibility_widens_and_main_stays_workspace(db: None) -
 
         omitting = apply_tool.input_model.model_validate(
             {
-                "user_description": OBJECT_NARRATION,
                 "manifest": yaml.safe_dump(
                     {
                         "kind": AGENT_KIND,
@@ -1235,7 +1222,6 @@ async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_nam
             ctx,
             apply_tool.input_model.model_validate(
                 {
-                    "user_description": OBJECT_NARRATION,
                     "manifest": manifest("support-desk", base),
                 }
             ),
@@ -1269,7 +1255,6 @@ async def test_agent_kind_stamps_an_icon_on_create_and_keeps_it_until_one_is_nam
                 ctx,
                 apply_tool.input_model.model_validate(
                     {
-                        "user_description": OBJECT_NARRATION,
                         "manifest": manifest("support-desk", {**base, "icon": "Unicorn"}),
                     }
                 ),
@@ -1341,7 +1326,6 @@ async def test_agent_kind_refuses_an_effort_outside_the_enum(db: None) -> None:
         apply_tool = tools["object_apply"]
         args = apply_tool.input_model.model_validate(
             {
-                "user_description": OBJECT_NARRATION,
                 "manifest": yaml.safe_dump(
                     {
                         "kind": AGENT_KIND,
@@ -1406,7 +1390,6 @@ async def test_agent_kind_creates_owned_by_any_speaking_member_and_refuses_delet
         def create_input(name: str, spec: dict, *, create_only: bool = False) -> object:
             return apply_tool.input_model.model_validate(
                 {
-                    "user_description": OBJECT_NARRATION,
                     "manifest": yaml.safe_dump({"kind": AGENT_KIND, "name": name, "spec": spec}),
                     "create_only": create_only,
                 }
@@ -1484,9 +1467,7 @@ async def test_agent_kind_creates_owned_by_any_speaking_member_and_refuses_delet
         with pytest.raises(VerbNotSupported) as delete_refusal:
             await delete_tool.handler(
                 ctx,
-                delete_tool.input_model.model_validate(
-                    {"user_description": OBJECT_NARRATION, "kind": AGENT_KIND, "name": "assistant"}
-                ),
+                delete_tool.input_model.model_validate({"kind": AGENT_KIND, "name": "assistant"}),
             )
         assert str(delete_refusal.value) == MAIN_AGENT_UNARCHIVABLE
 
@@ -1538,7 +1519,6 @@ async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: N
         unauthorized = apply_tool.input_model.model_validate(
             {
                 "manifest": manifest.replace("review the exact request", "unauthorized rewrite"),
-                "user_description": OBJECT_NARRATION,
             }
         )
         with pytest.raises(UnknownObject):
@@ -1603,7 +1583,6 @@ async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: N
                                 "spec": {**owned, "prompt": "stolen"},
                             }
                         ),
-                        "user_description": OBJECT_NARRATION,
                     }
                 ),
             )
@@ -1624,7 +1603,6 @@ async def test_an_owner_or_admin_edits_an_agent_and_anyone_else_is_refused(db: N
                                 },
                             }
                         ),
-                        "user_description": OBJECT_NARRATION,
                     }
                 ),
             )
@@ -2020,9 +1998,7 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
             with agent(turn.agent_id):
                 await apply_tool.handler(
                     ctx,
-                    apply_tool.input_model.model_validate(
-                        {"user_description": OBJECT_NARRATION, "manifest": manifest}
-                    ),
+                    apply_tool.input_model.model_validate({"manifest": manifest}),
                 )
 
         deleted = json.loads(
@@ -2043,9 +2019,7 @@ async def test_artifact_kind_refuses_apply_and_delete_removes_every_version(
             with agent(turn.agent_id):
                 await delete_tool.handler(
                     ctx,
-                    delete_tool.input_model.model_validate(
-                        {"user_description": OBJECT_NARRATION, "kind": ARTIFACT_KIND, "name": name}
-                    ),
+                    delete_tool.input_model.model_validate({"kind": ARTIFACT_KIND, "name": name}),
                 )
 
 
@@ -2170,7 +2144,6 @@ async def test_artifact_with_missing_bytes_fails_loud_on_get(db: None, tmp_path:
                     ctx,
                     get_tool.input_model.model_validate(
                         {
-                            "user_description": OBJECT_NARRATION,
                             "kind": ARTIFACT_KIND,
                             "name": f"{turn.conversation_id.hex[:8]}-gone-txt",
                         }
@@ -2547,7 +2520,6 @@ async def test_conversation_transcript_keeps_member_and_agent_gates(
                         hidden,
                         get_tool.input_model.model_validate(
                             {
-                                "user_description": OBJECT_NARRATION,
                                 "kind": CONVERSATION_KIND,
                                 "name": str(private.conversation_id),
                             }
@@ -3368,7 +3340,6 @@ async def test_artifact_reads_and_mutation_resolution_stay_inside_the_agent(db: 
                     ctx,
                     get_tool.input_model.model_validate(
                         {
-                            "user_description": OBJECT_NARRATION,
                             "kind": ARTIFACT_KIND,
                             "name": other_name,
                         }
@@ -3381,7 +3352,6 @@ async def test_artifact_reads_and_mutation_resolution_stay_inside_the_agent(db: 
                     ctx,
                     delete_tool.input_model.model_validate(
                         {
-                            "user_description": OBJECT_NARRATION,
                             "kind": ARTIFACT_KIND,
                             "name": other_name,
                         }
@@ -3925,7 +3895,6 @@ async def test_delete_archives_an_app_frees_its_name_and_restore_returns_the_sam
                 {
                     "app_id": str(archived_id),
                     "name": "invoice-intake-first",
-                    "user_description": OBJECT_NARRATION,
                 }
             ),
         )
@@ -3994,7 +3963,6 @@ async def test_a_restore_is_refused_a_name_a_live_app_answers_to(db: None) -> No
                     {
                         "app_id": str(archived_id),
                         "name": "invoice-intake",
-                        "user_description": OBJECT_NARRATION,
                     }
                 ),
             )
@@ -4042,7 +4010,6 @@ async def test_archive_keeps_the_main_app_and_other_members_apps_out_of_reach(db
                 {
                     "app_id": str(shipped),
                     "name": "briefer",
-                    "user_description": OBJECT_NARRATION,
                 }
             ),
         )
@@ -4059,7 +4026,6 @@ async def test_archive_keeps_the_main_app_and_other_members_apps_out_of_reach(db
                     {
                         "app_id": str(owned),
                         "name": "invoice-intake",
-                        "user_description": OBJECT_NARRATION,
                     }
                 ),
             )

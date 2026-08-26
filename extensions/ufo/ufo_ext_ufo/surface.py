@@ -46,16 +46,15 @@ from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
 from ufo.sdk.hub import (
     Absorbed,
+    Activity,
     CostTick,
     LiveFrame,
     Parked,
     Reply,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
     TextDelta,
-    ToolCall,
 )
 from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
@@ -241,8 +240,8 @@ def directives_for(
     files: tuple[SharedFile, ...] = (),
     exits: bool = True,
 ) -> tuple[bytes, ...]:
-    """The directive lines one live frame renders to. Token deltas stream as `txt`; tool and skill
-    activity narrates as `note`; a running cost meter is a transient `status`; the terminal frame
+    """The directive lines one live frame renders to. Token deltas stream as `txt`; tool-run
+    activity and the running cost meter are transient `status` lines; the terminal frame
     caps the turn (`streamed` says the answer already reached the transcript as `txt`, `collect`
     names the credential prompts still awaiting values, `files` the ones it shared). A drain names
     the member arrivals it folded (`absorbed`), which is how a client holding a message it sent
@@ -255,10 +254,8 @@ def directives_for(
     match frame:
         case TextDelta():
             return (directive("txt", frame.text),) if frame.text else ()
-        case ToolCall():
-            return (directive("note", _activity(frame)),)
-        case SkillLoad():
-            return (directive("note", f"loading skill: {frame.skill}"),)
+        case Activity():
+            return (directive("status", frame.text),)
         case SubagentActivity():
             return _subagent_note(frame)
         case CostTick():
@@ -278,21 +275,12 @@ def directives_for(
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
 
 
-def _activity(frame: ToolCall) -> str:
-    detail = frame.description or frame.preview
-    return f"running {frame.tool}: {detail}" if detail else f"running {frame.tool}"
-
-
 def _subagent_note(frame: SubagentActivity) -> tuple[bytes, ...]:
     """A run's dispatches narrate as notes under the run's name; its start and terminal are the
     parent's spawn narration and result, so they add no line."""
     label = frame.name or frame.profile
-    if frame.tool:
-        detail = frame.description or frame.preview
-        body = f"running {frame.tool}: {detail}" if detail else f"running {frame.tool}"
-        return (directive("note", f"{label}: {body}"),)
-    if frame.skill:
-        return (directive("note", f"{label}: loading skill: {frame.skill}"),)
+    if frame.activity:
+        return (directive("status", f"{label}: {frame.activity}"),)
     return ()
 
 

@@ -699,7 +699,7 @@ async def _run_rebuild(workspace_id: UUID, member_id: UUID, agent_id: UUID) -> s
     (tool,) = manifest().tools
     result = await tool.handler(
         _tool_ctx(workspace_id, member_id, agent_id),
-        RebuildReportDigestInput(user_description="write the radar entries again"),
+        RebuildReportDigestInput(),
     )
     return result.content[0].text
 

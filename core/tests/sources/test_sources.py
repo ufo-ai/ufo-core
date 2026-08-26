@@ -311,9 +311,7 @@ async def _search(memory: MemoryStore, member_id: UUID | None, blob_root: Path, 
     with ws(memory.workspace_id):
         result: ToolResult = await tool.handler(
             _context(memory, member_id, blob_root),
-            tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "queries": [query]}
-            ),
+            tool.input_model.model_validate({"queries": [query]}),
         )
     return result.content[0].text
 

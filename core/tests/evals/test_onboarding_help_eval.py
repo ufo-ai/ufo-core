@@ -328,9 +328,7 @@ async def test_rotated_secret_seed_makes_slack_connect_pending(db: None, tmp_pat
             )
             result = await slack_connect_handler(
                 ctx,
-                SlackConnectInput(
-                    method="manifest", user_description="checking the Slack connection"
-                ),
+                SlackConnectInput(method="manifest"),
             )
             await seed_slack_rotated_secret(workspace_id, agent_id, blob)
     finally:

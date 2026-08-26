@@ -438,13 +438,9 @@ async def test_bash_timeout_is_milliseconds_capped_and_converted(tmp_path: Path)
     to the carrier's seconds; an omitted timeout falls back to the default budget."""
     carrier = _RecordingCarrier()
     ctx = _bash_ctx(carrier, tmp_path)
-    await bash_handler(
-        ctx, BashInput(command="echo hi", timeout=5000, user_description="checking the box")
-    )
-    await bash_handler(
-        ctx, BashInput(command="echo hi", timeout=9_000_000, user_description="checking the box")
-    )
-    await bash_handler(ctx, BashInput(command="echo hi", user_description="checking the box"))
+    await bash_handler(ctx, BashInput(command="echo hi", timeout=5000))
+    await bash_handler(ctx, BashInput(command="echo hi", timeout=9_000_000))
+    await bash_handler(ctx, BashInput(command="echo hi"))
     assert carrier.timeouts == [5, 600, DEFAULT_EXEC_TIMEOUT_SECONDS]
 
 
@@ -463,9 +459,7 @@ async def test_background_bash_detaches_and_signals_completion(tmp_path: Path) -
     ctx = await _live_ctx(tmp_path)
     result = await bash_handler(
         ctx,
-        BashInput(
-            command="sleep 1; echo finished-marker", background=True, user_description="building"
-        ),
+        BashInput(command="sleep 1; echo finished-marker", background=True),
     )
     assert not result.is_error
     task = _task_payload(result.content[0].text)
@@ -481,7 +475,7 @@ async def test_background_bash_records_a_failing_exit_code(tmp_path: Path) -> No
     ctx = await _live_ctx(tmp_path)
     result = await bash_handler(
         ctx,
-        BashInput(command="echo boom >&2; exit 7", background=True, user_description="building"),
+        BashInput(command="echo boom >&2; exit 7", background=True),
     )
     task = _task_payload(result.content[0].text)
     assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "7"
@@ -495,7 +489,7 @@ async def test_background_bash_carries_the_commands_own_quoting(tmp_path: Path) 
     ctx = await _live_ctx(tmp_path)
     result = await bash_handler(
         ctx,
-        BashInput(command='echo "x\'y"', background=True, user_description="building"),
+        BashInput(command='echo "x\'y"', background=True),
     )
     task = _task_payload(result.content[0].text)
     assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "0"
@@ -513,7 +507,6 @@ async def test_background_bash_rewrites_workspace_paths_inside_the_command(tmp_p
         BashInput(
             command=f'echo rewritten > "{WORKSPACE_DIR}/out.txt"',
             background=True,
-            user_description="building",
         ),
     )
     task = _task_payload(result.content[0].text)
@@ -529,7 +522,7 @@ async def test_the_advertised_stop_line_ends_the_command_and_signals(tmp_path: P
     ctx = await _live_ctx(tmp_path)
     result = await bash_handler(
         ctx,
-        BashInput(command="sleep 30", background=True, user_description="building"),
+        BashInput(command="sleep 30", background=True),
     )
     task = _task_payload(result.content[0].text)
     killed = await ctx.sandbox.bash(task["stop"])
@@ -547,7 +540,6 @@ async def test_the_stop_line_reaches_the_commands_descendants(tmp_path: Path) ->
         BashInput(
             command=f'sleep 30 & echo $! > "{WORKSPACE_DIR}/desc.pid"; wait',
             background=True,
-            user_description="building",
         ),
     )
     task = _task_payload(result.content[0].text)
@@ -571,11 +563,11 @@ async def test_a_command_inside_its_budget_answers_as_itself(tmp_path: Path) -> 
 
     passed = await bash_handler(
         ctx,
-        BashInput(command="echo out-line; echo err-line >&2", user_description="checking the box"),
+        BashInput(command="echo out-line; echo err-line >&2"),
     )
     failed = await bash_handler(
         ctx,
-        BashInput(command="echo out-line; exit 7", user_description="checking the box"),
+        BashInput(command="echo out-line; exit 7"),
     )
 
     assert not passed.is_error
@@ -591,14 +583,12 @@ async def test_a_finished_task_is_swept_a_window_after_it_ended(tmp_path: Path) 
     where old completed tasks go — while a task still running keeps its files whatever its age."""
     ctx = await _live_ctx(tmp_path)
     tasks_dir = f"{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}"
-    await bash_handler(ctx, BashInput(command="echo done", user_description="checking the box"))
+    await bash_handler(ctx, BashInput(command="echo done"))
     finished = (await ctx.sandbox.bash(f'ls "{tasks_dir}"')).stdout.split()
     assert len(finished) == 3
-    running = await bash_handler(
-        ctx, BashInput(command="sleep 30", background=True, user_description="building")
-    )
+    running = await bash_handler(ctx, BashInput(command="sleep 30", background=True))
     await ctx.sandbox.bash(f'touch -t 202001010000 "{tasks_dir}"/*')
-    await bash_handler(ctx, BashInput(command="echo next", user_description="checking the box"))
+    await bash_handler(ctx, BashInput(command="echo next"))
     remaining = (await ctx.sandbox.bash(f'ls "{tasks_dir}"')).stdout.split()
     assert not set(finished) & set(remaining)
     live = _task_payload(running.content[0].text)["task"]
@@ -619,11 +609,11 @@ async def test_a_replayed_call_reattaches_and_reads_the_first_run(tmp_path: Path
     command = f'echo ran >> "{runs}"; cat "{runs}"'
     first = await bash_handler(
         await _live_ctx(tmp_path, idempotency_key=key),
-        BashInput(command=command, user_description="building"),
+        BashInput(command=command),
     )
     replayed = await bash_handler(
         await _live_ctx(tmp_path, idempotency_key=key),
-        BashInput(command=command, user_description="building"),
+        BashInput(command=command),
     )
     assert first.content[0].text == "ran\n"
     assert replayed.content[0].text == "ran\n"
@@ -637,11 +627,11 @@ async def test_a_replayed_call_picks_up_a_command_still_running(tmp_path: Path) 
     command = "sleep 1; echo finished"
     await bash_handler(
         await _live_ctx(tmp_path, idempotency_key=key),
-        BashInput(command=command, background=True, user_description="building"),
+        BashInput(command=command, background=True),
     )
     picked = await bash_handler(
         await _live_ctx(tmp_path, idempotency_key=key),
-        BashInput(command=command, user_description="building"),
+        BashInput(command=command),
     )
     assert not picked.is_error
     assert picked.content[0].text == "finished\n"
@@ -653,8 +643,8 @@ async def test_without_a_resume_identity_every_call_is_a_fresh_task(tmp_path: Pa
     ctx = await _live_ctx(tmp_path)
     runs = f"{WORKSPACE_DIR}/runs.txt"
     command = f'echo ran >> "{runs}"; cat "{runs}"'
-    await bash_handler(ctx, BashInput(command=command, user_description="building"))
-    second = await bash_handler(ctx, BashInput(command=command, user_description="building"))
+    await bash_handler(ctx, BashInput(command=command))
+    second = await bash_handler(ctx, BashInput(command=command))
     assert second.content[0].text == "ran\nran\n"
 
 
@@ -670,7 +660,6 @@ async def test_a_foreground_command_carries_its_quoting_and_workspace_paths(
         ctx,
         BashInput(
             command=f"""echo "x'y" > "{quoted}"; cat "{quoted}" """,
-            user_description="checking the box",
         ),
     )
 
@@ -691,7 +680,6 @@ async def test_a_command_that_outgrows_its_budget_keeps_running(tmp_path: Path) 
         BashInput(
             command='for i in 1 2 3 4 5 6 7 8; do echo "tick $i"; sleep 0.4; done',
             timeout=1000,
-            user_description="building",
         ),
     )
 
@@ -713,12 +701,8 @@ async def test_a_moved_command_is_reported_as_any_detached_one(tmp_path: Path) -
     watch it."""
     ctx = await _live_ctx(tmp_path)
 
-    asked = await bash_handler(
-        ctx, BashInput(command="sleep 30", background=True, user_description="building")
-    )
-    moved = await bash_handler(
-        ctx, BashInput(command="sleep 30", timeout=1000, user_description="building")
-    )
+    asked = await bash_handler(ctx, BashInput(command="sleep 30", background=True))
+    moved = await bash_handler(ctx, BashInput(command="sleep 30", timeout=1000))
 
     assert not asked.is_error and not moved.is_error
     assert (
@@ -742,7 +726,6 @@ async def test_a_moved_commands_stop_line_reaches_its_descendants(tmp_path: Path
         BashInput(
             command=f'sleep 30 & echo $! > "{WORKSPACE_DIR}/moved.pid"; wait',
             timeout=1000,
-            user_description="building",
         ),
     )
 
@@ -780,15 +763,15 @@ async def test_a_stopped_command_names_the_deadline_that_stopped_it(tmp_path: Pa
 
     unset = await bash_handler(
         _bash_ctx(default_stop, tmp_path),
-        BashInput(command="pytest -q", user_description="running the tests"),
+        BashInput(command="pytest -q"),
     )
     reduced = await bash_handler(
         _bash_ctx(capped, tmp_path),
-        BashInput(command="pytest -q", timeout=9_000_000, user_description="running the tests"),
+        BashInput(command="pytest -q", timeout=9_000_000),
     )
     honoured = await bash_handler(
         _bash_ctx(exact, tmp_path),
-        BashInput(command="pytest -q", timeout=5000, user_description="running the tests"),
+        BashInput(command="pytest -q", timeout=5000),
     )
 
     assert unset.is_error and reduced.is_error and honoured.is_error
@@ -812,9 +795,7 @@ async def test_a_commands_own_timeout_is_not_reported_as_the_sandboxs(tmp_path: 
 
     result = await bash_handler(
         _bash_ctx(carrier, tmp_path),
-        BashInput(
-            command="timeout 3000 pytest -q", timeout=600_000, user_description="running the tests"
-        ),
+        BashInput(command="timeout 3000 pytest -q", timeout=600_000),
     )
 
     assert result.is_error
@@ -838,7 +819,6 @@ async def test_a_stopped_command_records_the_container_it_was_stopped_in(
             BashInput(
                 command="uv run pytest -n auto " + "x" * 500,
                 timeout=9_000_000,
-                user_description="running the tests",
             ),
         )
 
@@ -876,7 +856,7 @@ async def test_a_container_that_cannot_answer_is_the_reading_that_matters(
     with caplog.at_level(logging.INFO, logger="ufo"):
         result = await bash_handler(
             _bash_ctx(carrier, tmp_path),
-            BashInput(command="echo alive", user_description="checking the box"),
+            BashInput(command="echo alive"),
         )
 
     logged = next(r for r in caplog.records if r.message == "sandbox.exec_timeout")
@@ -897,7 +877,7 @@ async def test_a_command_that_failed_on_its_own_records_no_timeout(
     with caplog.at_level(logging.INFO, logger="ufo"):
         await bash_handler(
             _bash_ctx(carrier, tmp_path),
-            BashInput(command="timeout 3000 pytest", user_description="running the tests"),
+            BashInput(command="timeout 3000 pytest"),
         )
 
     assert not [r for r in caplog.records if r.message == "sandbox.exec_timeout"]

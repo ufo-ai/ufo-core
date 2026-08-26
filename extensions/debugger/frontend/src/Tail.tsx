@@ -4,8 +4,7 @@ import { apiUrl } from "./api";
 type TailEvent = { kind: string; data: string };
 const EVENT_KINDS = [
   "text",
-  "tool",
-  "skill",
+  "activity",
   "subagent_activity",
   "cost",
   "absorbed",

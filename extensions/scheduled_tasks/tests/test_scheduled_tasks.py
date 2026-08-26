@@ -106,9 +106,7 @@ def _task_manifest(
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     assert result.is_error is False
     return result.content[0].text
 
@@ -1406,7 +1404,6 @@ async def test_applied_task_rejects_non_five_field_cron(db: None) -> None:
     apply = _object_tool("object_apply")
     args = apply.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _task_manifest("too-many", "0 9 * * * *", "too many fields"),
         }
     )
@@ -1758,7 +1755,6 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
                 stranger_ctx,
                 get.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "kind": SCHEDULED_TASK_KIND,
                         "name": "digest",
                     }
@@ -1769,7 +1765,6 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
                 stranger_ctx,
                 apply.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _task_manifest("digest", "0 17 * * 1", "hijacked"),
                     }
                 ),
@@ -1779,7 +1774,6 @@ async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -
                 stranger_ctx,
                 delete.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "kind": SCHEDULED_TASK_KIND,
                         "name": "digest",
                     }
@@ -2602,7 +2596,6 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
                 admin_ctx,
                 apply.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _task_manifest(
                             "digest", "0 17 * * 1", "admin's injected prompt"
                         ),

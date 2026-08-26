@@ -54,6 +54,7 @@ from evals.suites import (
     site_build,
     skill_routing,
     slack_message_block,
+    tool_activity,
     tool_calling,
     ufo_app_bench,
     web_research,
@@ -107,6 +108,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
+    tool_activity.tool_activity_task(),
     capability_task(
         "code_review",
         code_review.CASES,

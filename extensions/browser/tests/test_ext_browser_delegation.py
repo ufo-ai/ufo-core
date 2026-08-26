@@ -146,7 +146,6 @@ async def test_browser_task_spawns_the_browser_profile_and_awaits_its_terminal(
             "url": "https://jobs.example.com",
             "task": "list open roles",
             "task_name": "jobs",
-            "user_description": "browse jobs",
         }
     )
     assert args.timeout_minutes == BROWSER_TASK_TIMEOUT_FLOOR_MINUTES
@@ -184,7 +183,6 @@ async def test_browser_task_cancels_a_child_that_outlives_its_timeout(tmp_path: 
             url="https://slow.example.com",
             task="wait forever",
             task_name="slow",
-            user_description="slow browse",
             timeout_minutes=0,
         ),
     )
@@ -212,7 +210,6 @@ async def test_browser_task_reattached_to_its_timeout_cancelled_child_reports_th
                 "url": "https://jobs.example.com",
                 "task": "list open roles",
                 "task_name": "jobs",
-                "user_description": "browse jobs",
             }
         ),
     )
@@ -228,7 +225,6 @@ async def test_browser_task_rejects_a_timeout_below_the_floor() -> None:
                 "url": "https://jobs.example.com",
                 "task": "list open roles",
                 "task_name": "jobs",
-                "user_description": "browse jobs",
                 "timeout_minutes": BROWSER_TASK_TIMEOUT_FLOOR_MINUTES - 1,
             }
         )
@@ -250,7 +246,6 @@ async def test_wide_browse_fans_over_deduped_entities_and_writes_the_json(tmp_pa
                 "entities_file": "entities.txt",
                 "prompt_template": "get pricing from {entity}",
                 "output_schema_file": "schema.json",
-                "user_description": "batch",
             }
         ),
     )
@@ -281,7 +276,6 @@ async def test_wide_browse_keys_each_child_on_the_call_and_entity(tmp_path: Path
                 "entities_file": "entities.txt",
                 "prompt_template": "get pricing from {entity}",
                 "output_schema_file": "schema.json",
-                "user_description": "batch",
             }
         ),
     )
@@ -303,7 +297,6 @@ async def test_wide_browse_caps_the_entity_count(tmp_path: Path) -> None:
                     "entities_file": "entities.txt",
                     "prompt_template": "get {entity}",
                     "output_schema_file": "schema.json",
-                    "user_description": "batch",
                 }
             ),
         )
@@ -318,7 +311,6 @@ def test_a_browser_task_budget_stays_within_what_a_leased_session_can_hold() -> 
             url="https://example.com",
             task="t",
             task_name="n",
-            user_description="d",
             timeout_minutes=delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES,
         ).timeout_minutes
         == delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES
@@ -328,7 +320,6 @@ def test_a_browser_task_budget_stays_within_what_a_leased_session_can_hold() -> 
             url="https://example.com",
             task="t",
             task_name="n",
-            user_description="d",
             timeout_minutes=delegation.BROWSER_TASK_TIMEOUT_CEILING_MINUTES + 1,
         )
     assert (
@@ -366,7 +357,6 @@ async def test_a_real_shell_reads_hostile_paths_literally(tmp_path: Path) -> Non
                 "entities_file": entities,
                 "prompt_template": "get pricing from {entity}",
                 "output_schema_file": schema,
-                "user_description": "batch",
             }
         ),
     )

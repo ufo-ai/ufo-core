@@ -91,9 +91,7 @@ class _CrashOnceModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(
             id="c1",
-            partial_json=json.dumps(
-                {"command": f"echo hi >> {HITS_LOG}", "user_description": "running a check"}
-            ),
+            partial_json=json.dumps({"command": f"echo hi >> {HITS_LOG}"}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
@@ -134,7 +132,6 @@ class _CrashAfterBindFailureModel:
             partial_json=json.dumps(
                 {
                     "file_path": "/workspace/alpha.txt",
-                    "user_description": "opening alpha",
                 }
             ),
         )
@@ -144,7 +141,6 @@ class _CrashAfterBindFailureModel:
             partial_json=json.dumps(
                 {
                     "file_path": "/workspace/beta.txt",
-                    "user_description": "opening beta",
                 }
             ),
         )
@@ -429,9 +425,7 @@ class _GuidanceProbeModel:
             yield ToolCallStart(id="c1", name="bash")
             yield ToolCallDelta(
                 id="c1",
-                partial_json=json.dumps(
-                    {"command": f"echo {GUIDANCE_PROBE}", "user_description": "a long command"}
-                ),
+                partial_json=json.dumps({"command": f"echo {GUIDANCE_PROBE}"}),
             )
             yield Usage(input_tokens=2, output_tokens=2)
             return

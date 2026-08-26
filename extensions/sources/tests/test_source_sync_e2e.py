@@ -260,9 +260,7 @@ async def _sync_and_search(
                 context,
                 ext=context_for(memory.name, frozenset(), index=index, embed=embed),
             ),
-            search.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "queries": [query]}
-            ),
+            search.input_model.model_validate({"queries": [query]}),
         )
     return result.content[0].text, driver
 

@@ -218,9 +218,6 @@ class JsReplInput(BaseModel):
         description="Reset the REPL context and start fresh. Any code provided runs after the "
         "reset.",
     )
-    user_description: str = Field(
-        description="Brief plain-language description shown in the activity timeline."
-    )
 
 
 class XlsxReplInput(BaseModel):
@@ -231,10 +228,6 @@ class XlsxReplInput(BaseModel):
     timeout: int | None = Field(default=None, description=TIMEOUT_DESCRIPTION)
     reset: bool | None = Field(
         default=None, description="Reset REPL state — clears all variables and loaded workbooks."
-    )
-    user_description: str = Field(
-        description="What you are working out in the spreadsheet, in plain language for the "
-        "activity timeline. Never include code."
     )
 
 

@@ -248,8 +248,6 @@ class ApplicationBuilderTask(BaseModel):
 class BuildUfoApplicationInput(BaseModel):
     """One fixed application delegation for the current member request."""
 
-    user_description: str = Field(min_length=1, max_length=200)
-
 
 class RenderApplicationPreviewInput(BaseModel):
     """The complete small design contract for one application preview."""
@@ -259,7 +257,6 @@ class RenderApplicationPreviewInput(BaseModel):
     regions: tuple[ApplicationRegion, ...] = Field(min_length=2, max_length=6)
     layout: ApplicationLayout
     design_direction: str = Field(default="", max_length=200)
-    user_description: str = Field(min_length=1, max_length=200)
 
 
 class ApplicationPreviewResult(BaseModel):
@@ -420,21 +417,18 @@ class ApplicationBuildAcceptance:
 class WriteApplicationSourceInput(BaseModel):
     """The complete `app.tsx` source for the current typed build task."""
 
-    user_description: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=APPLICATION_SOURCE_MAX_CHARS)
 
 
 class WriteApplicationDesignInput(BaseModel):
     """One SVG visual contract for the application first screen."""
 
-    user_description: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=APPLICATION_DESIGN_MAX_CHARS)
 
 
 class ReadApplicationSourceInput(BaseModel):
     """Select bounded excerpts from the admitted `app.tsx` source for one repair."""
 
-    user_description: str = Field(min_length=1, max_length=200)
     terms: tuple[BoundedSourceTerm, ...] = Field(default=(), max_length=20)
 
 
@@ -448,7 +442,6 @@ class ApplicationSourceEdit(BaseModel):
 class EditApplicationSourceInput(BaseModel):
     """Exact replacements to apply to the current admitted `app.tsx`."""
 
-    user_description: str = Field(min_length=1, max_length=200)
     edits: tuple[ApplicationSourceEdit, ...] = Field(min_length=1, max_length=20)
 
     @field_validator("edits", mode="before")
@@ -997,7 +990,7 @@ async def render_application_preview(
     """Render and share one stateless product-owned application preview."""
     body = await asyncio.to_thread(_PillowApplicationPreview.render, args)
     await ctx.share_artifact(APPLICATION_PREVIEW_FILENAME, body, "Application preview")
-    contract = args.model_dump(mode="json", exclude={"user_description"})
+    contract = args.model_dump(mode="json")
     digest = sha256(
         json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

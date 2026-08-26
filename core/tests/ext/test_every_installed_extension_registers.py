@@ -79,7 +79,6 @@ from ufo.serve import (
 )
 from ufo.skills.runtime import parse_skill
 from ufo.tools.registry import ToolRegistry
-from ufo.turns.activity import SKILL_LOAD_TOOL
 from ufo.turns.audience import conversation_audience
 
 INSTALLED: dict[str, tuple[Manifest, object]] = discovered()
@@ -385,23 +384,15 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
     _check_conversation_slots(manifest)
 
 
-def test_every_registered_tool_takes_a_required_user_description() -> None:
-    """A surface names a running tool call by the model's own `user_description`, so every tool the
-    live registry offers must take one — the gate that keeps a new tool from landing with no
-    member-facing line. `load_skill` is exempt: the engine intercepts it and publishes a SkillLoad
-    frame naming the skill, never reading a description."""
+def test_no_registered_tool_takes_a_user_description() -> None:
     tools, _ = turn_tools(
         load_manifests(), _credential_store(), audience=conversation_audience(None)
     )
     assert tools
-    without: list[str] = []
-    for tool in tools:
-        if tool.name == SKILL_LOAD_TOOL:
-            continue
-        field = tool.input_model.model_fields.get("user_description")
-        if field is None or not field.is_required():
-            without.append(tool.name)
-    assert sorted(without) == []
+    assert (
+        sorted(tool.name for tool in tools if "user_description" in tool.input_model.model_fields)
+        == []
+    )
 
 
 @pytest.mark.parametrize("pack_name", sorted(PACKS))

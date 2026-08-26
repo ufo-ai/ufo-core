@@ -499,7 +499,7 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
           {
             role: "assistant",
             text: "**parent answer**",
-            events: [{ kind: "tool", name: "bash", preview: "ls", description: "" }],
+            events: [{ kind: "activity", text: "Listing the workspace." }],
             subagents: [
               {
                 profile: "research",
@@ -543,7 +543,7 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
   expect(screen.queryByText("bash ls")).toBeNull();
 
   await userEvent.click(summary);
-  expect(screen.getByText("bash ls")).toBeTruthy();
+  expect(screen.getByText("Listing the workspace.")).toBeTruthy();
   const run = screen.getByText("Subagent · research");
   expect(run.closest("a")).toBeNull();
 

@@ -181,7 +181,7 @@ async def test_granted_emails_groups_per_agent_and_sorts(db: None, tmp_path) -> 
         ):
             granted = await GRANT.handler(
                 _tool_ctx(workspace_id, agent_id, admin_id),
-                WebAccessInput(email=email, user_description="granting access"),
+                WebAccessInput(email=email),
             )
             assert not granted.is_error
         grants = await granted_emails(web_extension().store)
@@ -200,7 +200,7 @@ async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_pa
         extension = context_for(NAME, frozenset())
         granted = await GRANT.handler(
             _tool_ctx(workspace_id, second_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL.upper(), user_description="granting access"),
+            WebAccessInput(email=MEMBER_EMAIL.upper()),
         )
         assert not granted.is_error
         audience = await web_audience(surface, extension, MEMBER_EMAIL)
@@ -212,7 +212,7 @@ async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_pa
         assert [agent.id for agent in admin_view.agents] == [main_agent, second_agent]
         revoked = await REVOKE.handler(
             _tool_ctx(workspace_id, second_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL, user_description="revoking access"),
+            WebAccessInput(email=MEMBER_EMAIL),
         )
         assert not revoked.is_error
         remaining = await web_audience(surface, extension, MEMBER_EMAIL)
@@ -285,7 +285,7 @@ async def test_the_main_agent_needs_no_grant_and_revocation_only_clears_stale_ro
         extension = context_for(NAME, frozenset())
         granted = await GRANT.handler(
             _tool_ctx(workspace_id, main_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL, user_description="granting access"),
+            WebAccessInput(email=MEMBER_EMAIL),
         )
         assert not granted.is_error
         assert "already answers every member" in granted.content[0].text
@@ -295,7 +295,7 @@ async def test_the_main_agent_needs_no_grant_and_revocation_only_clears_stale_ro
         )
         revoked = await REVOKE.handler(
             _tool_ctx(workspace_id, main_agent, admin_id),
-            WebAccessInput(email=MEMBER_EMAIL, user_description="revoking access"),
+            WebAccessInput(email=MEMBER_EMAIL),
         )
         assert not revoked.is_error
         assert "still reaches it in the portal" in revoked.content[0].text
@@ -312,7 +312,7 @@ async def test_non_admin_speaker_cannot_change_web_access(db: None, tmp_path) ->
     with ws(workspace_id):
         refused = await GRANT.handler(
             _tool_ctx(workspace_id, second_agent, member_id),
-            WebAccessInput(email=MEMBER_EMAIL, user_description="granting access"),
+            WebAccessInput(email=MEMBER_EMAIL),
         )
         assert refused.is_error
         extension = context_for(NAME, frozenset())
@@ -326,7 +326,7 @@ async def test_grant_requires_an_existing_member(db: None, tmp_path) -> None:
     with ws(workspace_id):
         refused = await GRANT.handler(
             _tool_ctx(workspace_id, second_agent, admin_id),
-            WebAccessInput(email="carol@example.com", user_description="granting access"),
+            WebAccessInput(email="carol@example.com"),
         )
         assert refused.is_error
         assert "invite" in refused.content[0].text
@@ -338,7 +338,7 @@ async def test_speakerless_turn_cannot_change_web_access(db: None, tmp_path) -> 
     with ws(workspace_id):
         refused = await GRANT.handler(
             _tool_ctx(workspace_id, second_agent, None),
-            WebAccessInput(email=ADMIN_EMAIL, user_description="granting access"),
+            WebAccessInput(email=ADMIN_EMAIL),
         )
         assert refused.is_error
 
@@ -373,12 +373,8 @@ async def test_reading_a_private_transcript_is_admin_only_and_records_the_reader
                     updated_at=sa.func.now(),
                 )
             )
-    args = PrivateTranscriptInput(
-        conversation_id=conversation_id, user_description="reading a transcript"
-    )
-    own_args = PrivateTranscriptInput(
-        conversation_id=own_conversation_id, user_description="reading my own"
-    )
+    args = PrivateTranscriptInput(conversation_id=conversation_id)
+    own_args = PrivateTranscriptInput(conversation_id=own_conversation_id)
     with ws(workspace_id):
         # The non-admin is a bystander rather than the subject, because the admin gate is the first
         # thing a non-admin subject would hit — the reader's-own branch sits inside the writer,
@@ -461,10 +457,9 @@ async def test_open_conversation_lands_a_lost_race_on_the_winner_and_its_row(
         assert [key for key, _ in rows] == [f"chat/{winner}"]
 
 
-async def test_every_web_access_tool_takes_a_required_user_description() -> None:
+async def test_no_web_access_tool_takes_a_user_description() -> None:
     for tool in WEB_ACCESS_TOOLS:
-        field = tool.input_model.model_fields["user_description"]
-        assert field.is_required()
+        assert "user_description" not in tool.input_model.model_fields
 
 
 @pytest.mark.parametrize("tool", WEB_ACCESS_TOOLS, ids=lambda tool: tool.name)

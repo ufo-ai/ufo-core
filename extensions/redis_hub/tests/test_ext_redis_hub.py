@@ -25,13 +25,12 @@ from ufo_ext_redis_hub.stream_hub import (
 
 from ufo.hub import (
     Absorbed,
+    Activity,
     CostTick,
     LiveFrame,
     Parked,
-    SkillLoad,
     SubagentActivity,
     Terminal,
-    ToolCall,
 )
 from ufo.models.interface import TextDelta
 from ufo.schema.records import TerminalFrame
@@ -55,8 +54,7 @@ FRAMES: tuple[LiveFrame, ...] = (
     Terminal(frame=TerminalFrame(status="done", text="answer", model="claude-opus-4-8")),
     Parked(message="over a spend cap"),
     CostTick(cost_micro_usd=110, tokens=10),
-    ToolCall(tool="bash", preview='{"command":"ls"}'),
-    SkillLoad(skill="memory"),
+    Activity(text="Listing the workspace."),
     Absorbed(arrivals=(UUID(int=7), UUID(int=8))),
     SubagentActivity(
         turn_id=UUID(int=9),
@@ -64,8 +62,7 @@ FRAMES: tuple[LiveFrame, ...] = (
         conversation_id=UUID(int=11),
         profile="general_purpose",
         name="UK sports news",
-        tool="bash",
-        description="Checking the fixtures",
+        activity="Checking the fixtures.",
     ),
 )
 
@@ -73,6 +70,29 @@ FRAMES: tuple[LiveFrame, ...] = (
 @pytest.mark.parametrize("frame", FRAMES)
 def test_frame_wire_codec_round_trips_every_kind(frame: LiveFrame) -> None:
     assert frame_from_payload(frame_payload(frame)) == frame
+
+
+def test_activity_keeps_the_shared_streams_tool_call_wire_shape() -> None:
+    assert frame_payload(Activity(text="Reading the changelog.")) == {
+        "kind": "tool_call",
+        "data": {
+            "tool": "activity",
+            "preview": "",
+            "description": "Reading the changelog.",
+        },
+    }
+
+
+def test_tool_call_and_skill_load_wire_frames_decode_as_activity() -> None:
+    assert frame_from_payload(
+        {
+            "kind": "tool_call",
+            "data": {"tool": "bash", "preview": '{"command":"ls"}', "description": ""},
+        }
+    ) == Activity(text="bash")
+    assert frame_from_payload({"kind": "skill_load", "data": {"skill": "calendar"}}) == Activity(
+        text="Loading calendar."
+    )
 
 
 def test_manifest_registers_the_redis_hub_backend() -> None:
@@ -115,17 +135,17 @@ async def test_a_blocking_read_timeout_is_an_idle_tick_the_subscribe_survives() 
 @needs_redis
 async def test_latest_activity_reads_newest_first_across_pages() -> None:
     """The peek walks the stream newest-first in bounded pages, so the activity frame is found
-    even when more than one XREVRANGE batch of deltas was published after it, and a newer skill
-    load supersedes an older tool call."""
+    even when more than one XREVRANGE batch of deltas was published after it, and a newer summary
+    supersedes an older one."""
     hub = RedisStreamHub(url=REDIS_TEST_URL)
     turn_id = uuid4()
     assert await hub.latest_activity(turn_id) is None
-    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    call = Activity(text="Listing the workspace.")
     await hub.publish(turn_id, call)
     for index in range(150):
         await hub.publish(turn_id, TextDelta(text=f"delta {index}"))
     assert await hub.latest_activity(turn_id) == call
-    load = SkillLoad(skill="memory")
+    load = Activity(text="Loading saved context.")
     await hub.publish(turn_id, load)
     assert await hub.latest_activity(turn_id) == load
 
@@ -138,7 +158,7 @@ async def test_latest_activity_reads_back_no_further_than_the_peek_bound() -> No
     stream."""
     hub = RedisStreamHub(url=REDIS_TEST_URL)
     turn_id = uuid4()
-    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    call = Activity(text="Listing the workspace.")
     await hub.publish(turn_id, call)
     for index in range(ACTIVITY_PEEK_FRAMES - 1):
         await hub.publish(turn_id, TextDelta(text=f"delta {index}"))
@@ -151,10 +171,10 @@ async def test_latest_activity_reads_back_no_further_than_the_peek_bound() -> No
 async def test_latest_activity_reads_an_entrys_kind_before_decoding_it() -> None:
     """Only the frame the peek returns is validated: an entry whose kind is not an activity one is
     skipped on the wire tag alone, so a payload that would fail `frame_from_payload` sits between
-    the newest entry and the tool call without stopping the walk."""
+    the newest entry and the activity without stopping the walk."""
     hub = RedisStreamHub(url=REDIS_TEST_URL)
     turn_id = uuid4()
-    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    call = Activity(text="Listing the workspace.")
     await hub.publish(turn_id, call)
     client = Redis.from_url(REDIS_TEST_URL, decode_responses=True)
     try:

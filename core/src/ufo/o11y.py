@@ -67,6 +67,7 @@ METRICS = (
     "sandbox_restarted_total",
     "sandbox_unreachable_total",
     "sandbox_tool_output_dir_reclaimed_total",
+    "tool_activity_failed_total",
     "tool_offload_failed_total",
     "db_tx_unavailable_total",
     "db_pool_exhausted_total",

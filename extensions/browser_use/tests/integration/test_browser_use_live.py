@@ -94,7 +94,6 @@ async def test_a_real_run_returns_a_result_and_a_live_view(
                 url=LIVE_PAGE_URL,
                 task=LIVE_TASK,
                 task_name="Live heading read",
-                user_description="live proof",
             ),
         )
 

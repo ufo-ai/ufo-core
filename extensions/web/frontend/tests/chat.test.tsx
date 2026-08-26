@@ -126,18 +126,8 @@ test("a reloaded conversation states its latest activity and opens onto the rest
           role: "assistant",
           text: "The tests pass.",
           events: [
-            {
-              kind: "tool",
-              name: "bash",
-              preview: '{"command":"uv run pytest"}',
-              description: "Running the focused tests",
-            },
-            {
-              kind: "skill",
-              name: "coding",
-              preview: "",
-              description: "",
-            },
+            { kind: "activity", text: "Running the focused tests." },
+            { kind: "activity", text: "Loading coding guidance." },
           ],
         },
       ],
@@ -147,15 +137,15 @@ test("a reloaded conversation states its latest activity and opens onto the rest
 
   const summary = await screen.findByText("Completed 2 steps");
   expect(summary.closest("summary")!.querySelector("svg")).toBeTruthy();
-  expect(screen.queryByText("Running the focused tests")).toBeNull();
-  expect(screen.queryByText("Loaded skill · coding")).toBeNull();
+  expect(screen.queryByText("Running the focused tests.")).toBeNull();
+  expect(screen.queryByText("Loading coding guidance.")).toBeNull();
 
   await userEvent.click(summary);
-  expect(screen.getByText("Running the focused tests")).toBeTruthy();
-  expect(screen.getByText("Loaded skill · coding")).toBeTruthy();
+  expect(screen.getByText("Running the focused tests.")).toBeTruthy();
+  expect(screen.getByText("Loading coding guidance.")).toBeTruthy();
 
   await userEvent.click(summary);
-  expect(screen.queryByText("Running the focused tests")).toBeNull();
+  expect(screen.queryByText("Running the focused tests.")).toBeNull();
 });
 
 test("a bubble another member spoke names them, and the viewer's own carries no name", async () => {
@@ -202,9 +192,9 @@ test("a conversation reloaded while its turn runs shows the prompt, says so, and
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
 
-  StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
+  StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
   // The line states the step, and the fold it opens onto stands it as a row while the turn runs.
-  expect(await screen.findAllByText("bash gh pr view")).toHaveLength(2);
+  expect(await screen.findAllByText("Reviewing the pull request.")).toHaveLength(2);
   expect(screen.queryByText("Thinking…")).toBeNull();
 
   StreamFake.last().emit("terminal", {
@@ -229,8 +219,8 @@ test("the working line is not taken down when the turn's first step lands", asyn
   // Nothing stands behind the line yet, so it offers no disclosure to open.
   expect(opening.closest("[data-slot=marker]")!.querySelector("svg")).toBeNull();
 
-  StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
-  expect(await screen.findAllByText("bash gh pr view")).toHaveLength(2);
+  StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
+  expect(await screen.findAllByText("Reviewing the pull request.")).toHaveLength(2);
 
   // The same element, not one that replaced it: a remount here cuts the glyphing short.
   expect(document.querySelector("[data-slot=decode-text]")).toBe(line);
@@ -242,15 +232,15 @@ test("a running turn stands the calls behind its latest open, until the member c
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("tool", { tool: "bash", preview: "gh pr view" });
-  StreamFake.last().emit("skill", { skill: "coding" });
+  StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
+  StreamFake.last().emit("activity", { text: "Loading coding guidance." });
 
-  const summary = await screen.findByText("Loading skill · coding");
-  expect(screen.getByText("bash gh pr view")).toBeTruthy();
+  const summary = await screen.findByText("Loading coding guidance.", { selector: ".sr-only" });
+  expect(screen.getByText("Reviewing the pull request.")).toBeTruthy();
   expect(document.querySelector("[data-slot=decode-text]")).toBeTruthy();
 
   await userEvent.click(summary);
-  expect(screen.queryByText("bash gh pr view")).toBeNull();
+  expect(screen.queryByText("Reviewing the pull request.")).toBeNull();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -273,7 +263,7 @@ test("a live subagent run nests under the reply it produced", async () => {
   StreamFake.last().emit("subagent", {
     profile: "general_purpose",
     conversation_id: conversationId,
-    events: [{ kind: "tool", name: "fetch_url", preview: "", description: "Fetching the page" }],
+    events: [{ kind: "activity", text: "Fetching the page." }],
     output: "The release shipped on Tuesday.",
     subagents: [],
   });
@@ -289,10 +279,10 @@ test("a live subagent run nests under the reply it produced", async () => {
   await userEvent.click(summary);
   const row = screen.getByText("Subagent · general_purpose");
   expect(row.closest("a")).toBeNull();
-  expect(screen.queryByText("Fetching the page")).toBeNull();
+  expect(screen.queryByText("Fetching the page.")).toBeNull();
 
   await userEvent.click(row.closest("summary")!);
-  expect(screen.getByText("Fetching the page")).toBeTruthy();
+  expect(screen.getByText("Fetching the page.")).toBeTruthy();
   expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
 });
 
@@ -331,32 +321,24 @@ test("a live run states its name and current step, and clears the wait when it e
     conversation_id: conversationId,
     profile: "general_purpose",
     name: "UK sports news",
-    tool: "",
-    description: "",
-    preview: "",
-    skill: "",
+    activity: "",
     status: "",
   };
   wire(transcript({ messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }));
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("tool", {
-    tool: "spawn",
-    preview: "",
-    description: "Handing the research off",
-  });
+  StreamFake.last().emit("activity", { text: "Handing the research off." });
   StreamFake.last().emit("subagent_activity", frame);
   expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
 
   StreamFake.last().emit("subagent_activity", {
     ...frame,
-    tool: "fetch_url",
-    description: "Searching for latest MLS news",
+    activity: "Searching for latest MLS news.",
   });
   expect(await screen.findByText("UK sports news")).toBeTruthy();
   expect(screen.getByText(/Searching for latest MLS news/)).toBeTruthy();
-  expect(screen.getByText("Handing the research off")).toBeTruthy();
+  expect(screen.getByText("Handing the research off.")).toBeTruthy();
 
   StreamFake.last().emit("subagent_activity", { ...frame, status: "done" });
   await waitFor(() => expect(screen.queryByText("Awaiting 1 subagent")).toBeNull());
@@ -378,12 +360,7 @@ test("what a reply did stands above the reply, in the order the turn did it", as
           role: "assistant",
           text: "The tests pass.",
           events: [
-            {
-              kind: "tool",
-              name: "bash",
-              preview: '{"command":"uv run pytest"}',
-              description: "Running the focused tests",
-            },
+            { kind: "activity", text: "Running the focused tests." },
           ],
         },
       ],
@@ -394,8 +371,8 @@ test("what a reply did stands above the reply, in the order the turn did it", as
   // The tools ran before the agent wrote a word about them, so the disclosure states them where
   // they happened — above the answer they produced, never under it.
   await userEvent.click(await screen.findByText("Completed 1 step"));
-  expect(screen.getByText("Running the focused tests")).toBeTruthy();
-  expect(order("Running the focused tests", "The tests pass.")).toBe(true);
+  expect(screen.getByText("Running the focused tests.")).toBeTruthy();
+  expect(order("Running the focused tests.", "The tests pass.")).toBe(true);
 });
 
 test("a message that opens a turn stands above the reply it is waiting for", async () => {
@@ -813,14 +790,14 @@ test("a reloaded conversation nests its subagent work under the reply", async ()
         {
           role: "assistant",
           text: "Done.",
-          events: [{ kind: "tool", name: "grep", preview: "", description: "Reading the tree" }],
+          events: [{ kind: "activity", text: "Reading the tree." }],
           subagents: [
             {
               profile: "general_purpose",
               conversation_id: conversationId,
               events: [
                 { kind: "note", text: "Checking the release notes first." },
-                { kind: "tool", name: "fetch_url", preview: "", description: "Fetching the page" },
+                { kind: "activity", text: "Fetching the page." },
               ],
               output: "The release shipped on **Tuesday**.",
               subagents: [
@@ -828,7 +805,7 @@ test("a reloaded conversation nests its subagent work under the reply", async ()
                   profile: "deep_research",
                   conversation_id: nestedId,
                   events: [
-                    { kind: "tool", name: "search_web", preview: "", description: "Searching" },
+                    { kind: "activity", text: "Searching the web." },
                   ],
                   output: "Nothing further.",
                   subagents: [],
@@ -843,29 +820,29 @@ test("a reloaded conversation nests its subagent work under the reply", async ()
   open();
 
   const summary = await screen.findByText("Completed 2 steps");
-  expect(screen.queryByText("Reading the tree")).toBeNull();
+  expect(screen.queryByText("Reading the tree.")).toBeNull();
 
   await userEvent.click(summary);
-  expect(screen.getByText("Reading the tree")).toBeTruthy();
+  expect(screen.getByText("Reading the tree.")).toBeTruthy();
   const row = screen.getByText("Subagent · general_purpose");
   expect(row.closest("a")).toBeNull();
   expect(row.closest("summary")!.querySelector("svg")).toBeTruthy();
-  expect(screen.queryByText("Fetching the page")).toBeNull();
+  expect(screen.queryByText("Fetching the page.")).toBeNull();
 
   await userEvent.click(row.closest("summary")!);
   expect(screen.getByText("Checking the release notes first.")).toBeTruthy();
-  expect(screen.getByText("Fetching the page")).toBeTruthy();
+  expect(screen.getByText("Fetching the page.")).toBeTruthy();
   expect(screen.getByText("Tuesday").tagName).toBe("STRONG");
   const nested = screen.getByText("Subagent · deep_research");
   expect(nested.closest("a")).toBeNull();
-  expect(screen.queryByText("Searching")).toBeNull();
+  expect(screen.queryByText("Searching the web.")).toBeNull();
 
   await userEvent.click(nested.closest("summary")!);
-  expect(screen.getByText("Searching")).toBeTruthy();
+  expect(screen.getByText("Searching the web.")).toBeTruthy();
   expect(screen.getByText("Nothing further.")).toBeTruthy();
 
   await userEvent.click(summary);
-  expect(screen.queryByText("Fetching the page")).toBeNull();
+  expect(screen.queryByText("Fetching the page.")).toBeNull();
   expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
 });
 
@@ -886,7 +863,7 @@ test("a line longer than the fold opens in place and closes again", async () => 
           text: "Done.",
           events: [
             { kind: "note", text: long },
-            { kind: "tool", name: "grep", preview: "", description: "Reading the tree" },
+            { kind: "activity", text: "Reading the tree." },
           ],
           subagents: [],
         },
@@ -921,7 +898,7 @@ test("a line that fits is offered no control that would do nothing", async () =>
           text: "Done.",
           events: [
             { kind: "note", text: "Checked the changelog." },
-            { kind: "tool", name: "grep", preview: "", description: "Reading the tree" },
+            { kind: "activity", text: "Reading the tree." },
           ],
           subagents: [],
         },
@@ -3042,13 +3019,13 @@ test("a turn the fleet picked back up says so among its steps", async () => {
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("tool", { tool: "bash", preview: "alembic upgrade head" });
+  StreamFake.last().emit("activity", { text: "Applying the migration." });
   StreamFake.last().emit("resumed", { attempt: "attempt-one" });
 
   // The line stands where the work does, so the wait reads as interrupted rather than as stopped:
   // once as the open disclosure's summary and once in the step list standing behind it.
   expect(await screen.findAllByText("Resumed after a restart")).toHaveLength(2);
-  expect(screen.getByText("bash alembic upgrade head")).toBeTruthy();
+  expect(screen.getByText("Applying the migration.")).toBeTruthy();
 });
 
 /** Which app a new conversation reaches is settled by the route that opened the start screen, not

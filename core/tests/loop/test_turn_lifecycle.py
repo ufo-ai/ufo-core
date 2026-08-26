@@ -70,6 +70,7 @@ from ufo.surfaces import hub_tail
 from ufo.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
 from ufo.tools.context import TextContent, ToolContext, ToolResult
 from ufo.tools.registry import ToolDef
+from ufo.turns.activity import ACTIVITY_PROMPT
 from ufo.turns.audience import conversation_audience
 from ufo.turns.transcript import Conversation
 from ufo.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
@@ -200,6 +201,10 @@ PRELOAD_PROFILE = SubagentProfile(
 @dataclass(frozen=True)
 class StandInModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if request.system == ACTIVITY_PROMPT:
+            yield TextDelta(text="Running a check.")
+            yield Usage(input_tokens=2, output_tokens=2)
+            return
         SEEN_SYSTEM_PROMPTS.append(request.system)
         SEEN_TOOLS.append(tuple(tool.name for tool in request.tools))
         SEEN_REASONING.append(request.reasoning)
@@ -224,7 +229,7 @@ class StandInModel:
                 yield ToolCallStart(id="x1", name="bash")
                 yield ToolCallDelta(
                     id="x1",
-                    partial_json='{"command": "true", "user_description": "running a check"}',
+                    partial_json='{"command": "true"}',
                 )
                 yield Usage(input_tokens=2, output_tokens=2)
                 return
@@ -241,9 +246,7 @@ class StandInModel:
                 yield Usage(input_tokens=5, output_tokens=5)
                 return
             yield ToolCallStart(id="e1", name="bash")
-            yield ToolCallDelta(
-                id="e1", partial_json='{"command": "true", "user_description": "running a check"}'
-            )
+            yield ToolCallDelta(id="e1", partial_json='{"command": "true"}')
             yield Usage(input_tokens=2, output_tokens=2)
             return
         contents = [m.content for m in request.messages]
@@ -251,17 +254,14 @@ class StandInModel:
         inbound = contents[-2] if nudged else contents[-1]
         if isinstance(inbound, str) and RUN_A_COMMAND in inbound:
             yield ToolCallStart(id="b1", name="bash")
-            yield ToolCallDelta(
-                id="b1", partial_json='{"command": "true", "user_description": "running a check"}'
-            )
+            yield ToolCallDelta(id="b1", partial_json='{"command": "true"}')
             yield Usage(input_tokens=2, output_tokens=2)
             return
         if isinstance(inbound, str) and "spawn-subagent" in inbound:
             yield ToolCallStart(id="s1", name="spawn")
             yield ToolCallDelta(
                 id="s1",
-                partial_json='{"target": "roundtrip", "payload": {"value": 21}, '
-                '"user_description": "handing off the research"}',
+                partial_json='{"target": "roundtrip", "payload": {"value": 21}}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -270,7 +270,7 @@ class StandInModel:
             yield ToolCallDelta(
                 id="s2",
                 partial_json='{"target": "exhaust", "payload": {"value": 99}, '
-                '"user_description": "handing off the research", "name": "Fixture check"}',
+                '"name": "Fixture check"}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -278,8 +278,7 @@ class StandInModel:
             yield ToolCallStart(id="s3", name="spawn")
             yield ToolCallDelta(
                 id="s3",
-                partial_json='{"target": "pinned", "payload": {"value": 7}, '
-                '"user_description": "handing off the research"}',
+                partial_json='{"target": "pinned", "payload": {"value": 7}}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -288,8 +287,7 @@ class StandInModel:
             yield ToolCallDelta(
                 id="s4",
                 partial_json='{"target": "extend", "payload": '
-                '{"value": 42, "extended_context": true}, '
-                '"user_description": "handing off the research"}',
+                '{"value": 42, "extended_context": true}}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -297,8 +295,7 @@ class StandInModel:
             yield ToolCallStart(id="s5", name="spawn")
             yield ToolCallDelta(
                 id="s5",
-                partial_json='{"target": "extend", "payload": {"value": 42}, '
-                '"user_description": "handing off the research"}',
+                partial_json='{"target": "extend", "payload": {"value": 42}}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -307,7 +304,7 @@ class StandInModel:
             yield ToolCallDelta(
                 id="s7",
                 partial_json='{"target": "roundtrip", "payload": {"value": 21}, '
-                '"background": true, "user_description": "handing off the research"}',
+                '"background": true}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -316,8 +313,7 @@ class StandInModel:
             yield ToolCallDelta(
                 id="s6",
                 partial_json='{"target": "preload", "payload": '
-                '{"value": 5, "preload_skills": ["sandbox"]}, '
-                '"user_description": "handing off the research"}',
+                '{"value": 5, "preload_skills": ["sandbox"]}}',
             )
             yield Usage(input_tokens=4, output_tokens=4)
             return
@@ -1846,8 +1842,8 @@ async def test_a_childs_activity_mirrors_onto_the_parents_stream(surface: Turns)
     runs = await asyncio.wait_for(collector, STREAM_TIMEOUT_SECONDS)
     assert [frame.status for frame in runs] == ["", "", "done"]
     started, worked, _done = runs
-    assert (started.tool, started.skill) == ("", "")
-    assert (worked.tool, worked.description) == ("bash", "running a check")
+    assert started.activity == ""
+    assert worked.activity == "Running a check."
     assert {frame.turn_id for frame in runs} == {child.id}
     assert {frame.parent_turn_id for frame in runs} == {UUID(parent)}
     assert {frame.conversation_id for frame in runs} == {child.conversation_id}

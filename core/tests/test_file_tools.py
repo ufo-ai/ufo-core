@@ -62,10 +62,19 @@ from ufo.tools.context import (
     ToolResult,
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
 TOOL_NARRATION = "working through their files"
+
+
+class _ActivityModel:
+    model = "gpt-5.6-luna"
+
+    async def complete(self, _request: ModelRequest) -> str:
+        return "Working on the request."
+
 
 pytestmark = pytest.mark.docker
 
@@ -285,9 +294,7 @@ async def _seed_turn_rows(turn: Turn) -> None:
 async def _run(tool_name: str, ctx: ToolContext, **args: object):
     tool = REGISTRY.get(tool_name)
     with ws(ctx.turn.workspace_id):
-        return await tool.handler(
-            ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-        )
+        return await tool.handler(ctx, tool.input_model.model_validate({**args}))
 
 
 async def _share(ctx: ToolContext, **spec: object) -> dict:
@@ -820,6 +827,7 @@ def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
         byok=False,
         system_prompt=rendered_prompt("p"),
         model=_QuietModel(),
+        activity_summarizer=ActivitySummarizer(_ActivityModel()),
         provider="anthropic",
         transcript=Transcript(blob=ctx.blob, conversation_id=ctx.turn.conversation_id),
         compaction=Compaction(
@@ -1067,7 +1075,7 @@ async def test_a_read_over_the_cap_offloads_without_losing_the_file_it_read(
         ToolUseBlock(
             id="call4",
             name="read",
-            input={"file_path": "wide.log", "user_description": TOOL_NARRATION},
+            input={"file_path": "wide.log"},
         ),
     )
     assert isinstance(block.content, str)

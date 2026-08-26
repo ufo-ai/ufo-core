@@ -794,7 +794,7 @@ async def test_list_external_tools_surfaces_the_open_catalog(
     monkeypatch.setattr(composio, "composio_client", _mock_client)
     result = await list_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        ListExternalToolsInput(queries=("notion",), user_description="find a doc store"),
+        ListExternalToolsInput(queries=("notion",)),
     )
     payload = json.loads(result.content[0].text)
     rows = {row["source_id"] for row in payload["connectors"]}
@@ -844,9 +844,7 @@ async def test_list_external_tools_never_offers_an_unbrokerable_service(
     monkeypatch.setattr(composio, "composio_client", _mock_client)
     result = await list_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        ListExternalToolsInput(
-            queries=("xero", BANNED_SLUG, "notion"), user_description="find accounting and a crm"
-        ),
+        ListExternalToolsInput(queries=("xero", BANNED_SLUG, "notion")),
     )
     rows = {row["source_id"] for row in json.loads(result.content[0].text)["connectors"]}
     assert "xero" not in rows
@@ -862,9 +860,7 @@ async def test_list_external_tools_fans_multiple_queries_across_the_catalog(
     monkeypatch.setattr(composio, "composio_client", _mock_client)
     result = await list_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        ListExternalToolsInput(
-            queries=("notion", "stripe", "notion"), user_description="find a few tools"
-        ),
+        ListExternalToolsInput(queries=("notion", "stripe", "notion")),
     )
     rows = [row["source_id"] for row in json.loads(result.content[0].text)["connectors"]]
     assert set(rows) >= {"notion", "stripe"}
@@ -873,7 +869,7 @@ async def test_list_external_tools_fans_multiple_queries_across_the_catalog(
 
 def test_list_external_tools_input_bounds_the_query_count() -> None:
     with pytest.raises(ValidationError):
-        ListExternalToolsInput(queries=tuple(f"q{n}" for n in range(9)), user_description="x")
+        ListExternalToolsInput(queries=tuple(f"q{n}" for n in range(9)))
 
 
 async def test_describe_external_tools_fetches_schemas_and_available_tools(
@@ -882,9 +878,7 @@ async def test_describe_external_tools_fetches_schemas_and_available_tools(
     monkeypatch.setattr(composio, "composio_client", _mock_client)
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, tool_names=(GITHUB_SLUG,)
-        ),
+        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(GITHUB_SLUG,)),
     )
     payload = json.loads(result.content[0].text)
     assert payload["source_id"] == PROVIDER
@@ -899,9 +893,7 @@ async def test_describe_external_tools_marks_an_unknown_name_unresolved(
     monkeypatch.setattr(composio, "composio_client", _mock_client)
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, tool_names=(UNKNOWN_SLUG,)
-        ),
+        DescribeExternalToolsInput(source_id=PROVIDER, tool_names=(UNKNOWN_SLUG,)),
     )
     payload = json.loads(result.content[0].text)
     assert payload["unresolved"] == [UNKNOWN_SLUG]
@@ -928,9 +920,7 @@ async def test_describe_external_tools_falls_back_to_top_tools_and_marks_the_ans
     )
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
-        ),
+        DescribeExternalToolsInput(source_id=PROVIDER, query=DISCOVERY_QUERY),
     )
     payload = json.loads(result.content[0].text)
     assert [tool["slug"] for tool in payload["availableTools"]] == [GITHUB_SLUG]
@@ -952,9 +942,7 @@ async def test_describe_external_tools_reaches_the_listings_second_page(
     )
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
-        ),
+        DescribeExternalToolsInput(source_id=PROVIDER, query=DISCOVERY_QUERY),
     )
     payload = json.loads(result.content[0].text)
     listed = payload["availableTools"]
@@ -1015,9 +1003,7 @@ async def test_describe_external_tools_bounds_the_listing_it_answers_with(
     )
     result = await describe_external_tools(
         _ctx(uuid4(), uuid4(), uuid4(), None),
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id=PROVIDER, query=DISCOVERY_QUERY
-        ),
+        DescribeExternalToolsInput(source_id=PROVIDER, query=DISCOVERY_QUERY),
     )
     text = result.content[0].text
     payload = json.loads(text)
@@ -1078,7 +1064,7 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
 
     begin = await connect_account_handler(
         _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
-        ConnectAccountInput(user_description=TOOL_NARRATION, provider=PROVIDER),
+        ConnectAccountInput(provider=PROVIDER),
     )
     request = ConnectRequest.model_validate_json(begin.content[0].text.splitlines()[1])
     async with workspace_tx() as connection:
@@ -1128,7 +1114,6 @@ async def test_connect_binds_a_grant_and_call_external_tool_executes_via_composi
             ctx,
             tool.input_model.model_validate(
                 {
-                    "user_description": TOOL_NARRATION,
                     "tool_name": GITHUB_SLUG,
                     "source_id": PROVIDER,
                     "arguments": {"owner": "acme"},
@@ -1174,7 +1159,7 @@ async def test_open_namespace_slug_connects_describes_searches_and_executes(
 
     begin = await connect_account_handler(
         _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
-        ConnectAccountInput(user_description=TOOL_NARRATION, provider="notion"),
+        ConnectAccountInput(provider="notion"),
     )
     request = ConnectRequest.model_validate_json(begin.content[0].text.splitlines()[1])
     async with workspace_tx() as connection:
@@ -1209,9 +1194,7 @@ async def test_open_namespace_slug_connects_describes_searches_and_executes(
     )
     described = await describe_external_tools(
         ctx,
-        DescribeExternalToolsInput(
-            user_description=TOOL_NARRATION, source_id="notion", tool_names=(notion_tool,)
-        ),
+        DescribeExternalToolsInput(source_id="notion", tool_names=(notion_tool,)),
     )
     assert notion_tool in json.loads(described.content[0].text)["schemas"]
 
@@ -1223,9 +1206,7 @@ async def test_open_namespace_slug_connects_describes_searches_and_executes(
     monkeypatch.setattr(mcp_session, "mcp_call_tool", fake_router_call)
     found = await search_connector_tools(
         ctx,
-        SearchConnectorToolsInput(
-            user_description=TOOL_NARRATION, source_id="notion", query="insert a row"
-        ),
+        SearchConnectorToolsInput(source_id="notion", query="insert a row"),
     )
     assert notion_tool in [t["slug"] for t in json.loads(found.content[0].text)["tools"]]
 
@@ -1233,7 +1214,6 @@ async def test_open_namespace_slug_connects_describes_searches_and_executes(
         result = await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=notion_tool,
                 source_id="notion",
                 arguments={},
@@ -1271,7 +1251,7 @@ async def test_shared_oauth_bridge_verifies_workspace_and_lands_the_grant(
     install_connect_flow(flow)
     begun = await connect_account_handler(
         _turn_context(workspace_id, agent_id, conversation_id, member_id, turn_id),
-        ConnectAccountInput(user_description=TOOL_NARRATION, provider=PROVIDER),
+        ConnectAccountInput(provider=PROVIDER),
     )
     request = ConnectRequest.model_validate_json(begun.content[0].text.splitlines()[1])
     async with workspace_tx() as connection:
@@ -1351,7 +1331,6 @@ async def test_call_external_tool_without_a_grant_fails_loud(
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=GITHUB_SLUG,
                 source_id=PROVIDER,
                 arguments={},
@@ -1389,7 +1368,6 @@ async def test_call_external_tool_augments_a_404_with_the_real_slugs(
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=UNKNOWN_SLUG,
                 source_id=PROVIDER,
                 arguments={},
@@ -1437,7 +1415,6 @@ async def test_call_external_tool_with_a_stale_account_says_reconnect(
         await call_external_tool(
             ctx,
             CallExternalToolInput(
-                user_description=TOOL_NARRATION,
                 tool_name=GITHUB_SLUG,
                 source_id=PROVIDER,
                 arguments={},

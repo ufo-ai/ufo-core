@@ -123,10 +123,6 @@ class MemorySearchInput(BaseModel):
         default=None,
         description="Optional ISO-8601 end of the window; a bare date covers its whole day.",
     )
-    user_description: str = Field(
-        description="What you are trying to recall about them, in plain language for the activity "
-        "timeline."
-    )
 
 
 RecordedClass = Literal["fact", "episodic"]
@@ -163,10 +159,6 @@ class MemoryUpdateInput(BaseModel):
     )
     source_ref: str | None = Field(
         default=None, description="Optional reference to the source this fact came from."
-    )
-    user_description: str = Field(
-        description="What you are remembering about them, in plain language for the activity "
-        "timeline."
     )
 
 
@@ -520,11 +512,6 @@ the two cannot drift apart under a rename."""
 
 class RebuildPageFactsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    user_description: str = Field(
-        description="Why the facts are being written again, in plain language for the activity "
-        "timeline."
-    )
 
 
 async def rebuild_page_facts_handler(ctx: ToolContext, args: RebuildPageFactsInput) -> ToolResult:

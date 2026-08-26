@@ -94,10 +94,6 @@ class ListMcpToolsInput(BaseModel):
         description="Exact tool names to return full input schemas for. Omit to browse the "
         "server's catalog first.",
     )
-    user_description: str = Field(
-        description="Which connected system you are checking what you can do with, in plain "
-        "language for the activity timeline."
-    )
 
 
 class CallMcpToolInput(BaseModel):
@@ -105,10 +101,6 @@ class CallMcpToolInput(BaseModel):
     tool_name: str = Field(description="The tool's exact name, from list_mcp_tools.")
     arguments: dict[str, JsonValue] = Field(
         description="The tool's parameters as a JSON object matching its input schema."
-    )
-    user_description: str = Field(
-        description="What you are doing in the connected system, in plain language for the "
-        "activity timeline. Name the system, never the tool slug."
     )
 
 

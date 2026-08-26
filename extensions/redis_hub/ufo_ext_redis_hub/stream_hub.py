@@ -24,16 +24,15 @@ from redis.typing import StreamEntry, XReadResponse
 
 from ufo.sdk.hub import (
     Absorbed,
+    Activity,
     CostTick,
     LiveFrame,
     Parked,
     Reply,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
     TextDelta,
-    ToolCall,
 )
 
 STREAM_PREFIX = "ufo:turn"
@@ -42,14 +41,26 @@ STREAM_IDLE_TTL_SECONDS = 24 * 3600
 SUBSCRIBE_BATCH = 100
 SUBSCRIBE_BLOCK_MS = 5_000
 ACTIVITY_PEEK_FRAMES = 500
+TOOL_ACTIVITY_KIND = "tool_call"
+SKILL_ACTIVITY_KIND = "skill_load"
+
+
+class _ToolActivityWire(BaseModel):
+    tool: str
+    preview: str
+    description: str = ""
+
+
+class _SkillActivityWire(BaseModel):
+    skill: str
+
 
 _FRAME_KINDS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("text_delta", TextDelta),
     ("terminal", Terminal),
     ("parked", Parked),
     ("cost_tick", CostTick),
-    ("tool_call", ToolCall),
-    ("skill_load", SkillLoad),
+    (TOOL_ACTIVITY_KIND, Activity),
     ("absorbed", Absorbed),
     ("resumed", Resumed),
     ("reply", Reply),
@@ -57,17 +68,26 @@ _FRAME_KINDS: tuple[tuple[str, type[BaseModel]], ...] = (
 )
 _KIND_BY_TYPE = {cls: kind for kind, cls in _FRAME_KINDS}
 _TYPE_BY_KIND = {kind: cls for kind, cls in _FRAME_KINDS}
-_ACTIVITY_KINDS = frozenset({_KIND_BY_TYPE[ToolCall], _KIND_BY_TYPE[SkillLoad]})
+_ACTIVITY_KINDS = frozenset({TOOL_ACTIVITY_KIND, SKILL_ACTIVITY_KIND})
 
 
 def frame_payload(frame: LiveFrame) -> dict[str, object]:
     """The wire form of one frame: its kind tag and its model fields, so a tail reconstructs the
     exact LiveFrame variant it was published as."""
+    if isinstance(frame, Activity):
+        data = _ToolActivityWire(tool="activity", preview="", description=frame.text)
+        return {"kind": TOOL_ACTIVITY_KIND, "data": data.model_dump(mode="json")}
     return {"kind": _KIND_BY_TYPE[type(frame)], "data": frame.model_dump(mode="json")}
 
 
 def frame_from_payload(payload: dict[str, object]) -> LiveFrame:
     kind = payload["kind"]
+    if kind == TOOL_ACTIVITY_KIND:
+        tool_wire = _ToolActivityWire.model_validate(payload["data"])
+        return Activity(text=tool_wire.description or tool_wire.tool)
+    if kind == SKILL_ACTIVITY_KIND:
+        skill_wire = _SkillActivityWire.model_validate(payload["data"])
+        return Activity(text=f"Loading {skill_wire.skill}.")
     if not isinstance(kind, str) or kind not in _TYPE_BY_KIND:
         raise ValueError(f"unknown live-frame kind: {kind!r}")
     return cast(LiveFrame, _TYPE_BY_KIND[kind].model_validate(payload["data"]))
@@ -157,8 +177,8 @@ class RedisStreamHub:
             return False
         return _stream_id(str(first[0][0])) <= _stream_id(cursor)
 
-    async def latest_activity(self, turn_id: UUID) -> ToolCall | SkillLoad | None:
-        """The newest ToolCall or SkillLoad among the turn's last `ACTIVITY_PEEK_FRAMES` stream
+    async def latest_activity(self, turn_id: UUID) -> Activity | None:
+        """The newest Activity among the turn's last `ACTIVITY_PEEK_FRAMES` stream
         entries, read newest-first in bounded pages. None when the stream is gone, or none of those
         entries is an activity frame.
 
@@ -185,7 +205,7 @@ class RedisStreamHub:
                 remaining -= 1
                 payload = json.loads(fields["frame"])
                 if payload["kind"] in _ACTIVITY_KINDS:
-                    return cast(ToolCall | SkillLoad, frame_from_payload(payload))
+                    return cast(Activity, frame_from_payload(payload))
             if not oldest:
                 return None
             newest = f"({oldest}"

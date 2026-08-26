@@ -63,17 +63,15 @@ from ufo.sdk.http import (
 )
 from ufo.sdk.hub import (
     Absorbed,
+    Activity,
     CostTick,
     LiveFrame,
     Parked,
     Reply,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
     TextDelta,
-    ToolCall,
-    tool_activity,
 )
 from ufo.sdk.listings import ListingCursor, MalformedCursor
 from ufo.sdk.manifest import (
@@ -123,7 +121,6 @@ from ufo.sdk.surfaces import (
     inbox_name,
     member_message_text,
 )
-from ufo.sdk.tools import REQUESTED_BY
 from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
 from ufo_ext_web.panels import (
@@ -1009,18 +1006,6 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
-def _activity_label(frame: ToolCall | SkillLoad | None) -> str | None:
-    match frame:
-        case None:
-            return None
-        case SkillLoad():
-            return f"Loading skill · {frame.skill}"
-        case ToolCall():
-            return frame.description or (
-                f"{frame.tool} {frame.preview}" if frame.preview else frame.tool
-            )
-
-
 async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
     """Each visible agent's live picture, polled beside the index `agents_index` serves: the
     liveest non-terminal turn it holds — with what a running one is doing right now, peeked off
@@ -1048,9 +1033,9 @@ async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
     for status in statuses:
         if status.running_turn_id is None:
             continue
-        label = _activity_label(await ctx.latest_activity(status.running_turn_id))
-        if label:
-            activity[status.agent_id] = label
+        frame = await ctx.latest_activity(status.running_turn_id)
+        if frame is not None:
+            activity[status.agent_id] = frame.text
     next_runs: dict[UUID, str] = {}
     for status in statuses:
         if status.live is not None or status.last_failed:
@@ -1418,20 +1403,23 @@ def _rendered_text(message: Message) -> str:
     return rendered.strip()
 
 
-def _tool_event(block: ToolUseBlock) -> dict[str, str]:
-    visible = block.model_copy(
-        update={"input": {key: value for key, value in block.input.items() if key != REQUESTED_BY}}
-    )
-    match tool_activity(visible):
-        case SkillLoad(skill=skill):
-            return {"kind": "skill", "name": skill, "preview": "", "description": ""}
-        case ToolCall(tool=name, preview=preview, description=description):
-            return {
-                "kind": "tool",
-                "name": name,
-                "preview": preview,
-                "description": description,
-            }
+def _append_activity(events: list[dict[str, str]], text: str) -> None:
+    events.append({"kind": "activity", "text": text})
+
+
+def _stored_activity(block: ToolUseBlock, result: ToolResultBlock) -> str | None:
+    if result.activity_text:
+        return result.activity_text
+    description = block.input.get("user_description")
+    if isinstance(description, str) and description.strip():
+        return description.strip()
+    if block.name == "load_skill":
+        skill = block.input.get("name")
+        if isinstance(skill, str) and skill:
+            return f"Loading skill · {skill}"
+    if "activity_text" in result.model_fields_set:
+        return None
+    return block.name
 
 
 class SubagentNode(TypedDict):
@@ -1459,8 +1447,8 @@ def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]:
     read from blocks, so the plain text a run ends on is not work here: the prose a stopped child is
     force-finished over, and the finish payload the transcript closes with, are both string content.
     Its answer is the terminal's."""
-    active = {
-        block.tool_use_id
+    activity = {
+        block.tool_use_id: block
         for message in messages
         if not isinstance(message.content, str)
         for block in message.content
@@ -1473,8 +1461,10 @@ def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]:
         for block in message.content:
             if isinstance(block, TextBlock) and block.text.strip():
                 events.append({"kind": "note", "text": block.text.strip()})
-            elif isinstance(block, ToolUseBlock) and block.id in active:
-                events.append(_tool_event(block))
+            elif isinstance(block, ToolUseBlock) and block.id in activity:
+                text = _stored_activity(block, activity[block.id])
+                if text is not None:
+                    _append_activity(events, text)
     return events[:SUBAGENT_EVENT_LIMIT]
 
 
@@ -1697,8 +1687,8 @@ def _rendered_messages(
         answer_at = 0
         notes = 0
 
-    active = {
-        block.tool_use_id
+    activity = {
+        block.tool_use_id: block
         for message in messages
         if not isinstance(message.content, str)
         for block in message.content
@@ -1711,11 +1701,11 @@ def _rendered_messages(
                 note_answer()
                 answer, answer_at = text, len(pending)
             if not isinstance(message.content, str):
-                pending.extend(
-                    _tool_event(block)
-                    for block in message.content
-                    if isinstance(block, ToolUseBlock) and block.id in active
-                )
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock) and block.id in activity:
+                        activity_text = _stored_activity(block, activity[block.id])
+                        if activity_text is not None:
+                            _append_activity(pending, activity_text)
             continue
         if not text:
             continue
@@ -4168,10 +4158,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             return head + b"event: parked\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case CostTick():
             return head + b"event: cost\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case ToolCall():
-            return head + b"event: tool\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case SkillLoad():
-            return head + b"event: skill\ndata: " + frame.model_dump_json().encode() + b"\n\n"
+        case Activity():
+            return head + b"event: activity\ndata: " + frame.model_dump_json().encode() + b"\n\n"
         case SubagentActivity():
             return (
                 head
@@ -4259,7 +4247,6 @@ async def object_write(ctx: SurfaceContext, request: Request) -> Response:
             input={
                 "kind": kind,
                 "name": name,
-                "user_description": f"Delete {kind} {name} from the application.",
             },
         )
     else:
@@ -4285,7 +4272,6 @@ async def object_write(ctx: SurfaceContext, request: Request) -> Response:
             tool="object_apply",
             input={
                 "manifest": manifest,
-                "user_description": f"Apply {kind} {name} from the application.",
             },
         )
     conversation_id = await ctx.conversation_for(

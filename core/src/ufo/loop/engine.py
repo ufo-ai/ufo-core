@@ -58,16 +58,15 @@ from ufo.ext.manifest import (
 )
 from ufo.hub import (
     Absorbed,
+    Activity,
     CostTick,
     Hub,
     LiveFrame,
     Parked,
     Reply,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
-    ToolCall,
 )
 from ufo.loop.compaction import (
     Compaction,
@@ -153,7 +152,7 @@ from ufo.tools.context import (
     UntrustedContentError,
 )
 from ufo.tools.registry import REQUESTED_BY, ToolRegistry
-from ufo.turns.activity import SKILL_LOAD_TOOL, tool_activity
+from ufo.turns.activity import SKILL_LOAD_TOOL, ActivitySummarizer
 from ufo.turns.audience import Audience, audience_member, audience_subjects
 from ufo.turns.contracts import Contract
 from ufo.turns.transcript import Conversation
@@ -429,6 +428,15 @@ class _RoundInput:
 
 
 @dataclass(frozen=True, repr=False)
+class _ResolvedToolCall:
+    context: ToolContext
+    call: ToolUseBlock
+
+    def __repr__(self) -> str:
+        return f"_ResolvedToolCall(tool={self.call.name}, call_id={self.call.id})"
+
+
+@dataclass(frozen=True, repr=False)
 class _BoundToolCall:
     context: ToolContext
     call: ToolUseBlock
@@ -452,6 +460,18 @@ class _RejectedToolCall:
 
 
 type _DispatchInput = _BoundToolCall | _RejectedToolCall
+type _BindResult = _ResolvedToolCall | _RejectedToolCall
+
+
+@dataclass
+class _ActivityState:
+    sequence: int = 0
+    next_publish: int = 1
+    tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    labels: dict[str, str] = field(default_factory=dict)
+    results: set[int] = field(default_factory=set)
+    ready: dict[int, tuple[str, str | None]] = field(default_factory=dict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class ImageRef(BaseModel):
@@ -963,6 +983,7 @@ class TurnEngine:
     byok: bool
     system_prompt: RenderedPrompt
     model: ModelClient
+    activity_summarizer: ActivitySummarizer
     provider: str
     transcript: Transcript
     compaction: Compaction
@@ -1006,6 +1027,7 @@ class TurnEngine:
     preload: tuple[LoadedSkill, ...] = ()
     output_model: Contract | None = None
     adoption: AdoptionReplay = field(default_factory=AdoptionReplay)
+    _activity: _ActivityState = field(default_factory=_ActivityState, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if any(context.audience != self.audience for context in self.tool_ext.values()):
@@ -1293,7 +1315,15 @@ class TurnEngine:
                         member_id=self.turn.speaker_member_id, rendered=self.turn.inbound
                     )
                 }
-            bound = await self._bind_or_error(context, call, requesters)
+            resolved = await self._bind_or_error(context, call, requesters)
+            if isinstance(resolved, _ResolvedToolCall):
+                self._start_activity(resolved.call)
+                bound: _DispatchInput = _BoundToolCall(
+                    context=resolved.context,
+                    call=resolved.call,
+                )
+            else:
+                bound = resolved
             result = await self._dispatch_step(bound)
             if result.is_error:
                 frame = await self._commit(
@@ -1565,19 +1595,29 @@ class TurnEngine:
                             ),
                         )
                         continue
-                    bound = await asyncio.gather(
+                    resolved = await asyncio.gather(
                         *(self._bind_or_error(context, call, requesters) for call in segment),
                         return_exceptions=True,
                     )
-                    failures = [outcome for outcome in bound if isinstance(outcome, BaseException)]
+                    failures = [
+                        outcome for outcome in resolved if isinstance(outcome, BaseException)
+                    ]
                     if failures:
                         raise failures[0]
+                    bound: list[_DispatchInput] = []
+                    for item in resolved:
+                        if isinstance(item, _ResolvedToolCall):
+                            self._start_activity(item.call)
+                            bound.append(
+                                _BoundToolCall(
+                                    context=item.context,
+                                    call=item.call,
+                                )
+                            )
+                        elif not isinstance(item, BaseException):
+                            bound.append(item)
                     dispatched = await asyncio.gather(
-                        *(
-                            self._dispatch(item)
-                            for item in bound
-                            if not isinstance(item, BaseException)
-                        ),
+                        *(self._dispatch(item) for item in bound),
                         return_exceptions=True,
                     )
                     results = (
@@ -2360,11 +2400,11 @@ class TurnEngine:
         context: ToolContext,
         call: ToolUseBlock,
         requesters: dict[UUID, ActiveMessage],
-    ) -> _DispatchInput:
+    ) -> _BindResult:
         started = time.monotonic()
         try:
             context, call = await self._bind_requester(context, call, requesters)
-            return _BoundToolCall(context=context, call=call)
+            return _ResolvedToolCall(context=context, call=call)
         except asyncio.CancelledError as error:
             _meter_dispatch(
                 self.tools, call, started, "step_failed", type(error).__name__, self.profile
@@ -2384,30 +2424,34 @@ class TurnEngine:
     async def _dispatch_result(self, step: Awaitable[DispatchResult]) -> ToolResultBlock:
         result = await step
         if not result.image_refs:
-            return ToolResultBlock(
+            block = ToolResultBlock(
                 tool_use_id=result.tool_use_id,
                 content=result.text,
                 is_error=result.is_error,
                 activity=result.activity,
             )
-        images = [
-            ImageBlock(
-                source=ImageSource(
-                    media_type=ref.media_type, data=(await self.blob.get(ref.blob_key)).decode()
+        else:
+            images = [
+                ImageBlock(
+                    source=ImageSource(
+                        media_type=ref.media_type,
+                        data=(await self.blob.get(ref.blob_key)).decode(),
+                    )
                 )
+                for ref in result.image_refs
+            ]
+            blocks: tuple[TextBlock | ImageBlock, ...] = (
+                *((TextBlock(text=result.text),) if result.text else ()),
+                *images,
             )
-            for ref in result.image_refs
-        ]
-        blocks: tuple[TextBlock | ImageBlock, ...] = (
-            *((TextBlock(text=result.text),) if result.text else ()),
-            *images,
-        )
-        return ToolResultBlock(
-            tool_use_id=result.tool_use_id,
-            content=blocks,
-            is_error=result.is_error,
-            activity=result.activity,
-        )
+            block = ToolResultBlock(
+                tool_use_id=result.tool_use_id,
+                content=blocks,
+                is_error=result.is_error,
+                activity=result.activity,
+            )
+        self._activity.results.add(id(block))
+        return block
 
     async def _bind_requester(
         self,
@@ -2483,6 +2527,31 @@ class TurnEngine:
             return None
         return path
 
+    def _start_activity(self, call: ToolUseBlock) -> None:
+        self._activity.sequence += 1
+        sequence = self._activity.sequence
+        task = asyncio.create_task(self._generate_activity(call, sequence))
+        self._activity.tasks.add(task)
+        task.add_done_callback(self._activity.tasks.discard)
+
+    async def _generate_activity(self, call: ToolUseBlock, sequence: int) -> None:
+        activity = await self.activity_summarizer.summarize(call)
+        if activity is not None:
+            self._activity.labels[call.id] = activity
+        async with self._activity.lock:
+            self._activity.ready[sequence] = (call.id, activity)
+            while current := self._activity.ready.pop(self._activity.next_publish, None):
+                self._activity.next_publish += 1
+                _call_id, current_activity = current
+                if current_activity is None:
+                    continue
+                await self._publish(Activity(text=current_activity))
+                await self._publish_run(activity=current_activity)
+
+    def _stop_activity(self) -> None:
+        for task in tuple(self._activity.tasks):
+            task.cancel()
+
     @DBOS.step(preemptible=True)
     async def _dispatch_step(self, bound: _DispatchInput) -> DispatchResult:
         """Run one resolved binding in the DBOS step claimed for it in model order. A rejected bind
@@ -2556,11 +2625,9 @@ class TurnEngine:
                         tool_use_id=call.id,
                         text=GUIDANCE_PREEMPTED_NOTICE,
                         is_error=True,
+                        activity=True,
                     )
                 context = bound.context
-                activity = tool_activity(call)
-                await self._publish(activity)
-                await self._publish_run(activity)
                 try:
                     tool = self.tools.get(call.name)
                     args = tool.input_model.model_validate(call.input)
@@ -2586,7 +2653,10 @@ class TurnEngine:
                         else ("hook_failed", pre.failed_closed)
                     )
                     return DispatchResult(
-                        tool_use_id=call.id, text=pre.denied, is_error=True, activity=True
+                        tool_use_id=call.id,
+                        text=pre.denied,
+                        is_error=True,
+                        activity=True,
                     )
                 args = pre.tool_input if pre.tool_input is not None else args
                 images: list[ImageBlock] = []
@@ -2779,6 +2849,7 @@ class TurnEngine:
             return None
         await self._publish(Terminal(frame=frame))
         await self._publish_run(status=frame.status)
+        self._stop_activity()
         if committed:
             emit_metric(
                 "turn_terminal_total",
@@ -2977,30 +3048,19 @@ class TurnEngine:
                 error_class=type(error).__name__,
             )
 
-    async def _publish_run(
-        self, activity: ToolCall | SkillLoad | None = None, status: str = ""
-    ) -> None:
+    async def _publish_run(self, activity: str = "", status: str = "") -> None:
         """Mirror a subagent turn's member-facing moment — starting, a dispatch, its terminal —
         onto the root turn's stream, the one every surface tails. A main turn has no lineage and
         publishes nothing here. The live leg never fails the turn, as in `_publish`."""
         if self.lineage is None:
             return
-        tool, preview, description, skill = "", "", "", ""
-        match activity:
-            case ToolCall():
-                tool, preview, description = activity.tool, activity.preview, activity.description
-            case SkillLoad():
-                skill = activity.skill
         frame = SubagentActivity(
             turn_id=self.turn.id,
             parent_turn_id=self.lineage.parent_turn_id,
             conversation_id=self.turn.conversation_id,
             profile=self.lineage.profile,
             name=self.lineage.name,
-            tool=tool,
-            preview=preview,
-            description=description,
-            skill=skill,
+            activity=activity,
             status=status,
         )
         try:
@@ -3062,7 +3122,30 @@ class TurnEngine:
     async def _persist_transcript(
         self, messages: tuple[Message, ...], answer: str, system: str, injected: str
     ) -> None:
-        await self._repair().persist_transcript(messages, answer, system, injected)
+        labeled = tuple(
+            message.model_copy(
+                update={
+                    "content": tuple(
+                        block.model_copy(
+                            update={
+                                "activity_text": self._activity.labels.get(block.tool_use_id, "")
+                            }
+                        )
+                        if (
+                            isinstance(block, ToolResultBlock)
+                            and block.activity
+                            and id(block) in self._activity.results
+                        )
+                        else block
+                        for block in message.content
+                    )
+                }
+            )
+            if not isinstance(message.content, str)
+            else message
+            for message in messages
+        )
+        await self._repair().persist_transcript(labeled, answer, system, injected)
 
     async def _persist_inbound(
         self,

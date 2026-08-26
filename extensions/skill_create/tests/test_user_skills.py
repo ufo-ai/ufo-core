@@ -979,9 +979,7 @@ def _skill_manifest(
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     assert result.is_error is False
     return result.content[0].text
 
@@ -1171,7 +1169,6 @@ async def test_reapply_keeps_files_by_digest_and_refuses_unknown(db: None, tmp_p
         assert ("assets/note.md", b"inline note") in loaded.files
         stale = apply.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _skill_manifest(
                     "greet",
                     {
@@ -1211,7 +1208,6 @@ async def test_apply_fences_on_the_generation_the_get_returned(db: None, tmp_pat
         )
         stale = apply.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _skill_manifest(
                     "greet",
                     {"SKILL.md": _skill_md("greet", "lost race").decode()},
@@ -1233,7 +1229,6 @@ async def test_apply_refuses_shadow_and_frontmatter_mismatch(db: None, tmp_path)
     apply = _object_tool("object_apply")
     shadow = apply.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _skill_manifest(
                 "sandbox", {"SKILL.md": _skill_md("sandbox", "d").decode()}
             ),
@@ -1241,7 +1236,6 @@ async def test_apply_refuses_shadow_and_frontmatter_mismatch(db: None, tmp_path)
     )
     mismatch = apply.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _skill_manifest("greet", {"SKILL.md": _skill_md("other", "d").decode()}),
         }
     )
@@ -1265,7 +1259,6 @@ async def test_apply_refuses_a_file_key_outside_the_skill(db: None, tmp_path, ba
     apply = _object_tool("object_apply")
     escaping = apply.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _skill_manifest(
                 "greet",
                 {"SKILL.md": _skill_md("greet", "greets people").decode(), bad_key: "planted"},
@@ -1322,7 +1315,6 @@ async def test_apply_refuses_binary_and_missing_sources(db: None, tmp_path) -> N
     apply = _object_tool("object_apply")
     binary = apply.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _skill_manifest(
                 "greet",
                 {"SKILL.md": {"from": "greet/SKILL.md"}, "logo.png": {"from": "greet/logo.png"}},
@@ -1331,7 +1323,6 @@ async def test_apply_refuses_binary_and_missing_sources(db: None, tmp_path) -> N
     )
     missing = apply.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _skill_manifest("greet", {"SKILL.md": {"from": "greet/absent.md"}}),
         }
     )
@@ -1358,7 +1349,6 @@ async def test_apply_enforces_the_cap_but_allows_a_reapply(
         )
         over = apply.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _skill_manifest("two", {"SKILL.md": _skill_md("two", "2").decode()}),
             }
         )

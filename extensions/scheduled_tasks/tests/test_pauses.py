@@ -41,8 +41,6 @@ from ufo.tools.registry import ToolDef
 from ufo.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.workspace import ws
 
-TOOL_NARRATION = "waiting on the approval"
-
 
 @dataclass(frozen=True)
 class _RetireCrashes(PauseStore):
@@ -80,9 +78,7 @@ def _object_tool(name: str) -> ToolDef:
 
 
 async def _dispatch(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
-    result = await tool.handler(
-        ctx, tool.input_model.model_validate({"user_description": TOOL_NARRATION, **args})
-    )
+    result = await tool.handler(ctx, tool.input_model.model_validate({**args}))
     assert result.is_error is False
     return result.content[0].text
 
@@ -190,7 +186,6 @@ def _invoker(workspace_id: UUID, dbos: StubDbos) -> AdmissionInvoker:
 def _wait(**overrides: object) -> PauseAndWaitInput:
     return PauseAndWaitInput.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "ai_response": "I'll wait for the verification email.",
             "wait_minutes": 10,
             "next_steps": "Read the code and continue onboarding.",
@@ -271,7 +266,7 @@ async def test_pause_arms_a_row_and_returns_the_timer_directive(db: None) -> Non
     assert row["agent_id"] == agent_id
     assert row["origin_seq"] == 0
     assert row["created_by_member_id"] == member_id
-    assert row["user_description"] == TOOL_NARRATION
+    assert row["user_description"] == row["prompt"]
     assert row["claimed_by"] is None
     assert "Read the code and continue onboarding." in row["prompt"]
     assert "verification email" in row["prompt"]

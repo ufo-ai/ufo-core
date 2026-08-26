@@ -58,7 +58,7 @@ from ufo.ext.manifest import (
     InjectContext,
     UserPromptSubmit,
 )
-from ufo.hub import Absorbed, InProcessHub, LiveFrame, Resumed, SkillLoad, ToolCall
+from ufo.hub import Absorbed, Activity, InProcessHub, LiveFrame, Resumed
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     Compaction,
@@ -182,6 +182,7 @@ from ufo.tools.context import (
     UntrustedContentError,
 )
 from ufo.tools.registry import ToolDef, ToolRegistry
+from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import Audience, audience_subjects, conversation_audience
 from ufo.turns.transcript import CompactionSummary, Conversation
 from ufo.turns.untrusted import (
@@ -198,6 +199,13 @@ from ufo.turns.workspace_changes import (
 from ufo.workspace import init_workspace_credentials, ws
 
 HISTORY_PAD = "y" * 600
+
+
+class _ActivityModel:
+    model = "gpt-5.6-luna"
+
+    async def complete(self, _request: ModelRequest) -> str:
+        return "Working on the request."
 
 
 @dataclass
@@ -371,9 +379,7 @@ class ToolCallingModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -398,7 +404,6 @@ class WriteThenAnswerModel:
                 {
                     "file_path": "/workspace/proj/a.py",
                     "content": "x = 1\n",
-                    "user_description": "writing a module",
                 }
             ),
         )
@@ -487,7 +492,7 @@ class SkillThenToolModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(
             id="c1",
-            partial_json=json.dumps({"command": "echo hi", "user_description": "running a check"}),
+            partial_json=json.dumps({"command": "echo hi"}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
@@ -525,9 +530,7 @@ class NeverAnsweringModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "true", "user_description": "running a check"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -562,9 +565,7 @@ class FinishCallingModel:
             return
         yield TextDelta(text="working on it")
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "true", "user_description": "running a check"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
         yield Usage(input_tokens=2, output_tokens=2)
 
 
@@ -612,9 +613,7 @@ class FinishAlongsideWorkModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "true", "user_description": "running a check"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
         yield ToolCallStart(id="f1", name=FINISH_TOOL)
         yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "premature"}))
         yield Usage(input_tokens=2, output_tokens=2)
@@ -635,9 +634,7 @@ class NeverFinishingModel:
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "true", "user_description": "running a check"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "true"}')
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -769,9 +766,7 @@ class ClockedToolCallingModel:
             yield Usage(input_tokens=ROUND_INPUT_TOKENS, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
         yield Usage(input_tokens=ROUND_INPUT_TOKENS, output_tokens=1)
 
 
@@ -808,9 +803,7 @@ class CancelBeforeTheCapModel:
                 .where(tables.turn.c.id == self.turn_id)
             )
         yield ToolCallStart(id="c1", name="bash")
-        yield ToolCallDelta(
-            id="c1", partial_json='{"command": "echo hi", "user_description": "running a check"}'
-        )
+        yield ToolCallDelta(id="c1", partial_json='{"command": "echo hi"}')
         yield Usage(input_tokens=ROUND_INPUT_TOKENS, output_tokens=1)
 
 
@@ -857,7 +850,6 @@ class ConnectCallingModel:
             partial_json=json.dumps(
                 {
                     "provider": "stub",
-                    "user_description": "connecting their account",
                     "requested_by": str(self.message_ref),
                 }
             ),
@@ -1023,6 +1015,7 @@ def _engine(
         byok=byok,
         system_prompt=rendered_prompt("p"),
         model=model,
+        activity_summarizer=ActivitySummarizer(_ActivityModel()),
         provider=provider,
         reasoning=reasoning or ReasoningSupport(supported=True, tools_with_reasoning=True),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
@@ -3179,6 +3172,8 @@ async def test_tool_call_round_dispatches_in_sandbox_then_answers(db: None, tmp_
     assert tool_use[0].name == "bash"
     assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
     assert "hi" in tool_result[0].content
+    assert tool_result[0].activity
+    assert tool_result[0].activity_text == "Working on the request."
     assert stored.messages[-1] == Message(role="assistant", content="done")
 
 
@@ -3299,24 +3294,35 @@ async def test_text_streamed_during_a_paced_flush_still_reaches_the_hub(
     assert published == "first second"
 
 
-async def test_multi_tool_round_publishes_skill_then_tool_activity_frames_in_order(
-    db: None, tmp_path: Path
-) -> None:
+async def test_multi_tool_round_publishes_one_summary_per_tool(db: None, tmp_path: Path) -> None:
+    class CurrentActivityModel:
+        model = "gpt-5.6-luna"
+
+        def __init__(self) -> None:
+            self.names: list[str] = []
+
+        async def complete(self, request: ModelRequest) -> str:
+            payload = json.loads(request.messages[0].content)
+            self.names.append(payload["name"])
+            return f"Preparing the {payload['name']} step"
+
     turn = await _seed_turn("queued", None)
     carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
     hub = RecordingHub()
-    engine = replace(_engine(turn, SkillThenToolModel(), tmp_path, carrier=carrier), hub=hub)
+    activity_model = CurrentActivityModel()
+    engine = replace(
+        _engine(turn, SkillThenToolModel(), tmp_path, carrier=carrier),
+        hub=hub,
+        activity_summarizer=ActivitySummarizer(activity_model),
+    )
     frame = await engine.run()
     assert frame.status == "done"
-    activity = [frame for frame in hub.frames if isinstance(frame, SkillLoad | ToolCall)]
+    activity = [frame for frame in hub.frames if isinstance(frame, Activity)]
     assert activity == [
-        SkillLoad(skill="demo"),
-        ToolCall(
-            tool="bash",
-            preview='{"command":"echo hi","user_description":"running a check"}',
-            description="running a check",
-        ),
+        Activity(text="Preparing the load_skill step."),
+        Activity(text="Preparing the bash step."),
     ]
+    assert activity_model.names == ["load_skill", "bash"]
 
 
 @dataclass
@@ -3814,8 +3820,7 @@ async def test_a_preloaded_skill_counts_as_already_in_context(db: None, tmp_path
 
 @dataclass(frozen=True)
 class NarratedToolModel:
-    """Emits a bash call carrying a `user_description`, then answers — so a test reads back the
-    plain-language narration the engine surfaces on the activity frame."""
+    """Emits a bash call, then answers, so a test reads the generated activity frame."""
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         answered = any(
@@ -3830,29 +3835,67 @@ class NarratedToolModel:
         yield ToolCallStart(id="c1", name="bash")
         yield ToolCallDelta(
             id="c1",
-            partial_json=json.dumps(
-                {"command": "echo hi", "user_description": "greeting the shell"}
-            ),
+            partial_json=json.dumps({"command": "echo hi"}),
         )
         yield Usage(input_tokens=2, output_tokens=2)
 
 
-async def test_tool_activity_frame_carries_the_models_user_description(
-    db: None, tmp_path: Path
-) -> None:
+async def test_tool_activity_frame_carries_the_generated_summary(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None)
     carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
     hub = RecordingHub()
     engine = replace(_engine(turn, NarratedToolModel(), tmp_path, carrier=carrier), hub=hub)
     await engine.run()
-    tool_frames = [frame for frame in hub.frames if isinstance(frame, ToolCall)]
-    assert tool_frames and tool_frames[0].description == "greeting the shell"
+    tool_frames = [frame for frame in hub.frames if isinstance(frame, Activity)]
+    assert tool_frames == [Activity(text="Working on the request.")]
+
+
+async def test_tool_dispatch_does_not_wait_for_activity_generation(
+    db: None, tmp_path: Path
+) -> None:
+    class BlockedActivityModel:
+        model = "gpt-5.6-luna"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def complete(self, request: ModelRequest) -> str:
+            self.started.set()
+            await self.release.wait()
+            return "Running the command"
+
+    class ActivityAwareCarrier(RecordingCarrier):
+        def __init__(self, activity: BlockedActivityModel) -> None:
+            super().__init__(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
+            self.activity = activity
+
+        async def exec(
+            self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        ) -> ExecResult:
+            async with asyncio.timeout(5):
+                await self.activity.started.wait()
+            return await super().exec(handle, argv, timeout_s)
+
+    activity = BlockedActivityModel()
+    turn = await _seed_turn("queued", None)
+    carrier = ActivityAwareCarrier(activity)
+    engine = replace(
+        _engine(turn, NarratedToolModel(), tmp_path, carrier=carrier),
+        activity_summarizer=ActivitySummarizer(activity),
+    )
+
+    async with asyncio.timeout(5):
+        frame = await engine.run()
+
+    assert frame is not None and frame.status == "done"
+    assert carrier.calls
+    assert not activity.release.is_set()
 
 
 ASK_INPUT = {
     "title": "Need a decision",
     "questions": [{"question": "Ship it?", "options": [{"label": "Ship"}, {"label": "Hold"}]}],
-    "user_description": "checking whether to ship",
 }
 
 
@@ -3892,7 +3935,7 @@ class AskThenWorkModel:
             yield ToolCallStart(id="c1", name="bash")
             yield ToolCallDelta(
                 id="c1",
-                partial_json='{"command": "echo hi", "user_description": "running a check"}',
+                partial_json='{"command": "echo hi"}',
             )
         else:
             yield TextDelta(text="done without asking")
@@ -3962,7 +4005,6 @@ def _widget_call(call_id: str, color: str) -> tuple[ToolUseBlock, ...]:
             name=OBJECT_APPLY_TOOL,
             input={
                 "manifest": (f"kind: {sample.WIDGET_KIND}\nname: anvil\nspec:\n  color: {color}\n"),
-                "user_description": WIDGET_NARRATION,
             },
         ),
     )
@@ -4249,7 +4291,6 @@ async def test_question_is_cleared_when_the_turn_works_on_after_asking(
 REQUEST_INPUT = {
     "reason": "Connecting Slack needs the bot token.",
     "prompts": [{"slot": "sample_api", "prompt": "Bot User OAuth Token"}],
-    "user_description": "asking for the Slack token",
 }
 
 
@@ -4485,7 +4526,6 @@ class ConnectThenBookkeepModel:
                 partial_json=json.dumps(
                     {
                         "provider": "stub",
-                        "user_description": "connecting their account",
                         "requested_by": str(self.message_ref),
                     }
                 ),
@@ -4555,7 +4595,6 @@ class ConnectThenHearFromAMemberModel:
                 partial_json=json.dumps(
                     {
                         "provider": "stub",
-                        "user_description": "connecting their account",
                         "requested_by": str(self.turn.id),
                     }
                 ),
@@ -4762,7 +4801,6 @@ async def test_request_credentials_gates_on_admin_key_and_declared_slots(
         {
             "reason": "r",
             "prompts": [{"slot": "nonesuch", "prompt": "p"}],
-            "user_description": "asking for a value",
         }
     )
     with pytest.raises(ValueError, match="declares credential slot"):

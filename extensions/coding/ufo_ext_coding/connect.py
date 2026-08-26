@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from ufo.sdk.callback_page import CLOSE_THIS_PAGE, PageLink, callback_page
 from ufo.sdk.context import ExtensionContext
@@ -46,11 +46,6 @@ JSON_HEADERS = {"Accept": "application/json"}
 
 class ConnectGitHubInput(BaseModel):
     """The connection is for the speaking admin's workspace, so it takes no target."""
-
-    user_description: str = Field(
-        description="That you are getting their GitHub hooked up, in plain language for the "
-        "activity timeline."
-    )
 
 
 async def connect_github(ctx: ToolContext, args: ConnectGitHubInput) -> ToolResult:

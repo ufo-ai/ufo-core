@@ -14,15 +14,14 @@ from ufo_ext_web.surface import _event, _sse
 
 from ufo.hub import (
     Absorbed,
+    Activity,
     CostTick,
     LiveFrame,
     Parked,
     Reply,
     Resumed,
-    SkillLoad,
     SubagentActivity,
     Terminal,
-    ToolCall,
 )
 from ufo.models.interface import TextDelta
 from ufo.schema.records import TerminalFrame
@@ -47,16 +46,14 @@ TURN_ID = "33333333-3333-4333-8333-333333333333"
 def sse_frames() -> dict[type, LiveFrame]:
     return {
         TextDelta: TextDelta(text="Looking at the workspace…"),
-        ToolCall: ToolCall(tool="bash", preview="ls -la", description="Listing the workspace"),
-        SkillLoad: SkillLoad(skill="calendar-triage"),
+        Activity: Activity(text="Listing the workspace."),
         SubagentActivity: SubagentActivity(
             turn_id=UUID("99999999-9999-4999-8999-999999999999"),
             parent_turn_id=UUID("77777777-7777-4777-8777-777777777777"),
             conversation_id=UUID(CONVERSATION_ID),
             profile="deep_research",
             name="Calendar check",
-            tool="fetch_url",
-            description="Reading the calendar",
+            activity="Reading the calendar.",
         ),
         CostTick: CostTick(cost_micro_usd=110, tokens=12),
         Absorbed: Absorbed(arrivals=(ARRIVAL_ID,)),
@@ -148,8 +145,7 @@ def sse_rows() -> list[dict[str, str]]:
     frames = sse_frames()
     live = [
         frames[TextDelta],
-        frames[ToolCall],
-        frames[SkillLoad],
+        frames[Activity],
         frames[SubagentActivity],
         frames[CostTick],
         frames[Reply],

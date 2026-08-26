@@ -556,7 +556,6 @@ async def test_a_condition_that_already_holds_is_refused_at_plan_time(db: None) 
                 name="filing",
                 directive="file the vendor forms",
                 steps=(StepPlan(title="file the W9", accepts=(FileExists(path=REQUIRED_PATH),)),),
-                user_description="planning",
             ),
         )
     assert result.is_error
@@ -578,7 +577,6 @@ async def test_a_condition_that_does_not_hold_yet_is_accepted(db: None) -> None:
                 name="filing",
                 directive="file the vendor forms",
                 steps=(StepPlan(title="file the W9", accepts=(FileExists(path=REQUIRED_PATH),)),),
-                user_description="planning",
             ),
         )
     assert not result.is_error
@@ -608,7 +606,6 @@ async def test_a_suite_already_green_is_the_condition_worth_having(db: None) -> 
                 steps=(
                     StepPlan(title="raise MAX_ITEMS", accepts=(CommandSucceeds(command=suite),)),
                 ),
-                user_description="planning",
             ),
         )
     assert not result.is_error
@@ -629,7 +626,6 @@ async def test_a_revision_keeps_a_condition_the_finished_work_made_true(db: None
         name="filing",
         directive="file the vendor forms",
         steps=(StepPlan(title="file the W9", accepts=(FileExists(path=REQUIRED_PATH),)),),
-        user_description="planning",
     )
     with ws(workspace_id), agent(agent_id):
         assert not (
@@ -645,7 +641,6 @@ async def test_a_revision_keeps_a_condition_the_finished_work_made_true(db: None
                     *plan.steps,
                     StepPlan(title="file the 1099", accepts=(FileExists(path=WRONG_PATH),)),
                 ),
-                user_description="revising",
             ),
         )
     assert not revised.is_error
@@ -676,7 +671,6 @@ async def test_a_revision_of_an_attempted_step_is_not_gated_on_accepts_it_cannot
                     steps=(
                         StepPlan(title="file the W9", accepts=(FileExists(path=REQUIRED_PATH),)),
                     ),
-                    user_description="planning",
                 ),
             )
         ).is_error
@@ -691,7 +685,6 @@ async def test_a_revision_of_an_attempted_step_is_not_gated_on_accepts_it_cannot
                 name="filing",
                 directive="file the vendor forms",
                 steps=(StepPlan(title="file the W9", accepts=(FileExists(path=WRONG_PATH),)),),
-                user_description="revising",
             ),
         )
     assert not revised.is_error
@@ -717,7 +710,6 @@ async def test_a_revision_that_swaps_in_a_condition_already_true_is_refused(db: 
                     steps=(
                         StepPlan(title="file the W9", accepts=(FileExists(path=REQUIRED_PATH),)),
                     ),
-                    user_description="planning",
                 ),
             )
         ).is_error
@@ -727,7 +719,6 @@ async def test_a_revision_that_swaps_in_a_condition_already_true_is_refused(db: 
                 name="filing",
                 directive="file the vendor forms",
                 steps=(StepPlan(title="file the W9", accepts=(FileExists(path=WRONG_PATH),)),),
-                user_description="revising",
             ),
         )
     assert weakened.is_error

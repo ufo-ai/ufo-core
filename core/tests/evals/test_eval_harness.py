@@ -190,6 +190,7 @@ from evals.suites.response_register import (
     unwritten_reply_scorer,
     written_report_scorer,
 )
+from evals.suites.tool_activity import ACTIVITY_MODEL
 from evals.suites.ufo_app_bench import WORKFLOW_WAIT_SECONDS as UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS
 from ufo.access.credentials import (
     CredentialRequests,
@@ -381,6 +382,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["slack_silence"].simulator_model is None
     assert tasks["asd_writing"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["asd_writing"].simulator_model == DEFAULT_BACKGROUND_JOBS_MODEL
+    assert tasks["tool_activity"].judge_model == ACTIVITY_MODEL
+    assert tasks["tool_activity"].simulator_model is None
     assert all(
         task.judge_model is None and task.simulator_model is None
         for name, task in tasks.items()
@@ -409,6 +412,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "credential_handoff",
             "report_digest",
             "first_run",
+            "tool_activity",
         }
     )
 
@@ -5752,9 +5756,6 @@ async def test_workspace_driver_applies_a_browser_object_write_as_a_prepared_int
         "name": "assign-521",
         "spec": spec,
     }
-    assert intent.input["user_description"] == (
-        "Apply eval_app_action assign-521 from the application."
-    )
     async with workspace_tx() as connection:
         prepared = (
             await connection.execute(
@@ -6120,28 +6121,19 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
     class Process:
         returncode = 0
 
-        def __init__(self, output: bytes, admit: bool = False) -> None:
+        def __init__(self, output: bytes) -> None:
             self.output = output
-            self.admit = admit
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(output)
+            self.stdout.feed_eof()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_eof()
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            if self.admit:
-                async with workspace_tx() as connection:
-                    await connection.execute(
-                        sa.insert(tables.turn).values(
-                            id=turn_id,
-                            workspace_id=workspace_id,
-                            conversation_id=conversation_id,
-                            agent_id=agent_id,
-                            seq=1,
-                            status="done",
-                            inbound="Run it.",
-                            terminal={"status": "done", "text": "Done.", "model": MODEL},
-                            created_at=sa.func.now(),
-                            updated_at=sa.func.now(),
-                        )
-                    )
             return self.output, b""
+
+        async def wait(self) -> int:
+            return self.returncode
 
     async def spawn(*args, **kwargs) -> Process:
         if args[1:] == ("--help",):
@@ -6156,7 +6148,36 @@ async def test_remote_workspace_driver_uses_the_ufo_json_transport(
                 "credential": (home / "credentials").is_file(),
             }
         )
-        return Process(b'{"type":"session_start"}\n{"type":"turn_end"}\n', admit=True)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="done",
+                    inbound="Run it.",
+                    terminal={"status": "done", "text": "Done.", "model": MODEL},
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        output = "\n".join(
+            (
+                dumps({"type": "session_start"}),
+                dumps(
+                    {
+                        "type": "message_sent",
+                        "turn_id": str(turn_id),
+                        "opened_run": True,
+                        "arrival_id": "arrival-1",
+                    }
+                ),
+                dumps({"type": "turn_end"}),
+            )
+        )
+        return Process(f"{output}\n".encode())
 
     monkeypatch.setattr("evals.driver.asyncio.create_subprocess_exec", spawn)
     remote = RemoteClient(
@@ -6222,23 +6243,22 @@ async def test_remote_workspace_driver_deadline_stops_the_client_and_cancels_the
     class Process:
         returncode: int | None = None
 
-        async def communicate(self) -> tuple[bytes, bytes]:
-            async with workspace_tx() as connection:
-                await connection.execute(
-                    sa.insert(tables.turn).values(
-                        id=turn_id,
-                        workspace_id=workspace_id,
-                        conversation_id=conversation_id,
-                        agent_id=agent_id,
-                        seq=1,
-                        status="running",
-                        inbound="Keep working.",
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
+        def __init__(self) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(
+                (
+                    dumps(
+                        {
+                            "type": "message_sent",
+                            "turn_id": str(turn_id),
+                            "opened_run": True,
+                            "arrival_id": "arrival-1",
+                        }
                     )
-                )
-            await asyncio.Event().wait()
-            raise AssertionError("the remote client wait must end")
+                    + "\n"
+                ).encode()
+            )
+            self.stderr = asyncio.StreamReader()
 
         def kill(self) -> None:
             self.returncode = -9
@@ -6271,6 +6291,20 @@ async def test_remote_workspace_driver_deadline_stops_the_client_and_cancels_the
 
     with ws(workspace_id):
         conversation_id = await driver.open("remote-deadline")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="running",
+                    inbound="Keep working.",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
         admitted = await driver.admit(conversation_id, "Keep working.")
 
     assert admitted == turn_id

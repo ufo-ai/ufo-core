@@ -8,17 +8,21 @@ from ufo.hub import (
     ACTIVITY_PEEK_FRAMES,
     SUBSCRIBER_QUEUE_FRAMES,
     Absorbed,
+    Activity,
     InProcessHub,
     LiveFrame,
     Parked,
-    SkillLoad,
     SubagentActivity,
     Terminal,
-    ToolCall,
 )
-from ufo.models.interface import TextDelta, ToolUseBlock
+from ufo.models.interface import ModelRequest, TextDelta, ToolUseBlock
 from ufo.schema.records import TerminalFrame
-from ufo.turns.activity import tool_activity
+from ufo.turns.activity import (
+    ACTIVITY_ARGUMENT_CHARS,
+    ACTIVITY_LINE_CHARS,
+    ActivitySummarizer,
+    activity_line,
+)
 
 
 async def _pending_first(
@@ -36,20 +40,31 @@ async def _drop(pending: asyncio.Future[tuple[str, LiveFrame]]) -> None:
     await asyncio.gather(pending, return_exceptions=True)
 
 
-def test_tool_activity_uses_one_bounded_frame_shape():
-    assert tool_activity(ToolUseBlock(id="s", name="load_skill", input={"name": 7})) == SkillLoad(
-        skill=""
+class _ActivityModel:
+    model = "gpt-5.6-luna"
+    request: ModelRequest | None = None
+
+    async def complete(self, request: ModelRequest) -> str:
+        self.request = request
+        return "- Reviewing the notes\nthen updating the heading"
+
+
+async def test_activity_summarizer_sends_only_bounded_tool_calls():
+    model = _ActivityModel()
+    line = await ActivitySummarizer(model).summarize(
+        ToolUseBlock(id="e", name="edit", input={"content": "x" * 1_000})
     )
-    command = "é" * 100
-    frame = tool_activity(
-        ToolUseBlock(id="t", name="bash", input={"command": command, "user_description": 7})
-    )
-    assert frame == ToolCall(
-        tool="bash",
-        preview=json.dumps({"command": command, "user_description": 7}, separators=(",", ":"))[:200]
-        + "…",
-        description="",
-    )
+    assert line == "Reviewing the notes then updating the heading."
+    assert model.request is not None
+    payload = json.loads(model.request.messages[0].content)
+    assert payload["name"] == "edit"
+    assert len(payload["arguments"]) == ACTIVITY_ARGUMENT_CHARS + 1
+
+
+def test_activity_line_is_one_bounded_sentence():
+    assert activity_line("") == "Continuing the requested work."
+    assert "\n" not in activity_line("a" * 400)
+    assert len(activity_line("a" * 400)) == ACTIVITY_LINE_CHARS
 
 
 async def test_round_trip_delivers_text_and_terminal():
@@ -111,13 +126,13 @@ async def test_latest_activity_peeks_the_newest_activity_frame():
     assert await hub.latest_activity(turn_id) is None
     await hub.publish(turn_id, TextDelta(text="thinking"))
     assert await hub.latest_activity(turn_id) is None
-    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    call = Activity(text="Checking the workspace.")
     await hub.publish(turn_id, call)
     await hub.publish(turn_id, TextDelta(text="more"))
     assert await hub.latest_activity(turn_id) == call
-    load = SkillLoad(skill="memory")
-    await hub.publish(turn_id, load)
-    assert await hub.latest_activity(turn_id) == load
+    latest = Activity(text="Saving the result.")
+    await hub.publish(turn_id, latest)
+    assert await hub.latest_activity(turn_id) == latest
 
 
 async def test_latest_activity_reads_back_no_further_than_the_peek_bound():
@@ -126,7 +141,7 @@ async def test_latest_activity_reads_back_no_further_than_the_peek_bound():
     text costs the poll a bounded walk rather than the whole ten-thousand-frame ring."""
     hub = InProcessHub()
     turn_id = uuid4()
-    call = ToolCall(tool="bash", preview='{"command":"ls"}')
+    call = Activity(text="Checking the workspace.")
     await hub.publish(turn_id, call)
     for index in range(ACTIVITY_PEEK_FRAMES - 1):
         await hub.publish(turn_id, TextDelta(text=f"delta {index}"))
@@ -198,7 +213,7 @@ async def test_a_frame_the_dying_stream_never_rendered_replays_on_the_cursor_rec
     rendered = await hub.publish(turn_id, TextDelta(text="cost tick"))
     stream = hub.subscribe(turn_id)
     assert (await anext(stream))[1] == TextDelta(text="cost tick")
-    note = ToolCall(tool="bash", description="", preview="pwd")
+    note = Activity(text="Checking the workspace.")
     await hub.publish(turn_id, note)
     await stream.aclose()
 
@@ -273,8 +288,7 @@ def _run_frame(root_turn_id: UUID) -> SubagentActivity:
         parent_turn_id=root_turn_id,
         conversation_id=uuid4(),
         profile="general_purpose",
-        tool="bash",
-        description="still going",
+        activity="Still going.",
     )
 
 

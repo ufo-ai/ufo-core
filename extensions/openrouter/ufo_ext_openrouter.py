@@ -683,9 +683,6 @@ class GenerateImageInput(BaseModel):
             "the others."
         ),
     )
-    user_description: str = Field(
-        description="What you are generating, in plain language for the activity timeline."
-    )
 
     @model_validator(mode="after")
     def _within_model_limits(self) -> "GenerateImageInput":
@@ -776,7 +773,7 @@ class OpenRouterImages:
         ) as http:
             response = await http.post(
                 IMAGES_PATH,
-                json=args.model_dump(exclude_none=True, exclude={"name", "user_description"}),
+                json=args.model_dump(exclude_none=True, exclude={"name"}),
             )
         if response.is_error:
             return ToolResult(
@@ -929,9 +926,6 @@ class GenerateVideoInput(BaseModel):
         default=True,
         description="Whether the video carries its native audio track. False for a silent take.",
     )
-    user_description: str = Field(
-        description="What you are generating, in plain language for the activity timeline."
-    )
 
     @model_validator(mode="after")
     def _within_model_limits(self) -> "GenerateVideoInput":
@@ -1011,7 +1005,7 @@ class OpenRouterVideos:
         ) as http:
             response = await http.post(
                 VIDEOS_PATH,
-                json=args.model_dump(exclude_none=True, exclude={"name", "user_description"}),
+                json=args.model_dump(exclude_none=True, exclude={"name"}),
             )
             if response.is_error:
                 return ToolResult(

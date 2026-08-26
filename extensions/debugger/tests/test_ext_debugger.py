@@ -655,6 +655,31 @@ async def test_transcript_compactions_and_files_read_the_blobs_and_the_sandbox(d
     assert escape.status_code == 404
 
 
+async def test_transcript_shows_a_stored_tool_description_after_its_arg_is_removed(debug) -> None:
+    client, blob, _sandboxes = debug
+    workspace_id, _ = await _seed_workspace()
+    conversation_id = await _seed_conversation(workspace_id)
+    await blob.put(
+        transcript_key(conversation_id),
+        lz4.frame.compress(
+            b'{"seq":1,"messages":['
+            b'{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash",'
+            b'"input":{"command":"ls","user_description":"Listing files"}}]},'
+            b'{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1",'
+            b'"content":"README.md"}]}]}'
+        ),
+    )
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
+
+    response = await client.get(
+        f"/surface/debug/api/conversations/{conversation_id}/transcript", headers=_auth(token)
+    )
+
+    assert response.status_code == 200
+    call = response.json()["messages"][0]["content"][0]
+    assert call["input"] == {"command": "ls", "user_description": "Listing files"}
+
+
 async def test_stream_tails_a_completed_turn_from_its_durable_terminal(debug) -> None:
     client, _, _ = debug
     workspace_id, agent_id = await _seed_workspace()

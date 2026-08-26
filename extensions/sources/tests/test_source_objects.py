@@ -266,9 +266,7 @@ async def _apply(ctx: ToolContext, manifest_text: str) -> dict[str, object]:
     tool = _TOOLS["object_apply"]
     result = await tool.handler(
         ctx,
-        tool.input_model.model_validate(
-            {"user_description": TOOL_NARRATION, "manifest": manifest_text}
-        ),
+        tool.input_model.model_validate({"manifest": manifest_text}),
     )
     assert result.is_error is False
     return json.loads(result.content[0].text)
@@ -278,9 +276,7 @@ async def _get(ctx: ToolContext, name: str) -> dict[str, object]:
     tool = _TOOLS["object_get"]
     result = await tool.handler(
         ctx,
-        tool.input_model.model_validate(
-            {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
-        ),
+        tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
     )
     assert result.is_error is False
     return yaml.safe_load(result.content[0].text)
@@ -498,9 +494,7 @@ async def test_owner_applies_a_binding_and_reads_it_back(db: None) -> None:
             (
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
-                    ),
+                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
                 )
             )
             .content[0]
@@ -549,7 +543,6 @@ async def test_wrong_name_refusal_hands_back_the_derived_name(db: None) -> None:
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(ASANA, ("workspaces",), "my-asana"),
         }
     )
@@ -569,7 +562,6 @@ async def test_unknown_provider_and_stream_refuse_with_the_valid_sets(db: None) 
                 _context(state, None),
                 tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _manifest_text("nonesuch", ("things",), "nonesuch-x"),
                     }
                 ),
@@ -579,7 +571,6 @@ async def test_unknown_provider_and_stream_refuse_with_the_valid_sets(db: None) 
                 _context(state, grants, brokered=(ASANA,)),
                 tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _manifest_text(
                             ASANA, ("nonesuch",), binding_name(ASANA, "acct-one", None)
                         ),
@@ -619,9 +610,7 @@ async def test_a_member_registers_a_private_source_by_default(
             (
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
-                    ),
+                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
                 )
             )
             .content[0]
@@ -731,7 +720,6 @@ async def test_stranger_applying_a_private_source_name_is_not_found(
         for shared in (True, False):
             args = apply_tool.input_model.model_validate(
                 {
-                    "user_description": TOOL_NARRATION,
                     "manifest": _manifest_text(GREENHOUSE, ("jobs",), name, shared=shared),
                 }
             )
@@ -756,7 +744,6 @@ async def test_unsharing_is_delete_and_recreate(db: None, monkeypatch: pytest.Mo
         await _apply(ctx, _manifest_text(GREENHOUSE, ("jobs",), name, shared=True))
         args = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _manifest_text(GREENHOUSE, ("jobs",), name, shared=False),
             }
         )
@@ -781,15 +768,11 @@ async def test_delete_is_registrar_or_admin(db: None, monkeypatch: pytest.Monkey
         with pytest.raises(UnknownObject):
             await delete_tool.handler(
                 stranger_ctx,
-                delete_tool.input_model.model_validate(
-                    {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": member_name}
-                ),
+                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
             )
         await delete_tool.handler(
             member_ctx,
-            delete_tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": member_name}
-            ),
+            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
         )
     [row] = await _rows(state, GREENHOUSE)
     assert row["removed_at"] is not None
@@ -807,15 +790,11 @@ async def test_delete_is_registrar_or_admin(db: None, monkeypatch: pytest.Monkey
         with pytest.raises(AdminRequired, match="registering member or a workspace admin"):
             await delete_tool.handler(
                 member_ctx,
-                delete_tool.input_model.model_validate(
-                    {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": boot_name}
-                ),
+                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": boot_name}),
             )
         await delete_tool.handler(
             owner_ctx,
-            delete_tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": boot_name}
-            ),
+            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": boot_name}),
         )
     [row] = await _rows(state, FRESHDESK)
     assert row["removed_at"] is not None
@@ -852,9 +831,7 @@ async def test_read_verbs_hide_other_members_private_sources(
             (
                 await list_tool.handler(
                     stranger_ctx,
-                    list_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND}
-                    ),
+                    list_tool.input_model.model_validate({"kind": SOURCE_KIND}),
                 )
             )
             .content[0]
@@ -864,9 +841,7 @@ async def test_read_verbs_hide_other_members_private_sources(
         with pytest.raises(UnknownObject):
             await get_tool.handler(
                 stranger_ctx,
-                get_tool.input_model.model_validate(
-                    {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": private_name}
-                ),
+                get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": private_name}),
             )
 
         for ctx in (member_ctx, owner_ctx):
@@ -874,9 +849,7 @@ async def test_read_verbs_hide_other_members_private_sources(
                 (
                     await list_tool.handler(
                         ctx,
-                        list_tool.input_model.model_validate(
-                            {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND}
-                        ),
+                        list_tool.input_model.model_validate({"kind": SOURCE_KIND}),
                     )
                 )
                 .content[0]
@@ -889,7 +862,6 @@ async def test_read_verbs_hide_other_members_private_sources(
                         ctx,
                         get_tool.input_model.model_validate(
                             {
-                                "user_description": TOOL_NARRATION,
                                 "kind": SOURCE_KIND,
                                 "name": private_name,
                             }
@@ -957,7 +929,6 @@ async def test_registration_requires_a_speaking_member(
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(GREENHOUSE, ("jobs",), name),
         }
     )
@@ -1272,7 +1243,6 @@ async def test_a_submit_editing_the_window_and_the_streams_is_refused_whole(db: 
         await _apply(ctx, _manifest_text(OUTLOOK, ("events", "messages"), name, backfill_days=90))
         args = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _manifest_text(OUTLOOK, ("messages",), name, backfill_days=7),
             }
         )
@@ -1403,7 +1373,6 @@ async def test_narrowing_a_live_bindings_window_is_delete_and_recreate(db: None)
         await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=90))
         args = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _manifest_text(GMAIL, ("messages",), name, backfill_days=7),
             }
         )
@@ -1415,7 +1384,6 @@ async def test_narrowing_a_live_bindings_window_is_delete_and_recreate(db: None)
         await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days="all"))
         narrowing = apply_tool.input_model.model_validate(
             {
-                "user_description": TOOL_NARRATION,
                 "manifest": _manifest_text(GMAIL, ("messages",), name, backfill_days=365),
             }
         )
@@ -1423,9 +1391,7 @@ async def test_narrowing_a_live_bindings_window_is_delete_and_recreate(db: None)
             await apply_tool.handler(ctx, narrowing)
         await delete_tool.handler(
             ctx,
-            delete_tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
-            ),
+            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
         )
         recreated = await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=7))
     assert recreated["result"] == "created"
@@ -1454,9 +1420,7 @@ async def test_the_window_belongs_to_what_identifies_a_submitted_binding(db: Non
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(ctx, _manifest_text(GMAIL, ("messages",), name, backfill_days=90))
         for submitted, refusal in ((narrowed, "only ever widens"), (resynced, "resync changes")):
-            args = apply_tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "manifest": submitted}
-            )
+            args = apply_tool.input_model.model_validate({"manifest": submitted})
             with pytest.raises(VerbNotSupported, match=refusal):
                 await apply_tool.handler(ctx, args)
     [row] = await _rows(state, GMAIL)
@@ -1490,9 +1454,7 @@ async def test_resync_pulls_the_bindings_next_sync_to_now(db: None) -> None:
             (
                 await get_tool.handler(
                     ctx,
-                    get_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
-                    ),
+                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
                 )
             )
             .content[0]
@@ -1546,7 +1508,7 @@ async def test_resync_is_registrar_or_admin(db: None, monkeypatch: pytest.Monkey
                 await _TOOLS["object_get"].handler(
                     owner_ctx,
                     _TOOLS["object_get"].input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
+                        {"kind": SOURCE_KIND, "name": name}
                     ),
                 )
             )
@@ -1586,9 +1548,7 @@ async def test_delete_marks_rows_removed_tombstones_pages_and_revives(db: None) 
             (
                 await delete_tool.handler(
                     ctx,
-                    delete_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
-                    ),
+                    delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
                 )
             )
             .content[0]
@@ -1600,9 +1560,7 @@ async def test_delete_marks_rows_removed_tombstones_pages_and_revives(db: None) 
             (
                 await list_tool.handler(
                     ctx,
-                    list_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND}
-                    ),
+                    list_tool.input_model.model_validate({"kind": SOURCE_KIND}),
                 )
             )
             .content[0]
@@ -1644,7 +1602,6 @@ async def test_direct_provider_requires_its_credential_then_registers(
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(GREENHOUSE, ("jobs",), name),
         }
     )
@@ -1728,7 +1685,6 @@ async def test_missing_or_ambiguous_broker_account_refuses_with_repair(db: None)
     tool = _TOOLS["object_apply"]
     unconnected = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(ASANA, ("workspaces",), "asana-x"),
         }
     )
@@ -1761,7 +1717,6 @@ async def test_open_namespace_provider_without_an_account_asks_to_connect(db: No
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(ASANA, ("workspaces",), "asana-open"),
         }
     )
@@ -1789,7 +1744,6 @@ async def test_a_brokered_provider_without_an_account_asks_to_connect(
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(
                 GOOGLEDRIVE, ("files",), "drive-open", account_id=account_id
             ),
@@ -1816,7 +1770,6 @@ async def test_a_provider_the_namespace_does_not_claim_asks_for_its_credential(
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(GREENHOUSE, ("jobs",), "greenhouse-unkeyed"),
         }
     )
@@ -1846,7 +1799,6 @@ async def test_a_direct_only_provider_refuses_an_account_id_keyed_or_not(
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(
                 GREENHOUSE, ("jobs",), "greenhouse-keyed", account_id="acct-one"
             ),
@@ -1877,7 +1829,6 @@ async def test_a_broker_failure_for_a_claimed_provider_raises(
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(GOOGLEDRIVE, ("files",), "drive-broker-down"),
         }
     )
@@ -1894,7 +1845,6 @@ async def test_provider_with_no_broker_and_no_direct_backend_refuses(db: None) -
     tool = _TOOLS["object_apply"]
     args = tool.input_model.model_validate(
         {
-            "user_description": TOOL_NARRATION,
             "manifest": _manifest_text(ASANA, ("workspaces",), "asana-orphan"),
         }
     )
@@ -1997,7 +1947,6 @@ async def test_invalid_base_url_registers_nothing(db: None) -> None:
                 _context(state, None),
                 tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _manifest_text(
                             FRESHDESK, ("tickets",), "freshdesk-x", base_url="https://127.0.0.1"
                         ),
@@ -2009,7 +1958,6 @@ async def test_invalid_base_url_registers_nothing(db: None) -> None:
                 _context(state, grants, brokered=(ASANA,)),
                 tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _manifest_text(
                             ASANA, ("workspaces",), "asana-x", base_url="https://evil.test"
                         ),
@@ -2038,9 +1986,7 @@ async def test_source_delete_needs_a_live_speaker(
         with pytest.raises(AdminRequired):
             await delete_tool.handler(
                 speakerless,
-                delete_tool.input_model.model_validate(
-                    {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": member_name}
-                ),
+                delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": member_name}),
             )
     [row] = await _rows(state, GREENHOUSE)
     assert row["removed_at"] is None
@@ -2185,7 +2131,6 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
                     _context(state, None),
                     get_tool.input_model.model_validate(
                         {
-                            "user_description": TOOL_NARRATION,
                             "kind": SOURCE_TRIGGER_KIND,
                             "name": trigger_name(name, state.conversation_id),
                         }
@@ -2208,7 +2153,6 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
             _context(state, None),
             delete_tool.input_model.model_validate(
                 {
-                    "user_description": TOOL_NARRATION,
                     "kind": SOURCE_TRIGGER_KIND,
                     "name": trigger_name(name, state.conversation_id),
                 }
@@ -2241,7 +2185,6 @@ async def test_a_trigger_is_named_for_the_pair_it_is(db: None) -> None:
                 _context(state, None),
                 tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": yaml.safe_dump(
                             {
                                 "kind": SOURCE_TRIGGER_KIND,
@@ -2274,7 +2217,6 @@ async def test_applying_another_conversations_trigger_name_reports_no_success(db
                 from_elsewhere,
                 tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _trigger_manifest(name, state.conversation_id),
                     }
                 ),
@@ -2296,7 +2238,6 @@ async def test_a_private_source_cannot_be_watched_and_a_strangers_is_unknown(db:
                 _context(state, None, speaker_id=state.member_id),
                 tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _trigger_manifest(name, state.conversation_id),
                     }
                 ),
@@ -2306,7 +2247,6 @@ async def test_a_private_source_cannot_be_watched_and_a_strangers_is_unknown(db:
                 _context(state, None, speaker_id=stranger),
                 tool.input_model.model_validate(
                     {
-                        "user_description": TOOL_NARRATION,
                         "manifest": _trigger_manifest(name, state.conversation_id),
                     }
                 ),
@@ -2341,9 +2281,7 @@ async def test_get_renders_an_empty_status_for_a_binding_removed_mid_verb(
             (
                 await get_tool.handler(
                     _context(state, None),
-                    get_tool.input_model.model_validate(
-                        {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
-                    ),
+                    get_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
                 )
             )
             .content[0]
@@ -2370,9 +2308,7 @@ def _delete_source_before_create(state: _Workspace, monkeypatch: pytest.MonkeyPa
     ) -> SourceTrigger:
         await delete_tool.handler(
             _context(state, None),
-            delete_tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": binding}
-            ),
+            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": binding}),
         )
         return await real_create(
             store,
@@ -2424,9 +2360,7 @@ async def test_removing_a_source_takes_its_triggers_and_a_revival_inherits_none(
         assert await _woken(state, name) == {state.conversation_id: state.agent_id}
         await delete_tool.handler(
             _context(state, None),
-            delete_tool.input_model.model_validate(
-                {"user_description": TOOL_NARRATION, "kind": SOURCE_KIND, "name": name}
-            ),
+            delete_tool.input_model.model_validate({"kind": SOURCE_KIND, "name": name}),
         )
         assert await _woken(state, name) == {}
 
@@ -2525,7 +2459,6 @@ async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> No
                     _context(state, None),
                     _TOOLS["object_get"].input_model.model_validate(
                         {
-                            "user_description": TOOL_NARRATION,
                             "kind": SOURCE_TRIGGER_KIND,
                             "name": trigger_name(name, state.conversation_id),
                         }

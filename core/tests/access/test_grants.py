@@ -1180,9 +1180,7 @@ async def test_connect_account_handoff_is_private_memoized_and_binds_the_speaker
     )
     install_connect_flow(flow)
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
-    result = await connect_account_handler(
-        ctx, ConnectAccountInput(provider="stub", user_description="connecting their account")
-    )
+    result = await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
     assert result.is_error is False
     tool_text = result.content[0].text
     assert "https://" not in tool_text
@@ -1474,18 +1472,14 @@ async def test_connect_handoff_replays_one_authorization_then_remints_past_its_w
 async def test_connect_account_without_a_speaker_is_refused() -> None:
     ctx = _turn_context(uuid4(), uuid4(), uuid4(), None)
     with pytest.raises(ValueError, match="speaking member"):
-        await connect_account_handler(
-            ctx, ConnectAccountInput(provider="stub", user_description="connecting their account")
-        )
+        await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
 
 
 async def test_connect_account_without_an_installed_flow_raises() -> None:
     install_connect_flow(None)
     ctx = _turn_context(uuid4(), uuid4(), uuid4(), uuid4())
     with pytest.raises(ConnectUnavailable):
-        await connect_account_handler(
-            ctx, ConnectAccountInput(provider="stub", user_description="connecting their account")
-        )
+        await connect_account_handler(ctx, ConnectAccountInput(provider="stub"))
 
 
 async def test_the_begin_route_is_gone_and_the_callback_reports_unavailable_without_a_flow() -> (
@@ -1954,9 +1948,7 @@ async def test_connect_account_carries_the_shared_intent(db: None) -> None:
     ctx = _turn_context(workspace_id, agent_id, conversation_id, member_id)
     result = await connect_account_handler(
         ctx,
-        ConnectAccountInput(
-            provider="stub", shared=True, user_description="connecting the team account"
-        ),
+        ConnectAccountInput(provider="stub", shared=True),
     )
     payload = json.loads(result.content[0].text.splitlines()[-1])
     assert payload == {
@@ -2129,9 +2121,7 @@ async def test_the_main_agent_connects_an_account_for_another_agent(db: None) ->
     ctx = _turn_context(workspace_id, main_id, conversation_id, member_id)
     result = await connect_account_handler(
         ctx,
-        ConnectAccountInput(
-            provider="stub", agent="shipped", user_description="connecting their account"
-        ),
+        ConnectAccountInput(provider="stub", agent="shipped"),
     )
     assert result.is_error is False
     request = ConnectRequest.model_validate_json(result.content[0].text.splitlines()[1])
@@ -2160,9 +2150,7 @@ async def test_the_grant_lands_on_the_named_agent_not_the_asking_one(db: None) -
     ctx = _turn_context(workspace_id, main_id, conversation_id, member_id)
     result = await connect_account_handler(
         ctx,
-        ConnectAccountInput(
-            provider="stub", agent="shipped", user_description="connecting their account"
-        ),
+        ConnectAccountInput(provider="stub", agent="shipped"),
     )
     request = ConnectRequest.model_validate_json(result.content[0].text.splitlines()[1])
     terminal = TerminalFrame(status="done", connect_request=request)
@@ -2220,9 +2208,7 @@ async def test_an_agent_that_is_not_main_cannot_connect_for_another(db: None) ->
     with pytest.raises(ValueError, match="only the workspace main agent"):
         await connect_account_handler(
             ctx,
-            ConnectAccountInput(
-                provider="stub", agent="shipped", user_description="connecting their account"
-            ),
+            ConnectAccountInput(provider="stub", agent="shipped"),
         )
 
 
@@ -2246,9 +2232,7 @@ async def test_connecting_for_an_unknown_agent_is_refused(db: None) -> None:
     with pytest.raises(ValueError, match="no agent named"):
         await connect_account_handler(
             ctx,
-            ConnectAccountInput(
-                provider="stub", agent="absent", user_description="connecting their account"
-            ),
+            ConnectAccountInput(provider="stub", agent="absent"),
         )
 
 
@@ -2284,7 +2268,5 @@ async def test_a_grant_refuses_an_archived_app_name(db: None) -> None:
     with pytest.raises(ValueError, match="no agent named"):
         await connect_account_handler(
             ctx,
-            ConnectAccountInput(
-                provider="stub", agent="notes", user_description="connecting their account"
-            ),
+            ConnectAccountInput(provider="stub", agent="notes"),
         )

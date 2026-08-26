@@ -852,7 +852,7 @@ This file exists so the main agent does not have to build and validate a website
 
 The main pieces are the tool name and description, the input shape, and the actual handoff function. `BuildWebsiteInput` spells out what the main agent must provide: a complete objective, an optional friendly task name, optional skills to preload, whether the child should get more working time, and a plain user-facing description for the activity timeline.
 
-When the tool runs, `_build_website` calls `ctx.spawn`, which starts the website-building profile as a child turn. It passes along the build details, but leaves out `user_description` because that is for display rather than for the child’s build instructions. The spawn uses the current call’s idempotency key, meaning if the system retries after a crash, it can reconnect to the same delegated build instead of accidentally starting a duplicate one.
+When the tool runs, `_build_website` calls `ctx.spawn`, which starts the website-building profile as a child turn and passes along the build details. The spawn uses the current call’s idempotency key, meaning if the system retries after a crash, it can reconnect to the same delegated build instead of accidentally starting a duplicate one.
 
 The file then exposes this as `DELEGATION_TOOLS`, marking it as side-effecting because it can create files, start hosting, and register a site.
 
@@ -866,7 +866,7 @@ async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResul
 
 **Purpose**: This function performs the actual delegation when the `build_website` tool is used. It starts the website-building subagent, waits for its result, and wraps that result in the standard tool response format.
 
-**Data flow**: It receives the current tool context and a `BuildWebsiteInput` object containing the website objective and build options. It turns the input into plain data, leaving out empty fields and excluding `user_description`, then sends that data to `ctx.spawn` to start the website-building profile. When the child finishes, it converts the child’s output to JSON text if there is any output, places that text inside a `TextContent` object, and returns it as a `ToolResult`.
+**Data flow**: It receives the current tool context and a `BuildWebsiteInput` object containing the website objective and build options. It turns the input into plain data, leaving out empty fields, then sends that data to `ctx.spawn` to start the website-building profile. When the child finishes, it converts the child’s output to JSON text if there is any output, places that text inside a `TextContent` object, and returns it as a `ToolResult`.
 
 **Call relations**: This function is registered as the handler for the `build_website` tool in `DELEGATION_TOOLS`. When the main agent calls that tool, the tool system invokes `_build_website`; `_build_website` then hands the job to `ToolContext.spawn`, using the website-building profile name and the call’s idempotency key so retries reconnect to the same spawned work.
 

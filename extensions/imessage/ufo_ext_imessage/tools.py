@@ -55,9 +55,6 @@ class ImessageConnectInput(BaseModel):
     phone_number: str = Field(
         description="The member's iMessage phone number in E.164 form, such as +14155550123."
     )
-    user_description: str = Field(
-        description="That you are connecting their phone to iMessage, in plain language."
-    )
 
     @field_validator("phone_number")
     @classmethod
