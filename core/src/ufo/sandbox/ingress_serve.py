@@ -7,7 +7,6 @@ import asyncio
 import json
 import mimetypes
 import os
-import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -104,10 +103,6 @@ would have the edge store an access-controlled site's bytes however `cache-contr
 CONTENT_SECURITY_POLICY = "content-security-policy"
 FRAME_ANCESTORS_DIRECTIVE = "frame-ancestors"
 NO_FRAME_ANCESTOR = "'none'"
-FRAME_ANCESTORS_TTL_SECONDS = 30.0
-"""How long one workspace's rendered `frame-ancestors` value is reused before its hosted-site rows
-are read again. A page load asks once per asset, so the read must not be per request; a site
-deployed or torn down mid-window frames or stops framing within this many seconds."""
 ORIGIN_RESPONSE_DROPPED_HEADERS = (
     HOP_BY_HOP_HEADERS
     | CACHE_DIRECTIVE_HEADERS
@@ -283,12 +278,10 @@ class IngressServe:
     and lands on 403, but every site label shares one registrable domain — so without this, site A
     frames site B and the viewer's session cookie for B rides along.
 
-    `_frame_ancestors` appends the responding site's sibling origins per response: an app page can
-    itself embed another site's live view, and a browser checks `frame-ancestors` against every
-    ancestor in that chain, so the outer site's origin must be named alongside the app origin. Both
-    row-backed sites and row-less shipped apps are named from the responding site's own workspace —
-    that is the embed chain, and it keeps a site in another workspace of the same deploy from
-    wrapping this one around the viewer's session.
+    A view opened inside a sibling site carries that one site's signed address. `_open` proves the
+    sibling belongs to the same workspace before binding it into the session, and responses name
+    its exact origin beside the app origin. The policy is therefore fixed-size while a site in
+    another workspace still cannot wrap this one around the viewer's session.
 
     Carried as our own header rather than appended to the origin's: a site commonly sends no policy
     at all, which is the case this exists for, and several policies combine restrictively — so one
@@ -298,7 +291,6 @@ class IngressServe:
     site_port_suffix: str
     """The scheme and rendered `:port` (or empty) of `[sandbox] ingress_public_url` — with
     `base_host`, what `_frame_ancestors` renders a sibling site's origin from."""
-    frame_ancestors_cache: dict[UUID, tuple[float, str]] = field(default_factory=dict)
     shipped_manifests: dict[ShippedClaim, dict[str, StoredFile]] = field(default_factory=dict)
     resume_carriers: Mapping[str, tuple[Carrier, CarrierSpec]] = field(default_factory=dict)
     """Backends kept live only for the stored handles bearing their scheme (`[sandbox]
@@ -379,6 +371,10 @@ class IngressServe:
             return Response(LINK_NOT_VALID, status_code=403, media_type="text/plain")
         if (claims.conversation_id, claims.port) != site:
             return Response(WRONG_SITE, status_code=403, media_type="text/plain")
+        if claims.framer is not None and not await self._framer_belongs(
+            claims.workspace_id, claims.framer.conversation_id, claims.framer.port
+        ):
+            return Response(LINK_NOT_VALID, status_code=403, media_type="text/plain")
         if entry_path.startswith("/"):
             return Response(LINK_NOT_VALID, status_code=403, media_type="text/plain")
         session = mint_ingress_token(
@@ -585,7 +581,7 @@ class IngressServe:
                     background=BackgroundTask(upstream.aclose),
                 )
                 response.headers["cache-control"] = UNCACHEABLE
-                ancestors = await self._frame_ancestors(authorized.workspace_id)
+                ancestors = self._frame_ancestors(authorized)
                 response.headers[CONTENT_SECURITY_POLICY] = (
                     f"{FRAME_ANCESTORS_DIRECTIVE} {ancestors}"
                 )
@@ -637,7 +633,7 @@ class IngressServe:
         if located is None:
             return Response(NOT_FOUND, status_code=404, media_type="text/plain")
         name, stored = located
-        ancestors = await self._frame_ancestors(claims.workspace_id)
+        ancestors = self._frame_ancestors(claims)
         etag = f'"{stored.sha256}"'
         headers = {
             "cache-control": (
@@ -685,26 +681,21 @@ class IngressServe:
         async for chunk in rest:
             yield chunk
 
-    async def _frame_ancestors(self, workspace_id: UUID) -> str:
-        """The `frame-ancestors` value for one workspace's responses: the app origin, then every
-        row-backed site and active shipped app origin in that workspace. `'none'` stays alone —
-        with no app base there is no frame page and so no embed chain, and `'none'` beside another
-        source would name it anyway. The reads are explicitly workspace-filtered because this
-        process runs on the owner DSN."""
-        if self.frame_ancestor == NO_FRAME_ANCESTOR:
-            return NO_FRAME_ANCESTOR
-        now = time.monotonic()
-        cached = self.frame_ancestors_cache.get(workspace_id)
-        if cached is not None and now < cached[0]:
-            return cached[1]
+    async def _framer_belongs(self, workspace_id: UUID, conversation_id: UUID, port: int) -> bool:
         async with workspace_tx() as connection:
-            sites = (
+            site = (
                 await connection.execute(
-                    sa.select(HOSTED_SITE.c.conversation_id, HOSTED_SITE.c.port)
-                    .distinct()
-                    .where(HOSTED_SITE.c.workspace_id == workspace_id)
+                    sa.select(HOSTED_SITE.c.conversation_id)
+                    .where(
+                        HOSTED_SITE.c.workspace_id == workspace_id,
+                        HOSTED_SITE.c.conversation_id == conversation_id,
+                        HOSTED_SITE.c.port == port,
+                    )
+                    .limit(1)
                 )
-            ).all()
+            ).one_or_none()
+            if site is not None:
+                return True
             provisions = (
                 (
                     await connection.execute(
@@ -720,23 +711,22 @@ class IngressServe:
                 .scalars()
                 .all()
             )
-        shipped = [
-            shipped_anchor(workspace_id, slug)
+        return any(
+            (anchor := shipped_anchor(workspace_id, slug)) == conversation_id
+            and serve_port(anchor) == port
             for provision in provisions
             if (slug := shipped_app_slug(provision)) is not None
-        ]
-        origins = {
-            f"{self.site_scheme}://{site_label(row.conversation_id, row.port)}"
+        )
+
+    def _frame_ancestors(self, claims: IngressClaims) -> str:
+        if self.frame_ancestor == NO_FRAME_ANCESTOR or claims.framer is None:
+            return self.frame_ancestor
+        framer = claims.framer
+        origin = (
+            f"{self.site_scheme}://{site_label(framer.conversation_id, framer.port)}"
             f".{self.base_host}{self.site_port_suffix}"
-            for row in sites
-        } | {
-            f"{self.site_scheme}://{site_label(anchor, serve_port(anchor))}"
-            f".{self.base_host}{self.site_port_suffix}"
-            for anchor in shipped
-        }
-        ancestors = " ".join([self.frame_ancestor, *sorted(origins)])
-        self.frame_ancestors_cache[workspace_id] = (now + FRAME_ANCESTORS_TTL_SECONDS, ancestors)
-        return ancestors
+        )
+        return f"{self.frame_ancestor} {origin}"
 
     def _upstream_url(self, scheme: str, host: str, path: str, query_string: bytes) -> str:
         url = f"{scheme}://{host}/{quote(path, safe=PATH_SAFE_CHARACTERS)}"
@@ -1010,10 +1000,9 @@ def ingress_base_host(configured: str | None) -> str:
 def ingress_frame_ancestor(configured: str | None) -> str:
     """The deploy-wide source expression a hosted site may be framed by: the origin of
     `[connect] public_base_url` — scheme, host and port, never its path — which is where the frame
-    that reads a hosted site lives. Sibling site origins are workspace-scoped, so
-    `IngressServe._frame_ancestors` appends them per response rather than here. `'none'` when
-    unset, since then no frame exists and nothing may embed a site: unset is not a reason to allow
-    what a set base would forbid."""
+    that reads a hosted site lives. A signed session may name one workspace-scoped sibling site
+    beside it. `'none'` when unset, since then no frame exists and nothing may embed a site: unset
+    is not a reason to allow what a set base would forbid."""
     base = urlsplit(configured or "")
     if not (base.scheme and base.hostname):
         return NO_FRAME_ANCESTOR

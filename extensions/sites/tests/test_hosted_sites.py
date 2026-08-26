@@ -119,9 +119,11 @@ from ufo.media.site_previewer import SitePreviewer
 from ufo.objects import AdminRequired, UnknownObject, VerbNotSupported
 from ufo.sandbox import containment
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.ingress_host import site_label
 from ufo.sandbox.ingress_token import (
     INGRESS_VIEW_KIND,
     INGRESS_VIEW_PATH,
+    FramerClaim,
     ShippedClaim,
     verify_ingress_token,
 )
@@ -1105,6 +1107,30 @@ async def test_a_dm_site_opens_for_its_creator_and_hides_from_another_member(
     denied = await client.get(link, headers=_cookie(other_token))
     assert denied.status_code == 404
     assert SITE not in denied.text
+
+
+async def test_a_site_framed_by_a_sibling_carries_that_siblings_address(
+    deployment: Deployment,
+) -> None:
+    client, workspace = deployment.client, deployment.workspace
+    creator_id, creator_token = await _seed_member(workspace, OWNER_EMAIL)
+    audience = conversation_audience(creator_id)
+    framer_id = await _seed_conversation(workspace, audience, creator_id)
+    target_id = await _seed_conversation(workspace, audience, creator_id)
+    await _deploy(workspace, framer_id, audience, creator_id)
+    target = await _deploy(workspace, target_id, audience, creator_id)
+    framer = FramerClaim(conversation_id=framer_id, port=serve_port(framer_id))
+    headers = {
+        **_iframe_cookie(creator_token),
+        "referer": f"https://{site_label(framer.conversation_id, framer.port)}.{INGRESS_HOST}/",
+    }
+
+    opened = await client.get(str(target["site_url"]), headers=headers)
+
+    embedded = _embedded(opened.text)
+    token = urlsplit(embedded).path.removeprefix(f"{INGRESS_VIEW_PATH}/")
+    claims = verify_ingress_token(token, datetime.now(UTC), INGRESS_VIEW_KIND)
+    assert claims.framer == framer
 
 
 async def test_flipping_to_workspace_opens_the_frame_for_another_member(

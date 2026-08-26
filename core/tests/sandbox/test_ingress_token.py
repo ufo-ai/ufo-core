@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -9,6 +10,7 @@ from ufo.auth.token_signing import sign_token
 from ufo.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
+    FramerClaim,
     IngressClaims,
     IngressTokenError,
     ingress_secret,
@@ -28,7 +30,7 @@ def _claims(exp_offset: int = 900) -> IngressClaims:
 
 def test_roundtrip(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
-    claims = _claims()
+    claims = replace(_claims(), framer=FramerClaim(conversation_id=uuid4(), port=3000))
     for kind in (INGRESS_VIEW_KIND, INGRESS_SESSION_KIND):
         assert verify_ingress_token(mint_ingress_token(claims, kind), datetime.now(UTC), kind) == (
             claims

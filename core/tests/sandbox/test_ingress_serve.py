@@ -59,6 +59,7 @@ from ufo.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
     INGRESS_VIEW_PATH,
+    FramerClaim,
     IngressClaims,
     IngressTokenKind,
     ShippedClaim,
@@ -303,6 +304,7 @@ def _token(
     port: int = 8000,
     ttl: int = 900,
     kind: IngressTokenKind = INGRESS_VIEW_KIND,
+    framer: FramerClaim | None = None,
 ) -> str:
     return mint_ingress_token(
         IngressClaims(
@@ -310,6 +312,7 @@ def _token(
             conversation_id=conversation_id,
             port=port,
             expires_at=int(datetime.now(UTC).timestamp()) + ttl,
+            framer=framer,
         ),
         kind,
     )
@@ -323,11 +326,15 @@ def _origin(conversation_id: UUID, port: int = 8000) -> str:
 
 
 async def _open(
-    client: httpx.AsyncClient, workspace_id: UUID, conversation_id: UUID, port: int = 8000
+    client: httpx.AsyncClient,
+    workspace_id: UUID,
+    conversation_id: UUID,
+    port: int = 8000,
+    framer: FramerClaim | None = None,
 ) -> str:
     """Arrive at the site the way the frame's iframe does, and answer with the session the ingress
     bound — the client's own jar holds it too, host-only, so every later request carries it."""
-    token = _token(workspace_id, conversation_id, port)
+    token = _token(workspace_id, conversation_id, port, framer=framer)
     got = await client.get(f"{_origin(conversation_id, port)}{INGRESS_VIEW_PATH}/{token}")
     assert got.status_code == 303, got.text
     return got.cookies[INGRESS_SESSION_COOKIE]
@@ -843,37 +850,57 @@ async def test_a_site_that_says_nothing_about_framing_is_still_only_framed_by_th
     assert _framers(got) == [APP_ORIGIN]
 
 
-async def test_framing_names_only_the_workspaces_own_sites(db, ingress) -> None:
-    """An app page — itself a hosted site — embeds a sibling site's live view through the
-    app-origin frame page, and a browser checks `frame-ancestors` against every ancestor in that
-    chain, so the sibling's origin must be named alongside the app's. Named per workspace: a hosted
-    site of another workspace on the same deploy is not an ancestor, so a stranger's site cannot
-    wrap this one around the viewer's session."""
+async def test_framing_names_only_the_requested_workspace_site(db, ingress) -> None:
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
     sibling_conversation_id = uuid4()
     await _seed_hosted_site(workspace_id, sibling_conversation_id, port=3000)
+    unrequested_conversation_id = uuid4()
+    await _seed_hosted_site(workspace_id, unrequested_conversation_id, port=4000)
     foreign_workspace_id, foreign_conversation_id = await _seed_conversation(None)
     await _seed_hosted_site(foreign_workspace_id, foreign_conversation_id, port=3000)
-    await _open(ingress, workspace_id, conversation_id)
+    await _open(
+        ingress,
+        workspace_id,
+        conversation_id,
+        framer=FramerClaim(conversation_id=sibling_conversation_id, port=3000),
+    )
     got = await ingress.get(f"{_origin(conversation_id)}/index.html")
     assert got.status_code == 200
     assert _framers(got) == [f"{APP_ORIGIN} {_origin(sibling_conversation_id, 3000)}"]
+    assert _origin(unrequested_conversation_id, 4000) not in _framers(got)[0]
     assert _origin(foreign_conversation_id, 3000) not in _framers(got)[0]
 
 
-async def test_framing_names_the_workspaces_shipped_app_origin(db, ingress) -> None:
-    """A shipped app has no hosted-site row, but it embeds a site's live view from its synthetic
-    workspace origin. That origin is an ancestor the browser checks, so it is admitted beside the
-    frame page while the same shipped app in another workspace is not."""
+async def test_framing_refuses_a_requested_site_from_another_workspace(db, ingress) -> None:
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    foreign_workspace_id, foreign_conversation_id = await _seed_conversation(None)
+    await _seed_hosted_site(foreign_workspace_id, foreign_conversation_id, port=3000)
+    token = _token(
+        workspace_id,
+        conversation_id,
+        framer=FramerClaim(conversation_id=foreign_conversation_id, port=3000),
+    )
+
+    got = await ingress.get(f"{_origin(conversation_id)}{INGRESS_VIEW_PATH}/{token}")
+
+    assert (got.status_code, got.text) == (403, LINK_NOT_VALID)
+
+
+async def test_framing_names_the_requested_workspace_shipped_app(db, ingress) -> None:
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
     foreign_workspace_id, _foreign_conversation_id = await _seed_conversation(None)
     await _seed_shipped_app(workspace_id, "app_artifacts", "artifacts")
     await _seed_shipped_app(foreign_workspace_id, "app_artifacts", "artifacts")
-    await _open(ingress, workspace_id, conversation_id)
+    anchor = shipped_anchor(workspace_id, "artifacts")
+    await _open(
+        ingress,
+        workspace_id,
+        conversation_id,
+        framer=FramerClaim(conversation_id=anchor, port=serve_port(anchor)),
+    )
 
     got = await ingress.get(f"{_origin(conversation_id)}/index.html")
 
-    anchor = shipped_anchor(workspace_id, "artifacts")
     foreign_anchor = shipped_anchor(foreign_workspace_id, "artifacts")
     assert _framers(got) == [f"{APP_ORIGIN} {_origin(anchor, serve_port(anchor))}"]
     assert _origin(foreign_anchor, serve_port(foreign_anchor)) not in _framers(got)[0]
@@ -1931,7 +1958,7 @@ async def test_a_stored_site_is_served_from_the_store_and_never_dials(db, stored
     assert got.headers["etag"] == _stored_etag(INDEX_BYTES)
     assert got.headers["cache-control"] == STORED_SITE_CACHE
     assert got.headers["x-content-type-options"] == "nosniff"
-    assert _framers(got) == [f"{APP_ORIGIN} {_origin(conversation_id, 8000)}"]
+    assert _framers(got) == [APP_ORIGIN]
 
 
 async def test_a_stored_sites_nested_asset_and_directory_index_are_served(

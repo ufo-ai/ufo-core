@@ -1,10 +1,10 @@
 """A signed, expiring token for sandbox ingress: authenticated port access.
 
-A token claims a workspace, conversation, and port, and expires. The ingress verifies it against
-the deploy secret — a tampered, stale, or malformed token yields nothing, and a token claiming a
-port outside the addressable range is refused even with a valid signature. `mint_ingress_token`
-signs and `verify_ingress_token` checks the same body, so a round-trip agrees by construction, and
-both read the one deploy secret rather than taking it as a parameter.
+A token claims a workspace, conversation, port, optional enclosing site, and expiry. The ingress
+verifies it against the deploy secret — a tampered, stale, or malformed token yields nothing, and a
+token claiming a port outside the addressable range is refused even with a valid signature.
+`mint_ingress_token` signs and `verify_ingress_token` checks the same body, so a round-trip agrees
+by construction, and both read the one deploy secret rather than taking it as a parameter.
 
 A visit has two hops and each carries its own kind, named at both the mint and the verify. A
 **view** token is what `SurfaceContext.ingress_url` puts in the link the frame opens at
@@ -49,17 +49,28 @@ class ShippedClaim:
 
 
 @dataclass(frozen=True)
+class FramerClaim:
+    """The one sibling site origin enclosing a view behind the app-origin frame page."""
+
+    conversation_id: UUID
+    port: int
+
+
+@dataclass(frozen=True)
 class IngressClaims:
     """What a verified token grants: one workspace's conversation, and the one sandbox port its
-    bearer may reach, until it expires. `shipped`, when present, redirects the serve from the
-    conversation's own stored/dialed bytes to a deploy-wide precompiled app bundle in the fleet
-    store — the anchor and port still scope the origin and its session cookie to the workspace."""
+    bearer may reach, until it expires. `framer`, when present, names the enclosing sibling site
+    the ingress verifies inside the workspace before adding its origin to `frame-ancestors`.
+    `shipped`, when present, redirects the serve from the conversation's own stored/dialed bytes to
+    a deploy-wide precompiled app bundle in the fleet store — the anchor and port still scope the
+    origin and its session cookie to the workspace."""
 
     workspace_id: UUID
     conversation_id: UUID
     port: int
     expires_at: int
     shipped: ShippedClaim | None = None
+    framer: FramerClaim | None = None
 
 
 def mint_ingress_token(claims: IngressClaims, kind: IngressTokenKind) -> str:
@@ -74,6 +85,11 @@ def mint_ingress_token(claims: IngressClaims, kind: IngressTokenKind) -> str:
     }
     if claims.shipped is not None:
         body["shipped"] = {"slug": claims.shipped.slug, "digest": claims.shipped.digest}
+    if claims.framer is not None:
+        body["framer"] = {
+            "conversation": str(claims.framer.conversation_id),
+            "port": claims.framer.port,
+        }
     return sign_token(ingress_secret().encode(), json.dumps(body).encode())
 
 
@@ -88,6 +104,7 @@ def verify_ingress_token(token: str, now: datetime, kind: IngressTokenKind) -> I
         raise IngressTokenError("ingress token is invalid")
     try:
         shipped = payload.get("shipped")
+        framer = payload.get("framer")
         claims = IngressClaims(
             workspace_id=UUID(str(payload.get("ws"))),
             conversation_id=UUID(str(payload.get("conversation"))),
@@ -98,10 +115,20 @@ def verify_ingress_token(token: str, now: datetime, kind: IngressTokenKind) -> I
                 if isinstance(shipped, dict)
                 else None
             ),
+            framer=(
+                FramerClaim(
+                    conversation_id=UUID(str(framer["conversation"])),
+                    port=int(framer["port"]),
+                )
+                if isinstance(framer, dict)
+                else None
+            ),
         )
     except (TypeError, ValueError, KeyError) as error:
         raise IngressTokenError("ingress token is invalid") from error
     if not 0 < claims.port < 65536:
+        raise IngressTokenError("ingress token is invalid")
+    if claims.framer is not None and not 0 < claims.framer.port < 65536:
         raise IngressTokenError("ingress token is invalid")
     if claims.expires_at <= int(now.timestamp()):
         raise IngressTokenError("ingress token is expired")

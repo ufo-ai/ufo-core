@@ -1971,6 +1971,7 @@ class SurfaceContext:
         port: int,
         entry_path: str,
         *,
+        framed_from: str | None = None,
         shipped_slug: str | None = None,
         shipped_digest: str | None = None,
     ) -> str | None:
@@ -1989,6 +1990,11 @@ class SurfaceContext:
         quoted rather than trusted: this caller decodes it out of its own URL, so re-encoding is
         what round-trips a space or a literal `?` in a filename instead of splitting the URL.
 
+        `framed_from` carries the enclosing sibling site's browser URL when this surface is itself
+        framed there. Core reduces it to that signed site's address, and the ingress admits it only
+        when the address belongs to this workspace, so the response names one exact extra
+        `frame-ancestors` origin instead of every site the workspace has ever hosted.
+
         `shipped_slug`/`shipped_digest`, when both given, redirect the ingress from the
         conversation's own stored/dialed bytes to a deploy-wide precompiled app bundle in the fleet
         store under `apps/<digest>/`, of which the slug names one app's subtree. The conversation
@@ -2002,6 +2008,7 @@ class SurfaceContext:
             conversation_id,
             port,
             entry_path,
+            framed_from=framed_from,
             shipped_slug=shipped_slug,
             shipped_digest=shipped_digest,
         )

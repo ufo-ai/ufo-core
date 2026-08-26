@@ -354,7 +354,10 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
         if not (address.portal_embed and _is_portal_iframe_request(request)):
             return _into_the_portal(ctx, site.homepage_agent_id, share)
         embedded = ctx.ingress_url(
-            site.conversation_id, site.port, f"/{request.path_params.get(PATH_PARAM, '')}"
+            site.conversation_id,
+            site.port,
+            f"/{request.path_params.get(PATH_PARAM, '')}",
+            framed_from=_framed_from(request),
         )
         if embedded is None:
             return HTMLResponse(_unconfigured_page(site.name, share))
@@ -368,7 +371,10 @@ async def frame(ctx: SurfaceContext, request: Request) -> Response:
     ):
         return _not_found()
     embedded = ctx.ingress_url(
-        site.conversation_id, site.port, f"/{request.path_params.get(PATH_PARAM, '')}"
+        site.conversation_id,
+        site.port,
+        f"/{request.path_params.get(PATH_PARAM, '')}",
+        framed_from=_framed_from(request),
     )
     csrf = (
         mint_surface_token(SURFACE_SITES, {CSRF_CLAIM: _session_digest(request)})
@@ -411,6 +417,7 @@ async def _shipped_frame(
         anchor,
         serve_port(anchor),
         f"/{request.path_params.get(PATH_PARAM, '')}",
+        framed_from=_framed_from(request),
         shipped_slug=shipped.slug,
         shipped_digest=shipped.digest,
     )
@@ -421,6 +428,12 @@ async def _shipped_frame(
 
 def _is_portal_iframe_request(request: Request) -> bool:
     return request.headers.get(FETCH_DESTINATION_HEADER) == IFRAME_DESTINATION
+
+
+def _framed_from(request: Request) -> str | None:
+    if not _is_portal_iframe_request(request):
+        return None
+    return request.headers.get("referer")
 
 
 def _into_the_portal(ctx: SurfaceContext, agent_id: UUID, share: str) -> Response:

@@ -75,12 +75,13 @@ from ufo.loop.queue import _load_turn
 from ufo.models.interface import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sandbox.containment import ContainmentError
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
-from ufo.sandbox.ingress_host import parse_site_label
+from ufo.sandbox.ingress_host import parse_site_label, site_label
 from ufo.sandbox.ingress_token import (
     INGRESS_SESSION_KIND,
     INGRESS_VIEW_KIND,
     INGRESS_VIEW_PATH,
     INGRESS_VIEW_TTL_SECONDS,
+    FramerClaim,
     IngressTokenError,
     ShippedClaim,
     verify_ingress_token,
@@ -1868,9 +1869,10 @@ def test_ingress_url_addresses_the_site_the_ingress_resolves(
     accepts as a cookie, so the link cannot be pasted into a jar to skip the handshake. The secret
     stays core-side — a surface holds neither end."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, "s3cret")
-    workspace_id, conversation_id = uuid4(), uuid4()
+    workspace_id, conversation_id, framer_id = uuid4(), uuid4(), uuid4()
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    url = context.ingress_url(conversation_id, 8000, "/")
+    framed_from = f"https://{site_label(framer_id, 3000)}.sites.example.test/records/one"
+    url = context.ingress_url(conversation_id, 8000, "/", framed_from=framed_from)
     assert url is not None
     base = urlsplit(url)
     label, _, host = base.netloc.partition(".")
@@ -1883,6 +1885,7 @@ def test_ingress_url_addresses_the_site_the_ingress_resolves(
         conversation_id,
         8000,
     )
+    assert claims.framer == FramerClaim(conversation_id=framer_id, port=3000)
     with pytest.raises(IngressTokenError):
         verify_ingress_token(minted, datetime.now(UTC), INGRESS_SESSION_KIND)
 
