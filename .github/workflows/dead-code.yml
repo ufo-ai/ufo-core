@@ -2,13 +2,13 @@ name: Dead code
 
 on:
   schedule:
-    - cron: '43 5 * * *'
+    - cron: '43 5 */3 * *'
   workflow_dispatch:
     inputs:
       focus:
         description: >-
           Doctrine surface to sweep (db-columns, config-fields, events-frames, enum-members,
-          sdk-exports, manifest-points); empty rotates by day.
+          sdk-exports, manifest-points); empty rotates one class per scheduled run.
         required: false
         default: ""
 
@@ -114,7 +114,7 @@ jobs:
           claude_args: |
             --allowedTools "Task,TodoWrite,Read,Grep,Glob,Edit,Write,Bash(git:*),Bash(uv run:*),Bash(jq:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*)"
 
-  # The "both ends or neither" audit: one declared-surface class per day, rotating; a surface
+  # The "both ends or neither" audit: one declared-surface class per run, rotating; a surface
   # missing its producer or consumer is dead weight no mechanical scanner can see.
   doctrine:
     runs-on: ubuntu-latest
@@ -152,7 +152,9 @@ jobs:
           focus='${{ inputs.focus }}'
           if [ -z "$focus" ]; then
             order='db-columns config-fields events-frames enum-members sdk-exports manifest-points'
-            focus=$(echo "$order" | tr ' ' '\n' | sed -n "$(( 10#$(date -u +%j) % 6 + 1 ))p")
+            # Divide the day of year by the cron day step (3) to get the run ordinal: the index
+            # then advances one class per run, so all 6 classes come up inside every month.
+            focus=$(echo "$order" | tr ' ' '\n' | sed -n "$(( 10#$(date -u +%j) / 3 % 6 + 1 ))p")
           fi
           echo "focus=$focus" >> "$GITHUB_OUTPUT"
           echo "doctrine focus: $focus"
