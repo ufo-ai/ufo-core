@@ -24,6 +24,15 @@ uv run python -m evals --terminal-bench --remote \
   --workspace <workspace-id> --concurrency 24
 ```
 
+Capture patches already shared by a completed remote SWE-bench workspace without rerunning turns:
+
+```bash
+uv run python -m evals --swebench-capture --workspace <workspace-id> \
+  --swebench-subset all --swebench-submissions <directory>
+```
+
+The command copies exact durable artifact bytes and lists selected cases with no shared patch.
+
 `--fresh-workspace` provisions one clean hosted SWE-bench workspace through the authenticated
 onboarding boundary and records its id with the run. It requires `UFO_ONBOARD_CONTROL_TOKEN` and
 `connect.public_base_url`; use `--workspace` instead to target an existing workspace. SWE-bench

@@ -132,6 +132,8 @@ from evals.swebench.runner import (
 )
 from evals.swebench.runner import (
     SWEBENCH_PACKS,
+    CapturedPatches,
+    capture_shared_patches,
     load_swebench,
     new_submissions_root,
 )
@@ -254,6 +256,11 @@ def main(argv: list[str] | None = None) -> None:
         "--reconstruct",
         metavar="RUN_ID",
         help="rebuild a diagnostic copy of a run recorded without evidence from durable state",
+    )
+    action.add_argument(
+        "--swebench-capture",
+        action="store_true",
+        help="copy durable SWE-bench patches into a submissions directory without rerunning",
     )
     parser.add_argument("--only", nargs="*", default=(), help="run only the named suites")
     parser.add_argument(
@@ -411,7 +418,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
-    if args.remote and (args.list or args.view or args.share or args.reconstruct):
+    if args.remote and (
+        args.list or args.view or args.share or args.reconstruct or args.swebench_capture
+    ):
         parser.error("--remote runs eval suites")
     if args.fresh_workspace and (not args.remote or not args.swebench):
         parser.error("--fresh-workspace requires --remote --swebench")
@@ -440,12 +449,22 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--handbook-ingest requires --handbook")
     if args.coding_repo_case and not args.coding_repo:
         parser.error("--coding-repo-case requires --coding-repo")
-    if (args.swebench_subset is not None or args.swebench_case) and not args.swebench:
-        parser.error("--swebench-subset and --swebench-case require --swebench")
+    if (args.swebench_subset is not None or args.swebench_case) and not (
+        args.swebench or args.swebench_capture
+    ):
+        parser.error(
+            "--swebench-subset and --swebench-case require --swebench or --swebench-capture"
+        )
     if args.swebench and args.swebench_subset is None and not args.swebench_case:
         parser.error("--swebench requires --swebench-subset or --swebench-case")
     if args.swebench and args.swebench_submissions is None:
         args.swebench_submissions = new_submissions_root()
+    if args.swebench_capture and args.workspace is None:
+        parser.error("--swebench-capture requires --workspace")
+    if args.swebench_capture and args.swebench_subset is None and not args.swebench_case:
+        parser.error("--swebench-capture requires --swebench-subset or --swebench-case")
+    if args.swebench_capture and args.swebench_submissions is None:
+        parser.error("--swebench-capture requires --swebench-submissions")
     if args.terminal_bench_case and not args.terminal_bench:
         parser.error("--terminal-bench-case requires --terminal-bench")
     if args.terminal_bench and not args.remote:
@@ -460,6 +479,28 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--wandr-subset and --wandr-case require --wandr")
     if args.wandr is not None and args.wandr_subset is None and not args.wandr_case:
         parser.error("--wandr requires --wandr-subset or --wandr-case")
+    if args.swebench_capture:
+        try:
+            capture_tasks = load_swebench(
+                tuple(args.swebench_case),
+                args.swebench_snapshot,
+                args.swebench_submissions,
+                None if args.swebench_subset == "all" else args.swebench_subset,
+            )
+            captured = asyncio.run(
+                _capture_swebench(
+                    load_config(),
+                    args.workspace,
+                    tuple(case for task in capture_tasks for case in task.cases),
+                    args.swebench_submissions,
+                )
+            )
+        except (OSError, ValueError, ValidationError) as error:
+            parser.error(str(error))
+        print(f"captured {len(captured.paths)} SWE-bench patches in {args.swebench_submissions}")
+        if captured.missing:
+            print(f"missing {len(captured.missing)}: {', '.join(captured.missing)}")
+        return
     requested_runs = sum(
         source is not None
         for source in (
@@ -1134,6 +1175,27 @@ async def _task_reports(
                     errors.append(error)
     if errors:
         raise BaseExceptionGroup("eval tasks raised", tuple(errors))
+
+
+async def _capture_swebench(
+    config: Config,
+    workspace_id: UUID,
+    case_ids: tuple[str, ...],
+    submissions_root: Path,
+) -> CapturedPatches:
+    init_db(config.database.url)
+    try:
+        async with AsyncExitStack() as stack:
+            backend = blob_store_for(config.blob)
+            match backend:
+                case S3BlobStore():
+                    stack.push_async_callback(backend.close)
+            with ws(workspace_id):
+                return await capture_shared_patches(
+                    WorkspaceBlobStore(backend=backend), case_ids, submissions_root
+                )
+    finally:
+        await dispose_db()
 
 
 async def _reconstruct(config: Config, run: EvalRun, workspace_id: UUID) -> EvalRun:

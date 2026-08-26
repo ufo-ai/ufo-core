@@ -3,9 +3,10 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+import sqlalchemy as sa
 
 from evals.__main__ import main as evals_main
 from evals.harness.capability import (
@@ -23,8 +24,10 @@ from evals.swebench.runner import (
     PARENT_FORBIDDEN_TOOLS,
     SWEBENCH_PACKS,
     WORKFLOW_WAIT_SECONDS,
+    CapturedPatches,
     PatchCapture,
     _capability_case,
+    capture_shared_patches,
     load_swebench,
 )
 from evals.swebench.snapshot import (
@@ -33,7 +36,11 @@ from evals.swebench.snapshot import (
     select_cases,
     write_snapshot,
 )
+from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import BlobConfig, Config, DatabaseConfig, PackConfig
+from ufo.db import workspace_tx
+from ufo.schema import tables
+from ufo.workspace import ws
 
 SUBSETS = SWEBENCH_UPSTREAM.subsets
 ALL_IDS = SUBSETS.all_ids
@@ -356,6 +363,129 @@ async def test_missing_or_unshared_capture_fails_visibly(tmp_path: Path) -> None
     assert not (root / case.instance_id).exists()
 
 
+async def test_capture_shared_patches_reads_durable_bytes_without_rerunning(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    conversation_id = uuid4()
+    turn_id = uuid4()
+    case_id = SMOKE_CASE_IDS[0]
+    filename = f"{case_id}.patch"
+    blob_key = f"artifacts/{uuid4()}/{filename}"
+    patch = b"--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+    blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blob"))
+
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=agent_id,
+                    workspace_id=workspace_id,
+                    name="assistant",
+                    prompt="Solve the task.",
+                    model="eval",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.conversation).values(
+                    id=conversation_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    surface="cli",
+                    queue_key=str(conversation_id),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="done",
+                    inbound="fix it",
+                    terminal={"status": "done", "text": "Done.", "model": "eval"},
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=turn_id,
+                    blob_key=blob_key,
+                    workspace_id=workspace_id,
+                    filename=filename,
+                    subject=None,
+                    media_type="text/x-diff",
+                    size_bytes=len(patch),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await blob.put(blob_key, patch)
+
+        captured = await capture_shared_patches(blob, (case_id,), tmp_path / "submissions")
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.shared_artifact)
+                .where(tables.shared_artifact.c.turn_id == turn_id)
+                .values(size_bytes=len(patch) + 1)
+            )
+        with pytest.raises(ValueError, match="stored bytes; row declares"):
+            await capture_shared_patches(blob, (case_id,), tmp_path / "mismatched")
+        duplicate_turn_id = uuid4()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.shared_artifact)
+                .where(tables.shared_artifact.c.turn_id == turn_id)
+                .values(size_bytes=len(patch))
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=duplicate_turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=2,
+                    status="done",
+                    inbound="fix it again",
+                    terminal={"status": "done", "text": "Done.", "model": "eval"},
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=duplicate_turn_id,
+                    blob_key=f"artifacts/{uuid4()}/{filename}",
+                    workspace_id=workspace_id,
+                    filename=filename,
+                    subject=None,
+                    media_type="text/x-diff",
+                    size_bytes=len(patch),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        with pytest.raises(ValueError, match=f"multiple shared artifacts named: {filename}"):
+            await capture_shared_patches(blob, (case_id,), tmp_path / "duplicate")
+
+    target = tmp_path / "submissions" / case_id / filename
+    assert captured.paths == (target,)
+    assert captured.missing == ()
+    assert target.read_bytes() == patch
+
+
 async def test_task_removes_only_a_case_stale_capture_when_that_case_starts(
     tmp_path: Path,
 ) -> None:
@@ -511,6 +641,50 @@ def test_cli_all_loads_every_subset_for_remote_concurrency(
     )
 
     assert loaded_subsets == [None]
+
+
+def test_cli_captures_durable_swebench_patches_without_starting_a_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snapshot_root = snapshot(tmp_path / "snapshot")
+    submissions = tmp_path / "submissions"
+    workspace_id = uuid4()
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///tenant.db"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path / "blobs"),
+        pack=PackConfig(name="assistant"),
+    )
+    reached: list[tuple[UUID, tuple[str, ...], Path]] = []
+
+    async def capture(
+        _config: Config, workspace: UUID, cases: tuple[str, ...], root: Path
+    ) -> CapturedPatches:
+        assert _config is config
+        reached.append((workspace, cases, root))
+        target = root / cases[0] / f"{cases[0]}.patch"
+        return CapturedPatches(paths=(target,), missing=(cases[1],))
+
+    monkeypatch.setattr("evals.__main__.load_config", lambda: config)
+    monkeypatch.setattr("evals.__main__._capture_swebench", capture)
+
+    evals_main(
+        [
+            "--swebench-capture",
+            "--workspace",
+            str(workspace_id),
+            "--swebench-subset",
+            "smoke",
+            "--swebench-snapshot",
+            str(snapshot_root),
+            "--swebench-submissions",
+            str(submissions),
+        ]
+    )
+
+    assert reached == [(workspace_id, SMOKE_CASE_IDS, submissions)]
+    assert capsys.readouterr().out == (
+        f"captured 1 SWE-bench patches in {submissions}\nmissing 1: {SMOKE_CASE_IDS[1]}\n"
+    )
 
 
 def test_cli_validates_pack_before_run(

@@ -11,6 +11,8 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
+
 from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
@@ -24,6 +26,10 @@ from evals.harness.registry import EvalTask, capability_task, rewrapped
 from evals.harness.scorers import delegation_only_scorer
 from evals.swebench.models import SUBSET_SIZES, Subset, SWEbenchCase
 from evals.swebench.snapshot import load_snapshot
+from ufo.blob import WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.schema import tables
+from ufo.workspace import ws_current
 
 SUITE_NAME = "swebench_verified"
 SUBSETS: tuple[Subset, ...] = tuple(SUBSET_SIZES)
@@ -48,6 +54,64 @@ def new_submissions_root() -> Path:
     """Mint an isolated capture root without creating it."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return SUBMISSIONS_ROOT / f"{stamp}-{uuid4().hex[:8]}"
+
+
+@dataclass(frozen=True)
+class CapturedPatches:
+    """Submission paths copied from durable artifacts and selected cases with no patch."""
+
+    paths: tuple[Path, ...]
+    missing: tuple[str, ...]
+
+
+async def capture_shared_patches(
+    blob: WorkspaceBlobStore,
+    case_ids: tuple[str, ...],
+    submissions_root: Path,
+) -> CapturedPatches:
+    """Copy durable SWE-bench patch artifacts into the official submissions layout."""
+    wanted = tuple(f"{case_id}.patch" for case_id in case_ids)
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.shared_artifact.c.filename,
+                    tables.shared_artifact.c.blob_key,
+                    tables.shared_artifact.c.size_bytes,
+                ).where(
+                    tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
+                    tables.shared_artifact.c.filename.in_(wanted),
+                )
+            )
+        ).all()
+    by_name = {name: tuple(row for row in rows if row.filename == name) for name in wanted}
+    duplicates = tuple(name for name, matches in by_name.items() if len(matches) > 1)
+    if duplicates:
+        raise ValueError(f"multiple shared artifacts named: {', '.join(duplicates)}")
+
+    paths: list[Path] = []
+    missing: list[str] = []
+    for case_id, filename in zip(case_ids, wanted, strict=True):
+        matches = by_name[filename]
+        if not matches:
+            missing.append(case_id)
+            continue
+        row = matches[0]
+        content = await blob.get(row.blob_key)
+        if len(content) != row.size_bytes:
+            raise ValueError(
+                f"{filename} has {len(content)} stored bytes; row declares {row.size_bytes}"
+            )
+        if not _carries_complete_diff(content):
+            raise ValueError(f"{filename} carries no unified diff")
+        directory = submissions_root / case_id
+        await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
+        target = directory / filename
+        temporary = directory / f".{filename}.{uuid4().hex}.tmp"
+        await asyncio.to_thread(temporary.write_bytes, content)
+        await asyncio.to_thread(temporary.replace, target)
+        paths.append(target)
+    return CapturedPatches(paths=tuple(paths), missing=tuple(missing))
 
 
 def load_swebench(

@@ -24,15 +24,24 @@ type EvalRunner = Callable[[CapabilityTarget, asyncio.Semaphore], Awaitable[Eval
 async def gather_cases[ResultT](
     slots: asyncio.Semaphore,
     runs: Sequence[Callable[[], Awaitable[ResultT]]],
+    *,
+    on_error: Callable[[int, BaseException], None] | None = None,
 ) -> tuple[ResultT, ...]:
     """Run every case bounded by the run-wide semaphore, preserving input order. Siblings always
     settle; only then does any raise surface, so one harness fault never cancels in-flight turns."""
 
-    async def bounded(run: Callable[[], Awaitable[ResultT]]) -> ResultT:
-        async with slots:
-            return await run()
+    async def bounded(index: int, run: Callable[[], Awaitable[ResultT]]) -> ResultT:
+        try:
+            async with slots:
+                return await run()
+        except BaseException as error:
+            if on_error is not None and not isinstance(error, asyncio.CancelledError):
+                on_error(index, error)
+            raise
 
-    outcomes = await asyncio.gather(*(bounded(run) for run in runs), return_exceptions=True)
+    outcomes = await asyncio.gather(
+        *(bounded(index, run) for index, run in enumerate(runs)), return_exceptions=True
+    )
     errors = tuple(outcome for outcome in outcomes if isinstance(outcome, BaseException))
     if errors:
         raise BaseExceptionGroup("eval cases raised", errors)
@@ -110,7 +119,12 @@ def capability_task(
                     results += (await run_capability_case(case, target),)
         else:
             results = await gather_cases(
-                slots, tuple(partial(run_capability_case, case, target) for case in cases)
+                slots,
+                tuple(partial(run_capability_case, case, target) for case in cases),
+                on_error=lambda index, error: print(
+                    f"{name}/{cases[index].name} raised {type(error).__name__}",
+                    flush=True,
+                ),
             )
         return EvalReport(name=name, suite="capability", digest=digest, cases=results)
 

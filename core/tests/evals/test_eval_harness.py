@@ -869,6 +869,37 @@ async def test_gather_cases_settles_siblings_before_raising() -> None:
     assert isinstance(error, RuntimeError)
 
 
+async def test_gather_cases_reports_a_failure_while_its_sibling_is_running() -> None:
+    reported = asyncio.Event()
+    release = asyncio.Event()
+    errors: list[tuple[int, BaseException]] = []
+
+    async def failing() -> str:
+        raise RuntimeError("artifact credentials expired")
+
+    async def sibling() -> str:
+        await release.wait()
+        return "settled"
+
+    def report(index: int, error: BaseException) -> None:
+        errors.append((index, error))
+        reported.set()
+
+    running = asyncio.create_task(
+        gather_cases(asyncio.Semaphore(2), (failing, sibling), on_error=report)
+    )
+    await reported.wait()
+
+    assert not running.done()
+    assert len(errors) == 1
+    assert errors[0][0] == 0
+    assert isinstance(errors[0][1], RuntimeError)
+
+    release.set()
+    with pytest.raises(BaseExceptionGroup):
+        await running
+
+
 async def test_capability_task_fans_out_and_keeps_corpus_order() -> None:
     first_may_finish = asyncio.Event()
 
