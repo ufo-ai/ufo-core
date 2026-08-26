@@ -1140,7 +1140,8 @@ test("a status read that fails after answering keeps polling and recovers", asyn
     // the clock: the keyboard press is the same act, and it needs no timer to advance.
     fireEvent.keyDown(screen.getByRole("button", { name: "Applications" }), { key: "Enter" });
     await settle(0);
-    const row = () => screen.getByRole("button", { name: /^Research/ });
+    const index = screen.getByRole("navigation", { name: "Apps" });
+    const row = () => within(index).getByRole("button", { name: /^Research/ });
     expect(row().querySelector(".bg-live")).toBeTruthy();
 
     await settle(WORKING_STATUS_MS);

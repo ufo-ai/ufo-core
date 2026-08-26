@@ -592,6 +592,12 @@ CASES: tuple[SkillLoadCase, ...] = (
         forbidden=("create-application",),
     ),
     SkillLoadCase(
+        "starter-default-app-setup",
+        "Set up this app.",
+        expected="agent-setup",
+        forbidden=("create-application",),
+    ),
+    SkillLoadCase(
         "application-invoice-inbox",
         "I want a separate app that reads the invoices landing in our shared inbox and files the "
         "totals, so it stays out of this chat.",
@@ -1124,6 +1130,19 @@ CASES: tuple[SkillLoadCase, ...] = (
         "I want a support bot of our own that our team can message. Get it made.",
         expected="create-application",
         forbidden=("create-skill", "website-building"),
+    ),
+    SkillLoadCase(
+        "starter-market-researcher",
+        "I want an application that researches a market, company, or person on request and "
+        "cites every claim.",
+        expected="create-application",
+        forbidden=("agent-setup", "website-building"),
+    ),
+    SkillLoadCase(
+        "starter-writing-desk",
+        "I want an application that drafts our recurring updates, announcements, and posts.",
+        expected="create-application",
+        forbidden=("agent-setup", "website-building"),
     ),
     SkillLoadCase(
         "application-another-pr-babysitter",

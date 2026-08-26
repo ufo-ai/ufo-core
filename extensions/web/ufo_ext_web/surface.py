@@ -126,8 +126,10 @@ from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
 from ufo_ext_web.panels import (
     FIRST_RUN_PROVIDERS,
     SPOKEN_ROOM_PREFIXES,
+    STARTER_APP_EXTENSIONS,
     UNLOCKS_BY_NAME,
     ApplyIntent,
+    AppUnlock,
     agent_settings,
     submit_intent,
 )
@@ -3346,6 +3348,7 @@ async def connector_catalog(ctx: SurfaceContext, request: Request) -> Response:
 STARTER_APP_SLOTS = 2
 UNLOCK_MAX_MISSING = 2
 PROVIDER_LABELS = {tile.name: tile.label for tile in FIRST_RUN_PROVIDERS}
+DEFAULT_APP_SETUP_ASK = "Set up this app."
 
 
 class MissingTile(BaseModel):
@@ -3364,6 +3367,7 @@ class StarterRow(BaseModel):
     mark: str | None
     line: str
     ask: str
+    agent_id: UUID | None = None
     providers: tuple[MissingTile, ...] = ()
 
 
@@ -3378,7 +3382,15 @@ class UnlockRow(BaseModel):
     mark: str
     line: str
     ask: str
+    agent_id: UUID | None = None
     providers: tuple[MissingTile, ...]
+
+
+@dataclass(frozen=True)
+class StarterApp:
+    id: UUID
+    extension: str
+    ready: bool
 
 
 async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) -> frozenset[str]:
@@ -3396,7 +3408,10 @@ async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) 
 
 
 def fill_starters(
-    slate: Slate, held: frozenset[str], taken: frozenset[str]
+    slate: Slate,
+    held: frozenset[str],
+    taken: frozenset[str],
+    installed: tuple[StarterApp, ...] = (),
 ) -> tuple[tuple[StarterRow, ...], UnlockRow | None]:
     """Which ranked rows the start screen draws, decided against what the workspace holds right now.
 
@@ -3412,14 +3427,30 @@ def fill_starters(
     and the rows it would otherwise fall back to need accounts just the same — so it reads as named
     work rather than as generic filler. A spare standing in an application's slot says its work and
     nothing about its accounts: the row closing the list is the one that states a price, and the
-    ranking instructions already hold that an account is asked for once the work is agreed."""
+    ranking instructions already hold that an account is asked for once the work is agreed.
+
+    A catalog row that names an installed app is different. It is offered only while that app still
+    needs setup and the workspace already holds every account the row names. The account makes the
+    installed app useful now; the row opens that app's own chat so its setup gains no duplicate.
+    Two catalog rows for one app produce one offer, in rank order."""
     apps: list[StarterRow] = []
     short: list[UnlockRow] = []
+    offered_apps: set[UUID] = set()
     for entry in slate.ranked:
         row = UNLOCKS_BY_NAME.get(entry.unlock)
-        if row is None or row.name in taken or entry.title.strip().lower() in taken:
+        if row is None:
             continue
         missing = row.missing(held)
+        match row:
+            case AppUnlock(extension=extension):
+                target = next((app for app in installed if app.extension == extension), None)
+                if target is None or target.ready or missing or target.id in offered_apps:
+                    continue
+                offered_apps.add(target.id)
+            case _:
+                target = None
+                if row.name in taken or entry.title.strip().lower() in taken:
+                    continue
         if not missing:
             if len(apps) < STARTER_APP_SLOTS:
                 apps.append(
@@ -3427,7 +3458,8 @@ def fill_starters(
                         kind="app",
                         mark=row.mark,
                         line=entry.line,
-                        ask=entry.ask,
+                        ask=entry.ask if target is None else DEFAULT_APP_SETUP_ASK,
+                        agent_id=None if target is None else target.id,
                     )
                 )
         elif len(missing) <= UNLOCK_MAX_MISSING:
@@ -3436,6 +3468,7 @@ def fill_starters(
                     mark=row.mark,
                     line=entry.line,
                     ask=entry.ask,
+                    agent_id=None,
                     providers=tuple(
                         MissingTile(name=name, label=PROVIDER_LABELS[name]) for name in missing
                     ),
@@ -3508,10 +3541,36 @@ async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
     if isinstance(resolved, Response):
         return resolved
     member_id, _email, audience = resolved
+    app_agents = tuple(
+        (agent, agent.provisioned_by)
+        for agent in audience.agents
+        if agent.provisioned_by in STARTER_APP_EXTENSIONS
+    )
+    app_states = await asyncio.gather(
+        *(ctx.agent_setup(agent.id, member_id) for agent, _extension in app_agents)
+    )
+    installed = tuple(
+        StarterApp(
+            id=agent.id,
+            extension=extension,
+            ready=all(connector.granted for connector in state.connectors)
+            and all(credential.filled for credential in state.credentials)
+            and all(order.armed for order in state.standing),
+        )
+        for (agent, extension), state in zip(app_agents, app_states, strict=True)
+        if extension is not None
+    )
+    pending_extensions = frozenset(app.extension for app in installed if not app.ready)
     slate = await StarterCache(
         store=web_extension().store,
         member_id=member_id,
-        agents=tuple(sorted(agent.name for agent in audience.agents)),
+        agents=tuple(
+            sorted(
+                agent.name
+                for agent in audience.agents
+                if agent.provisioned_by not in pending_extensions
+            )
+        ),
         recalled=await _recalled(ctx, member_id),
         model=ctx.model,
         solvent=await _solvent(),
@@ -3520,7 +3579,7 @@ async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
         return JSONResponse({"starters": [], "unlock": None})
     held = await _held_providers(ctx, member_id, admin=audience.admin)
     taken = frozenset(agent.name.strip().lower() for agent in audience.agents)
-    starters, unlock = fill_starters(slate, held, taken)
+    starters, unlock = fill_starters(slate, held, taken, installed)
     return JSONResponse(
         {
             "starters": [row.model_dump(mode="json") for row in starters],

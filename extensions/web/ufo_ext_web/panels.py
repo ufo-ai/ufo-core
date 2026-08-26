@@ -412,25 +412,50 @@ class Unlock(BaseModel):
         return tuple(group[0] for group in self.needs if not held.intersection(group))
 
 
+class AppUnlock(Unlock):
+    extension: str
+
+
+PR_BABYSITTER = AppUnlock(
+    name="pr-babysitter",
+    mark="gnomon",
+    does="Reports what each open pull request waits on: age, reviewer, checks.",
+    needs=(("github",),),
+    extension="app_code",
+)
+ISSUE_ASSIGNER = AppUnlock(
+    name="issue-assigner",
+    mark="deltoton",
+    does="Routes each new issue to one owner, and states the evidence.",
+    needs=(("github",),),
+    extension="app_issues",
+)
+MEETING_TO_ISSUES = AppUnlock(
+    name="meeting-to-issues",
+    mark="denticulus",
+    does="Files the next steps a meeting agreed, once they are confirmed.",
+    needs=(("googlecalendar",),),
+    extension="app_meetings",
+)
+DAY_AHEAD = AppUnlock(
+    name="day-ahead",
+    mark="akhet",
+    does="Posts the day's meetings and what to read before each one.",
+    needs=(("googlecalendar",),),
+    extension="app_meetings",
+)
+APP_UNLOCKS = (PR_BABYSITTER, ISSUE_ASSIGNER, MEETING_TO_ISSUES, DAY_AHEAD)
+
+
 UNLOCKS = (
-    Unlock(
-        name="pr-babysitter",
-        mark="gnomon",
-        does="Reports what each open pull request waits on: age, reviewer, checks.",
-        needs=(("github",),),
-    ),
+    PR_BABYSITTER,
     Unlock(
         name="release-notes",
         mark="triglyph",
         does="Posts what shipped since the last release, in plain sentences.",
         needs=(("github",), ("slack",)),
     ),
-    Unlock(
-        name="issue-assigner",
-        mark="deltoton",
-        does="Routes each new issue to one owner, and states the evidence.",
-        needs=(("github",), TRACKERS),
-    ),
+    ISSUE_ASSIGNER,
     Unlock(
         name="doc-drift",
         mark="ostrakon",
@@ -449,18 +474,8 @@ UNLOCKS = (
         does="Writes a note per meeting — decided, owed, open — and files it.",
         needs=(("googlecalendar",), DOCS),
     ),
-    Unlock(
-        name="meeting-to-issues",
-        mark="denticulus",
-        does="Files the next steps a meeting agreed, once they are confirmed.",
-        needs=(("googlecalendar",), TRACKERS),
-    ),
-    Unlock(
-        name="day-ahead",
-        mark="akhet",
-        does="Posts the day's meetings and what to read before each one.",
-        needs=(("googlecalendar",), ("slack",)),
-    ),
+    MEETING_TO_ISSUES,
+    DAY_AHEAD,
     Unlock(
         name="inbox-triage",
         mark="hydria",
@@ -557,6 +572,7 @@ UNLOCKS = (
 )
 
 UNLOCKS_BY_NAME = {unlock.name: unlock for unlock in UNLOCKS}
+STARTER_APP_EXTENSIONS = frozenset(unlock.extension for unlock in APP_UNLOCKS)
 
 
 TOOLING_PREFIX = "My team uses "

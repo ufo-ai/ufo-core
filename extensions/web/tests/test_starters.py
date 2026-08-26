@@ -16,7 +16,13 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from pydantic import ValidationError
-from ufo_ext_web.panels import FIRST_RUN_PROVIDER_NAMES, UNLOCKS, UNLOCKS_BY_NAME, Unlock
+from ufo_ext_web.panels import (
+    APP_UNLOCKS,
+    FIRST_RUN_PROVIDER_NAMES,
+    UNLOCKS,
+    UNLOCKS_BY_NAME,
+    Unlock,
+)
 from ufo_ext_web.starters import (
     LINE_CHARS,
     SLATE_DIGEST,
@@ -31,7 +37,12 @@ from ufo_ext_web.starters import (
     settle_slate,
     starters_key,
 )
-from ufo_ext_web.surface import STARTER_APP_SLOTS, fill_starters
+from ufo_ext_web.surface import (
+    DEFAULT_APP_SETUP_ASK,
+    STARTER_APP_SLOTS,
+    StarterApp,
+    fill_starters,
+)
 
 from ufo.db import workspace_tx
 from ufo.ext.context import ModelAccess, ScopedStore
@@ -56,6 +67,8 @@ AUTO_MODEL = "claude-opus-5"
 PROVIDER_ANTHROPIC = "anthropic"
 
 STAMP = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+CODE_ID = UUID("11111111-1111-4111-8111-111111111111")
+MEETINGS_ID = UUID("22222222-2222-4222-8222-222222222222")
 
 
 def _slate(**kw: object) -> Slate:
@@ -83,6 +96,17 @@ def test_every_catalog_row_names_offered_tiles_and_a_drawn_mark() -> None:
         for group in row.needs:
             assert set(group) <= FIRST_RUN_PROVIDER_NAMES
     assert len(UNLOCKS_BY_NAME) == len(UNLOCKS)
+
+
+def test_overlapping_starters_name_the_default_app_their_account_unlocks() -> None:
+    mapped = {row.name: (row.extension, row.needs) for row in APP_UNLOCKS}
+
+    assert mapped == {
+        "pr-babysitter": ("app_code", (("github",),)),
+        "issue-assigner": ("app_issues", (("github",),)),
+        "meeting-to-issues": ("app_meetings", (("googlecalendar",),)),
+        "day-ahead": ("app_meetings", (("googlecalendar",),)),
+    }
 
 
 def test_a_catalog_row_naming_no_tile_is_refused_at_construction() -> None:
@@ -185,10 +209,10 @@ def test_an_unusable_check_in_leaves_the_slate_without_one() -> None:
 
 def test_a_held_row_is_an_application_and_a_short_row_is_the_unlock() -> None:
     slate = _slate(
-        ranked=(_ranked("pr-babysitter", "PR watch"), _ranked("runway-report", "Runway")),
+        ranked=(_ranked("inbox-triage", "Inbox"), _ranked("runway-report", "Runway")),
     )
-    rows, unlock = fill_starters(slate, frozenset({"github"}), frozenset())
-    assert [row.line for row in rows] == ["Does PR watch."]
+    rows, unlock = fill_starters(slate, frozenset({"gmail"}), frozenset())
+    assert [row.line for row in rows] == ["Does Inbox."]
     assert unlock is not None
     assert unlock.line == "Does Runway."
     assert [tile.name for tile in unlock.providers] == ["stripe", "quickbooks"]
@@ -212,13 +236,13 @@ def test_unlocks_take_the_slots_no_ready_application_filled() -> None:
     of what it needs, and the row closing the list is the one that states a price."""
     slate = _slate(
         ranked=(
-            _ranked("pr-babysitter", "PR watch"),
+            _ranked("inbox-triage", "Inbox"),
             _ranked("runway-report", "Runway"),
             _ranked("release-notes", "Release notes"),
         )
     )
     rows, unlock = fill_starters(slate, frozenset(), frozenset())
-    assert unlock is not None and unlock.line == "Does PR watch."
+    assert unlock is not None and unlock.line == "Does Inbox."
     assert [(r.kind, r.line) for r in rows] == [
         ("unlock", "Does Runway."),
         ("unlock", "Does Release notes."),
@@ -232,10 +256,10 @@ def test_promotion_stops_at_the_slots_the_screen_draws() -> None:
     workspace could connect."""
     slate = _slate(
         ranked=(
-            _ranked("pr-babysitter", "PR watch"),
+            _ranked("inbox-triage", "Inbox"),
             _ranked("runway-report", "Runway"),
             _ranked("release-notes", "Release notes"),
-            _ranked("inbox-triage", "Inbox"),
+            _ranked("payment-watch", "Payments"),
             _ranked("ticket-themes", "Tickets"),
         )
     )
@@ -285,18 +309,67 @@ def test_a_row_more_than_two_accounts_short_is_passed_over() -> None:
 
 def test_an_application_the_workspace_already_has_is_never_offered_again() -> None:
     slate = _slate(
-        ranked=(_ranked("pr-babysitter", "PR watch"), _ranked("inbox-triage", "Inbox")),
+        ranked=(_ranked("release-notes", "Releases"), _ranked("inbox-triage", "Inbox")),
     )
     rows, _unlock = fill_starters(
-        slate, frozenset({"github", "gmail"}), frozenset({"pr-babysitter"})
+        slate, frozenset({"github", "slack", "gmail"}), frozenset({"release-notes"})
     )
     assert [row.line for row in rows] == ["Does Inbox."]
 
 
 def test_a_title_an_application_already_carries_is_never_offered_again() -> None:
-    slate = _slate(ranked=(_ranked("pr-babysitter", "PR watch"),))
-    rows, _unlock = fill_starters(slate, frozenset({"github"}), frozenset({"pr watch"}))
+    slate = _slate(ranked=(_ranked("release-notes", "Release notes"),))
+    rows, _unlock = fill_starters(
+        slate, frozenset({"github", "slack"}), frozenset({"release notes"})
+    )
     assert rows == ()
+
+
+def test_a_default_app_is_not_suggested_before_its_account_is_known() -> None:
+    slate = _slate(ranked=(_ranked("pr-babysitter", "PR watch"),))
+    installed = (StarterApp(id=CODE_ID, extension="app_code", ready=False),)
+
+    rows, unlock = fill_starters(slate, frozenset(), frozenset(), installed)
+
+    assert rows == ()
+    assert unlock is None
+
+
+def test_a_known_account_opens_the_default_app_that_still_needs_setup() -> None:
+    slate = _slate(ranked=(_ranked("pr-babysitter", "PR watch"),))
+    installed = (StarterApp(id=CODE_ID, extension="app_code", ready=False),)
+
+    rows, unlock = fill_starters(slate, frozenset({"github"}), frozenset(), installed)
+
+    assert unlock is None
+    assert [(row.line, row.agent_id, row.ask) for row in rows] == [
+        ("Does PR watch.", CODE_ID, DEFAULT_APP_SETUP_ASK)
+    ]
+
+
+def test_a_ready_default_app_is_not_suggested_again() -> None:
+    slate = _slate(ranked=(_ranked("pr-babysitter", "PR watch"),))
+    installed = (StarterApp(id=CODE_ID, extension="app_code", ready=True),)
+
+    rows, unlock = fill_starters(slate, frozenset({"github"}), frozenset(), installed)
+
+    assert rows == ()
+    assert unlock is None
+
+
+def test_two_starters_for_one_default_app_produce_one_offer() -> None:
+    slate = _slate(
+        ranked=(
+            _ranked("day-ahead", "Day ahead"),
+            _ranked("meeting-to-issues", "Meeting follow-ups"),
+        )
+    )
+    installed = (StarterApp(id=MEETINGS_ID, extension="app_meetings", ready=False),)
+
+    rows, unlock = fill_starters(slate, frozenset({"googlecalendar"}), frozenset(), installed)
+
+    assert unlock is None
+    assert [(row.line, row.agent_id) for row in rows] == [("Does Day ahead.", MEETINGS_ID)]
 
 
 def test_the_screen_takes_no_more_applications_than_it_draws() -> None:

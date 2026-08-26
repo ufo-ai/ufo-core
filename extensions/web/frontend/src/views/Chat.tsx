@@ -57,7 +57,8 @@ import {
 } from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
-import { sectionHash } from "@/lib/route";
+import { newChatHash, sectionHash } from "@/lib/route";
+import { navigate } from "@/lib/router";
 import {
   answerQuestions,
   refreshTranscript,
@@ -236,7 +237,6 @@ export function Chat({
   );
 }
 
-
 function Handoff({ children }: { children: ReactNode }) {
   return (
     <div className="flex max-w-bubble flex-col gap-sm self-start rounded-bubble border border-edge px-lg py-md">
@@ -244,6 +244,7 @@ function Handoff({ children }: { children: ReactNode }) {
     </div>
   );
 }
+
 
 /** The most options a turn may offer as choices. Past that the list is taller than the reply it
  *  stands under, and reading it is worse than typing the answer. */
@@ -780,10 +781,16 @@ type StarterRow = {
   mark: string | null;
   line: string;
   ask: string;
+  agent_id?: string | null;
   providers?: MissingTile[];
 };
 type MissingTile = { name: string; label: string };
-type UnlockRow = { line: string; ask: string; providers: MissingTile[] };
+type UnlockRow = {
+  line: string;
+  ask: string;
+  agent_id?: string | null;
+  providers: MissingTile[];
+};
 type StartersPayload = { starters: StarterRow[]; unlock: UnlockRow | null };
 
 const STARTERS_READ = "/workspace/starters";
@@ -803,19 +810,19 @@ const STARTERS_EVERY_MS = 300_000;
  *  what lands replaces words and moves nothing. */
 const STARTERS: { mark: string; line: string; ask: string }[] = [
   {
-    mark: "gnomon",
-    line: "Report what every open pull request is waiting on.",
-    ask: "I want an application that watches our open pull requests and reports what each one waits on — age, reviewer, checks, conflicts — ordered by what it blocks.",
-  },
-  {
     mark: "wedjat",
     line: "Track the competitors you name, with a source for every claim.",
     ask: "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
   },
   {
-    mark: "ostrakon",
-    line: "Write down what the team learned this week.",
-    ask: "I want an application that reads our work each week and writes down what we learned: what worked, what did not, and what we should not repeat.",
+    mark: "nephele",
+    line: "Research a market, company, or person on request.",
+    ask: "I want an application that researches a market, company, or person on request and cites every claim.",
+  },
+  {
+    mark: "kalyx",
+    line: "Draft recurring updates, announcements, and posts.",
+    ask: "I want an application that drafts our recurring updates, announcements, and posts.",
   },
 ];
 
@@ -881,14 +888,19 @@ function Starters({ agentId }: { agentId: string }) {
   const answered = read.phase === "ready" ? read.payload : null;
   const rows = answered?.starters?.length ? answered.starters : FALLBACK_ROWS;
   const unlock = answered?.unlock?.providers?.length ? answered.unlock : null;
+  const start = (target: string | null | undefined, ask: string) => {
+    const next = target ?? agentId;
+    setPendingAsk(next, ask, true);
+    if (next !== agentId) navigate(newChatHash(next));
+  };
   return (
     <div className="mb-2xl flex flex-col">
       {rows.map((row) => (
         <PressRow
-          key={row.ask}
+          key={row.agent_id ?? `${row.kind}:${row.ask}`}
           glyph={<StarterMark row={row} />}
           line={row.line}
-          onPress={() => setPendingAsk(agentId, row.ask, true)}
+          onPress={() => start(row.agent_id, row.ask)}
         />
       ))}
       {unlock ? (
@@ -901,7 +913,7 @@ function Starters({ agentId }: { agentId: string }) {
           }
           line={unlock.line}
           note={"Connect " + namedTiles(unlock.providers) + "."}
-          onPress={() => setPendingAsk(agentId, unlock.ask, true)}
+          onPress={() => start(unlock.agent_id, unlock.ask)}
         />
       ) : (
         <a href={sectionHash("connectors")} className={PRESS_ROW}>

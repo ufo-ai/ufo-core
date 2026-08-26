@@ -3130,15 +3130,15 @@ test("a starter says its sentence on the press, and leaves with the start screen
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Ask anything");
-  await userEvent.click(screen.getByRole("button", { name: /open pull request/ }));
+  await userEvent.click(screen.getByRole("button", { name: /competitors you name/ }));
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(said).toEqual([
-    "I want an application that watches our open pull requests and reports what each one waits on — age, reviewer, checks, conflicts — ordered by what it blocks.",
+    "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
   ]);
   expect((screen.getByLabelText("Ask anything") as HTMLTextAreaElement).value).toBe("");
   expect(document.activeElement).toBe(screen.getByLabelText("Ask anything"));
-  expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
 });
 
 /** The composer states which application the message is addressed to, wearing the mark that app
@@ -3209,9 +3209,9 @@ test("a workspace with nothing ranked reads the rows the screen ships with", asy
   location.hash = "#/";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByRole("button", { name: /open pull request/ });
+  await screen.findByRole("button", { name: /competitors you name/ });
   expect(
-    screen.getByRole("button", { name: /competitors you name/ }),
+    screen.getByRole("button", { name: /market, company, or person/ }),
   ).toBeTruthy();
   expect(
     screen.getByRole("link", { name: /Connect more accounts/ }),
@@ -3226,7 +3226,7 @@ test("a ranked slate replaces every row the screen ships with", async () => {
   await screen.findByRole("button", { name: /months of runway left/ });
   expect(screen.getByRole("button", { name: /invoice past its terms/ })).toBeTruthy();
   expect(screen.getByRole("button", { name: /waiting on legal/ })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
 });
 
 /** jsdom lays nothing out, so every width reads 0 and no line is ever cut. These stub the two the
@@ -3328,6 +3328,51 @@ test("a ranked starter says its own sentence, and a check-in asks after work", a
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(said).toEqual(["Where did the Acme renewal land?"]);
+});
+
+test("a default-app starter opens that app and says the ranked ask there", async () => {
+  const ask = "Set up this app.";
+  const said: string[] = [];
+  const posts: string[] = [];
+  wire({
+    ...transcript(),
+    "/workspace/starters": () =>
+      json({
+        starters: [
+          {
+            kind: "app",
+            mark: "gnomon",
+            line: "Report what each pull request waits on.",
+            ask,
+            agent_id: SECOND_ID,
+          },
+          {
+            kind: "app",
+            mark: "pinax",
+            line: "Assign each issue to its owner.",
+            ask,
+            agent_id: AGENT_ID,
+          },
+        ],
+        unlock: null,
+      }),
+    "/chat": (url, init) => {
+      posts.push(url);
+      said.push(String(init?.body));
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" });
+    },
+  });
+  location.hash = "#/";
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: /each issue to its owner/ })).toBeTruthy();
+  await userEvent.click(
+    await screen.findByRole("button", { name: /each pull request waits on/ }),
+  );
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(posts[0]).toContain(SECOND_ID);
+  expect(said).toEqual([ask]);
 });
 
 test("an unlock is an ask, not a departure: it names its accounts and says the build", async () => {
