@@ -623,6 +623,20 @@ async def test_creation_scaffold_syncs_into_an_active_application_container(
     ]
 
 
+def test_code_review_refuses_to_run_as_the_default_agent(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "evals.__main__.load_config",
+        lambda: SimpleNamespace(pack=SimpleNamespace(name="assistant_eval")),
+    )
+
+    with pytest.raises(SystemExit):
+        eval_main(["--only", "code_review", "--out", str(tmp_path)])
+
+    assert "code_review requires --agent 'code'" in capsys.readouterr().err
+
+
 def test_stateful_and_scenario_tasks_are_exclusive() -> None:
     exclusive = {task.name for task in TASKS if task.exclusive}
     scenario = {task.name for task in TASKS if task.suite == "scenario"}
@@ -634,6 +648,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "scenario_env",
     }
     assert exclusive == scenario | {
+        "code_review",
         "connector_connections",
         "github_connections",
         "onboarding_help",

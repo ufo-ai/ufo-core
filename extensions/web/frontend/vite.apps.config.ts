@@ -21,7 +21,17 @@ import { tablerMarks } from "./vite-marks";
  *  stands in for this build's chunks. That build writes elsewhere now, so its run is unordered
  *  against this one. */
 
-const APPS = ["artifacts", "chat", "issues", "meetings", "metrics", "radar", "tasks", "wiki"];
+const APPS = [
+  "artifacts",
+  "chat",
+  "code",
+  "issues",
+  "meetings",
+  "metrics",
+  "radar",
+  "tasks",
+  "wiki",
+];
 const KIT = new URL("./src/apps/kit.ts", import.meta.url).pathname;
 const FRONTEND = new URL("./src/", import.meta.url).pathname;
 

@@ -26,6 +26,7 @@ VERSION = "0.1.0"
 EXTENSIONS = (
     "app_artifacts",
     "app_chat",
+    "app_code",
     "app_issues",
     "app_meetings",
     "app_metrics",

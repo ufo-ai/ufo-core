@@ -8,7 +8,7 @@ Ask only what remains unclear:
 - the current cycle time or another baseline
 
 Separate making changes from watching the delivery system. Use the coding capability for repository
-work, the existing code-review application for review state, and GitHub or issue-tracker access for
+work, the existing Code application for review state, and GitHub or issue-tracker access for
 their records. Do not create replacements for capabilities the workspace already has.
 
 Build the plan around one constrained improvement: define the baseline, remove the named bottleneck,

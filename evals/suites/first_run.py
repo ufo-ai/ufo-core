@@ -57,8 +57,8 @@ GOALS = (
         ),
         rubric=(
             "The answer gives a short plan tied to the stated two-day delivery target.",
-            "The plan uses the existing coding, code-review, GitHub, and issue-tracking "
-            "capabilities when useful instead of assuming a new application is required.",
+            "The plan uses the existing coding capability, the Code application, GitHub, and "
+            "issue tracking when useful instead of assuming a new application is required.",
             "The plan offers to measure the current and next issue-to-production cycle time from "
             "GitHub and Linear instead of asking the member to calculate it.",
             "The plan names a first measurable action and does not claim that an application was "

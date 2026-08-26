@@ -67,11 +67,10 @@ def test_every_shard_runs_its_suites_under_a_pack_that_accepts_them(planner) -> 
 
 
 def test_an_agent_specific_suite_runs_in_its_own_shard(planner) -> None:
-    """A suite bound to one agent runs `--agent <name>`, which the whole shard takes — so a shard
-    holding it and anything else would run the rest against the wrong agent. No task binds an agent
-    today, and this is what says so: the moment one does, it stands alone."""
-    for shard in planner.plan(smoke=False):
-        assert shard.agent is None or shard.suites == (shard.suites[0],), shard.label
+    shard = next(shard for shard in planner.plan(smoke=False) if "code_review" in shard.suites)
+
+    assert shard.agent == "code"
+    assert shard.suites == ("code_review",)
 
 
 def test_application_suites_do_not_share_a_shard_with_other_suites(planner) -> None:

@@ -221,6 +221,11 @@ test("the meetings page mounts and draws its bands over its own placeholder", as
   expect(await screen.findByRole("heading", { name: "Follow-ups" })).toBeTruthy();
 });
 
+test("the code page mounts and draws its review queue", async () => {
+  await runPage("code", { "/objects/conversation": () => json({ objects: [] }) });
+  expect(await screen.findByRole("heading", { name: "Code" })).toBeTruthy();
+});
+
 test("the issues page mounts and draws both of its bands", async () => {
   await runPage("issues", { "/objects/conversation": () => json({ objects: [] }) });
   expect(await screen.findByRole("heading", { name: "Issues" })).toBeTruthy();

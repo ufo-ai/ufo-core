@@ -6312,6 +6312,7 @@ def test_the_shipped_apps_tree_is_a_page_per_app_and_the_chunks_they_name() -> N
     assert apps.slugs == {
         "artifacts",
         "chat",
+        "code",
         "issues",
         "meetings",
         "metrics",

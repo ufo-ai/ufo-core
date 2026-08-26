@@ -27,6 +27,7 @@
   "files": [
     "../../app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx",
     "../../app_chat/ufo_ext_app_chat/skills/app-chat-home/app.tsx",
+    "../../app_code/ufo_ext_app_code/skills/app-code-home/app.tsx",
     "../../app_issues/ufo_ext_app_issues/skills/app-issues-home/app.tsx",
     "../../app_meetings/ufo_ext_app_meetings/skills/app-meetings-home/app.tsx",
     "../../app_metrics/ufo_ext_app_metrics/skills/app-metrics-home/app.tsx",
