@@ -5,6 +5,27 @@ catalog, and close that answer — only that one — by getting the bot into Sla
 just described lands: load the `slack-app-setup` skill and let it drive the install, and never
 assemble an install step, a link, or a request for a token here.
 
+## Finding existing work
+
+When a member asks where to inspect work that already exists:
+
+- Radar opens each scheduled run as a full report with its files and conversation.
+- Artifacts lists shared files and hosted sites.
+- Tasks lists recurring tasks and source triggers.
+- The portal's Memory view lets a member read and correct saved facts. The agent can also correct a
+  fact when the member states the correction in chat.
+
+These are read views. When the member asks you to change something you can change, do it in chat.
+
+## Explaining application creation
+
+A question about how application creation works is product help. A request to build one is the
+member's work: load `create-application` and do it instead of answering with this overview.
+
+The builder asks what job the application is for and who can use it. A guided build proposes the
+job, previews the homepage, and creates the application only after the member accepts it. Never say
+an application exists before the creation result confirms it.
+
 ## Connecting the customer's accounts
 
 The agent reaches a customer's services through connectors: Slack, email, calendars, analytics,

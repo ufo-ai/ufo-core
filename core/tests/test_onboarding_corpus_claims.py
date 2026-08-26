@@ -50,6 +50,12 @@ SPEC = "spec.md"
 TASK_SCHEDULING_SKILL_MD = (
     "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/skills/task-scheduling/SKILL.md"
 )
+CREATE_APPLICATION_SKILL_MD = "core/src/ufo/skills/create-application/SKILL.md"
+RADAR_MANIFEST = "extensions/app_radar/ufo_ext_app_radar/manifest.py"
+ARTIFACTS_MANIFEST = "extensions/app_artifacts/ufo_ext_app_artifacts/manifest.py"
+TASKS_MANIFEST = "extensions/app_tasks/ufo_ext_app_tasks/manifest.py"
+MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
+WEB_MEMORY_VIEW = "extensions/web/frontend/src/views/Memory.tsx"
 
 
 @dataclass(frozen=True)
@@ -399,6 +405,78 @@ CLAIMS = (
         phrase="the agent hosts it and shares a permanent link instead of a file to\ndownload",
         source=SITES_TOOLS,
         pattern=r"register that port as a hosted site, returning its\s+`site_url`",
+    ),
+    Claim(
+        claim="Radar opens a scheduled run with its report, files, and conversation",
+        corpus="references/capabilities.md",
+        phrase="Radar opens each scheduled run as a full report with its files and conversation",
+        source=RADAR_MANIFEST,
+        pattern=r'opening into the full story with its files, its report, its "\n\s+"conversation',
+    ),
+    Claim(
+        claim="Artifacts lists shared files and hosted sites",
+        corpus="references/capabilities.md",
+        phrase="Artifacts lists shared files and hosted sites",
+        source=ARTIFACTS_MANIFEST,
+        pattern=r'hosted "\n\s+"sites and shared files in one grid',
+    ),
+    Claim(
+        claim="Tasks lists scheduled work and source triggers",
+        corpus="references/capabilities.md",
+        phrase="Tasks lists recurring tasks and source triggers",
+        source=TASKS_MANIFEST,
+        pattern=r'tasks screen: two listings — "\n\s+"Scheduled and Triggers',
+    ),
+    Claim(
+        claim="the portal memory view reads and corrects saved facts",
+        corpus="references/capabilities.md",
+        phrase="Memory view lets a member read and correct saved facts",
+        source=WEB_MEMORY_VIEW,
+        pattern=(
+            r"usePanelRead<MemoryPayload>\((?:.*\n)*?\s+"
+            r"<DialogTitle>Correct Memory</DialogTitle>"
+        ),
+    ),
+    Claim(
+        claim="the agent records a correction through the memory update tool",
+        corpus="references/capabilities.md",
+        phrase="The agent can also correct a fact when the member states the correction in chat",
+        source=MEMORY_MANIFEST,
+        pattern=r'name="memory_update"',
+    ),
+    Claim(
+        claim="an actual app build routes to the create-application skill",
+        corpus="references/capabilities.md",
+        phrase="load `create-application` and do it instead of answering with this overview",
+        source=CREATE_APPLICATION_SKILL_MD,
+        pattern=r"^name: create-application$",
+    ),
+    Claim(
+        claim="the application builder asks for the job and its audience",
+        corpus="references/capabilities.md",
+        phrase="asks what job the application is for and who can use it",
+        source=CREATE_APPLICATION_SKILL_MD,
+        pattern=(
+            r"\| What job is it for\? \| the prompt \|\n"
+            r"\| Who else uses it\? `Just me` / `Everyone in the workspace` \|"
+        ),
+    ),
+    Claim(
+        claim="a guided application build proposes and previews its homepage",
+        corpus="references/capabilities.md",
+        phrase="A guided build proposes the job, previews the homepage",
+        source=CREATE_APPLICATION_SKILL_MD,
+        pattern=(
+            r"gets a\nguided build: propose first, then the interview, then the design of the "
+            r"app's homepage"
+        ),
+    ),
+    Claim(
+        claim="a guided application build creates only after the member accepts its design",
+        corpus="references/capabilities.md",
+        phrase="creates the application only after the member accepts it",
+        source=CREATE_APPLICATION_SKILL_MD,
+        pattern=r"in a guided build with a design pass, `Build it`\nis",
     ),
     Claim(
         claim="a member reaches every workspace-visible agent and their own, not only shared ones",

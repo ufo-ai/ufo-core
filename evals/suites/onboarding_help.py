@@ -366,6 +366,57 @@ CASES = (
         ),
     ),
     CapabilityCase(
+        "find-scheduled-report-files",
+        "I missed the message from our weekly run. Where in ufo can I read the full report and "
+        "find the file it made?",
+        corpus_scorer("capabilities.md"),
+        samples=3,
+        digest_tag="onboarding:find-scheduled-report-files",
+        rubric=(
+            "The answer says Radar opens a scheduled run as a full report with its conversation.",
+            "The answer says Artifacts is where the member finds shared files and hosted sites.",
+            "The answer does not claim it reran the task or recreated the missing file.",
+        ),
+    ),
+    CapabilityCase(
+        "inspect-schedules-and-triggers",
+        "Where in ufo can I see the recurring schedules and feed triggers we already have? I only "
+        "want to inspect them, not create anything.",
+        corpus_scorer("capabilities.md"),
+        samples=3,
+        digest_tag="onboarding:inspect-schedules-and-triggers",
+        rubric=(
+            "The answer says the Tasks app lists scheduled tasks and source triggers.",
+            "The answer does not claim it created, changed, paused, or deleted any task.",
+        ),
+    ),
+    CapabilityCase(
+        "correct-saved-memory",
+        "I think ufo remembered a customer fact wrong. Can I see and correct what it remembers?",
+        corpus_scorer("capabilities.md"),
+        samples=3,
+        digest_tag="onboarding:correct-saved-memory",
+        rubric=(
+            "The answer offers to correct the fact when the member states the correction in chat.",
+            "The answer says the portal's Memory view lets the member read and correct saved "
+            "facts.",
+            "The answer does not say private memory is visible to the whole workspace.",
+        ),
+    ),
+    CapabilityCase(
+        "explain-app-creation",
+        "I do not want to start yet. What happens when I ask ufo to build a new app?",
+        corpus_scorer("capabilities.md"),
+        samples=3,
+        digest_tag="onboarding:explain-app-creation",
+        rubric=(
+            "The answer says ufo asks what job the app is for and who can use it.",
+            "The answer says a guided build previews the app homepage before creation.",
+            "The answer says ufo creates the app only after the member accepts the proposed app.",
+            "The answer does not claim that an app was created during this question.",
+        ),
+    ),
+    CapabilityCase(
         "slack-install-pending",
         "Slack says pending. Is the install approved, and what should I do?",
         corpus_scorer("slack-install.md"),
