@@ -711,6 +711,7 @@ test("a mark named for what every object answers still leads the picker as the a
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
 
+  await userEvent.click(await screen.findByRole("button", { name: "Edit avatar" }));
   const marks = await screen.findAllByRole("radio");
   expect(marks.length).toBe(Object.keys(AGENT_ICONS).length + 1);
   expect(marks[0].getAttribute("value")).toBe("constructor");
@@ -864,7 +865,8 @@ test("scheduled task sheets close back to their settings list", async () => {
   expect(weekly.getAttribute("data-slot")).toBe("sheet-content");
   await userEvent.click(within(weekly).getByRole("button", { name: "Close" }));
 
-  await userEvent.click(within(dialog).getByRole("tab", { name: "Settings" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "Scheduled" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
@@ -886,6 +888,7 @@ test("the main agent keeps the reserved mark, and no offered cell repeats it", a
   render(<App agents={[{ ...AGENT, icon: "ufo" }]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
 
+  await userEvent.click(await screen.findByRole("button", { name: "Edit avatar" }));
   const marks = await screen.findAllByRole("radio");
   expect(marks.length).toBe(Object.keys(AGENT_ICONS).length + 1);
   expect(marks[0].getAttribute("value")).toBe("ufo");
@@ -913,6 +916,7 @@ test("a member picks another mark, and the pick rides one intent and comes back"
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
 
+  await userEvent.click(await screen.findByRole("button", { name: "Edit avatar" }));
   const marks = await screen.findAllByRole("radio");
   expect(marks.length).toBe(Object.keys(AGENT_ICONS).length);
   // The picker draws the offered set in its own order, and the product's own mark is not in it:
@@ -932,7 +936,7 @@ test("a member picks another mark, and the pick rides one intent and comes back"
   expect(screen.queryByRole("textbox", { name: "icon" })).toBeNull();
 
   await userEvent.click(screen.getByRole("radio", { name: "Krepis" }));
-  await userEvent.click(screen.getByRole("button", { name: "Save icon" }));
+  await userEvent.click(screen.getByRole("button", { name: "Save avatar" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toEqual({
@@ -941,7 +945,9 @@ test("a member picks another mark, and the pick rides one intent and comes back"
     name: "assistant",
     spec: { icon: "krepis" },
   });
-  expect(await screen.findByText("Applied.")).toBeTruthy();
+  expect(await screen.findByText("Assistant saved.")).toBeTruthy();
+  // Saving closes the picker, so the mark it kept is read by opening it again.
+  await userEvent.click(await screen.findByRole("button", { name: "Edit avatar" }));
   await waitFor(() =>
     expect((screen.getByRole("radio", { name: "Krepis" }) as HTMLInputElement).checked).toBe(
       true,
@@ -1185,7 +1191,7 @@ test("the index row and the pane header draw the app's name in Title Case", asyn
   expect(index.queryByText("code reviewer")).toBeNull();
 
   const pane = within(await screen.findByRole("region", { name: "Code Reviewer" }));
-  expect(pane.getByRole("button", { name: "Settings for Code Reviewer" })).toBeTruthy();
+  expect(pane.getByRole("button", { name: "Menu for Code Reviewer" })).toBeTruthy();
   expect(pane.queryByText("code reviewer")).toBeNull();
 });
 
@@ -1207,8 +1213,11 @@ test("the settings dialog reads the drawn name and the intent it posts carries t
   render(<App agents={[AGENT, REVIEWER]} member={MEMBER} onAgents={() => {}} />);
   const dialog = within(await openAgentSettings("Code Reviewer"));
 
-  expect(dialog.getByRole("heading", { name: "Code Reviewer" })).toBeTruthy();
+  expect(dialog.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
+    "Code Reviewer/Settings",
+  );
 
+  await userEvent.click(dialog.getByRole("button", { name: "Edit prompt" }));
   await userEvent.click(dialog.getByRole("button", { name: "Save prompt" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
@@ -1291,7 +1300,7 @@ test("a shipped app that declares no setup stands on its page", async () => {
     <App agents={[{ ...AGENT, main: false, app: "wiki" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  expect(await screen.findByLabelText(/^Settings for/)).toBeTruthy();
+  expect(await screen.findByLabelText(/^Menu for/)).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 });
 
@@ -1369,7 +1378,7 @@ test("an app that has been built once stands on its page, and the setup screen i
     <App agents={[{ ...AGENT, main: false, app: "meetings" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  expect(await screen.findByLabelText(/^Settings for/)).toBeTruthy();
+  expect(await screen.findByLabelText(/^Menu for/)).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
 });
 
@@ -1393,9 +1402,9 @@ test("the app pane's header starts a chat with the app it shows, standing with t
   const pane = within(await screen.findByRole("region", { name: "Research" }));
   const act = pane.getByRole("button", { name: "New" });
   const named = pane.getByRole("heading", { level: 2, name: FRESH });
-  const settings = pane.getByRole("button", { name: "Settings for Research" });
+  const menu = pane.getByRole("button", { name: "Menu for Research" });
   expect(named.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(settings.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  expect(menu.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
 
   await userEvent.click(act);
 
@@ -1405,6 +1414,99 @@ test("the app pane's header starts a chat with the app it shows, standing with t
 
   await waitFor(() => expect(sent.length).toBe(1));
   expect(sent[0]).toBe("/surface/web/agents/" + SECOND_ID + "/chat?conversation=new");
+});
+
+test("the app pane's menu opens each app setting on its matching tab", async () => {
+  location.hash = "#/agents/" + SECOND_ID;
+  wire({
+    "/api/agents": () => boot([AGENT, RESEARCH], ADMIN),
+    "/settings": () => json({ ...SETTINGS, agent: { ...SETTINGS.agent, name: RESEARCH.name } }),
+    "/connections": () => json({ connections: [] }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<Portal />);
+
+  const pane = within(await screen.findByRole("region", { name: "Research" }));
+  const trigger = pane.getByRole("button", { name: "Menu for Research" });
+  expect(trigger.querySelector("svg")?.classList.contains("tabler-icon-dots")).toBe(true);
+
+  for (const tab of ["Settings", "Connectors", "Scheduled"] as const) {
+    await userEvent.click(trigger);
+    const menu = within(await screen.findByRole("menu"));
+    expect(menu.getAllByRole("menuitem").map((entry) => entry.textContent)).toEqual([
+      "Settings",
+      "Connectors",
+      "Scheduled",
+    ]);
+
+    await userEvent.click(menu.getByRole("menuitem", { name: tab }));
+    const panel = await screen.findByRole("dialog", { name: "Research" });
+    // The band names the read showing, and the read is reached under that name alone.
+    expect(within(panel).getByRole("button", { name: tab })).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  }
+});
+
+test("the band's menu and the panel's own draw the three reads identically", async () => {
+  location.hash = "#/agents/" + SECOND_ID;
+  wire({
+    "/api/agents": () => boot([AGENT, RESEARCH], ADMIN),
+    "/settings": () => json({ ...SETTINGS, agent: { ...SETTINGS.agent, name: RESEARCH.name } }),
+    "/connections": () => json({ connections: [] }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<Portal />);
+
+  const pane = within(await screen.findByRole("region", { name: "Research" }));
+  await userEvent.click(pane.getByRole("button", { name: "Menu for Research" }));
+  const fromBand = [...(await screen.findByRole("menu")).querySelectorAll('[role="menuitem"]')].map(
+    (item) => item.outerHTML,
+  );
+  await userEvent.keyboard("{Escape}");
+
+  const panel = within(await openAgentSettings("Research", "Settings"));
+  await userEvent.click(panel.getByRole("button", { name: "Settings" }));
+  const fromPanel = [...(await screen.findByRole("menu")).querySelectorAll('[role="menuitem"]')].map(
+    (item) => item.outerHTML,
+  );
+
+  // Same words, same marks, same set — one list stood in two places.
+  expect(fromPanel.length).toBe(3);
+  expect(fromPanel.map(stripIds)).toEqual(fromBand.map(stripIds));
+});
+
+/** Radix stamps each menu item with its own generated ids, which differ between two mounts of the
+ *  same list and say nothing about how the item is drawn. */
+function stripIds(markup: string): string {
+  return markup.replaceAll(/(id|aria-labelledby|aria-describedby|data-radix-[a-z-]*)="[^"]*"/g, "");
+}
+
+test("the app's panel switches reads from its own band, without going back to the app menu", async () => {
+  location.hash = "#/agents/" + SECOND_ID;
+  wire({
+    "/api/agents": () => boot([AGENT, RESEARCH], ADMIN),
+    "/settings": () => json({ ...SETTINGS, agent: { ...SETTINGS.agent, name: RESEARCH.name } }),
+    "/connections": () => json({ connections: [] }),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<Portal />);
+
+  const panel = within(await openAgentSettings("Research", "Settings"));
+  // The panel stands over the screen it was opened from, which the scrim under it is what says.
+  expect(document.querySelector("[data-slot=app-settings-scrim]")).toBeTruthy();
+  // The band names the app the read belongs to, because the panel covers the band that would.
+  expect(panel.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
+    "Research/Settings",
+  );
+
+  await userEvent.click(panel.getByRole("button", { name: "Settings" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Scheduled" }));
+
+  expect(panel.getByRole("button", { name: "Scheduled" })).toBeTruthy();
 });
 
 test("the wizard's bare address founds nothing and forwards to the apps screen", async () => {

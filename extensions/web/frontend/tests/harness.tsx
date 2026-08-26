@@ -435,21 +435,18 @@ export async function openAgentRow(name: string): Promise<void> {
   );
 }
 
-/** An agent's settings, which stand in a dialog the gear in the agent's own pane opens rather
- *  than on a tab of the agent's page. The gear is found by its own label rather than inside a
- *  region, because which half wears it depends on the app: the homepage titlebar where one is set
- *  or building, the conversation header where the app has none. The dialog opens on Settings;
- *  `tab` reaches the other three. */
+/** An agent's three reads, which stand in a panel over the screen rather than on a tab of the
+ *  agent's page. The menu is found by its own label rather than inside a region, because which half
+ *  wears it depends on the app: the homepage titlebar where one is set or building, the
+ *  conversation header where the app has none. Each item names the read it opens, so `tab` is the
+ *  item pressed rather than a strip inside the panel. */
 export async function openAgentSettings(
   name = "Assistant",
   tab: "Settings" | "Connectors" | "Scheduled" = "Settings",
 ): Promise<HTMLElement> {
-  await userEvent.click(await screen.findByRole("button", { name: "Settings for " + name }));
-  const dialog = await screen.findByRole("dialog");
-  if (tab !== "Settings") {
-    await userEvent.click(within(dialog).getByRole("tab", { name: tab }));
-  }
-  return dialog;
+  await userEvent.click(await screen.findByRole("button", { name: "Menu for " + name }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: tab }));
+  return await screen.findByRole("dialog");
 }
 
 /** Press a record's own row, where the row itself is the control that opens it. */

@@ -385,7 +385,9 @@ test("a rail read that fails states so and keeps the rows it has", async () => {
   wire({ "/objects/conversation$": () => new Response("nope", { status: 503 }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const toast = await screen.findByRole("status");
+  // The primitive stands its own live region beside the card, so the card is what is read here.
+  await screen.findByText("Conversations did not refresh.");
+  const toast = document.querySelector("[data-slot=toast]") as HTMLElement;
   expect(toast.textContent).toContain("Conversations did not refresh.");
   expect(toast.textContent).toContain("Error 503 — reload to retry.");
 });
@@ -395,7 +397,7 @@ test("a rail read the session refuses states nothing, since sign-in answers it",
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(document.querySelector("[data-slot=toast]")).toBeNull();
 });
 
 test("a new-conversation link naming no agent of this workspace says so", async () => {
@@ -1151,7 +1153,7 @@ test("a hash naming an agent this member cannot reach reports it", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("No such app.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /^Settings for/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Menu for/ })).toBeNull();
 });
 
 test("the sidebar marks the destination the member is in and leaves the others off", async () => {

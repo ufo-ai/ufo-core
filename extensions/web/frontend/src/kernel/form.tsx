@@ -1,4 +1,4 @@
-import { Checkbox, Field, Input, Label, Textarea } from "@/components/ui/field";
+import { Field, Input, Label, Switch, Textarea } from "@/components/ui/field";
 import {
   PLAIN_CONTROL,
   Select,
@@ -73,10 +73,19 @@ type SpecFieldProps = {
   onChange: (value: SpecValue) => void;
 };
 
+/** A spec field read as a row takes the register a stated fact takes: same pitch, same label, same
+ *  edge down the right. A form of them under a column of facts is one surface the member reads
+ *  down, not two that happen to be stacked. */
 const ROW = cn(
-  "flex min-h-(--size-control) items-center justify-between gap-2xl py-2xs",
-  "border-b border-edge",
+  "flex h-(--size-record) items-center justify-between gap-2xl",
+  "border-b border-edge text-label",
 );
+
+/** How a stored choice is read. The value on the wire stays what the schema named; what the member
+ *  reads is that name as words, led with a capital. */
+function choiceLabel(choice: string): string {
+  return choice.replaceAll("-", " ").replaceAll("_", " ").replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
 
 /** One schema field as the control its shape asks for. A required field carries the requirement so
  *  the browser's own validity applies to it — except a boolean, which holds a value either way: a
@@ -92,7 +101,7 @@ function SpecField({ name, prop, value, options, required, layout, onChange }: S
         <Label htmlFor={id} className="truncate font-normal text-ink-soft">
           {label}
         </Label>
-        <Checkbox
+        <Switch
           id={id}
           checked={value === true}
           onChange={(event) => onChange(event.target.checked)}
@@ -100,7 +109,7 @@ function SpecField({ name, prop, value, options, required, layout, onChange }: S
       </div>
     ) : (
       <div className="flex items-center gap-sm">
-        <Checkbox
+        <Switch
           id={id}
           checked={value === true}
           onChange={(event) => onChange(event.target.checked)}
@@ -121,7 +130,7 @@ function SpecField({ name, prop, value, options, required, layout, onChange }: S
           <SelectContent>
             {choices.map((choice) => (
               <SelectItem key={choice} value={choice}>
-                {choice}
+                {choiceLabel(choice)}
               </SelectItem>
             ))}
           </SelectContent>
@@ -138,7 +147,7 @@ function SpecField({ name, prop, value, options, required, layout, onChange }: S
           <SelectContent>
             {choices.map((choice) => (
               <SelectItem key={choice} value={choice}>
-                {choice}
+                {choiceLabel(choice)}
               </SelectItem>
             ))}
           </SelectContent>

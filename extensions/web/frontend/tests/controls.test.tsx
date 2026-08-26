@@ -158,11 +158,19 @@ test("a dialog's two footer controls measure the same, so neither reads as the l
   expect(padding("Cancel")).toEqual(padding("Add members"));
 });
 
+/** The primitive stands an empty live region beside the card it draws, so a test that wants the
+ *  message reads the card rather than the first thing carrying the status role. */
+function toastCard(): HTMLElement {
+  const card = document.querySelector("[data-slot=toast]");
+  if (!card) throw new Error("no toast is standing");
+  return card as HTMLElement;
+}
+
 test("a toast states what applied and then takes itself away", async () => {
   vi.useFakeTimers();
   const done = vi.fn();
   render(<Toast state={{ title: "2 members added." }} onDone={done} />);
-  expect(screen.getByRole("status").textContent).toBe("2 members added.");
+  expect(toastCard().textContent).toBe("2 members added.");
   await act(async () => {
     vi.runAllTimers();
   });
@@ -170,9 +178,24 @@ test("a toast states what applied and then takes itself away", async () => {
   vi.useRealTimers();
 });
 
+/** A screen lays its own panes out, and the toast is drawn over them rather than among them. Every
+ *  element the component puts on the page stands out of flow, so nothing it renders can take a
+ *  track in the grid the screen behind it is laid out by — silent, and it halves the screen. */
+test("a toast takes no room in the layout it is drawn over", () => {
+  const { container } = render(
+    <Toast state={{ title: "2 members added." }} onDone={vi.fn()} />,
+  );
+  // jsdom lays nothing out and loads no sheet, so what is asserted is that every element the
+  // component puts on the page is taken out of flow by its own class.
+  const laid = [...container.children].filter(
+    (node) => !/(^|\s)(fixed|absolute)(\s|$)/.test(node.className),
+  );
+  expect(laid.map((node) => node.outerHTML.slice(0, 120))).toEqual([]);
+});
+
 test("a toast with nothing to say draws nothing", () => {
   render(<Toast state={SILENT} onDone={vi.fn()} />);
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(document.querySelector("[data-slot=toast]")).toBeNull();
 });
 
 test("a toast states why under what", () => {
@@ -181,7 +204,7 @@ test("a toast states why under what", () => {
     description: "The skill directory answered 502.",
   };
   render(<Toast state={state} onDone={vi.fn()} />);
-  const toast = screen.getByRole("status");
+  const toast = toastCard();
   expect(toast.textContent).toContain("release-notes did not open.");
   expect(toast.textContent).toContain("The skill directory answered 502.");
 });

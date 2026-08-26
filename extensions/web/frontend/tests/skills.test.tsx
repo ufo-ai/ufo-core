@@ -82,7 +82,7 @@ test("the workspace skills page renders items as a list, without a picker or a t
   expect(group.querySelectorAll("li[aria-hidden]").length).toBe(1);
 });
 
-test("the app's settings dialog holds no skills tab", async () => {
+test("the app's own panel offers no skills read", async () => {
   location.hash = "#/agents/" + AGENT.id;
   wire({
     "/settings": () => json(SETTINGS),
@@ -92,7 +92,8 @@ test("the app's settings dialog holds no skills tab", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   const dialog = within(await openAgentSettings());
 
-  expect(dialog.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+  await userEvent.click(dialog.getByRole("button", { name: "Settings" }));
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
     "Settings",
     "Connectors",
     "Scheduled",
@@ -116,8 +117,8 @@ test("the settings form states the workspace-skill setting and saves it", async 
 
   const checkbox = (await screen.findByLabelText("Use workspace skills")) as HTMLInputElement;
   expect(checkbox.checked).toBe(true);
+  // A preference is kept the moment it is changed, so the switch is the whole act.
   await userEvent.click(checkbox);
-  await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({

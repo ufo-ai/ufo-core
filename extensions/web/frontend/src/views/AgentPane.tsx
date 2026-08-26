@@ -1,8 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconLayoutSidebarRight, IconMessage, IconPlus, IconSettings } from "@tabler/icons-react";
+import {
+  IconClipboardCheck,
+  IconDots,
+  IconLayoutSidebarRight,
+  IconMessage,
+  IconPlug,
+  IconPlus,
+  IconSettings,
+} from "@tabler/icons-react";
 
 import { attachBridge, type BridgeHandle } from "@/lib/bridge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Header } from "@/kernel/pane";
 import { PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
@@ -42,6 +56,79 @@ const NEW = "New";
  *  founds one writes that conversation's id over it. */
 const FRESH = "new";
 
+/** What an app's own dialog holds: the spec the member edits, the accounts the app reaches, and the
+ *  tasks that run it on a clock. Three reads of one app, none of which heads a page of its own. The
+ *  skills are the workspace's, so they stand on the workspace page and the spec states only whether
+ *  this app loads them. The names live here because the band's menu is what picks between them. */
+export const SETTINGS_TABS = ["settings", "connectors", "scheduled"] as const;
+export type SettingsTab = (typeof SETTINGS_TABS)[number];
+export const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
+  settings: "Settings",
+  connectors: "Connectors",
+  scheduled: "Scheduled",
+};
+
+/** The weight the menu's glyphs are drawn at: light enough beside 13px type that a row reads as its
+ *  word with a mark beside it, rather than as an icon with a caption. */
+const GLYPH_STROKE = 1.25;
+
+/** The glyph each read is drawn with. The menu takes its names and its order from the tabs
+ *  themselves, so a member picks the same word here that heads the panel they land on. */
+const SETTINGS_TAB_GLYPHS: Record<SettingsTab, typeof IconSettings> = {
+  settings: IconSettings,
+  connectors: IconPlug,
+  scheduled: IconClipboardCheck,
+};
+
+/** The three reads as a member picks between them. Both places that offer the pick stand this one
+ *  list — the band's menu on the app screen, and the panel's own breadcrumb once it is open — so a
+ *  read is named, marked and set the same way wherever it is chosen. */
+export function SettingsTabItems({ onPick }: { onPick: (tab: SettingsTab) => void }) {
+  return (
+    <>
+      {SETTINGS_TABS.map((tab) => {
+        const Glyph = SETTINGS_TAB_GLYPHS[tab];
+        return (
+          <DropdownMenuItem
+            key={tab}
+            className="justify-start gap-md rounded-row text-label tracking-ui"
+            onSelect={() => onPick(tab)}
+          >
+            <Glyph className="size-(--size-glyph) shrink-0" stroke={GLYPH_STROKE} aria-hidden />
+            {SETTINGS_TAB_LABELS[tab]}
+          </DropdownMenuItem>
+        );
+      })}
+    </>
+  );
+}
+
+/** The acts an app carries beyond its conversation, gathered under one glyph. Each opens the app's
+ *  own dialog on the read it names, so all three are reached from the band the app heads rather
+ *  than from a gear that names only one of them. */
+function AppMenu({
+  name,
+  onPick,
+  className,
+}: {
+  name: string;
+  onPick: (tab: SettingsTab) => void;
+  className?: string;
+}) {
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button variant="quiet" size="icon" aria-label={"Menu for " + name} className={className}>
+          <IconDots aria-hidden />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-(--container-menu)">
+        <SettingsTabItems onPick={onPick} />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /** How long the arriving frame takes to fade over the one it replaces, and how long after that the
  *  replaced frame is kept mounted under it. The page it swaps in has already fired `load`, so the
  *  fade is the whole wait — nothing here delays the swap past the paint it exists to smooth. */
@@ -69,7 +156,7 @@ export type AgentPaneProps = {
    *  long as the rail takes to arrive, and forever if it never does. */
   chats: ChatRow[] | null;
   place: WorkspacePlace;
-  onSettings: () => void;
+  onSettings: (tab: SettingsTab) => void;
   /** The founded conversation, told to the shell so the rail carries the row this half is now
    *  holding — this half reads the rail to know which conversations it can carry on, so a chat the
    *  rail has not heard of is one the half would slide off the moment anything re-read. */
@@ -386,14 +473,7 @@ export function AgentPane({
               <Button variant="send" size="bar" onClick={start}>
                 {NEW}
               </Button>
-              <Button
-                variant="quiet"
-                size="icon"
-                aria-label={"Settings for " + agentName(agent.name)}
-                onClick={onSettings}
-              >
-                <IconSettings aria-hidden />
-              </Button>
+              <AppMenu name={agentName(agent.name)} onPick={onSettings} />
             </>
           }
           pinned
@@ -491,15 +571,11 @@ export function AgentPane({
               right end, and the page's band makes room for them: the frame inherits the inset the
               shell's acts occupy, so its own band-right controls end where these begin. */}
           <div className="absolute top-lg right-2xl z-10 flex items-center gap-xs">
-            <Button
-              variant="quiet"
-              size="icon"
-              aria-label={"Settings for " + agentName(agent.name)}
+            <AppMenu
+              name={agentName(agent.name)}
+              onPick={onSettings}
               className="rounded-full border border-edge bg-surface"
-              onClick={onSettings}
-            >
-              <IconSettings aria-hidden />
-            </Button>
+            />
             <Button
               variant="quiet"
               size={held !== undefined ? "icon" : "bar"}

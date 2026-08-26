@@ -460,9 +460,12 @@ function ObjectIndex({
           <>
             {section ? (
               <SectionBand name={section} action={making} />
-            ) : (
+            ) : title ? (
               <Header heading={1} title={title} acts={making} />
-            )}
+            ) : null}
+            {/* A pane that heads itself stands its act on that heading. One standing inside a panel
+                has no heading of its own, so the act joins the bar rather than taking a band of its
+                own above it — one row of controls over the records they act on. */}
             <PageToolbar>
               {section ? null : searching}
               {lead}
@@ -487,6 +490,7 @@ function ObjectIndex({
               >
                 <IconRefresh aria-hidden />
               </Button>
+              {section || title ? null : making}
             </PageToolbar>
             <DataTable
                 columns={columns}

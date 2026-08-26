@@ -68,10 +68,10 @@ test("the settings page states the agent's facts, renders its schema, and submit
   expect(screen.queryByRole("tab", { name: "Usage" })).toBeNull();
   // Connectors have a tab of their own in this dialog; the spec form states none of them.
   expect(screen.queryByRole("button", { name: "Add connector" })).toBeNull();
-  expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("be useful");
+  expect(screen.getByText("be useful")).toBeTruthy();
 
-  await pick("reasoning", "low");
-  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  // A preference is kept the moment it is changed, so the pick is the whole act.
+  await pick("reasoning", "Low");
 
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({
@@ -80,9 +80,10 @@ test("the settings page states the agent's facts, renders its schema, and submit
     name: "assistant",
     spec: { reasoning: "low", model: "opus", internet_access_allowed: true },
   });
-  expect(await screen.findByText("Applied.")).toBeTruthy();
-  expect((screen.getByLabelText("reasoning") as HTMLElement).textContent).toContain("low");
+  expect(await screen.findByText("Assistant saved.")).toBeTruthy();
+  expect((screen.getByLabelText("reasoning") as HTMLElement).textContent).toContain("Low");
 
+  await userEvent.click(screen.getByRole("button", { name: "Edit prompt" }));
   await userEvent.clear(screen.getByLabelText("Prompt"));
   await userEvent.type(screen.getByLabelText("Prompt"), "review every request");
   await userEvent.click(screen.getByRole("button", { name: "Save prompt" }));
@@ -93,8 +94,101 @@ test("the settings page states the agent's facts, renders its schema, and submit
     name: "assistant",
     spec: { prompt: "review every request" },
   });
-  expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe(
-    "review every request",
+  // Saving closes the editor, leaving the section stating the prompt again.
+  expect(await screen.findByRole("button", { name: "Edit prompt" })).toBeTruthy();
+  expect(screen.queryByLabelText("Prompt")).toBeNull();
+});
+
+/** Two preferences changed in quick succession are two whole-spec intents. Sent at once they can
+ *  land either way round, and the older one landing last would undo the newer choice — so they are
+ *  sent one after the other, and the last request carries the last answer. */
+test("a second preference changed mid-save is the one that lands last", async () => {
+  const posted: { spec: Record<string, unknown> }[] = [];
+  // Held on an object rather than in a local: a local assigned only inside the executor narrows to
+  // never by the time the test releases it.
+  const held: { release?: () => void } = {};
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/intents": async (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      // The first intent is held open, so the second change is made while it is still in flight.
+      if (posted.length === 1) {
+        await new Promise<void>((resume) => {
+          held.release = resume;
+        });
+      }
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await openAgentSettings();
+
+  await userEvent.click(await screen.findByLabelText("internet_access_allowed"));
+  await waitFor(() => expect(posted.length).toBe(1));
+
+  await userEvent.click(screen.getByLabelText("Use workspace skills"));
+  // Nothing is sent while the first is outstanding.
+  expect(posted.length).toBe(1);
+
+  held.release?.();
+  await waitFor(() => expect(posted.length).toBe(2));
+
+  // The last request carries both answers, so neither change is undone by the other.
+  expect(posted[1].spec).toMatchObject({
+    internet_access_allowed: false,
+    use_workspace_skills: false,
+  });
+});
+
+/** A refused preference cannot be followed by the change queued behind it — that spec still carries
+ *  the refused value. What the member changed while the first was in flight is still drawn on the
+ *  control, so the read is taken again and the column goes back to stating what is stored. */
+test("a refusal names itself and puts the controls back to what is stored", async () => {
+  const posted: unknown[] = [];
+  const held: { release?: () => void } = {};
+  let reads = 0;
+  wire({
+    "/settings": () => {
+      reads += 1;
+      return json(SETTINGS);
+    },
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/intents": async (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      if (posted.length === 1) {
+        await new Promise<void>((resume) => {
+          held.release = resume;
+        });
+        return json({ applied: false, message: "reasoning is required by that model." });
+      }
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await openAgentSettings();
+  const before = reads;
+
+  await userEvent.click(await screen.findByLabelText("internet_access_allowed"));
+  await waitFor(() => expect(posted.length).toBe(1));
+
+  // A second change made while the refusal is still in flight.
+  const skills = screen.getByLabelText("Use workspace skills") as HTMLInputElement;
+  await userEvent.click(skills);
+  expect(skills.checked).toBe(false);
+
+  held.release?.();
+
+  // The refusal is named, the queued spec is not sent, and the read is taken again.
+  expect(await screen.findByText("reasoning is required by that model.")).toBeTruthy();
+  await waitFor(() => expect(reads).toBeGreaterThan(before));
+  expect(posted.length).toBe(1);
+  await waitFor(() =>
+    expect((screen.getByLabelText("Use workspace skills") as HTMLInputElement).checked).toBe(true),
   );
 });
 
@@ -143,6 +237,7 @@ test("switching agents discards unsaved settings edits", async () => {
     <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
   await openAgentSettings();
+  await userEvent.click(await screen.findByRole("button", { name: "Edit prompt" }));
   await userEvent.clear(await screen.findByLabelText("Prompt"));
   await userEvent.type(screen.getByLabelText("Prompt"), "do not carry this");
 
@@ -150,11 +245,11 @@ test("switching agents discards unsaved settings edits", async () => {
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 
   await waitFor(() =>
-    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("be second"),
+    expect(screen.getByText("be second")).toBeTruthy(),
   );
 });
 
-test("settings polling preserves dirty edits", async () => {
+test("settings polling preserves a dirty prompt edit", async () => {
   const posted: unknown[] = [];
   let reads = 0;
   wire({
@@ -190,9 +285,9 @@ test("settings polling preserves dirty edits", async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.getByDisplayValue("be useful")).toBeTruthy();
+    expect(screen.getByText("be useful")).toBeTruthy();
 
-    fireEvent.click(screen.getByLabelText("internet_access_allowed"));
+    fireEvent.click(screen.getByRole("button", { name: "Edit prompt" }));
     fireEvent.change(screen.getByLabelText("Prompt"), {
       target: { value: "review every request" },
     });
@@ -202,25 +297,15 @@ test("settings polling preserves dirty edits", async () => {
       await Promise.resolve();
     });
     expect(reads).toBe(2);
-    expect((screen.getByLabelText("internet_access_allowed") as HTMLInputElement).checked).toBe(
-      false,
-    );
+    // The prompt is the one read a member holds unsaved, so it is the one a poll must not write
+    // over. A preference keeps itself as it is changed and has no unsaved state to lose.
     expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe(
       "review every request",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await act(async () => await Promise.resolve());
     fireEvent.click(screen.getByRole("button", { name: "Save prompt" }));
     await act(async () => await Promise.resolve());
-    expect(posted).toMatchObject([
-      {
-        spec: { internet_access_allowed: false },
-      },
-      {
-        spec: { prompt: "review every request" },
-      },
-    ]);
+    expect(posted).toMatchObject([{ spec: { prompt: "review every request" } }]);
   } finally {
     vi.useRealTimers();
   }
@@ -910,9 +995,9 @@ test("the app pane starts a conversation where it stands, without leaving for th
 
   const pane = await screen.findByRole("region", { name: "Assistant" });
   const act = within(pane).getByRole("button", { name: "New" });
-  const settings = within(pane).getByRole("button", { name: "Settings for Assistant" });
-  // The act stands at the far end, immediately before settings.
-  expect(settings.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  const menu = within(pane).getByRole("button", { name: "Menu for Assistant" });
+  // The act stands at the far end, immediately before the menu.
+  expect(menu.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
 
   await userEvent.click(act);
 
@@ -970,9 +1055,10 @@ test("the model field offers the deploy's models, which its schema alone cannot 
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await openAgentSettings();
+  // The wire's names, read as the member reads them.
   expect((await opened("model")).map((option) => option.textContent)).toEqual([
-    "opus",
-    "sonnet",
+    "Opus",
+    "Sonnet",
   ]);
 });
 

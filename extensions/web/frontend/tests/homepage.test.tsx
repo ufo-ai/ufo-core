@@ -75,7 +75,7 @@ test("a set homepage frames the bound site beside the conversation", async () =>
   // The page heads itself, so the pane draws no band and no title of its own over it — only the
   // shell's two acts, floating in the page's gutter.
   expect(screen.queryByRole("heading", { name: "Assistant" })).toBeNull();
-  expect(screen.getByRole("button", { name: "Settings for Assistant" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Menu for Assistant" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Chat with Assistant" })).toBeTruthy();
 });
 

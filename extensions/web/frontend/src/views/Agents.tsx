@@ -1,13 +1,23 @@
-import { useEffect, useState, type CSSProperties } from "react";
-import { IconPin, IconPinFilled } from "@tabler/icons-react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { IconChevronDown, IconPin, IconPinFilled, IconX } from "@tabler/icons-react";
 
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ObjectPane } from "@/kernel/objects";
 import { Empty, usePanelRead } from "@/kernel/panel";
-import { BANDS } from "@/kernel/pane";
-import { TabPanel, TabRow } from "@/kernel/tabs";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
@@ -15,7 +25,13 @@ import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { friendlyMoment } from "@/lib/moments";
 import { openAgents } from "@/lib/router";
-import { AgentPane } from "@/views/AgentPane";
+import {
+  AgentPane,
+  SETTINGS_TABS,
+  SETTINGS_TAB_LABELS,
+  SettingsTabItems,
+  type SettingsTab,
+} from "@/views/AgentPane";
 import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
@@ -263,17 +279,98 @@ function AgentRow({
  *  one up. */
 const TASK_KIND = "scheduled_task";
 
-/** What an app's own dialog holds: the spec the member edits, the accounts the app reaches, and the
- *  tasks that run it on a clock. Three reads of one app, none of which heads a page of its own. The
- *  skills are the workspace's, so they stand on the workspace page and the spec states only whether
- *  this app loads them. */
-const SETTINGS_TABS = ["settings", "connectors", "scheduled"] as const;
-type SettingsTab = (typeof SETTINGS_TABS)[number];
-const SETTINGS_TAB_LABELS: Record<SettingsTab, string> = {
-  settings: "Settings",
-  connectors: "Connectors",
-  scheduled: "Scheduled",
-};
+/** An app's three reads, standing over the screen they were opened from rather than beside it. The
+ *  scrim puts that screen out of focus so the panel is the one thing in hand, and the band names
+ *  the read showing with the way to the other two under the same chevron — a member switches reads
+ *  without going back to the band they came from. It stays out of the modal state radix would take:
+ *  a record opened from the tasks read raises the shared sheet over this panel, and a modal layer
+ *  under it would hold the pointer away from that sheet. */
+function AppSettings({
+  agent,
+  tab,
+  open,
+  onTab,
+  onClose,
+  children,
+}: {
+  agent: Agent;
+  tab: SettingsTab;
+  open: boolean;
+  onTab: (tab: SettingsTab) => void;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <DialogPrimitive.Root modal={false} open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogPrimitive.Portal>
+        {/* The scrim is drawn here rather than as the primitive's own overlay, which renders
+            nothing outside the modal state this panel stays out of. */}
+        <div
+          data-slot="app-settings-scrim"
+          className="fixed inset-0 z-10 bg-scrim backdrop-blur-scrim animate-appear"
+          onClick={onClose}
+        />
+        <DialogPrimitive.Content
+          data-slot="app-settings"
+          aria-describedby={undefined}
+          onInteractOutside={(event) => event.preventDefault()}
+          className={cn(
+            "fixed inset-y-0 right-0 left-auto z-10 w-app-settings",
+            "flex min-h-0 flex-col border-l border-edge bg-surface pt-2xl",
+            "[box-shadow:var(--shadow-raised)] animate-slide-in-end",
+          )}
+        >
+          {/* The band stands the height of the acts on it and carries no rule of its own: the panel
+              is one surface, and a line under its own name would part the name from what it names. */}
+          <div className="flex h-(--size-control) shrink-0 items-center gap-md px-2xl">
+            {/* The app the read belongs to, then the read: a panel standing over the whole screen
+                covers the band that would otherwise say which app this is. The app step goes
+                nowhere — it is the screen already underneath — so it is the landmark's name and
+                text is all it is. */}
+            <Breadcrumb className="min-w-0 flex-1">
+              <BreadcrumbList className="flex-nowrap text-body tracking-ui">
+                <BreadcrumbItem className="min-w-0">
+                  <DialogPrimitive.Title asChild>
+                    <span className="truncate">{agentName(agent.name)}</span>
+                  </DialogPrimitive.Title>
+                </BreadcrumbItem>
+                <BreadcrumbSeparator />
+                <BreadcrumbItem className="min-w-0">
+                  <DropdownMenu modal={false}>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex min-w-0 cursor-pointer items-center gap-xs border-0 bg-transparent p-0",
+                          "text-inherit transition-colors duration-100 ease-control hover:text-ink",
+                        )}
+                      >
+                        <BreadcrumbPage>{SETTINGS_TAB_LABELS[tab]}</BreadcrumbPage>
+                        <IconChevronDown
+                          className="size-(--size-glyph) shrink-0 text-ink-soft"
+                          aria-hidden
+                        />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="w-(--container-menu)">
+                      <SettingsTabItems onPick={onTab} />
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </BreadcrumbItem>
+              </BreadcrumbList>
+            </Breadcrumb>
+            <Button variant="quiet" size="icon" aria-label="Close" onClick={onClose}>
+              <IconX aria-hidden />
+            </Button>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col gap-2xl overflow-y-auto p-2xl">
+            {children}
+          </div>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
+  );
+}
 
 /** The apps index: one row per app under the New application act, the wizard's run in flight at
  *  the head while one is live. The apps screen carried it as a column once; it is the sidebar's
@@ -472,8 +569,8 @@ export function Agents({
           chats={chats}
           onCreated={(conversationId, title) => onCreated(shown, conversationId, title)}
           onFounded={onCreated}
-          onSettings={() => {
-            setSettingsTab(SETTINGS_TABS[0]);
+          onSettings={(tab) => {
+            setSettingsTab(tab);
             setScheduled([]);
             setSettling(true);
           }}
@@ -484,43 +581,35 @@ export function Agents({
         <Empty>No app is visible to you.</Empty>
       )}
       {shown && !building ? (
-        <Dialog modal={false} open={settling} onOpenChange={setSettling}>
-          <DialogContent className="w-settings" aria-describedby={undefined}>
-            <DialogHeader className="flex-row items-center gap-2xl">
-              <DialogTitle className="min-w-0 flex-1 truncate">{agentName(shown.name)}</DialogTitle>
-              <TabRow
-                group="agent-settings"
-                tabs={SETTINGS_TABS}
-                current={settingsTab}
-                label={(name) => SETTINGS_TAB_LABELS[name]}
-                onPick={setSettingsTab}
-              />
-            </DialogHeader>
-            <TabPanel group="agent-settings" current={settingsTab} className={BANDS}>
-              {settingsTab === "settings" ? (
-                <Settings
-                  key={shown.id}
-                  agent={shown}
-                  onArchived={() => {
-                    setSettling(false);
-                    openAgents();
-                    onAgents();
-                  }}
-                />
-              ) : null}
-              {settingsTab === "connectors" ? <AgentConnectors agent={shown} /> : null}
-              {settingsTab === "scheduled" ? (
-                <ObjectPane
-                  key={shown.id}
-                  agentId={shown.id}
-                  kind={TASK_KIND}
-                  opens={scheduled}
-                  onPlace={(next) => setScheduled(next.opens ?? [])}
-                />
-              ) : null}
-            </TabPanel>
-          </DialogContent>
-        </Dialog>
+        <AppSettings
+          agent={shown}
+          tab={settingsTab}
+          open={settling}
+          onTab={setSettingsTab}
+          onClose={() => setSettling(false)}
+        >
+          {settingsTab === "settings" ? (
+            <Settings
+              key={shown.id}
+              agent={shown}
+              onArchived={() => {
+                setSettling(false);
+                openAgents();
+                onAgents();
+              }}
+            />
+          ) : null}
+          {settingsTab === "connectors" ? <AgentConnectors agent={shown} /> : null}
+          {settingsTab === "scheduled" ? (
+            <ObjectPane
+              key={shown.id}
+              agentId={shown.id}
+              kind={TASK_KIND}
+              opens={scheduled}
+              onPlace={(next) => setScheduled(next.opens ?? [])}
+            />
+          ) : null}
+        </AppSettings>
       ) : null}
     </div>
   );

@@ -150,7 +150,7 @@ export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
       data-slot="textarea"
       className={cn(
         CONTROL,
-        "w-full max-w-section min-h-[var(--size-textarea)] font-mono text-subtitle narrow:text-mono",
+        "w-full max-w-section min-h-[var(--size-textarea)] text-subtitle narrow:text-ui",
         className,
       )}
       {...props}
@@ -213,6 +213,33 @@ export function Checkbox({ className, ...props }: ComponentProps<"input">) {
       className={cn(
         "size-(--spacing-2xl) accent-ink align-middle",
         "transition-[scale] duration-100 ease-control active:scale-[0.96]",
+        "disabled:cursor-not-allowed disabled:opacity-(--disabled)",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+/** A setting a member turns on and off, drawn as the track it slides in. It is a checkbox
+ *  underneath — the browser's own control, so it is reached by keyboard, announced as a checkbox,
+ *  and submitted with the form it stands in — wearing a track and a thumb instead of a tick. The
+ *  state is read from the box itself with `checked:`, so nothing has to be told twice. */
+export function Switch({ className, ...props }: ComponentProps<"input">) {
+  return (
+    <input
+      data-slot="switch"
+      type="checkbox"
+      role="switch"
+      className={cn(
+        "relative h-(--size-switch) w-(--size-switch-track) shrink-0 cursor-pointer appearance-none",
+        "rounded-full bg-fill-strong transition-colors duration-100 ease-control",
+        "checked:bg-ink",
+        "before:absolute before:top-1/2 before:left-(--spacing-hair) before:size-(--size-switch-thumb)",
+        "before:-translate-y-1/2 before:rounded-full before:bg-surface before:content-['']",
+        "before:transition-[translate] before:duration-100 before:ease-control",
+        "checked:before:translate-x-(--size-switch-throw)",
+        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
         "disabled:cursor-not-allowed disabled:opacity-(--disabled)",
         className,
       )}

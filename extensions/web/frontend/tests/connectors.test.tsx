@@ -589,25 +589,25 @@ test("the agent's own section states what is shared with that agent", async () =
 
 /** The agent's own dialog holds three reads of it, and the connectors are one of them — reached by
  *  their own tab rather than scrolled past under the spec form. */
-test("the agent's connectors stand on their own tab of its settings dialog", async () => {
+test("the agent's connectors stand as their own read of its settings panel", async () => {
   location.hash = "#/agents/" + AGENT_ID;
   connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   const dialog = within(await openAgentSettings("Assistant", "Connectors"));
-  expect(dialog.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+  expect(await dialog.findByRole("cell", { name: "github" })).toBeTruthy();
+  expect(dialog.getByRole("button", { name: "Add connector" })).toBeTruthy();
+
+  // The band names the read showing, and the other two stand under it.
+  await userEvent.click(dialog.getByRole("button", { name: "Connectors" }));
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
     "Settings",
     "Connectors",
     "Scheduled",
   ]);
-  expect(dialog.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
-    "true",
-  );
-  expect(await dialog.findByRole("cell", { name: "github" })).toBeTruthy();
-  expect(dialog.getByRole("button", { name: "Add connector" })).toBeTruthy();
 
-  await userEvent.click(dialog.getByRole("tab", { name: "Settings" }));
-  expect(await dialog.findByLabelText("Prompt")).toBeTruthy();
+  await userEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+  expect(await dialog.findByRole("button", { name: "Edit prompt" })).toBeTruthy();
   expect(dialog.queryByRole("button", { name: "Add connector" })).toBeNull();
 });
 

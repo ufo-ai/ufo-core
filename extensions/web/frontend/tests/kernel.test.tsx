@@ -596,8 +596,8 @@ test("a schema field with an enum becomes a select over exactly its choices", as
     />,
   );
   expect((await opened("reasoning")).map((option) => option.textContent)).toEqual([
-    "low",
-    "high",
+    "Low",
+    "High",
   ]);
 });
 

@@ -109,7 +109,12 @@
 
   --color-fill: var(--bkgd-200);
   --color-fill-strong: var(--bkgd-300);
-  --color-scrim: color-mix(in srgb, var(--text-primary) 40%, transparent);
+  --color-scrim: color-mix(in srgb, var(--text-primary) 50%, transparent);
+
+  /* What the scrim does to the screen behind it, beyond dimming: enough to put the page out of
+     focus so the panel over it reads as the one thing in hand, and little enough that a member
+     still sees which screen they left standing. */
+  --blur-scrim: 3px;
 
   /* Each accent laid over the pane at the one weight the comps tint a status at. */
   --color-affirm: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
@@ -159,6 +164,14 @@
     }
   }
 
+  --animate-slide-in-end: slide-in-end 0.14s var(--ease-control);
+
+  @keyframes slide-in-end {
+    from {
+      translate: 100% 0;
+    }
+  }
+
   --opacity-muted: 0.6;
   --opacity-muted-strong: 0.5;
   --opacity-muted-soft: 0.7;
@@ -190,7 +203,14 @@
   --radius-answer: 16px;
   --radius-panel: var(--radius);
   --radius-bubble: var(--radius);
-  --radius-menu: var(--radius);
+  /* A menu is drawn as an overlay standing off the surface rather than as a panel set into it, so
+     it carries a far rounder corner than the controls beneath it — its rows are pills, and a tight
+     corner around them reads as a box someone forgot to round. */
+  --radius-menu: 16px;
+
+  /* The tile an app's mark is drawn on. Rounder than a control and squarer than a pill: it reads as
+     a thing the app owns rather than as a button. */
+  --radius-avatar: 8px;
   --radius-card: var(--radius);
 
   --font-sans: "Inter", system-ui, sans-serif;
@@ -237,6 +257,10 @@
   /* An app's whole settings form, read in one dialog rather than a page: wider than a dialog that
      asks one question, and the width the spotlight search opens at. */
   --container-settings: min(880px, calc(100vw - 32px));
+  /* An app's own reads, standing over the screen rather than set into it. Narrower than the drawer
+     a record opens in: this one is read down a column of stated facts, and a wider measure only
+     puts more space between a fact's name and its value. */
+  --container-app-settings: min(493px, 100vw);
   --container-spotlight: min(640px, calc(100vw - 32px));
   --container-bubble: 70ch;
   --container-section: 728px;
@@ -254,7 +278,7 @@
      land on rather than a pill the width of its own text. */
   --container-attachment: 160px;
   --container-record: min(440px, 45%);
-  --container-menu: 160px;
+  --container-menu: 168px;
   --media-tall: 60vh;
   --media-card: 20rem;
   /* The square one attached file is drawn in, wherever a file is drawn as a picture rather than a
@@ -316,6 +340,13 @@
   /* The floor a control the member points at with a finger keeps, which is taller than the
      control height the pointer needs. An answer in a conversation is tapped as often as clicked. */
   --size-touch: 44px;
+
+  /* The track a setting slides in, the thumb that slides, and how far it goes: the throw is the
+     track less the thumb and the hair of ground it sits on at either end. */
+  --size-switch: 20px;
+  --size-switch-track: 34px;
+  --size-switch-thumb: 16px;
+  --size-switch-throw: 14px;
   --size-fact: 16ch;
   --size-glyph: 16px;
   --size-icon: 1em;

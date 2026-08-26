@@ -12,11 +12,23 @@ export type Fact = { label: string; value: ReactNode; block?: boolean };
  *  The heading stands outside the list it heads: a definition list holds terms and definitions, so
  *  a title dropped among them is markup a reader that builds pairs out of the list has no place
  *  for. That is why this wraps `Facts` rather than being a branch inside it. */
-export function Group({ title, children }: { title: string; children: ReactNode }) {
+/** `action` is what the group does to itself, standing at the far end of its own name: the way into
+ *  editing what the group states, and the act that commits it once open. It sits on the name's line
+ *  rather than under the rows, so a group the member only reads carries nothing extra. */
+export function Group({
+  title,
+  action,
+  children,
+}: {
+  title: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <section className="flex flex-col">
-      <p className="m-0 flex h-(--size-record) items-center border-b border-edge text-label">
-        {title}
+    <section className="flex flex-col gap-px">
+      <p className="m-0 flex h-(--size-record) items-center gap-md border-b border-edge text-label font-medium">
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+        {action}
       </p>
       {children}
     </section>
@@ -39,7 +51,7 @@ export function Group({ title, children }: { title: string; children: ReactNode 
  *  worth the pitch it breaks. */
 export function Facts({ rows }: { rows: Fact[] }) {
   return (
-    <dl data-slot="facts" className="m-0">
+    <dl data-slot="facts" className="m-0 flex flex-col gap-px">
       {rows.map((row) =>
         row.block ? (
           <div

@@ -215,7 +215,7 @@ test("a transcript that never loads says so in the pane, not as an empty convers
   expect(await screen.findByText("The conversation did not load.")).toBeTruthy();
   expect(screen.getByText("Error 503 — reload to retry.")).toBeTruthy();
   expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
-  expect(screen.queryByRole("status")).toBeNull();
+  expect(document.querySelector("[data-slot=toast]")).toBeNull();
 });
 
 test("a re-read that fails states so over the conversation it already holds", async () => {
@@ -232,7 +232,7 @@ test("a re-read that fails states so over the conversation it already holds", as
   await screen.findByText("still here");
 
   window.dispatchEvent(new Event("focus"));
-  const toast = await screen.findByRole("status");
+  const toast = (await screen.findByText(/did not load\./)).closest("[data-slot=toast]") as HTMLElement;
   expect(toast.textContent).toContain("The conversation did not load.");
   expect(screen.getByText("still here")).toBeTruthy();
 });
