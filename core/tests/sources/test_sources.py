@@ -3302,13 +3302,16 @@ async def test_a_stream_whose_transaction_never_opened_still_reports_the_failure
     assert (await _source_state(source_id))["consecutive_errors"] == 0
 
 
-async def test_a_synced_stream_reports_what_it_wrote(
+async def test_a_synced_stream_reports_what_it_wrote_and_what_it_dropped(
     db: None,
     database_url: str,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A successful run reports the records it could not represent beside the pages it wrote. A drop
+    warns per record, and no health query selects a warning, so a run that lands nothing but drops
+    everything would otherwise read as a healthy stream."""
     reader = _meter(monkeypatch)
     workspace_id = await _workspace()
     source_id = await _seed_connector_source(workspace_id)
@@ -3322,7 +3325,7 @@ async def test_a_synced_stream_reports_what_it_wrote(
     driver = _connector_driver(
         [
             SyncResult(pages=(page,), deletes=("C1/1600000000.1", "C1/1500000000.1")),
-            SyncResult(pages=(page.model_copy(update={"title": "#deploys"}),)),
+            SyncResult(pages=(page.model_copy(update={"title": "#deploys"}),), dropped=2),
         ],
         database_url,
         tmp_path / "blobs",
@@ -3344,9 +3347,11 @@ async def test_a_synced_stream_reports_what_it_wrote(
         "pages_fetched": 1,
         "pages_written": 1,
         "pages_tombstoned": 1,
+        "pages_dropped": 0,
     }
     assert await _tombstone(gone_id) is True
     assert (synced[1].ufo["pages_written"], synced[1].ufo["pages_tombstoned"]) == (1, 0)
+    assert synced[1].ufo["pages_dropped"] == 2
     assert not _events(caplog, "source_sync.failed")
     assert not _metric_points(reader, SYNC_METRIC)
 

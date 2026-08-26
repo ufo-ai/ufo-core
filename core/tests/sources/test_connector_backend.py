@@ -222,10 +222,10 @@ async def test_an_unrepresentable_record_is_dropped_and_named_not_run_failing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A record the page model rejects is one record, so it costs one record: it is dropped, the
-    warning names it and the field that rejected it, and the run lands its siblings and advances the
-    watermark past it. Failing the run instead costs the stream — a failed run commits nothing and
-    advances no cursor, so a record the provider keeps returning holds every later record behind it
-    every interval."""
+    warning names it and the field that rejected it, the result counts it, and the run lands its
+    siblings and advances the watermark past it. Failing the run instead costs the stream — a failed
+    run commits nothing and advances no cursor, so a record the provider keeps returning holds every
+    later record behind it every interval."""
     stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
     connector = _UntitledRecordConnector(stream, [_records(1, 2)])
 
@@ -235,6 +235,7 @@ async def test_an_unrepresentable_record_is_dropped_and_named_not_run_failing(
     assert [page.source_ref for page in result.pages] == ["items/1"]
     # the watermark is the dropped record's own: the next run resumes past it, not at it
     assert result.next_cursor == "2026-01-02T00:00:00Z"
+    assert result.dropped == 1
     dropped = [
         record
         for record in caplog.records

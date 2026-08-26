@@ -11,8 +11,11 @@ pageInfo { hasNextPage endCursor } } }`. `paginate` POSTs one page at a time thr
 over `updatedAt`. The four collections Linear exposes without an `updatedAt` filter (customer
 statuses/tiers, issue relations, project statuses) full-refresh each run. `render` lifts an
 issue/project/comment/user into readable prose (title, description, state, assignee) rather than the
-default GraphQL-node JSON dump. A refusal (HTTP 401/403) raises `StreamSkipped` so the run records a
-skip; a GraphQL `errors` array fails loud rather than commit a partial page. The credential is
+default GraphQL-node JSON dump. A comment carries no title of its own, so a record that renders none
+takes its first body line and falls back to its `stream/id` identity: a page holds a non-empty
+title, and an empty one is a record the page model rejects and the run drops.
+A refusal (HTTP 401/403) raises `StreamSkipped` so the run records a skip; a GraphQL `errors` array
+fails loud rather than commit a partial page. The credential is
 resolved through the auth proxy the runner threads (an OAuth bearer works on the base client
 unchanged); this connector holds no token. The write path (mutations) is intentionally absent — the
 source seam only reads."""
@@ -342,6 +345,9 @@ class LinearConnector(RestConnector):
                 )
             case _:
                 return super().render(record, stream)
+        if not title:
+            first_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+            title = first_line or super().render(record, stream)[0]
         heading = f"# linear {stream.name}: {title}".rstrip()
         return title, f"{heading}\n\n{body}".rstrip()
 

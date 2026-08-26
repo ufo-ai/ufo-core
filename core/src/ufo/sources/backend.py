@@ -4,12 +4,12 @@ A connector speaks in streams and async page generators; the source seam speaks 
 per run. `ConnectorBackend` bridges them: one `source` row is one (account, stream), so `fetch`
 resolves the account's `Credential` through the runner's auth proxy, drives the connector's one
 stream, and renders each record into a recallable `Page` — one record the page model rejects is
-dropped and warned rather than failing the run (`_page`). A full-collection stream
-(`delete_missing`) returns as an authoritative `snapshot` so the driver tombstones records that
-vanished; an incremental stream returns `snapshot=False`, advances a watermark over its
-`cursor_field`, and names any provider-reported removals in `deletes`. A row whose config pins a
-`backfill_after` hands that instant to `fetch_page` beside the spec — never on it, so the spec holds
-only connector declarations and nothing on it invites a per-run recomputation.
+dropped, warned, and counted onto the result's `dropped` rather than failing the run (`_page`).
+A full-collection stream (`delete_missing`) returns as an authoritative `snapshot` so the driver
+tombstones records that vanished; an incremental stream returns `snapshot=False`, advances a
+watermark over its `cursor_field`, and names any provider-reported removals in `deletes`. A row
+whose config pins a `backfill_after` hands that instant to `fetch_page` beside the spec — never on
+it, so the spec holds only connector declarations and nothing on it invites a per-run recomputation.
 
 An incremental run lands `MAX_RECORDS_PER_RUN` records and then stops at the first checkpoint
 advance — immediately for a stream with per-page checkpoints or none at all (tier 2 resumes by
@@ -179,6 +179,7 @@ class ConnectorBackend:
             origin, skip_target, watermark = envelope.origin, envelope.skip, envelope.watermark
         pages: list[Page] = []
         deletes: list[str] = []
+        dropped = 0
         page_cursor: str | None = None
         consumed = 0
         skipped = 0
@@ -201,7 +202,9 @@ class ConnectorBackend:
                         skipped += 1
                         continue
                     page_row = self._page(stream, record)
-                    if page_row is not None:
+                    if page_row is None:
+                        dropped += 1
+                    else:
                         pages.append(page_row)
                     if stream.cursor_field:
                         watermark = _max_str(watermark, record.get(stream.cursor_field))
@@ -234,6 +237,7 @@ class ConnectorBackend:
                         next_cursor=resume,
                         deletes=tuple(deletes),
                         snapshot=False,
+                        dropped=dropped,
                     )
         finally:
             if isinstance(stream_pages, AsyncGenerator):
@@ -248,6 +252,7 @@ class ConnectorBackend:
             next_cursor=next_cursor,
             deletes=tuple(deletes),
             snapshot=stream.delete_missing,
+            dropped=dropped,
         )
 
     def _stream(self, name: str) -> StreamSpec:
@@ -282,10 +287,11 @@ class ConnectorBackend:
         entry all settle on the same page.
 
         None when the page model rejects what the connector rendered for that one record. It is
-        dropped, named by `source_ref` and the field the model rejected, and the run lands the rest:
-        a run that raises commits no page and advances no cursor, so a single unrepresentable record
-        would hold every later record of the stream behind it for as long as the provider keeps
-        returning it."""
+        dropped, named by `source_ref` and the field the model rejected, counted onto the result's
+        `dropped` so the run's own success event carries the loss, and the run lands the rest: a run
+        that raises commits no page and advances no cursor, so a single unrepresentable record would
+        hold every later record of the stream behind it for as long as the provider keeps returning
+        it."""
         ref = _record_ref(stream, record)
         title, body = self.connector.render(record, stream)
         created_at = _record_timestamp(

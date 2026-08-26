@@ -16,9 +16,9 @@ to a downstream indexer under a `(revision, id)` cursor. The core `page` row car
 substrate and browse metadata;
 derivation state lives in the indexer's own mirror. The driver polls; it never fires on the writes
 it makes. `source_sync.failed` and `source_sync_failed_total` name a failed provider stream;
-`source_sync.ok` records what a successful run wrote; the `ufo.source_sync` service check carries
-each source row's current state, CRITICAL from the run that failed until the run that
-succeeds. A provider that keeps refusing a stream is neither: after
+`source_sync.ok` records what a successful run wrote and how many records it dropped;
+the `ufo.source_sync` service check carries each source row's current state, CRITICAL from the run
+that failed until the run that succeeds. A provider that keeps refusing a stream is neither: after
 `SOURCE_REFUSAL_PARK_THRESHOLD` refusals the row parks — held at
 `SOURCE_PARK_RETRY_SECONDS` instead of the interval, and recorded by `source_sync.parked` and
 `source_sync_parked_total` — until a run of it succeeds. A park pages nobody: only a member widening
@@ -150,12 +150,17 @@ class SyncResult(BaseModel):
     authoritative full collection, so the driver tombstones every prior page absent from `pages`.
     A delta/incremental backend leaves `snapshot=False` and names removals in `deletes` (the
     source_refs to tombstone), so the driver tombstones only those and never sweeps the pages a
-    partial fetch simply didn't mention."""
+    partial fetch simply didn't mention.
+
+    `dropped` counts the provider records this run could not represent as a page and discarded. A
+    run that drops every record it fetched is a success by every other signal it emits, so the count
+    rides onto `source_sync.ok`: the event that says what a run wrote says what it lost with it."""
 
     pages: tuple[Page, ...]
     next_cursor: str | None = None
     deletes: tuple[str, ...] = ()
     snapshot: bool = False
+    dropped: int = 0
 
 
 class CursorExpired(Exception):
@@ -692,7 +697,13 @@ class SyncDriver:
             deleted,
             result.snapshot,
         )
-        await self._report_ok(source, len(result.pages), len(changed) + len(metadata), tombstoned)
+        await self._report_ok(
+            source,
+            len(result.pages),
+            len(changed) + len(metadata),
+            tombstoned,
+            result.dropped,
+        )
 
     async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool, PageBrowse]]:
         async with workspace_tx() as connection:
@@ -856,13 +867,15 @@ class SyncDriver:
         return tombstoned
 
     async def _report_ok(
-        self, source: ClaimedSource, fetched: int, written: int, tombstoned: int
+        self, source: ClaimedSource, fetched: int, written: int, tombstoned: int, dropped: int
     ) -> None:
-        """One stream's successful run: what it wrote, as a log, and the stream's state, as an OK
-        service check. The check is what ends an alert on that row — a counter says a failure
-        happened and never that it stopped, so nothing but the passage of time took a recovered
-        stream out of a window over one. Each emission is suppressed on its own, as on the failure
-        path."""
+        """One stream's successful run: what it wrote and what it dropped, as a log, and the
+        stream's state, as an OK service check. `pages_dropped` is what the backend could not
+        represent: the drop already warns per record, and a warning is not a signal a health query
+        selects, so the run's own success event carries the count too. The check is what ends an
+        alert on that row — a counter says a failure happened and never that it stopped, so nothing
+        but the passage of time took a recovered stream out of a window over one. Each emission is
+        suppressed on its own, as on the failure path."""
         tags = _stream_tags(source)
         with suppress(Exception):
             log(
@@ -873,6 +886,7 @@ class SyncDriver:
                 pages_fetched=fetched,
                 pages_written=written,
                 pages_tombstoned=tombstoned,
+                pages_dropped=dropped,
             )
         with suppress(Exception):
             await emit_service_check(SOURCE_SYNC_CHECK, SERVICE_CHECK_OK, **_check_tags(source))

@@ -1,8 +1,9 @@
 """The Linear connector over a mock transport: the GraphQL `POST /graphql` shape — one query per
 page, `pageInfo.endCursor` threaded into the next request's `after`, `hasNextPage` ending the walk —
 the incremental `filter: { updatedAt: { gte } }` gate, a full-refresh stream (no `updatedAt` filter)
-threading no variables, the `render` override that lifts an issue/project into readable prose, the
-two rendered content streams naming only the fields the connector reads, a 403 surfacing as
+threading no variables, the `render` override that lifts an issue/project into readable prose and
+titles a titleless comment off its body, the two rendered content streams naming only the fields the
+connector reads, a 403 surfacing as
 `StreamSkipped`, and a GraphQL `errors` array failing loud. No conftest: the shared
 `ufo_testsupport` plugin covers fixtures, and these tests are offline (a canned transport, no
 DB, no token, no broker)."""
@@ -226,6 +227,49 @@ async def test_project_render_is_readable() -> None:
     assert "Ship v1 to customers" in body
     assert "started" in body
     assert "nodes" not in body
+
+
+async def test_comments_land_with_a_title_taken_off_the_body() -> None:
+    """A Linear comment has no title of its own and a page holds a non-empty one, so a comment
+    rendered with an empty title is a record the page model rejects: the run drops it, warns, and
+    reports success, and the comment never reaches recall. The first readable line of the body
+    titles the comment; a comment carrying no readable body takes its `stream/id` identity."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "comments": {
+                        "nodes": [
+                            {
+                                "id": "cm1",
+                                "body": "Looks good to me\nship it",
+                                "createdAt": "2026-02-01T00:00:00.000Z",
+                                "updatedAt": "2026-02-02T00:00:00.000Z",
+                            },
+                            {
+                                "id": "cm2",
+                                "body": "",
+                                "createdAt": "2026-02-01T00:00:00.000Z",
+                                "updatedAt": "2026-02-03T00:00:00.000Z",
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            },
+        )
+
+    result = await _fetch("comments", handle)
+
+    assert _refs(result) == {"comments/cm1", "comments/cm2"}
+    assert result.dropped == 0
+    titles = {page.source_ref: page.title for page in result.pages}
+    assert titles == {"comments/cm1": "Looks good to me", "comments/cm2": "comments/cm2"}
+    body = next(page.body for page in result.pages if page.source_ref == "comments/cm1")
+    assert "Looks good to me\nship it" in body
+    assert result.next_cursor == "2026-02-03T00:00:00.000Z"
 
 
 async def test_forbidden_status_raises_stream_skipped() -> None:
