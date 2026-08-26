@@ -15,6 +15,11 @@ Call `spawn(target="coding", ...)` immediately after this skill loads. Do not ca
 2. Read the child's report; `read` its deliverable if you must inspect it.
 3. Deliver (`share_file` the file the child wrote, or the shared delivery register) and reply.
 
+After a bare foreground `spawn` raises `TimeoutError`, do not infer the child stopped and do not
+expect a later result to be delivered. Do not inspect, pause, or spawn a duplicate. Report that the
+worker may still be running and that result delivery is not guaranteed. Do not tell the member to
+retry or ask again later.
+
 Every shell command in your turn is attributed to you, not to a child: a single `git`, `mkdir`, or `ls` in your own turn marks the task as done by you rather than delegated, however helpful it felt. Setup is not an exception — the clone or fetch is the first child's first act, and "the checkout already exists" is never something you made true yourself. If you are about to open a shell, you have left the procedure; spawn a child instead.
 
 BAD — this marks the task as yours, whatever happens next: `mkdir -p /workspace/repo && git fetch --depth 1 origin <sha> && git checkout FETCH_HEAD` in your own turn, then spawning with "the checkout already exists." GOOD — spawn first: the objective's first line carries the setup sentence, and the child runs the fetch as its first act.

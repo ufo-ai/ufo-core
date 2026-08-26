@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 import tomllib
 from pathlib import Path
@@ -11,6 +12,7 @@ from evals import ablate
 from evals.ablate import (
     BUILT_TREES,
     LOGS_DIR,
+    REMOTE_CLIENT_BINARY,
     RUNS_DIR,
     STACK_LOG,
     STACK_RUNS_DIR,
@@ -339,6 +341,37 @@ def test_remote_ablation_routes_every_arm_through_the_remote_transport(tmp_path:
     assert matrix.run[0].args == ("--concurrency", "4", "--remote", "--only", "basics")
 
 
+def test_remote_ablation_preflights_the_selected_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = tmp_path / "ufo"
+    client.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: ufo [--remote] [--json]'\n")
+    client.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    spec = _spec(remote=True)
+
+    selected = asyncio.run(
+        Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")._preflight_remote_client()
+    )
+
+    assert selected == client.resolve()
+
+
+def test_remote_ablation_rejects_a_client_without_the_remote_json_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = tmp_path / "ufo"
+    client.write_text("#!/bin/sh\nprintf '%s\\n' 'Usage: ufo [message...]'\n")
+    client.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    spec = _spec(remote=True)
+
+    with pytest.raises(SystemExit, match="ufo client with --remote and --json"):
+        asyncio.run(
+            Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")._preflight_remote_client()
+        )
+
+
 def test_every_arm_uses_the_experiment_model_and_reasoning(tmp_path: Path) -> None:
     spec = ExperimentSpec(
         name="exp",
@@ -480,7 +513,7 @@ def test_an_arm_missing_its_repo_path_is_recorded_as_a_failed_arm(tmp_path: Path
         arm=(ArmSpec(name="knockout", files={"gone.py": tmp_path / "variant.py"}),),
     )
     ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
-    result = asyncio.run(ablation._arm(spec.arm[0], base, asyncio.Semaphore(1)))
+    result = asyncio.run(ablation._arm(spec.arm[0], base, asyncio.Semaphore(1), None))
     assert result.error is not None
     assert "gone.py" in result.error
     assert result.kept_worktree is None
@@ -543,6 +576,34 @@ def test_an_arm_carries_the_app_page_build_output(tmp_path: Path) -> None:
         assert (worktree / path / f"built-{index}").read_text() == str(index)
 
 
+def test_a_remote_arm_carries_the_preflighted_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    root = tmp_path / "worktree"
+    egress = repo / ablate.EGRESS_BINARY
+    egress.parent.mkdir(parents=True)
+    egress.write_bytes(b"egress")
+    client = tmp_path / "selected-ufo"
+    client.write_bytes(b"exact-client-bytes")
+
+    def add_worktree(self: Ablation, *args: str) -> str:
+        assert args[:2] == ("worktree", "add")
+        Path(args[3]).mkdir(parents=True)
+        return ""
+
+    monkeypatch.setattr(Ablation, "_git", add_worktree)
+    monkeypatch.setattr(Ablation, "_sync", lambda self, path: None)
+    spec = _spec(remote=True)
+    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
+
+    ablation._materialize(spec.arm[0], "base", root, client)
+
+    carried = root / REMOTE_CLIENT_BINARY
+    assert carried.read_bytes() == client.read_bytes()
+    assert carried.stat().st_mode & 0o111
+
+
 def test_the_stack_runs_the_arm_environment_without_the_dev_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -572,6 +633,35 @@ def test_the_stack_runs_the_arm_environment_without_the_dev_group(
     assert text == output.decode()
 
 
+def test_a_remote_stack_pins_its_carried_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setenv("UFO_CLIENT_BINARY", "/build/linux/ufo")
+
+    class Fake:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def fake_exec(*argv: str, **kwargs: object) -> Fake:
+        seen.update(kwargs)
+        return Fake()
+
+    monkeypatch.setattr(ablate.asyncio, "create_subprocess_exec", fake_exec)
+    spec = _spec(remote=True)
+    root = tmp_path / "worktree"
+    carried = (root / REMOTE_CLIENT_BINARY).resolve()
+
+    asyncio.run(Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")._stack(spec.arm[0], root))
+
+    environment = seen["env"]
+    assert isinstance(environment, dict)
+    assert environment["PATH"].split(os.pathsep)[0] == str(carried.parent)
+    assert environment["UFO_CLIENT_BINARY"] == "/build/linux/ufo"
+
+
 def test_record_gaps_name_the_repeat_and_the_suite_that_recorded_nothing() -> None:
     """A stack that paid for a suite and archived no report for it is invisible to the pass counts:
     `collect_counts` reads what landed."""
@@ -582,6 +672,16 @@ def test_record_gaps_name_the_repeat_and_the_suite_that_recorded_nothing() -> No
     assert record_gaps(spec, "knockout", [complete[0]]) == ("ablate-knockout-1: no record",)
     assert record_gaps(spec, "knockout", [complete[0], _stack_record(1, ("closing_message",))]) == (
         "ablate-knockout-1: no report for response_register",
+    )
+
+
+def test_record_gaps_name_an_infra_excluded_case() -> None:
+    spec = _spec(repeats=1, suites=("closing_message",))
+    record = _stack_record(0, spec.suites)
+    record["reports"][0]["cases"] = [{"name": "provider-auth", "excluded": True}]
+
+    assert record_gaps(spec, "knockout", [record]) == (
+        "ablate-knockout-0: excluded case provider-auth",
     )
 
 
@@ -612,7 +712,14 @@ def _archived_arm(
     spec = _spec()
     root = tmp_path / WORKTREES_DIR / spec.name / spec.arm[0].name
 
-    def materialize(self: Ablation, arm: ArmSpec, base: str, target: Path) -> None:
+    def materialize(
+        self: Ablation,
+        arm: ArmSpec,
+        base: str,
+        target: Path,
+        remote_client: Path | None,
+    ) -> None:
+        assert remote_client is None
         (target / RUNS_DIR).mkdir(parents=True)
         for index, record in enumerate(records):
             (target / RUNS_DIR / f"{index}.json").write_text(json.dumps(record))
@@ -627,8 +734,31 @@ def _archived_arm(
     monkeypatch.setattr(Ablation, "_stack", stack)
     ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
 
-    result = asyncio.run(ablation._arm(spec.arm[0], "base", asyncio.Semaphore(1)))
+    result = asyncio.run(ablation._arm(spec.arm[0], "base", asyncio.Semaphore(1), None))
     return result, root
+
+
+@pytest.mark.parametrize("excluded_key", ("excludedSamples", "excludedTrials"))
+def test_an_arm_with_partial_infra_exclusions_keeps_its_worktree_and_logs_the_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, excluded_key: str
+) -> None:
+    spec = _spec()
+    records = [_stack_record(0, spec.suites), _stack_record(1, spec.suites)]
+    records[0]["reports"][0]["cases"] = [
+        _case("provider-throttle", 1, 2, excluded_key=excluded_key, excluded=1)
+    ]
+
+    result, root = _archived_arm(tmp_path, monkeypatch, records)
+    report = render_report(
+        spec,
+        (ArmResult("control", result.counts, result.cost_usd), result),
+    )
+
+    assert result.gaps == ("ablate-knockout-0: provider-throttle has 1 infra-excluded sample(s)",)
+    assert result.kept_worktree == root
+    assert (
+        "record gap: ablate-knockout-0: provider-throttle has 1 infra-excluded sample(s)" in report
+    )
 
 
 def test_a_complete_arm_archives_its_logs_and_gives_the_worktree_back(

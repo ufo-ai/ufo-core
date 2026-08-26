@@ -78,9 +78,31 @@ jobs:
           echo "$shards"
           echo "shards=$shards" >>"$GITHUB_OUTPUT"
 
+  sandbox-client:
+    name: sandbox client
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/client-gh
+        with:
+          target: x86_64-unknown-linux-musl
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+      - working-directory: client
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-client
+          path: client/target/release/ufo
+          if-no-files-found: error
+          retention-days: 1
+
   sweep:
     name: ${{ matrix.label }}
-    needs: plan
+    needs: [plan, sandbox-client]
     # The org-hosted larger runner `integration.yaml` already uses: 4 vCPU, 16 GB, ~87 GB free
     # disk. GitHub stops any job at six hours; the step deadline below fires first, so a shard that
     # overruns still uploads what it recorded.
@@ -129,6 +151,14 @@ jobs:
           enable-cache: true
 
       - run: uv sync
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sandbox-client
+          path: client/target/release
+      - run: |
+          chmod +x client/target/release/ufo
+          echo "$GITHUB_WORKSPACE/client/target/release" >> "$GITHUB_PATH"
 
       # The stack boots `ufo-egress` beside its serve so an in-sandbox fetch has a proxy to reach.
       # It locates the built binary and fails loud without it.

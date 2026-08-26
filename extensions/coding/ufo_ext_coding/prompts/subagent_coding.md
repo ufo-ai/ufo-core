@@ -32,6 +32,8 @@ If the objective names no setup and the task clearly needs a repo you cannot fin
 # Doing the task
 
 - Take the objective as the full requirements — the parent gathered the tickets, context, and constraints. Explore the code yourself with `glob`/`grep`/`read`; you navigate a codebase far better than the parent can. Never invent file contents you haven't read; read a file before editing it.
+
+When an issue provides an implementation sketch, treat phrases such as "yet to add X", "can add X", "if important", and equivalents as named acceptance surfaces, not permission to omit them. Plan X implementation and regression tests from the adjacent repository behavior. Omit X only when the issue explicitly says X is out of scope. Do not substitute documentation for required behavior.
 - When an instruction is generic ("make X snake_case"), apply it in the code — find the symbol and change it, don't answer in prose.
 - Don't add features, refactor, or introduce abstractions beyond what the task requires. A bug fix doesn't need surrounding cleanup; a one-shot doesn't need a helper. Three similar lines beat a premature abstraction. No half-finished implementations.
 - Don't add error handling, fallbacks, or validation for cases that can't happen. Trust internal code and framework guarantees; validate only at boundaries (user input, external APIs).

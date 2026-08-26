@@ -42,13 +42,16 @@ named `memory_ingestion.<corpus>.<category>` and are built from the snapshot at 
 budget preflight counts their cases from the snapshot instead of the registry.
 
 Credentials come from the invoking environment — the orchestrator adds nothing and strips
-nothing, so run it under the same minimal environment an `evals.stack` run takes."""
+nothing, so run it under the same minimal environment an `evals.stack` run takes. A remote
+experiment selects and validates one native client before it creates an arm, then copies those
+exact bytes into every worktree and puts that copy first on the arm's command path."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -63,12 +66,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from evals.harness.registry import narrowed_tasks
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
+from ufo.sandbox.client_binary import CLIENT_BINARY_NAME
 from ufo.schema.records import ReasoningEffort
 
 CONTROL_ARM = "control"
 INGESTION_PREFIX = "memory_ingestion"
 ARM_LABEL_PREFIX = "ablate"
 EGRESS_BINARY = Path("servers/egress/target/debug/ufo-egress")
+REMOTE_CLIENT_BINARY = Path(".local/bin/ufo")
 BUILT_TREES = (
     Path("extensions/web/ufo_ext_web/apps"),
     Path("extensions/sites/ufo_ext_sites/page/kit"),
@@ -258,11 +263,8 @@ def collect_counts(records: list[dict]) -> tuple[dict[str, CaseCount], float]:
 
 
 def record_gaps(spec: ExperimentSpec, arm: str, records: list[dict]) -> tuple[str, ...]:
-    """The records and suite reports this arm's stacks owed and never wrote. A stack pays for a
-    suite before it records it, so a repeat that archived nothing — or a record that carries only
-    some of the suites it ran — is spend with no evidence, and every verdict read against it is
-    void. Naming the gap keeps it out of the arithmetic's blind spot: `collect_counts` reads what
-    landed and cannot tell a suite that never ran from one whose report was lost."""
+    """The missing or infra-excluded evidence in this arm's records. Naming each gap keeps it out
+    of the arithmetic's blind spot and retains the stack worktree for diagnosis."""
     by_label = {record.get("label"): record for record in records}
     gaps = []
     for index in range(spec.repeats):
@@ -275,6 +277,27 @@ def record_gaps(spec: ExperimentSpec, arm: str, records: list[dict]) -> tuple[st
         absent = [name for name in spec.suites if name not in landed]
         if absent:
             gaps.append(f"{label}: no report for {', '.join(absent)}")
+        excluded = sorted(
+            case["name"]
+            for report in record["reports"]
+            for case in report["cases"]
+            if case.get("excluded")
+        )
+        if excluded:
+            gaps.append(f"{label}: excluded case {', '.join(excluded)}")
+        partial = sorted(
+            (case["name"], count)
+            for report in record["reports"]
+            for case in report["cases"]
+            if not case.get("excluded")
+            if (
+                count := ((case.get("evidence") or {}).get("excludedSamples") or 0)
+                + ((case.get("evidence") or {}).get("excludedTrials") or 0)
+            )
+        )
+        gaps.extend(
+            f"{label}: {name} has {count} infra-excluded sample(s)" for name, count in partial
+        )
     return tuple(gaps)
 
 
@@ -361,10 +384,13 @@ class Ablation:
 
     async def run(self) -> int:
         self._preflight()
+        remote_client = await self._preflight_remote_client()
         base = self._resolve_base()
         arms = (ArmSpec.model_construct(name=CONTROL_ARM, files={}), *self.spec.arm)
         slots = asyncio.Semaphore(self.spec.max_stacks)
-        results = await asyncio.gather(*(self._arm(arm, base, slots) for arm in arms))
+        results = await asyncio.gather(
+            *(self._arm(arm, base, slots, remote_client) for arm in arms)
+        )
         report = render_report(self.spec, tuple(results))
         self.out.mkdir(parents=True, exist_ok=True)
         (self.out / "report.md").write_text(report)
@@ -404,6 +430,31 @@ class Ablation:
             f"budget ${self.spec.budget_usd:.0f}"
         )
 
+    async def _preflight_remote_client(self) -> Path | None:
+        if not self.spec.remote:
+            return None
+        found = shutil.which(CLIENT_BINARY_NAME)
+        if found is None:
+            raise SystemExit("remote ablation requires ufo on PATH")
+        selected = Path(found)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                str(selected),
+                "--help",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as error:
+            raise SystemExit(f"remote ablation has no runnable ufo client: {error}") from error
+        stdout, stderr = await process.communicate()
+        if process.returncode or b"--remote" not in stdout or b"--json" not in stdout:
+            detail = (stderr or stdout).decode("utf-8", "replace").strip()[-TAIL_CHARS:]
+            raise SystemExit(
+                f"remote ablation requires a ufo client with --remote and --json: "
+                f"{selected}: {detail}"
+            )
+        return selected
+
     def _planned_cases(self) -> int:
         if self.spec.memory_ingestion is not None:
             return self._planned_ingestion_cases(self.spec.memory_ingestion)
@@ -437,7 +488,13 @@ class Ablation:
             ("git", "-C", str(self.repo), *args), check=True, capture_output=True, text=True
         ).stdout
 
-    async def _arm(self, arm: ArmSpec, base: str, slots: asyncio.Semaphore) -> ArmResult:
+    async def _arm(
+        self,
+        arm: ArmSpec,
+        base: str,
+        slots: asyncio.Semaphore,
+        remote_client: Path | None,
+    ) -> ArmResult:
         """One arm end to end. The worktree is removed only once the arm archived every record it
         owed: a stack pays before it records, so a lost record is the one moment the worktree's
         stack logs and databases are the only evidence of what the money bought, and the run that
@@ -449,7 +506,7 @@ class Ablation:
             keep = False
             print(f"[{arm.name}] materializing", flush=True)
             try:
-                await asyncio.to_thread(self._materialize, arm, base, root)
+                await asyncio.to_thread(self._materialize, arm, base, root, remote_client)
                 keep = True
                 print(f"[{arm.name}] stack running", flush=True)
                 exit_code, output = await self._stack(arm, root)
@@ -503,7 +560,7 @@ class Ablation:
             logs.mkdir(parents=True, exist_ok=True)
             shutil.copy(path, logs / path.name)
 
-    def _materialize(self, arm: ArmSpec, base: str, root: Path) -> None:
+    def _materialize(self, arm: ArmSpec, base: str, root: Path, remote_client: Path | None) -> None:
         if root.exists():
             self._remove_worktree(root)
         root.parent.mkdir(parents=True, exist_ok=True)
@@ -514,6 +571,11 @@ class Ablation:
         binary.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(self.repo / EGRESS_BINARY, binary)
         binary.chmod(0o755)
+        if remote_client is not None:
+            carried_client = root / REMOTE_CLIENT_BINARY
+            carried_client.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(remote_client, carried_client)
+            carried_client.chmod(0o755)
         self._carry_build_output(root)
         config = root / "ablate-template.toml"
         config.write_text(tomli_w.dumps(self.spec.template))
@@ -600,6 +662,13 @@ class Ablation:
         }
 
     async def _stack(self, arm: ArmSpec, root: Path) -> tuple[int, str]:
+        environment = None
+        if self.spec.remote:
+            carried_client = (root / REMOTE_CLIENT_BINARY).resolve()
+            environment = dict(os.environ)
+            environment["PATH"] = os.pathsep.join(
+                part for part in (str(carried_client.parent), environment.get("PATH")) if part
+            )
         process = await asyncio.create_subprocess_exec(
             "uv",
             "run",
@@ -611,6 +680,7 @@ class Ablation:
             "evals.stack",
             str(root / "ablate-matrix.toml"),
             cwd=root,
+            env=environment,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

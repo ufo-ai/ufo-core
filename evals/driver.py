@@ -481,13 +481,19 @@ class WorkspaceDriver:
                     Message(
                         role="assistant",
                         content=(
-                            TextBlock(text=round.narration),
+                            *((TextBlock(text=round.narration),) if round.narration else ()),
                             ToolUseBlock(id=call_id, name=round.tool, input=round.input),
                         ),
                     ),
                     Message(
                         role="user",
-                        content=(ToolResultBlock(tool_use_id=call_id, content=round.result),),
+                        content=(
+                            ToolResultBlock(
+                                tool_use_id=call_id,
+                                content=round.result,
+                                is_error=round.is_error,
+                            ),
+                        ),
                     ),
                 )
             await self.blob.put(

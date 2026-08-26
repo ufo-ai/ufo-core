@@ -39,6 +39,7 @@ module "platform" {
   node_min_size             = 4
   node_max_size             = 6
   node_desired_size         = 4
+  node_disk_size            = 64
   rds_instance_class        = "db.t4g.medium"
   rds_multi_az              = false
   rds_allocated_storage     = 20

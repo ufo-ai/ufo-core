@@ -363,8 +363,8 @@ spec:
             - {name: AWS_REGION, value: "${region}"}
 %{ endif }
           resources:
-            requests: {cpu: 250m, memory: 512Mi}
-            limits: {cpu: "2", memory: 3Gi}
+            requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 32Gi}
+            limits: {cpu: "2", memory: 3Gi, ephemeral-storage: 32Gi}
           volumeMounts:
             - {name: cache, mountPath: /var/cache/ufo}
           # Liveness only — never readiness. The cache is an optimization co-located with the proxy;

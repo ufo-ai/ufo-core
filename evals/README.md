@@ -7,6 +7,8 @@ Start `ufoctl serve` with a test workspace. You can delete the workspace after t
 ```bash
 uv run python -m evals --workspace <workspace-id> --label baseline
 uv run python -m evals --remote --workspace <workspace-id> --label remote
+uv run python -m evals --remote --only coding_profile --agent profile:coding \
+  --workspace <workspace-id> --label coding-profile
 uv run python -m evals --view
 uv run python -m evals --share <current-run> <baseline-run>
 ```
@@ -14,6 +16,10 @@ uv run python -m evals --share <current-run> <baseline-run>
 `--remote` admits each case through `ufo --remote --json` at the configured serve URL. The current
 `ufo` must be on `PATH`, and `UFO_TOKEN_SECRET` must match the running serve process. Remote cases
 use the private member audience of the terminal surface; shared-audience cases fail before admission.
+`profile:<name>` is an explicit profile target for suites that pin it. The member turn is a proxy
+that must foreground-spawn that qualified production profile with the case objective unchanged;
+the grader reads the child's validated result and ignores the proxy's answer. A durable agent with
+the same bare name cannot capture the target.
 
 Corpus runs use the same concurrency control:
 

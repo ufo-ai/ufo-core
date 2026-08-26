@@ -73,6 +73,17 @@ def test_an_agent_specific_suite_runs_in_its_own_shard(planner) -> None:
     assert shard.suites == ("code_review",)
 
 
+def test_agent_specific_shard_labels_are_artifact_safe(planner) -> None:
+    profile = next(shard for shard in planner.plan(smoke=False) if "coding_profile" in shard.suites)
+
+    assert profile.agent == "profile:coding"
+    assert profile.label.startswith("nightly-assistant-eval-profile-coding")
+    assert all(
+        planner.UNSAFE_LABEL_CHARS.search(shard.label) is None
+        for shard in planner.plan(smoke=False)
+    )
+
+
 def test_application_suites_do_not_share_a_shard_with_other_suites(planner) -> None:
     for shard in planner.plan(smoke=False):
         app_suites = planner.APP_SUITES.intersection(shard.suites)
@@ -135,10 +146,38 @@ def test_the_workflow_fans_out_over_the_planned_shards(workflow) -> None:
     sweep = workflow["jobs"]["sweep"]
     plan = workflow["jobs"]["plan"]
 
-    assert sweep["needs"] == "plan"
+    assert sweep["needs"] == ["plan", "sandbox-client"]
     assert sweep["strategy"]["fail-fast"] is False
     assert sweep["strategy"]["matrix"]["label"] == "${{ fromJSON(needs.plan.outputs.shards) }}"
     assert '--plan "$SWEEP_SMOKE"' in plan["steps"][-1]["run"]
+
+
+def test_every_sweep_shard_receives_one_shared_sandbox_client(workflow) -> None:
+    producer = workflow["jobs"]["sandbox-client"]
+    upload = next(
+        step for step in producer["steps"] if step.get("uses", "").startswith("actions/upload")
+    )
+
+    assert upload["with"] == {
+        "name": "sandbox-client",
+        "path": "client/target/release/ufo",
+        "if-no-files-found": "error",
+        "retention-days": 1,
+    }
+    sweep = workflow["jobs"]["sweep"]
+    download = next(
+        step
+        for step in sweep["steps"]
+        if step.get("uses", "").startswith("actions/download-artifact")
+        and step["with"].get("name") == "sandbox-client"
+    )
+    install = sweep["steps"][sweep["steps"].index(download) + 1]
+
+    assert "sandbox-client" in sweep["needs"]
+    assert download["with"]["path"] == "client/target/release"
+    assert "chmod +x client/target/release/ufo" in install["run"]
+    assert 'client/target/release" >> "$GITHUB_PATH"' in install["run"]
+    assert "needs" not in workflow["jobs"]["memory-ingestion"]
 
 
 def test_every_shard_archives_its_own_records_and_the_archive_merges_them(workflow) -> None:

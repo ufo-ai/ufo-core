@@ -30,6 +30,8 @@ from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from dbos import error as dbos_error
 from httpx import AsyncClient, MockTransport, Request, Response
+from ufo_ext_coding.manifest import CODING_PROFILE
+from ufo_ext_coding.manifest import manifest as coding_manifest
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DEPLOY_TOOL,
     APPLICATION_BUILDER_DESIGN_TOOL,
@@ -150,6 +152,7 @@ from evals.harness.viewer import (
     render_viewer,
 )
 from evals.registry import (
+    DEFAULT_TASKS,
     SCENARIO_SIMULATOR_MODEL,
     SEMANTIC_JUDGE_MODEL,
     TASKS,
@@ -684,6 +687,29 @@ def test_code_review_refuses_to_run_as_the_default_agent(
         eval_main(["--only", "code_review", "--out", str(tmp_path)])
 
     assert "code_review requires --agent 'code'" in capsys.readouterr().err
+
+
+def test_profile_target_refuses_an_unpinned_suite(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "evals.__main__.load_config",
+        lambda: SimpleNamespace(pack=SimpleNamespace(name="assistant_hosted")),
+    )
+
+    with pytest.raises(SystemExit):
+        eval_main(
+            [
+                "--only",
+                "coding_subagent",
+                "--agent",
+                "profile:coding",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+
+    assert "coding_subagent does not target --agent 'profile:coding'" in capsys.readouterr().err
 
 
 def test_stateful_and_scenario_tasks_are_exclusive() -> None:
@@ -2291,6 +2317,16 @@ async def test_a_turn_that_died_on_a_transport_fault_is_excluded_not_scored() ->
     assert "case is excluded" not in result.reason
 
 
+async def test_a_turn_that_died_on_a_rejected_provider_key_is_excluded_not_scored() -> None:
+    case = CapabilityCase("crashed", "do the task", exact_scorer("done"))
+
+    result = await run_capability_case(case, CrashedTarget("CredentialValueInvalid"))  # type: ignore[arg-type]
+
+    assert result.excluded is True
+    assert result.passed is False
+    assert "the eval configuration owns this fault" in result.reason
+
+
 async def test_a_turn_that_died_on_an_internal_fault_stays_a_failure() -> None:
     """The exclusion reads the terminal's exact class against the provider-fault set, so a wedge of
     ours — a DB fault, a bare builtin timeout the backstop commits as `type(error).__name__` — is
@@ -2421,7 +2457,11 @@ async def test_a_case_carrying_undelivered_rounds_seeds_them_before_the_turn_run
         Message(
             role="user",
             content=(
-                ToolResultBlock(tool_use_id="undelivered-0", content="segment,who\nA,operations"),
+                ToolResultBlock(
+                    tool_use_id="undelivered-0",
+                    content="segment,who\nA,operations",
+                    is_error=True,
+                ),
             ),
         ),
     )
@@ -2449,6 +2489,7 @@ async def test_a_case_carrying_undelivered_rounds_seeds_them_before_the_turn_run
                 tool="read",
                 input={"file_path": "/workspace/outreach/segments.csv"},
                 result="segment,who\nA,operations",
+                is_error=True,
             ),
         ),
     )
@@ -3283,6 +3324,335 @@ async def test_parallel_checkout_scorer_covers_every_checkout_guard() -> None:
         True,
     )
     assert not (await grader(CapabilityOutput("done", (setup, first, missing_remote)))).passed
+
+
+async def test_foreground_timeout_scorer_requires_fail_open_without_more_tools() -> None:
+    grader = coding_subagent.foreground_timeout_scorer()
+    response = (
+        "The timeout does not prove it stopped; the worker may still be running. The bare error "
+        "has no guaranteed delivery, so I will not start a duplicate."
+    )
+    seeded = (
+        ToolInvocation("load_skill", {"name": "coding"}, "loaded", True, call_id="undelivered-0"),
+        ToolInvocation("spawn", {"target": "coding"}, "TimeoutError:", True, True, "undelivered-1"),
+    )
+
+    assert (await grader(CapabilityOutput(response, (), own_calls=()))).passed
+    assert (await grader(CapabilityOutput(response, seeded, own_calls=seeded))).passed
+    assert (
+        await grader(
+            CapabilityOutput(
+                "The worker may still be running, but its result is not guaranteed to return here.",
+                seeded,
+                own_calls=seeded,
+            )
+        )
+    ).passed
+    assert (
+        await grader(
+            CapabilityOutput(
+                "The worker may still be running and delivery is not guaranteed. Do not inspect, "
+                "pause, or spawn a duplicate.",
+                (),
+                own_calls=(),
+            )
+        )
+    ).passed
+    assert (
+        await grader(
+            CapabilityOutput(
+                "The worker may still be running and there is no guarantee its result will be "
+                "delivered back here. Do not retry.",
+                (),
+                own_calls=(),
+            )
+        )
+    ).passed
+    for tool in ("spawn", "pause_and_wait", "object_list", "bash", "read"):
+        call = ToolInvocation(tool, {}, "done", True, call_id="call-live")
+        assert not (
+            await grader(CapabilityOutput(response, (*seeded, call), own_calls=(*seeded, call)))
+        ).passed
+    assert not (
+        await grader(
+            CapabilityOutput(
+                "The worker may still be running, so I will not start a duplicate.",
+                (),
+                own_calls=(),
+            )
+        )
+    ).passed
+    assert not (
+        await grader(
+            CapabilityOutput(
+                "There is no guaranteed delivery from the bare timeout.", (), own_calls=()
+            )
+        )
+    ).passed
+    for unsafe in (
+        "The worker may still be running and delivery is not guaranteed. Start a duplicate now.",
+        "The worker may still be running and delivery is not guaranteed, so start a duplicate.",
+        "The worker may still be running and delivery is not guaranteed. Inspect it and pause.",
+        "The worker may still be running and delivery is not guaranteed. Retry the spawn.",
+        "The worker may still be running and there is no guarantee its result will be delivered "
+        "back here. If nothing arrives, ask again and I'll run the task fresh.",
+    ):
+        assert not (await grader(CapabilityOutput(unsafe, (), own_calls=()))).passed
+
+
+async def test_cross_layer_error_emitter_scorer_requires_the_active_public_path() -> None:
+    response = (
+        "Causal path: forms.DecimalField.clean() calls DecimalField.validate() before "
+        "DecimalValidator, and that override directly raises for NaN without params, bypassing "
+        "the changed validator. Remove the DecimalField.validate override and let "
+        "DecimalValidator own the non-finite check. Add a public form test that submits NaN with "
+        "the %(value)s placeholder and expects NaN in form.errors."
+    )
+    grader = coding_subagent.cross_layer_error_emitter_scorer()
+    tool = ToolInvocation("grep", {"pattern": "DecimalField"}, "match", True)
+
+    assert (await grader(CapabilityOutput(response, ()))).passed
+    assert not (await grader(CapabilityOutput(response, (tool,)))).passed
+    assert not (
+        await grader(
+            CapabilityOutput(response.replace("DecimalField.validate", "the form field"), ())
+        )
+    ).passed
+    assert not (
+        await grader(
+            CapabilityOutput(
+                response.replace(
+                    "Remove the DecimalField.validate override and let DecimalValidator own "
+                    "the non-finite check.",
+                    "Add params with value to DecimalField.validate too.",
+                ),
+                (),
+            )
+        )
+    ).passed
+    assert not (
+        await grader(
+            CapabilityOutput(
+                response.replace(
+                    "Add a public form test that submits NaN with the %(value)s placeholder and "
+                    "expects NaN in form.errors.",
+                    "Keep the direct DecimalValidator unit test.",
+                ),
+                (),
+            )
+        )
+    ).passed
+
+
+async def test_direct_error_emitter_scorer_rejects_cross_layer_scope_inflation() -> None:
+    response = (
+        "URLValidator.__call__ directly raises on its bad scheme before regex validation. Add "
+        "params={'value': value} at that raise. Test URLValidator directly with "
+        "ftp://example.com and assert that the custom value placeholder renders the URL."
+    )
+    grader = coding_subagent.direct_error_emitter_scorer()
+
+    assert (await grader(CapabilityOutput(response, ()))).passed
+    assert not (
+        await grader(
+            CapabilityOutput(response.replace("URLValidator.__call__", "RegexValidator"), ())
+        )
+    ).passed
+    assert not (
+        await grader(CapabilityOutput(response + " Also change Field.clean for consistency.", ()))
+    ).passed
+    assert not (
+        await grader(
+            CapabilityOutput(
+                response.replace(
+                    "Test URLValidator directly with ftp://example.com and assert that the custom "
+                    "value placeholder renders the URL.",
+                    "Run the existing broad suite.",
+                ),
+                (),
+            )
+        )
+    ).passed
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "Exact error emitter: URLValidator.__call__ raises ValidationError in the bad-scheme "
+        'branch. Add params={"value": value}. Call URLValidator(schemes=["http"]) with '
+        '"ftp://example.com" '
+        "and assert the custom message renders the URL.",
+        "URLValidator.__call__ bad-scheme branch owns the error. Raise with "
+        "params={'value': value}. Call URLValidator with ftp://example.com and check the message.",
+        "URLValidator.__call__ owns the bad-scheme branch. Raise with "
+        'params={"value": value}. Set validator = URLValidator(schemes=["http"]), then assert '
+        'validator("ftp://example.com") raises the rendered custom message.',
+    ),
+)
+async def test_direct_error_emitter_scorer_accepts_explicit_direct_calls(response: str) -> None:
+    assert (
+        await coding_subagent.direct_error_emitter_scorer()(CapabilityOutput(response, ()))
+    ).passed
+
+
+async def test_composite_modulus_boundary_scorer_requires_the_full_decomposition() -> None:
+    response = (
+        "The prime-only patch is incomplete and does not complete the composite modulus request. "
+        "Factor the modulus into prime powers with factorint. Find roots modulo each prime, then "
+        "Hensel lift roots through each prime power. Branch over singular roots when the "
+        "derivative is zero. Take the Cartesian product of per-factor roots and combine each "
+        "tuple with CRT. Test nthroot_mod(29, 31, 74), the prime-power examples, and "
+        "nthroot_mod(0, 7, 100)."
+    )
+    grader = coding_subagent.composite_modulus_boundary_scorer()
+    tool = ToolInvocation("grep", {"pattern": "nthroot_mod"}, "match", True)
+
+    assert (await grader(CapabilityOutput(response, ()))).passed
+    assert not (await grader(CapabilityOutput(response, (tool,)))).passed
+    assert not (
+        await grader(
+            CapabilityOutput(
+                "The prime modulus zero shortcut is sufficient. Test 17*17, 5, 17.", ()
+            )
+        )
+    ).passed
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "The prime-only patch is insufficient for the composite-modulus request. Factor into "
+        "prime powers, lift unit roots, branch when the derivative is zero for singular roots, "
+        "then combine every tuple with CRT. Test 29, 31, 74 and 0, 7, 100.",
+        "The shortcut does not complete the composite modulus algorithm. Use factorint, Hensel "
+        "lift each root including every non-invertible derivative branch, take the Cartesian "
+        "product, and use the Chinese remainder theorem. Test modulus 74 and modulus 100.",
+    ),
+)
+async def test_composite_modulus_boundary_scorer_accepts_equivalent_decompositions(
+    response: str,
+) -> None:
+    assert (
+        await coding_subagent.composite_modulus_boundary_scorer()(CapabilityOutput(response, ()))
+    ).passed
+
+
+async def test_prime_zero_boundary_scorer_rejects_composite_scope_growth() -> None:
+    response = (
+        "Keep the prime modulus boundary. Add `if a % p == 0` before is_nthpow_residue and "
+        "return [0] if all_roots else 0. Test nthroot_mod(17*17, 5, 17) with both return shapes."
+    )
+    grader = coding_subagent.prime_zero_boundary_scorer()
+
+    assert (await grader(CapabilityOutput(response, ()))).passed
+    assert not (
+        await grader(CapabilityOutput(response + " Add Hensel lifting and CRT too.", ()))
+    ).passed
+    assert not (
+        await grader(CapabilityOutput(response.replace("return [0] if all_roots else 0. ", ""), ()))
+    ).passed
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        "Keep `if not isprime(p): raise NotImplementedError`. Guard the rejection with "
+        "`if a and not is_nthpow_residue`, then use `if not a: return [0] if all_roots else 0`. "
+        "Test nthroot_mod(17*17, 5, 17).",
+        "For the prime-modulus path, handle `a % p == 0` before the prime-modulus residue test. "
+        "Return 0 when all_roots=False and [0] when all_roots=True. Keep composite behavior "
+        "unchanged. Test nthroot_mod(17 * 17, 5, 17).",
+    ),
+)
+async def test_prime_zero_boundary_scorer_accepts_guard_and_early_return_forms(
+    response: str,
+) -> None:
+    assert (
+        await coding_subagent.prime_zero_boundary_scorer()(CapabilityOutput(response, ()))
+    ).passed
+
+
+def test_modular_boundary_cases_are_single_sample_target_and_scope_neighbor() -> None:
+    names = {
+        "coding-subagent-composite-modulus-boundary",
+        "coding-subagent-prime-zero-boundary",
+    }
+    cases = {case.name: case for case in coding_subagent.PROFILE_CASES if case.name in names}
+
+    assert set(cases) == names
+    assert all(case.samples == 1 for case in cases.values())
+
+
+def test_error_emitter_cases_are_single_sample_target_and_scope_neighbor() -> None:
+    cases = {case.name for case in coding_subagent.PROFILE_CASES if "error-emitter" in case.name}
+
+    assert cases == {
+        "coding-subagent-cross-layer-error-emitter",
+        "coding-subagent-direct-error-emitter",
+    }
+    assert all(
+        case.samples == 1 for case in coding_subagent.PROFILE_CASES if "error-emitter" in case.name
+    )
+
+
+def test_coding_profile_cases_are_explicit_and_pin_the_profile_target() -> None:
+    task = next(task for task in TASKS if task.name == "coding_profile")
+
+    assert task.agent == "profile:coding"
+    assert task not in DEFAULT_TASKS
+    assert set(task.cases) == {case.name for case in coding_subagent.PROFILE_CASES}
+    assert not set(task.cases) & {
+        case_name for default in DEFAULT_TASKS for case_name in default.cases
+    }
+
+
+async def test_profile_proxy_scorer_grades_the_exact_child_result() -> None:
+    objective = "Choose the narrow fix."
+    spawn = ToolInvocation(
+        "spawn",
+        {"target": "profile:coding", "payload": {"objective": objective}},
+        dumps({"result": "ANSWER: NARROW"}),
+        has_result=True,
+        call_id="proxy-spawn",
+    )
+    output = CapabilityOutput(
+        "The proxy rewrote this answer.",
+        (spawn,),
+        own_calls=(spawn,),
+    )
+
+    verdict = await coding_subagent.profile_proxy_scorer(objective, exact_scorer("NARROW"))(output)
+
+    assert verdict.passed
+
+
+@pytest.mark.parametrize(
+    ("observed", "passed"),
+    (
+        ("Choose the narrow fix.\nColumns:\t\tLabel", True),
+        ("Choose the narrow\nfix. Columns: Label", True),
+        (r"Choose the narrow fix. Columns:\t\tLabel", True),
+        ("Choose the broad fix. Columns: Label", False),
+        ("Choose the narrow fix.", False),
+    ),
+)
+async def test_profile_proxy_scorer_accepts_only_formatting_transport_changes(
+    observed: str, passed: bool
+) -> None:
+    objective = "Choose the narrow fix.\nColumns:\t\tLabel"
+    spawn = ToolInvocation(
+        "spawn",
+        {"target": "profile:coding", "payload": {"objective": observed}},
+        dumps({"result": "ANSWER: NARROW"}),
+        has_result=True,
+        call_id="proxy-spawn",
+    )
+
+    verdict = await coding_subagent.profile_proxy_scorer(objective, exact_scorer("NARROW"))(
+        CapabilityOutput("done", (spawn,), own_calls=(spawn,))
+    )
+
+    assert verdict.passed is passed
 
 
 async def test_github_app_api_scorer_requires_the_skill_command_and_no_connector() -> None:
@@ -6735,6 +7105,13 @@ async def test_workspace_driver_seeds_an_undelivered_round_behind_the_case_messa
                 input={"file_path": "/workspace/outreach/segments.csv"},
                 result="segment,who\nA,operations",
             ),
+            UndeliveredRound(
+                narration="",
+                tool="write",
+                input={"file_path": "/workspace/outreach/draft.md"},
+                result="upstream timeout",
+                is_error=True,
+            ),
         ),
     )
 
@@ -6771,6 +7148,26 @@ async def test_workspace_driver_seeds_an_undelivered_round_behind_the_case_messa
                     ),
                 ),
             ),
+            Message(
+                role="assistant",
+                content=(
+                    ToolUseBlock(
+                        id="undelivered-1",
+                        name="write",
+                        input={"file_path": "/workspace/outreach/draft.md"},
+                    ),
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    ToolResultBlock(
+                        tool_use_id="undelivered-1",
+                        content="upstream timeout",
+                        is_error=True,
+                    ),
+                ),
+            ),
         ),
     )
 
@@ -6786,6 +7183,32 @@ def test_an_undelivered_round_requires_the_member_message_it_answers() -> None:
                 UndeliveredRound(narration="drafting", tool="read", input={}, result="body"),
             ),
         )
+
+
+def test_an_undelivered_error_changes_the_case_payload() -> None:
+    def case(is_error: bool) -> CapabilityCase:
+        return CapabilityCase(
+            "interrupted",
+            "carry on",
+            exact_scorer("done"),
+            prior_messages=("tighten the email",),
+            undelivered=(
+                UndeliveredRound(
+                    narration="drafting",
+                    tool="read",
+                    input={"file_path": "/workspace/draft.md"},
+                    result="body",
+                    is_error=is_error,
+                ),
+            ),
+        )
+
+    successful = case(False).payload()
+    failed = case(True).payload()
+
+    assert successful["undelivered"][0]["isError"] is False
+    assert failed["undelivered"][0]["isError"] is True
+    assert successful != failed
 
 
 async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence(
@@ -8005,6 +8428,55 @@ async def test_fresh_workspace_is_provisioned_before_agent_resolution(
         )
 
     assert calls == [recorder.id]
+
+
+async def test_profile_target_uses_the_main_agent_as_an_explicit_spawn_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    recorder = _recorder(tmp_path)
+    resolutions: list[str] = []
+
+    async def resolve(agent_name: str, selected: UUID | None):
+        resolutions.append(agent_name)
+        assert agent_name == "assistant"
+        assert selected == workspace_id
+        return workspace_id, agent_id, "main prompt", MODEL, AGENT_REASONING
+
+    async def dispose() -> None:
+        return None
+
+    class Materialized(Exception):
+        pass
+
+    def stop(_config: object) -> object:
+        raise Materialized
+
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
+    monkeypatch.setattr("evals.__main__.dispose_db", dispose)
+    monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
+    monkeypatch.setattr("evals.__main__.install_credential_requests", lambda _requests: None)
+    monkeypatch.setattr("evals.__main__.load_manifests", lambda _pack: (coding_manifest(),))
+    monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
+    monkeypatch.setattr("evals.__main__.blob_store_for", stop)
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+    )
+
+    with pytest.raises(Materialized):
+        await run_evals(
+            config,
+            (),
+            "profile:coding",
+            recorder,
+            workspace_id=workspace_id,
+        )
+
+    assert resolutions == ["assistant"]
+    assert recorder.agent_prompt == CODING_PROFILE.prompt
 
 
 async def test_run_builds_the_compaction_client_inside_the_workspace_scope(

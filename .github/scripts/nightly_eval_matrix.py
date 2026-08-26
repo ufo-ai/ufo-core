@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ PUBLIC_BASE_URL = "http://evals.invalid"
 SMOKE_PROBE = "basics"
 SMOKE_SUITES = (SMOKE_PROBE, "semantic_quality", "scenario_smoke", "ab_reversal")
 APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy"})
+UNSAFE_LABEL_CHARS = re.compile(r"[^A-Za-z0-9.-]+")
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,14 @@ class Shard:
     suites: tuple[str, ...]
 
 
+def _label_token(value: str) -> str:
+    """Keep a matrix label safe when it is embedded in a GitHub artifact name."""
+    token = UNSAFE_LABEL_CHARS.sub("-", value.replace("_", "-")).strip("-")
+    if not token:
+        raise ValueError(f"cannot make an artifact-safe label from {value!r}")
+    return token
+
+
 def plan(smoke: bool) -> tuple[Shard, ...]:
     """Every registered suite, split into shards that each fit inside one job's ceiling."""
     tasks = TASKS
@@ -84,9 +94,9 @@ def plan(smoke: bool) -> tuple[Shard, ...]:
                 carried = (probe, *carried)
             if not carried:
                 continue
-            stem = f"nightly-{arm.pack.replace('_', '-')}"
+            stem = f"nightly-{_label_token(arm.pack)}"
             if agent is not None:
-                stem += f"-{agent.replace('_', '-')}"
+                stem += f"-{_label_token(agent)}"
             app_tasks = tuple(task for task in carried if task.name in APP_SUITES)
             other_tasks = tuple(task for task in carried if task.name not in APP_SUITES)
             groups = (*_balance(app_tasks), *_balance(other_tasks))

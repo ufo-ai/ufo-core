@@ -10,7 +10,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import openai
@@ -44,6 +44,7 @@ from openai.types.responses.response_input_message_content_list_param import (
 from openai.types.responses.response_input_param import FunctionCallOutput, ResponseInputItemParam
 from openai.types.responses.response_input_text_content_param import ResponseInputTextContentParam
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
+from openai.types.responses.response_output_text_param import ResponseOutputTextParam
 from openai.types.responses.response_reasoning_item_param import Summary as ReasoningSummaryParam
 from openai.types.responses.response_usage import InputTokensDetails, ResponseUsage
 from openai.types.shared.reasoning_effort import ReasoningEffort as OpenAIEffort
@@ -225,7 +226,7 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
         if isinstance(message.content, str):
             items.append(EasyInputMessageParam(role=message.role, content=message.content))
             continue
-        content: list[ResponseInputContentParam] = []
+        content: list[ResponseInputContentParam | ResponseOutputTextParam] = []
         for block in message.content:
             match block:
                 case ThinkingBlock() | RedactedThinkingBlock():
@@ -243,7 +244,11 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
                         )
                     )
                 case TextBlock(text=text):
-                    content.append(ResponseInputTextParam(type="input_text", text=text))
+                    content.append(
+                        ResponseOutputTextParam(type="output_text", text=text, annotations=[])
+                        if message.role == "assistant"
+                        else ResponseInputTextParam(type="input_text", text=text)
+                    )
                 case ImageBlock(source=source):
                     content.append(
                         ResponseInputImageParam(
@@ -254,7 +259,12 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
                     )
                 case ToolUseBlock(id=call_id, name=name, input=arguments):
                     if content:
-                        items.append(EasyInputMessageParam(role=message.role, content=content))
+                        items.append(
+                            cast(
+                                ResponseInputItemParam,
+                                {"role": message.role, "content": content},
+                            )
+                        )
                         content = []
                     items.append(
                         ResponseFunctionToolCallParam(
@@ -266,7 +276,12 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
                     )
                 case ToolResultBlock(tool_use_id=call_id, content=result, is_error=is_error):
                     if content:
-                        items.append(EasyInputMessageParam(role=message.role, content=content))
+                        items.append(
+                            cast(
+                                ResponseInputItemParam,
+                                {"role": message.role, "content": content},
+                            )
+                        )
                         content = []
                     if isinstance(result, str):
                         output: str | list[ResponseFunctionCallOutputItemParam] = (
@@ -300,7 +315,7 @@ def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemPara
                         )
                     )
         if content:
-            items.append(EasyInputMessageParam(role=message.role, content=content))
+            items.append(cast(ResponseInputItemParam, {"role": message.role, "content": content}))
     return items
 
 

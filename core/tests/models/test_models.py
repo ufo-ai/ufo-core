@@ -1470,7 +1470,10 @@ def test_responses_input_echoes_the_reasoning_item_and_drops_the_thinking_blocks
             "encrypted_content": "Z3B0LWVuY3J5cHRlZA",
             "summary": [{"type": "summary_text", "text": "weigh the item"}],
         },
-        {"role": "assistant", "content": [{"type": "input_text", "text": "checking"}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "checking", "annotations": []}],
+        },
         {
             "type": "function_call",
             "call_id": "t1",

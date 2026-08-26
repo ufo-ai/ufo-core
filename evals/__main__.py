@@ -270,7 +270,11 @@ def main(argv: list[str] | None = None) -> None:
         help="run only the named cases within the --only suites",
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="run archive directory")
-    parser.add_argument("--agent", default=DEFAULT_AGENT_NAME, help="target agent name")
+    parser.add_argument(
+        "--agent",
+        default=DEFAULT_AGENT_NAME,
+        help="target durable agent name or a profile:<name> pinned by the selected suite",
+    )
     parser.add_argument(
         "--candidate-from-proposal",
         type=UUID,
@@ -746,6 +750,8 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(
                 f"{task.name} requires [pack] name in {task.packs}, found {config.pack.name!r}"
             )
+        if args.agent.startswith("profile:") and task.agent != args.agent:
+            parser.error(f"{task.name} does not target --agent {args.agent!r}")
         if task.agent is not None and task.agent != args.agent:
             parser.error(f"{task.name} requires --agent {task.agent!r}, found {args.agent!r}")
     workspace_id = args.workspace
@@ -945,18 +951,31 @@ async def _run(
                     )
                 )
                 workspace_id = await RemoteWorkspaceProvisioner(onboard).provision(recorder.id)
-            if candidate_proposal is not None:
+            profile = None
+            if agent_name.startswith("profile:"):
+                if candidate_proposal is not None:
+                    raise ValueError("a profile target cannot use --candidate-from-proposal")
+                profile_name = agent_name.removeprefix("profile:")
+                profile = SubagentRegistry(
+                    (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
+                ).get(profile_name)
+                resolved_agent = await resolve_workspace_and_agent(DEFAULT_AGENT_NAME, workspace_id)
+            elif candidate_proposal is not None:
                 workspace_id, agent_name = await seed_candidate_agent(
                     candidate_proposal, workspace_id
                 )
+                resolved_agent = await resolve_workspace_and_agent(agent_name, workspace_id)
+            else:
+                resolved_agent = await resolve_workspace_and_agent(agent_name, workspace_id)
             (
                 workspace_id,
                 agent_id,
                 agent_prompt,
                 agent_model,
                 agent_reasoning,
-            ) = await resolve_workspace_and_agent(agent_name, workspace_id)
-            recorder.agent_prompt = agent_prompt
+            ) = resolved_agent
+            target_prompt = profile.prompt if profile is not None else agent_prompt
+            recorder.agent_prompt = target_prompt
             recorder.workspace_id = workspace_id
             blob_backend = blob_store_for(config.blob)
             match blob_backend:
@@ -1140,7 +1159,7 @@ async def _run(
                     recorder.record(index, completed[index])
 
                 await _task_reports(tasks, targets, slots, finished)
-            return tuple(completed[index] for index in sorted(completed)), agent_prompt
+            return tuple(completed[index] for index in sorted(completed)), target_prompt
     finally:
         install_credential_requests(None)
         init_workspace_credentials(None)

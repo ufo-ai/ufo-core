@@ -391,9 +391,10 @@ async def test_responses_reasoning_item_without_encrypted_content_fails_loud() -
         [event async for event in _responses_client(scripted).complete(_request())]
 
 
-def test_responses_input_replays_the_round_reasoning_ahead_of_its_function_calls() -> None:
+def test_responses_input_replays_assistant_text_and_reasoning_ahead_of_function_calls() -> None:
     """The guarantee the replay rests on: a round's items keep their order among themselves and land
-    ahead of the function calls they chose, in the arrangement the engine leads the message with."""
+    ahead of the function calls they chose. Structured assistant narration is output text — the
+    Responses API rejects input text in an assistant message — while member text remains input."""
     assert responses_input(
         (
             Message(
@@ -409,7 +410,10 @@ def test_responses_input_replays_the_round_reasoning_ahead_of_its_function_calls
     ) == [
         {"type": "reasoning", "id": "rs_1", "encrypted_content": "ZW5jcnlwdGVk", "summary": []},
         {"type": "reasoning", "id": "rs_2", "encrypted_content": "bW9yZQ", "summary": []},
-        {"role": "assistant", "content": [{"type": "input_text", "text": "looking"}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "looking", "annotations": []}],
+        },
         {
             "type": "function_call",
             "call_id": "call-1",

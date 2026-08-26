@@ -56,12 +56,27 @@ module "eks" {
     vpc-cni                = { before_compute = true }
   }
 
-  eks_managed_node_group_defaults = {
-    ami_type = "AL2023_x86_64_STANDARD"
-    # Without this, node AMIs only refresh on cluster-version bumps — kernel and NIC-driver
-    # fixes go stale for months and known panics keep hard-resetting nodes.
-    use_latest_ami_release_version = true
-  }
+  eks_managed_node_group_defaults = merge(
+    {
+      ami_type = "AL2023_x86_64_STANDARD"
+      # Without this, node AMIs only refresh on cluster-version bumps — kernel and NIC-driver
+      # fixes go stale for months and known panics keep hard-resetting nodes.
+      use_latest_ami_release_version = true
+    },
+    var.node_disk_size == null ? {} : {
+      block_device_mappings = {
+        root = {
+          device_name = "/dev/xvda"
+          ebs = {
+            delete_on_termination = true
+            encrypted             = true
+            volume_size           = var.node_disk_size
+            volume_type           = "gp3"
+          }
+        }
+      }
+    },
+  )
 
   eks_managed_node_groups = {
     default = {

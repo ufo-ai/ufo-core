@@ -27,7 +27,9 @@ from evals.suites import (
     browser_nav,
     closing_message,
     code_review,
+    coding_caveat_completeness,
     coding_subagent,
+    completeness_inventory,
     connector_connections,
     connector_refs,
     credential_handoff,
@@ -50,6 +52,7 @@ from evals.suites import (
     response_register,
     sandbox_cli,
     scenario_smoke,
+    scope_preservation,
     semantic_quality,
     site_build,
     skill_routing,
@@ -108,6 +111,18 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
 )
 TASKS: tuple[EvalTask, ...] = (
     *DEFAULT_TASKS,
+    capability_task(
+        "coding_profile",
+        coding_subagent.PROFILE_CASES,
+        agent="profile:coding",
+    ),
+    capability_task(
+        "coding_caveat_completeness",
+        coding_caveat_completeness.CASES,
+        agent="profile:coding",
+    ),
+    capability_task("scope_preservation", scope_preservation.CASES),
+    capability_task("completeness_inventory", completeness_inventory.CASES),
     tool_activity.tool_activity_task(),
     capability_task(
         "code_review",

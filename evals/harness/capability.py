@@ -294,15 +294,16 @@ class WorkspaceFile:
 @dataclass(frozen=True)
 class UndeliveredRound:
     """One round the agent had already run when the member's message arrived: the prose it wrote,
-    the tool it called, and the result that came back. Seeded ahead of the case message so the live
-    turn opens where a real one does once a member writes into a working turn — the agent's own
-    narration behind it, streamed to a tailing surface and delivered to nobody. A case that seeds
-    one is asking what the closing message does with content only the model can see."""
+    the tool it called, and the result or error that came back. Seeded ahead of the case message so
+    the live turn opens where a real one does once a member writes into a working turn — the
+    agent's own narration behind it, streamed to a tailing surface and delivered to nobody. A case
+    that seeds one is asking what the closing message does with content only the model can see."""
 
     narration: str
     tool: str
     input: JsonObject
     result: str
+    is_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -415,6 +416,7 @@ class CapabilityCase:
                     "tool": round.tool,
                     "input": round.input,
                     "result": sha256(round.result.encode()).hexdigest(),
+                    "isError": round.is_error,
                 }
                 for round in self.undelivered
             ]
@@ -563,23 +565,19 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
 
 
 def _unclean_verdict(result: TargetResult) -> CapabilityVerdict:
-    """The verdict for a turn that never reached a grader. A terminal `error_class` naming a model
-    or transport fault the provider owns put no capability question to the model at all, so the
-    sample is excluded rather than scored — the same call the scenario harness makes on the same
-    field. A wait that expired is excluded on the same reasoning, whether it left the turn running
-    or cancelled it at the deadline: the harness stopped listening, the turn did not stop working of
-    its own accord. Every other unclean end (a wedge of ours, a turn that reached its own terminal
-    without a transcript, a class the transient set does not name) stays a failure: exclusion
-    reaches only turns that never terminated cleanly, so a graded answer, a refusal, and a failed
-    rubric are all out of its reach by construction."""
+    """The verdict for a turn that never reached a grader. A provider fault, rejected eval
+    credential, or harness wait put no capability question to the model, so the sample is excluded
+    rather than scored. Every other unclean end stays a failure. Exclusion reaches only turns that
+    never terminated cleanly, so a graded answer, refusal, and failed rubric remain scored."""
     status = result.trajectory.status if result.trajectory is not None else None
     if not infra_owned_fault(result.error_class, result.failure_reason, status):
         return CapabilityVerdict(False, result.failure_reason)
-    owner = (
-        "the provider owns this fault"
-        if is_transient_fault(result.error_class)
-        else "the harness's own wait expired on a working turn"
-    )
+    if is_transient_fault(result.error_class):
+        owner = "the provider owns this fault"
+    elif result.error_class == "CredentialValueInvalid":
+        owner = "the eval configuration owns this fault"
+    else:
+        owner = "the harness's own wait expired on a working turn"
     return CapabilityVerdict(False, f"{result.failure_reason}; {owner}", excluded=True)
 
 

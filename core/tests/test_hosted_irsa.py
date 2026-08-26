@@ -12,6 +12,9 @@ CLUSTER_SERVICES_TEMPLATE = (
     Path(__file__).resolve().parents[2] / "infra/templates/cluster-services.yaml.tpl"
 )
 PLATFORM_SECRETS = Path(__file__).resolve().parents[2] / "infra/modules/platform/secrets.tf"
+PLATFORM_EKS = Path(__file__).resolve().parents[2] / "infra/modules/platform/eks.tf"
+PLATFORM_VARIABLES = Path(__file__).resolve().parents[2] / "infra/modules/platform/variables.tf"
+TESTING_MAIN = Path(__file__).resolve().parents[2] / "infra/envs/testing/main.tf"
 
 
 def _terraform_block(header: str) -> str:
@@ -435,6 +438,18 @@ def test_hosted_proxy_receives_the_run_token_signing_secret() -> None:
 def test_hosted_proxy_has_resource_bounds() -> None:
     assert "requests: {cpu: 250m, memory: 384Mi}" in PROXY_DEPLOYMENT
     assert 'limits: {cpu: "2", memory: 768Mi}' in PROXY_DEPLOYMENT
+
+
+def test_hosted_cache_reserves_node_storage() -> None:
+    disk_size = re.search(r"node_disk_size\s+=\s+(\d+)", TESTING_MAIN.read_text())
+    cache_size = re.search(r"emptyDir: \{sizeLimit: (\d+)Gi\}", PROXY_DEPLOYMENT)
+
+    assert disk_size and cache_size
+    assert int(disk_size.group(1)) >= 2 * int(cache_size.group(1))
+    assert "volume_size           = var.node_disk_size" in PLATFORM_EKS.read_text()
+    assert "default     = null" in PLATFORM_VARIABLES.read_text()
+    assert "requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 32Gi}" in PROXY_DEPLOYMENT
+    assert 'limits: {cpu: "2", memory: 3Gi, ephemeral-storage: 32Gi}' in PROXY_DEPLOYMENT
 
 
 def test_hosted_proxy_carries_only_the_cache_scoped_identity() -> None:

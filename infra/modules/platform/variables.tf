@@ -94,6 +94,18 @@ variable "node_desired_size" {
   default = 3
 }
 
+variable "node_disk_size" {
+  type        = number
+  default     = null
+  nullable    = true
+  description = "Optional root volume size in GiB for each managed node."
+
+  validation {
+    condition     = var.node_disk_size == null || var.node_disk_size >= 48
+    error_message = "node_disk_size must leave headroom above the 24 GiB sandbox cache volume."
+  }
+}
+
 variable "cluster_admin_principal_arns" {
   type        = list(string)
   default     = []

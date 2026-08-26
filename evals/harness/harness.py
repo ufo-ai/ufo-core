@@ -245,6 +245,7 @@ TRANSIENT_ERROR_CLASSES = frozenset(
         "ProxyError",
     }
 )
+CONFIGURATION_ERROR_CLASSES = frozenset({"CredentialValueInvalid"})
 
 
 def is_transient_fault(error_class: str | None) -> bool:
@@ -275,10 +276,10 @@ def infra_owned_fault(
     error_class: str | None, failure_reason: str, status: TurnStatus | None
 ) -> bool:
     """Whether an unclean run's fault lies outside the model's capability: a provider-owned
-    transient, or a wait that expired while the turn was still live or was cancelled by the expiry
-    itself — the harness stopped listening, the turn did not stop working of its own accord, so no
-    capability question was put. A turn that reached `done` or `failed` without a transcript is a
-    wedge of ours and stays a failure."""
-    if is_transient_fault(error_class):
+    transient, rejected eval credentials, or a wait that expired while the turn was still live or
+    was cancelled by the expiry itself. None put a capability question to the model. A turn that
+    reached `done` or `failed` without a transcript for any other reason is a wedge of ours and
+    stays a failure."""
+    if is_transient_fault(error_class) or error_class in CONFIGURATION_ERROR_CLASSES:
         return True
     return failure_reason == WAIT_EXPIRED and status in WAIT_EXPIRY_STATUSES
