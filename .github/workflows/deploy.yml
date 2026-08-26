@@ -170,6 +170,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
 
       - uses: pnpm/action-setup@v4
         with:
@@ -407,6 +408,7 @@ jobs:
         if: github.event_name != 'pull_request'
         with:
           python-version: "3.12"
+          enable-cache: true
 
       # The sandbox image bakes the compiled `ufo` client, so the template publish below needs the
       # linux binary this workflow's own client job already built — never a second Rust build here,

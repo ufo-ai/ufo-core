@@ -104,6 +104,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            infra/modules/edge/pnpm-lock.yaml
+            extensions/debugger/frontend/pnpm-lock.yaml
+            extensions/web/frontend/pnpm-lock.yaml
       # The landing page's behaviour is geometric and frame-timed, so its suite drives a browser.
       - run: pnpm -C infra/modules/edge install --frozen-lockfile
       # `--with-deps` runs apt against the runner's mirrors before it fetches the browser. When a

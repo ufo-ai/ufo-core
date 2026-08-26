@@ -250,6 +250,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
 
       # The sandbox image bakes the compiled `ufo` client. This workflow promotes a tested commit
       # rather than running the client job, so it builds that binary for the sandbox target here:
