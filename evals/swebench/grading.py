@@ -171,10 +171,17 @@ class SWEbenchGrading:
                 self.model_name,
             )
         )
-        self._pull_official_images()
-        self._invoke_official_harness(grade_directory, predictions_path)
+        for case in self.selected_cases:
+            self._pull_official_image(case)
+            self._invoke_official_harness(
+                grade_directory, predictions_path, (case,), rewrite_reports=False
+            )
+            self._validate_official_report(self._official_report_path(grade_directory), (case,))
+        self._invoke_official_harness(
+            grade_directory, predictions_path, self.selected_cases, rewrite_reports=True
+        )
         report_path = self._official_report_path(grade_directory)
-        resolved = self._validate_official_report(report_path)
+        resolved = self._validate_official_report(report_path, self.selected_cases)
         summary_path = self._write_summary(grade_directory, report_path, resolved)
         self._prune_official_images()
         return summary_path
@@ -188,23 +195,25 @@ class SWEbenchGrading:
         known_ids = {case.instance_id for case in self.snapshot.cases}
         return load_submission_patches(self.selected_cases, known_ids, self.submissions_root)
 
-    def _pull_official_images(self) -> None:
-        # The pinned harness pulls without a platform and arm64 daemons refuse the
-        # x86_64-only manifests; a pre-pulled image satisfies its local-image check.
-        for case in self.selected_cases:
-            subprocess.run(
-                (
-                    "docker",
-                    "pull",
-                    "--platform",
-                    OFFICIAL_IMAGE_PLATFORM,
-                    official_instance_image(case.instance_id),
-                ),
-                check=True,
-            )
+    def _pull_official_image(self, case: SWEbenchCase) -> None:
+        subprocess.run(
+            (
+                "docker",
+                "pull",
+                "--platform",
+                OFFICIAL_IMAGE_PLATFORM,
+                official_instance_image(case.instance_id),
+            ),
+            check=True,
+        )
 
     def _invoke_official_harness(
-        self, grade_directory: Path, predictions_path: Path | None
+        self,
+        grade_directory: Path,
+        predictions_path: Path | None,
+        cases: tuple[SWEbenchCase, ...],
+        *,
+        rewrite_reports: bool,
     ) -> None:
         try:
             installed = version(HARNESS_DISTRIBUTION)
@@ -231,17 +240,21 @@ class SWEbenchGrading:
             "--max_workers",
             "1",
             "--instance_ids",
-            *(case.instance_id for case in self.selected_cases),
+            *(case.instance_id for case in cases),
             "--run_id",
             self.run_id,
         ]
+        if rewrite_reports:
+            command.extend(("--rewrite_reports", "true"))
         subprocess.run(command, cwd=grade_directory, check=True)
 
     def _official_report_path(self, grade_directory: Path) -> Path:
         model = "gold" if self.gold else self.model_name
         return grade_directory / f"{model.replace('/', '__')}.{self.run_id}.json"
 
-    def _validate_official_report(self, report_path: Path) -> int:
+    def _validate_official_report(
+        self, report_path: Path, selected_cases: tuple[SWEbenchCase, ...]
+    ) -> int:
         if not report_path.is_file():
             raise FileNotFoundError(f"official SWE-bench report is missing: {report_path}")
         try:
@@ -265,7 +278,7 @@ class SWEbenchGrading:
                 raise ValueError(f"official SWE-bench report has invalid {key}")
             return value
 
-        selected = {case.instance_id for case in self.selected_cases}
+        selected = {case.instance_id for case in selected_cases}
         submitted = set(ids("submitted_ids"))
         completed = set(ids("completed_ids"))
         resolved = set(ids("resolved_ids"))
@@ -273,17 +286,20 @@ class SWEbenchGrading:
         incomplete = set(ids("incomplete_ids"))
         empty = set(ids("empty_patch_ids"))
         errors = set(ids("error_ids"))
-        if not selected.issubset(submitted) or (not self.gold and submitted != selected):
+        expected_submissions = {case.instance_id for case in self.selected_cases}
+        if not selected.issubset(submitted) or (
+            not self.gold and submitted != expected_submissions
+        ):
             raise ValueError("official SWE-bench report omitted selected submissions")
         completed_outcomes = resolved | unresolved
         if completed != completed_outcomes:
             raise ValueError("official SWE-bench report has inconsistent completed outcomes")
         if resolved & unresolved or resolved & empty or unresolved & empty:
             raise ValueError("official SWE-bench report has overlapping selected outcomes")
-        if resolved | unresolved | empty != selected:
-            raise ValueError("official SWE-bench report omitted selected case outcomes")
         if incomplete or errors:
             raise ValueError("official SWE-bench report contains incomplete or error outcomes")
+        if resolved | unresolved | empty != selected:
+            raise ValueError("official SWE-bench report omitted selected case outcomes")
         expected_counts = {
             "total_instances": len(selected),
             "submitted_instances": len(submitted),

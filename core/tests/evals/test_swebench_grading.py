@@ -76,6 +76,14 @@ def official_report(
     }
 
 
+def report_with_submissions(
+    report: dict[str, object], case_ids: tuple[str, ...]
+) -> dict[str, object]:
+    report["submitted_instances"] = len(case_ids)
+    report["submitted_ids"] = list(case_ids)
+    return report
+
+
 def grading_workflow(
     tmp_path: Path,
     snapshot_value: SWEbenchSnapshot,
@@ -209,7 +217,7 @@ def test_official_instance_images_are_the_pinned_harness_names() -> None:
     )
 
 
-def test_workflow_pulls_official_images_then_invokes_official_harness_once(
+def test_workflow_pulls_and_grades_each_image_before_aggregating_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot_value = snapshot(tmp_path / "snapshot")
@@ -227,7 +235,15 @@ def test_workflow_pulls_official_images_then_invokes_official_harness_once(
         assert check
         calls.append((tuple(command), cwd))
         if cwd is not None:
-            (cwd / "ufo.official-smoke.json").write_bytes(report_bytes)
+            selected = (
+                SMOKE_CASE_IDS
+                if "--rewrite_reports" in command
+                else (command[command.index("--instance_ids") + 1],)
+            )
+            report = report_with_submissions(
+                official_report(selected, resolved_ids=selected[:2]), SMOKE_CASE_IDS
+            )
+            (cwd / "ufo.official-smoke.json").write_text(json.dumps(report, indent=1))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(grading.subprocess, "run", run)
@@ -236,8 +252,10 @@ def test_workflow_pulls_official_images_then_invokes_official_harness_once(
 
     grade = workflow.grade_directory.resolve()
     predictions = grade / "predictions.jsonl"
-    assert calls == [
-        *(
+    expected_case_calls = [
+        call
+        for case_id in SMOKE_CASE_IDS
+        for call in (
             (
                 (
                     "docker",
@@ -247,9 +265,31 @@ def test_workflow_pulls_official_images_then_invokes_official_harness_once(
                     official_instance_image(case_id),
                 ),
                 None,
-            )
-            for case_id in SMOKE_CASE_IDS
-        ),
+            ),
+            (
+                (
+                    sys.executable,
+                    "-m",
+                    "swebench.harness.run_evaluation",
+                    "--dataset_name",
+                    str(workflow.parquet.resolve().parent),
+                    "--split",
+                    "test",
+                    "--predictions_path",
+                    str(predictions),
+                    "--max_workers",
+                    "1",
+                    "--instance_ids",
+                    case_id,
+                    "--run_id",
+                    "official-smoke",
+                ),
+                grade,
+            ),
+        )
+    ]
+    assert calls == [
+        *expected_case_calls,
         (
             (
                 sys.executable,
@@ -267,6 +307,8 @@ def test_workflow_pulls_official_images_then_invokes_official_harness_once(
                 *SMOKE_CASE_IDS,
                 "--run_id",
                 "official-smoke",
+                "--rewrite_reports",
+                "true",
             ),
             grade,
         ),
@@ -305,9 +347,13 @@ def test_gold_mode_uses_official_gold_predictions_and_pulls_only_selected_images
         commands.append(tuple(command))
         if cwd is None:
             return subprocess.CompletedProcess(command, 0)
-        report = official_report(selected, resolved_ids=selected)
-        report["submitted_instances"] = 3
-        report["submitted_ids"] = [*selected, "another__official-1"]
+        graded = (
+            selected
+            if "--rewrite_reports" in command
+            else (command[command.index("--instance_ids") + 1],)
+        )
+        report = official_report(graded, resolved_ids=graded)
+        report_with_submissions(report, (*selected, "another__official-1"))
         (cwd / "gold.official-smoke.json").write_text(json.dumps(report))
         return subprocess.CompletedProcess(command, 0)
 
@@ -371,6 +417,44 @@ def test_workflow_rejects_missing_error_and_omitted_official_outcomes(
     assert not (workflow.grade_directory / "summary.json").exists()
 
 
+def test_workflow_rejects_a_case_error_before_report_aggregation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_value = snapshot(tmp_path / "snapshot")
+    workflow = grading_workflow(tmp_path, snapshot_value)
+    accept_test_source(monkeypatch)
+    aggregated = False
+
+    def run(
+        command: Sequence[str], *, cwd: Path | None = None, check: bool
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal aggregated
+        assert check
+        if cwd is None:
+            return subprocess.CompletedProcess(command, 0)
+        if "--rewrite_reports" in command:
+            aggregated = True
+            report = official_report(SMOKE_CASE_IDS, resolved_ids=SMOKE_CASE_IDS)
+        else:
+            case_id = command[command.index("--instance_ids") + 1]
+            report = report_with_submissions(official_report((case_id,)), SMOKE_CASE_IDS)
+            report["completed_instances"] = 0
+            report["completed_ids"] = []
+            report["unresolved_instances"] = 0
+            report["unresolved_ids"] = []
+            report["error_instances"] = 1
+            report["error_ids"] = [case_id]
+        (cwd / "ufo.official-smoke.json").write_text(json.dumps(report))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(grading.subprocess, "run", run)
+
+    with pytest.raises(ValueError, match="official SWE-bench report contains incomplete or error"):
+        workflow.run()
+    assert not aggregated
+    assert not (workflow.grade_directory / "summary.json").exists()
+
+
 def test_workflow_accepts_empty_patch_as_an_explicit_denominator_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -392,7 +476,23 @@ def test_workflow_accepts_empty_patch_as_an_explicit_denominator_outcome(
     ) -> subprocess.CompletedProcess[bytes]:
         assert check
         if cwd is not None:
-            (cwd / "ufo.official-smoke.json").write_bytes(report_bytes)
+            graded = (
+                SMOKE_CASE_IDS
+                if "--rewrite_reports" in command
+                else (command[command.index("--instance_ids") + 1],)
+            )
+            resolved_ids = tuple(case_id for case_id in graded if case_id == SMOKE_CASE_IDS[0])
+            graded_report = report_with_submissions(
+                official_report(graded, resolved_ids=resolved_ids), SMOKE_CASE_IDS
+            )
+            if empty_id in graded:
+                graded_report["completed_instances"] -= 1
+                graded_report["completed_ids"].remove(empty_id)
+                graded_report["unresolved_instances"] -= 1
+                graded_report["unresolved_ids"].remove(empty_id)
+                graded_report["empty_patch_instances"] = 1
+                graded_report["empty_patch_ids"] = [empty_id]
+            (cwd / "ufo.official-smoke.json").write_text(json.dumps(graded_report, indent=1))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(grading.subprocess, "run", run)
@@ -469,8 +569,23 @@ def test_cli_grades_one_subset_into_its_own_directory_and_prunes_after_the_summa
     ) -> subprocess.CompletedProcess[bytes]:
         assert check
         if cwd is not None:
+            graded = (
+                SUBSETS.hillclimb
+                if "--rewrite_reports" in command
+                else (command[command.index("--instance_ids") + 1],)
+            )
             (cwd / "ufo.official-hillclimb.json").write_text(
-                json.dumps(official_report(SUBSETS.hillclimb, resolved_ids=SUBSETS.hillclimb[:3]))
+                json.dumps(
+                    report_with_submissions(
+                        official_report(
+                            graded,
+                            resolved_ids=tuple(
+                                case_id for case_id in graded if case_id in SUBSETS.hillclimb[:3]
+                            ),
+                        ),
+                        SUBSETS.hillclimb,
+                    )
+                )
             )
         if command[:2] == ("docker", "rmi"):
             removed.append((command[-1], (grade / "summary.json").is_file()))
@@ -510,8 +625,23 @@ def test_cli_all_grades_the_complete_pinned_roster_once(
     ) -> subprocess.CompletedProcess[bytes]:
         assert check
         if cwd is not None:
+            graded = (
+                SUBSETS.all_ids
+                if "--rewrite_reports" in command
+                else (command[command.index("--instance_ids") + 1],)
+            )
             (cwd / "ufo.official-all.json").write_text(
-                json.dumps(official_report(SUBSETS.all_ids, resolved_ids=SUBSETS.all_ids[:5]))
+                json.dumps(
+                    report_with_submissions(
+                        official_report(
+                            graded,
+                            resolved_ids=tuple(
+                                case_id for case_id in graded if case_id in SUBSETS.all_ids[:5]
+                            ),
+                        ),
+                        SUBSETS.all_ids,
+                    )
+                )
             )
         return subprocess.CompletedProcess(command, 0)
 
