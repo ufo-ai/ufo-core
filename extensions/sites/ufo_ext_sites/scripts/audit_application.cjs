@@ -29,11 +29,22 @@ const VIEWS = [
 ];
 
 function measure(floor) {
+  // A computed colour carries whatever syntax the engine chose: a color-mix() token resolves to
+  // `color(srgb …)`, which no rgb() pattern reads. The browser paints the value into one pixel and
+  // the pixel is the answer. An unpaintable value leaves both probe fills in place, so it reads as
+  // no colour rather than as black.
+  const swatch = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
   const parse = (value) => {
-    const found = value.match(/rgba?\(([^)]+)\)/);
-    if (!found) return null;
-    const parts = found[1].split(',').map((part) => parseFloat(part));
-    return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+    swatch.fillStyle = '#000000';
+    swatch.fillStyle = value;
+    const painted = swatch.fillStyle;
+    swatch.fillStyle = '#ffffff';
+    swatch.fillStyle = value;
+    if (swatch.fillStyle !== painted) return null;
+    swatch.globalCompositeOperation = 'copy';
+    swatch.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = swatch.getImageData(0, 0, 1, 1).data;
+    return { r, g, b, a: a / 255 };
   };
   const over = (front, back) => ({
     r: front.r * front.a + back.r * (1 - front.a),
