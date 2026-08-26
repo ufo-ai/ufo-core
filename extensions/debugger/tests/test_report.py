@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 from ufo_ext_debugger import manifest as debugger_manifest
 from ufo_ext_debugger.report import (
-    ERROR_CLASS_MAX_CHARS,
+    PROBLEM_MAX_CHARS,
     PROBLEM_REPORTED_EVENT,
     REPORT_PROBLEM_TOOL,
     ReportProblemInput,
@@ -70,7 +70,7 @@ def _reported(caplog: pytest.LogCaptureFixture) -> dict[str, object]:
     return record.ufo
 
 
-async def test_a_report_names_the_workspace_and_links_to_the_turn_that_made_it(
+async def test_a_report_carries_its_category_and_impact_and_links_to_the_turn_that_made_it(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     workspace_id = uuid4()
@@ -80,26 +80,27 @@ async def test_a_report_names_the_workspace_and_links_to_the_turn_that_made_it(
         result = await report_problem(
             ctx,
             ReportProblemInput(
+                problem=(
+                    "I ran the daily brief build three times and every run ended on a 401 from "
+                    "the gmail connection; I expected the last seven days of mail."
+                ),
+                category="external_connector",
+                impact="major",
                 origin="fault",
-                symptom="the gmail connection returns 401 on every call",
-                next_action="reconnect the account or check the broker's token refresh",
-                object_ref="connection/gmail",
-                error_class="HTTPStatusError 401",
             ),
         )
     reported = _reported(caplog)
     assert reported["workspace_id"] == str(workspace_id)
+    assert reported["category"] == "external_connector"
+    assert reported["impact"] == "major"
     assert reported["origin"] == "fault"
-    assert reported["symptom"] == "the gmail connection returns 401 on every call"
-    assert reported["object_ref"] == "connection/gmail"
-    assert reported["error_class"] == "HTTPStatusError 401"
-    assert reported["next_action"] == "reconnect the account or check the broker's token refresh"
+    assert reported["problem"].startswith("I ran the daily brief build three times")
     assert reported["member_id"] == str(member_id)
     assert reported["debug_url"] == (
         f"https://fleet.example.com/surface/debug?ws={workspace_id}"
         f"&c={ctx.turn.conversation_id}&t={ctx.turn.id}"
     )
-    assert "operators" in result.content[0].text
+    assert "engineers" in result.content[0].text
 
 
 async def test_a_member_request_reports_under_its_own_origin(
@@ -110,16 +111,18 @@ async def test_a_member_request_reports_under_its_own_origin(
         await report_problem(
             _context(workspace_id, tmp_path),
             ReportProblemInput(
+                problem=(
+                    "A member asked for this to be reported: the daily brief has arrived empty "
+                    "for three days and they have stopped opening it."
+                ),
+                category="cron_task",
+                impact="minor",
                 origin="member_request",
-                symptom="the daily brief has been empty for three days",
-                next_action="read the brief job's last three runs",
             ),
         )
     reported = _reported(caplog)
     assert reported["origin"] == "member_request"
-    assert reported["object_ref"] is None
-    assert reported["error_class"] is None
-    assert reported["member_id"] is None
+    assert "member_id" not in reported
 
 
 async def test_a_deploy_that_publishes_no_base_url_reports_the_ids_alone(
@@ -131,37 +134,59 @@ async def test_a_deploy_that_publishes_no_base_url_reports_the_ids_alone(
         await report_problem(
             ctx,
             ReportProblemInput(
+                problem=(
+                    "Every send from this workspace fails because the slack_bot_token slot is "
+                    "empty; I expected the slot to hold the workspace's bot token."
+                ),
+                category="external_connector",
+                impact="critical",
                 origin="fault",
-                symptom="the slack_bot_token slot is empty",
-                next_action="ask the workspace admin to refill the slot",
             ),
         )
     reported = _reported(caplog)
-    assert reported["debug_url"] is None
+    assert "debug_url" not in reported
     assert reported["turn_id"] == str(ctx.turn.id)
     assert reported["conversation_id"] == str(ctx.turn.conversation_id)
     assert reported["agent_id"] == str(ctx.turn.agent_id)
 
 
-def test_an_error_class_carries_neither_a_dump_nor_a_url() -> None:
+def test_the_problem_carries_neither_a_dump_nor_a_credential() -> None:
     """The two bounds that keep a sandbox's own output — and the signed run token its environment
-    echoes in `HTTP_PROXY` — out of the record and out of the alert body."""
-    for over_bound in ("x" * (ERROR_CLASS_MAX_CHARS + 1), "https://tok3n:@proxy.example:443"):
+    echoes in `HTTP_PROXY` — out of the record."""
+    for over_bound in (
+        "x" * (PROBLEM_MAX_CHARS + 1),
+        "the sandbox echoed HTTP_PROXY=http://tok3n:@proxy.example:443 and then died",
+    ):
         with pytest.raises(ValidationError):
             ReportProblemInput(
+                problem=over_bound,
+                category="sandbox_runtime",
+                impact="major",
                 origin="fault",
-                symptom="a stream fails on every run",
-                next_action="read the stream's last run",
-                error_class=over_bound,
             )
 
 
-def test_the_manifest_declares_the_tool_and_its_two_origins() -> None:
+def test_a_problem_may_name_the_host_that_stopped_answering() -> None:
+    """The refusal is of a credential, not of a URL: a site that stopped answering is named."""
+    accepted = ReportProblemInput(
+        problem="https://shop.example.com has returned 502 on every request for twenty minutes.",
+        category="asset_site",
+        impact="major",
+        origin="fault",
+    )
+    assert accepted.category == "asset_site"
+
+
+def test_the_manifest_declares_the_tool_and_the_fields_the_board_reads() -> None:
     (tool,) = debugger_manifest.manifest().tools
     assert tool.name == REPORT_PROBLEM_TOOL
     assert tool.parallel_safe is True
     assert tool.side_effecting is False
     properties = tool.input_model.model_json_schema()["properties"]
     assert properties["origin"]["enum"] == ["fault", "member_request"]
-    assert set(properties) >= {"symptom", "next_action", "object_ref", "error_class"}
-    assert "user_description" not in tool.input_model.model_fields
+    assert properties["impact"]["enum"] == ["critical", "major", "minor"]
+    assert "sandbox_runtime" in properties["category"]["enum"]
+    assert set(tool.input_model.model_fields) == {"problem", "category", "impact", "origin"}
+    assert all(field.is_required() for field in tool.input_model.model_fields.values()), (
+        "a default reached by silence measures nothing"
+    )

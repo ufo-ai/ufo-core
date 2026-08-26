@@ -1,30 +1,56 @@
-name = "asd-writing-single-rules"
-base = "cdbb70520d65f22c6e9e4a3a6ab62531c4de82b5"
-suites = ["asd_writing", "report_digest"]
+name = "problem-report-triggers"
+base = "agent/diagnostic-problem-report"
+suites = ["problem_report"]
+cases = [
+  "task-faults-on-every-run",
+  "restraint-the-agents-own-failed-step",
+  "restraint-a-capability-the-workspace-lacks",
+]
 repeats = 3
-concurrency = 1
+concurrency = 4
 max_stacks = 3
 budget_usd = 60.0
-est_usd_per_case = 0.10
+est_usd_per_case = 0.50
 
 [template]
-database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5542/ufo" }
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5549/ufo" }
 blob = { backend = "filesystem", root = "./blobs" }
 connect = { public_base_url = "http://evals.invalid" }
 pack = { name = "assistant_eval" }
 research = { search_provider = "perplexity" }
 
-[[arm]]
-name = "ste"
-[arm.files]
-"extensions/report_digest/ufo_ext_report_digest/skills/report-digest/SKILL.md" = "arms/ste-report-digest-skill.md"
+# Spelling the retry exclusion out, over the `a fault no turn can repair` that carries it. The
+# sentence shipped for two ablations and held no restraint case better — 17/18 restraint samples
+# without it against 16/18 with — while making a refused token read as the provider's problem rather
+# than the faulting task's. It is out; this arm puts it back, so the next hand on that sentence is
+# measured on the two restraints it claims to guard plus the fault it must not suppress.
 
 [[arm]]
-name = "rank"
-[arm.files]
-"extensions/report_digest/ufo_ext_report_digest/skills/report-digest/SKILL.md" = "arms/rank-report-digest-skill.md"
+name = "with-retry-bound"
+[[arm.replacements]]
+path = "extensions/debugger/ufo_ext_debugger/report.py"
+old = """
+    "member asks for a problem to be reported, whatever the problem is. Say what you attempted, "
+    "what happened, and what you expected, in your own words; never paste command output. An "
+"""
+new = """
+    "member asks for a problem to be reported, whatever the problem is. Not for a step you can "
+    "retry: one failed command, a path you named wrong, or a provider error that clears on the "
+    "next attempt is this turn's work. Say what you attempted, "
+    "what happened, and what you expected, in your own words; never paste command output. An "
+"""
+
+# The four examples of a fault, which are load-bearing: without them the faulting-task case reported
+# nothing at all on a connector-shaped log, and 1/3 on the task-shaped one that replaced it.
 
 [[arm]]
-name = "glance"
-[arm.files]
-"extensions/report_digest/ufo_ext_report_digest/skills/report-digest/SKILL.md" = "arms/glance-report-digest-skill.md"
+name = "no-fault-examples"
+[[arm.replacements]]
+path = "extensions/debugger/ufo_ext_debugger/report.py"
+old = """
+    "no turn can repair — a connection that stopped authenticating, an empty credential slot, a "
+    "task that faults on every run, a sandbox or site that stopped answering — and whenever a "
+"""
+new = """
+    "no turn can repair — and whenever a "
+"""

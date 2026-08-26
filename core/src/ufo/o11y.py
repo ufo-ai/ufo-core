@@ -512,7 +512,8 @@ def log(event: str, **fields: object) -> None:
     """Emit a structured info record — tagged with the ambient workspace, sensitive fields redacted
     — to stdlib logging and the OTel logs pipeline; the OTel record correlates to the active span.
     The workspace is read from the `with ws(...)` scope, never passed, so every record inside a turn
-    or job carries the workspace it ran under."""
+    or job carries the workspace it ran under. A field whose value is None is absent from the
+    record rather than empty in it, so a search for the field matches only records that have one."""
     _emit_log(event, SeverityNumber.INFO, "INFO", logging.INFO, fields)
 
 
@@ -565,7 +566,11 @@ def _emit_log(
     level: int,
     fields: Mapping[str, object],
 ) -> None:
-    redacted = redact_payload({**_ambient_scope(), **fields})
+    redacted = {
+        key: value
+        for key, value in redact_payload({**_ambient_scope(), **fields}).items()
+        if value is not None
+    }
     logging.getLogger(INSTRUMENTATION_NAME).log(level, event, extra={"ufo": redacted})
     _logs.get_logger(INSTRUMENTATION_NAME).emit(
         severity_number=severity_number,

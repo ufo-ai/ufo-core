@@ -346,6 +346,36 @@ resource "datadog_dashboard" "model_latency" {
 
 }
 
+# The count behind the two `report_problem` widgets at the foot of the turns board.
+# `report_problem` emits one log record per report and nothing else, so the class and the cost of a
+# report are log fields; this derives a counter from them, because a log widget columns and groups
+# only by a Datadog-side facet and no terraform resource creates one. Grouping a log-based metric
+# needs no facet, so the board's shape is provisioned here rather than made by hand in the UI and
+# kept alive there. Only the three dimensions the board reads are grouped: `category` and `impact`
+# by their widgets, `env` by the board's template variable.
+
+resource "datadog_logs_metric" "problem_reported" {
+  name = "ufo.problem_reported"
+  compute {
+    aggregation_type = "count"
+  }
+  filter {
+    query = "service:ufo \"problem.reported\""
+  }
+  group_by {
+    path     = "@category"
+    tag_name = "category"
+  }
+  group_by {
+    path     = "@impact"
+    tag_name = "impact"
+  }
+  group_by {
+    path     = "env"
+    tag_name = "env"
+  }
+}
+
 # Where a turn spends its wall clock, and what it spent it on. The latency distributions arrive as
 # sketches and answer percentiles because `metrics.tf` enables them.
 #
@@ -534,34 +564,44 @@ resource "datadog_dashboard" "turns" {
     }
   }
 
-  # An agent's own report of a workspace it could not repair, from `report_problem`. It sits on this
+  # An agent's own report of a problem it could not repair, from `report_problem`. It sits on this
   # board because a report is produced inside a turn and read while watching the fleet, and because
   # nothing else counts one: `tool_call_total{tool:report_problem}` says a call happened, never that
   # a workspace is broken — a refusal and a landed report are the same count there.
+  #
+  # By category, because that is what a reader routes on: which subsystem is generating reports this
+  # week decides who picks them up.
 
   widget {
     timeseries_definition {
-      title = "workspaces an agent reported as broken"
+      title = "problems reported by category"
       request {
-        log_query {
-          index        = "*"
-          search_query = "$env service:ufo \"problem.reported\""
-          compute_query {
-            aggregation = "count"
-          }
-        }
+        q            = "sum:ufo.problem_reported{$env} by {category}.as_count()"
         display_type = "bars"
       }
     }
   }
 
-  # The reports themselves, because the count alone cannot be acted on. Each row carries the
-  # workspace, the broken object, the origin (`fault`, or `member_request` where a member asked us
-  # to be told), the error class, the next action, and a debugger link scoped to the reporting turn
-  # — a click on the row opens them. It carries no columns and no grouping, here or on the count
-  # above: a log widget columns and groups only by a Datadog-side facet, and no terraform resource
-  # creates one, so the board reads the whole fleet's reports as one list rather than depending on a
-  # facet made by hand in the UI and kept alive there.
+  # And by what it cost the member, which is a different question from how many: one critical report
+  # outranks a week of minor ones, and the two series move independently.
+
+  widget {
+    timeseries_definition {
+      title = "problems reported by impact"
+      request {
+        q            = "sum:ufo.problem_reported{$env} by {impact}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  # The reports themselves, because the counts alone cannot be acted on. Each row carries the
+  # workspace, the agent's own account of the problem, its category and impact, the origin (`fault`,
+  # or `member_request` where a member asked us to be told), and a debugger link scoped to the
+  # reporting turn — a click on the row opens the transcript. It carries no columns and no grouping:
+  # a log widget columns and groups only by a Datadog-side facet, and no terraform resource creates
+  # one, so the board reads the whole fleet's reports as one list and the counts above carry the
+  # grouping.
   widget {
     log_stream_definition {
       title               = "what they reported"
