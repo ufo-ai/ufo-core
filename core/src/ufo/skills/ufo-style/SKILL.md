@@ -48,6 +48,9 @@ Paths are relative to this skill's directory (`$UFO_HOME/skills/ufo-style/`).
   — `--text-display` (32px) — for the screen's own title, used once per screen. Nothing else on an
   app screen goes above `--text-title`. A reading or landing page keeps the fluid scale
   `website-building` teaches and takes the palette from here.
+- **Chrome.** The product supplies the page's header and everything in the top right — theme,
+  settings, account. A screen of ours adds no bar that crosses the centre of the page and puts no
+  control in that corner; it starts at its own title.
 - **Shape and motion.** One radius (`0.25rem`) for everything except a row, which is a pill. Motion
   is short and functional: `--ease-control` for a control, the enter/leave pair for anything that
   arrives over the page.
