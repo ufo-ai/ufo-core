@@ -33,8 +33,8 @@ uv run python -m evals --swebench-capture --workspace <workspace-id> \
 
 The command copies exact durable artifact bytes and lists selected cases with no shared patch.
 
-`--fresh-workspace` provisions one clean hosted SWE-bench workspace through the authenticated
-onboarding boundary and records its id with the run. It requires `UFO_ONBOARD_CONTROL_TOKEN` and
+`--fresh-workspace` provisions one clean hosted workspace through the authenticated onboarding
+boundary and records its id with the run. It requires `UFO_ONBOARD_CONTROL_TOKEN` and
 `connect.public_base_url`; use `--workspace` instead to target an existing workspace. SWE-bench
 admits one remote ufo session per case. Terminal-Bench delegates the same bound to one remote
 Harbor job so Harbor grades the task environments it owns. The corpus READMEs hold setup and

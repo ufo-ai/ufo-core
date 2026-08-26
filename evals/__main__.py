@@ -287,7 +287,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--fresh-workspace",
         action="store_true",
-        help="provision a clean hosted workspace for a remote SWE-bench run",
+        help="provision a clean hosted workspace for a remote eval run",
     )
     parser.add_argument("--s3-bucket", help="private bucket override for --share")
     parser.add_argument("--s3-region", help="S3 region for --share")
@@ -422,8 +422,8 @@ def main(argv: list[str] | None = None) -> None:
         args.list or args.view or args.share or args.reconstruct or args.swebench_capture
     ):
         parser.error("--remote runs eval suites")
-    if args.fresh_workspace and (not args.remote or not args.swebench):
-        parser.error("--fresh-workspace requires --remote --swebench")
+    if args.fresh_workspace and not args.remote:
+        parser.error("--fresh-workspace requires --remote")
     if args.fresh_workspace and args.workspace is not None:
         parser.error("--fresh-workspace conflicts with --workspace")
     names = tuple(args.only)

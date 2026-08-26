@@ -714,11 +714,10 @@ def test_cli_validates_pack_before_run(
     "args",
     (
         ("--fresh-workspace",),
-        ("--fresh-workspace", "--remote"),
         ("--fresh-workspace", "--swebench", "--swebench-subset", "smoke"),
     ),
 )
-def test_fresh_workspace_requires_remote_swebench(
+def test_fresh_workspace_requires_remote(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     args: tuple[str, ...],
@@ -726,7 +725,29 @@ def test_fresh_workspace_requires_remote_swebench(
     with pytest.raises(SystemExit):
         evals_main([*args, "--out", str(tmp_path)])
 
-    assert "--fresh-workspace requires --remote --swebench" in capsys.readouterr().err
+    assert "--fresh-workspace requires --remote" in capsys.readouterr().err
+
+
+def test_fresh_workspace_accepts_a_remote_capability_suite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def load_config() -> NoReturn:
+        raise RunStarted
+
+    monkeypatch.setattr("evals.__main__.load_config", load_config)
+    with pytest.raises(RunStarted):
+        evals_main(
+            [
+                "--only",
+                "coding_subagent",
+                "--case",
+                "coding-subagent-github-app-api",
+                "--fresh-workspace",
+                "--remote",
+                "--out",
+                str(tmp_path),
+            ]
+        )
 
 
 def test_fresh_workspace_conflicts_with_an_explicit_workspace(
