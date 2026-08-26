@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -328,6 +328,79 @@ test("the chat toggle opens the composer when no directive conversation exists",
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
   expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+});
+
+/** The state the reporter's app is in: it stands on its page, the rail carries the member's chat
+ *  with it, and the app's own conversation index does not answer that chat. An app accumulates
+ *  conversations no member opened — every page build, every portal intent — and the index answers
+ *  one bounded page over all of them, so on an app holding many hundreds the member's own chat falls
+ *  outside that page while the rail still carries it under its own bound. The rail is what says
+ *  which conversations this half can open, so the half opens the row it carries. */
+function openApp(routes: Parameters<typeof wire>[0] = {}) {
+  const wired = wire({
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json(SET),
+    "/setup": () => json({ own_page: false, connectors: [], credentials: [], standing: [] }),
+    ...chatsOnWire([CHAT_ROW]),
+    "/conversations$": () => json({ conversations: [] }),
+    ...routes,
+  });
+  render(
+    <App
+      agents={[{ ...withHome(SET), main: false, app: "code" }]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
+  );
+  return wired;
+}
+
+test("the chat toggle opens a rail chat the app's index does not answer", async () => {
+  location.hash = "#/agents/" + AGENT_ID;
+  const { calls } = openApp();
+
+  await screen.findByTitle("Assistant homepage");
+  await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
+
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
+  const latched = await screen.findByRole("button", { name: "Close chat with Assistant" });
+  expect(latched.getAttribute("aria-pressed")).toBe("true");
+  expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
+  await waitFor(() =>
+    expect(calls.some((url) => url.includes("/transcript?conversation=" + CONVO_ID))).toBe(true),
+  );
+});
+
+test("a link to a rail chat the app's index does not answer opens it beside the page", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
+  const { calls } = openApp();
+
+  const frame = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
+  expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
+  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "Close chat with Assistant" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
+  await waitFor(() =>
+    expect(calls.some((url) => url.includes("/transcript?conversation=" + CONVO_ID))).toBe(true),
+  );
+
+  // The lane holds the conversation, so the page is not handed an id it cannot stand on.
+  const sent: unknown[] = [];
+  vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
+    postMessage: (message: unknown) => void sent.push(message),
+  } as unknown as Window);
+  fireEvent(
+    window,
+    new MessageEvent("message", { data: { ufo: "ready" }, source: frame.contentWindow }),
+  );
+  const init = sent.find((message) => (message as { ufo?: string }).ufo === "init") as {
+    place: { opens?: string[] };
+  };
+  expect(init.place.opens).toBeUndefined();
 });
 
 /** An app whose page has not been built yet has none, and the pane draws its conversation — never a

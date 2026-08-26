@@ -291,9 +291,20 @@ export function AgentPane({
   // opens the newest conversation the member can speak in, so arriving lands on the work rather
   // than on a list of it, and on an app they have only ever read, on the composer.
   const composeFallback = target === COMPOSE && home.state !== "set";
+  // The rail's own row for a target the index answer does not carry. The two reads are bounded
+  // differently — the index answers one page of 100 rows over every surface the app has ever spoken
+  // on, machine lanes included, while the rail bounds the member's own chats on their own — so an
+  // app holding 100 rows newer than the member's chat with it keeps that chat on the rail and
+  // outside the index's page. The rail is what says which conversations this half can open, so a
+  // row it carries is one the half holds, whether the index answered it or not.
+  const railHeld =
+    target !== undefined && !rows.some((entry) => entry.id === target)
+      ? (directives?.find((row) => row.conversation_id === target) ?? null)
+      : null;
   const conversational =
     composeFallback ||
-    (target !== undefined && (target === FRESH || rows.some((entry) => entry.id === target)));
+    (target !== undefined &&
+      (target === FRESH || rows.some((entry) => entry.id === target) || railHeld !== null));
   const held = composeFallback ? FRESH : conversational ? target : undefined;
   const wanted = held === FRESH;
   const named =
@@ -304,19 +315,28 @@ export function AgentPane({
   // made. What the member did in this pane is held here, the way a permalink's pane holds it.
   const [disclosed, setDisclosed] = useState<string | null>(null);
   const start = () => onPlace({ ...place, opens: [FRESH] }, "push");
-  const opened = wanted
-    ? null
-    : (named ??
-      (live === null
-        ? null
-        : (rows.find((entry) => entry.id === editing?.conversation_id) ??
-          rows.find((entry) => live.has(entry.id)) ??
-          null)));
+  // The fallback to the newest conversation the member can speak in stands for an address that
+  // names none; a target the rail holds is already named, so answering it with another row would
+  // open a place the address never asked for.
+  const opened =
+    wanted || railHeld !== null
+      ? null
+      : (named ??
+        (live === null
+          ? null
+          : (rows.find((entry) => entry.id === editing?.conversation_id) ??
+            rows.find((entry) => live.has(entry.id)) ??
+            null)));
   // What the half is drawing, named rather than spelled inline: four states read as a chain of
   // conditions no one can follow. Nothing is drawn while the reads that decide are still in
   // flight — a composer put up for that frame is one the member could type into, and the words
-  // would be founded on a conversation the next answer replaces.
-  const settling = opened === null && !wanted && (live === null || listed.phase === "loading");
+  // would be founded on a conversation the next answer replaces. A target the rail already names
+  // waits for neither read: the row is the whole answer, and the index will not carry it.
+  const settling =
+    opened === null &&
+    !wanted &&
+    railHeld === null &&
+    (live === null || listed.phase === "loading");
   // A conversation shared with nobody this member belongs to is not one an acknowledgement can
   // open: the index says so on the row itself, and the intent would refuse. The half says that
   // rather than offering an act that cannot be taken.
@@ -466,7 +486,7 @@ export function AgentPane({
               ? opened.commentable
                 ? conversationTitle(opened, viewer)
                 : subject(opened, viewer)
-              : NEW_CONVERSATION
+              : (railHeld?.title ?? NEW_CONVERSATION)
           }
           acts={
             <>
@@ -518,10 +538,10 @@ export function AgentPane({
         </div>
       ) : (
         <Chat
-          key={opened?.id ?? "new"}
+          key={opened?.id ?? railHeld?.conversation_id ?? "new"}
           agent={agent}
           member={member}
-          conversationId={opened?.id ?? null}
+          conversationId={opened?.id ?? railHeld?.conversation_id ?? null}
           onCreated={(conversationId, title) => {
             onCreated(conversationId, title);
             setSettles((count) => count + 1);
@@ -543,7 +563,7 @@ export function AgentPane({
   const slot = useSlot(beside && held !== undefined ? conversation : null, {
     id: held ?? FRESH,
     kind: "panel",
-    title: opened ? subject(opened, viewer) : NEW_CONVERSATION,
+    title: opened ? subject(opened, viewer) : (railHeld?.title ?? NEW_CONVERSATION),
     acts: (
       <Button
         variant="quiet"
