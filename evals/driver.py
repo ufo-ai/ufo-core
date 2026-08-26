@@ -70,6 +70,7 @@ EVAL_SURFACE = "eval"
 REMOTE_SURFACE = "ufo"
 CANDIDATE_AGENT_NAME = "candidate-{proposal_id}"
 POLL_INTERVAL_SECONDS = 1.0
+TRANSCRIPT_POLL_ATTEMPTS = 6
 WORKFLOW_WAIT_SECONDS = 300.0
 TERMINAL_STATUSES = frozenset({"done", "cancelled", "failed"})
 WORKFLOW_STATUSES = frozenset({"queued", "running"})
@@ -912,20 +913,24 @@ class WorkspaceDriver:
         return await self._trajectory(conversation_id, row.seq)
 
     async def _trajectory(self, conversation_id: UUID, turn_seq: int) -> Trajectory | None:
-        try:
-            body = await self.blob.get(transcript_key(conversation_id))
-        except BlobNotFound:
-            return None
-        try:
-            conversation = decode(body)
-        except TranscriptDecodeError:
-            return None
-        if conversation.seq != turn_seq:
-            return None
-        return Trajectory(
-            conversation_id=conversation_id,
-            agent_id=self.agent_id,
-            agent_prompt=self.agent_prompt,
-            agent_prompt_digest=prompt_digest(self.agent_prompt),
-            messages=conversation.messages,
-        )
+        for attempt in range(TRANSCRIPT_POLL_ATTEMPTS):
+            try:
+                body = await self.blob.get(transcript_key(conversation_id))
+            except BlobNotFound:
+                pass
+            else:
+                try:
+                    conversation = decode(body)
+                except TranscriptDecodeError:
+                    return None
+                if conversation.seq == turn_seq:
+                    return Trajectory(
+                        conversation_id=conversation_id,
+                        agent_id=self.agent_id,
+                        agent_prompt=self.agent_prompt,
+                        agent_prompt_digest=prompt_digest(self.agent_prompt),
+                        messages=conversation.messages,
+                    )
+            if attempt < TRANSCRIPT_POLL_ATTEMPTS - 1:
+                await asyncio.sleep(self.poll_interval_seconds)
+        return None

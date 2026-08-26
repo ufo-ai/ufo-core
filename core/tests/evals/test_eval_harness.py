@@ -204,7 +204,7 @@ from ufo.access.credentials import (
 )
 from ufo.billing.accounting import Pricing
 from ufo.billing.balance import credit, set_reserve
-from ufo.blob import FilesystemBlobStore, S3BlobStore
+from ufo.blob import BlobNotFound, FilesystemBlobStore, S3BlobStore
 from ufo.config import (
     DEFAULT_AMBIENT_REPLY_MODEL,
     DEFAULT_BACKGROUND_JOBS_MODEL,
@@ -6789,7 +6789,7 @@ def test_an_undelivered_round_requires_the_member_message_it_answers() -> None:
 
 
 async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence(
-    db: None, tmp_path
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
@@ -6818,7 +6818,7 @@ async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence
         blob,
         UNCALLED_DBOS,
         tmp_path / "workspaces",
-        poll_interval_seconds=10,
+        poll_interval_seconds=0,
     )
     with ws(workspace_id):
         missing = await driver.settle(conversation_id, turn_id)
@@ -6834,12 +6834,26 @@ async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence
             encode(Conversation(seq=1, messages=_research_transcript())),
         )
         ready = await driver.settle(conversation_id, turn_id)
+        get = FilesystemBlobStore.get
+        missing_once = True
+
+        async def delayed_get(store: FilesystemBlobStore, key: str) -> bytes:
+            nonlocal missing_once
+            if missing_once and key == transcript_key(conversation_id):
+                missing_once = False
+                raise BlobNotFound(key)
+            return await get(store, key)
+
+        monkeypatch.setattr(FilesystemBlobStore, "get", delayed_get)
+        delayed = await driver.settle(conversation_id, turn_id)
 
     assert missing is None
     assert corrupt is None
     assert stale is None
     assert ready is not None
     assert ready.messages == _research_transcript()
+    assert delayed is not None
+    assert delayed.messages == _research_transcript()
 
 
 async def test_resolve_workspace_and_agent_accepts_an_explicit_workspace(db: None) -> None:
