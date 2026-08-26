@@ -3727,8 +3727,11 @@ async def test_github_app_api_scorer_requires_the_skill_command_and_no_connector
 
     assert (await grader(CapabilityOutput("done", (coding, spawn)))).passed
     assert (await grader(CapabilityOutput("done", (spawn, coding)))).passed
-    assert not (await grader(CapabilityOutput("done", (spawn,)))).passed
+    direct = await grader(CapabilityOutput("done", (spawn,)))
+    assert direct.passed
+    assert "spawned direct" in direct.reason
     assert not (await grader(CapabilityOutput("done", (coding, connector, spawn)))).passed
+    assert not (await grader(CapabilityOutput("done", (connector, spawn)))).passed
 
     bare = ToolInvocation(
         "spawn",
@@ -3743,7 +3746,34 @@ async def test_github_app_api_scorer_requires_the_skill_command_and_no_connector
     assert (await grader(CapabilityOutput(answer, (coding, bare)))).passed
     assert (await grader(CapabilityOutput(answer, (bare, coding)))).passed
     assert not (await grader(CapabilityOutput("use the App token", (coding, bare)))).passed
-    assert not (await grader(CapabilityOutput(answer, (bare,)))).passed
+    assert (await grader(CapabilityOutput(answer, (bare,)))).passed
+    assert not (await grader(CapabilityOutput("use the App token", (bare,)))).passed
+
+
+async def test_handled_inline_scorer_rejects_delegation_and_allows_a_skill_load() -> None:
+    grader = coding_subagent.handled_inline_scorer()
+    bash = ToolInvocation("bash", {"command": "python3 x.py"}, "ok", True)
+    assert (await grader(CapabilityOutput("ANSWER: 13", (bash,)))).passed
+    spawned = ToolInvocation("spawn", {"target": "coding", "payload": {}}, "ok", True)
+    sandbox = ToolInvocation("load_skill", {"name": "sandbox"}, "ok", True)
+    rejected = await grader(CapabilityOutput("ANSWER: 13", (bash, spawned)))
+    assert not rejected.passed
+    assert "delegated a one-shot task: spawn" in rejected.reason
+    assert not (await grader(CapabilityOutput("ANSWER: 13", (sandbox, bash, spawned)))).passed
+    assert (await grader(CapabilityOutput("ANSWER: 13", (sandbox, bash)))).passed
+
+
+async def test_head_overhead_scorer_bounds_the_heads_own_calls() -> None:
+    grader = coding_subagent.head_overhead_scorer(3)
+    calls = tuple(
+        ToolInvocation(name, {}, "ok", True) for name in ("load_skill", "spawn", "memory_update")
+    )
+    within = await grader(CapabilityOutput("done", calls, own_calls=calls))
+    assert within.passed
+    assert "load_skill, spawn, memory_update" in within.reason
+    over = await grader(CapabilityOutput("done", calls, own_calls=calls + calls[:1]))
+    assert not over.passed
+    assert "4 calls" in over.reason
 
 
 async def test_landed_branch_scorer_reads_the_remote_the_prepare_hook_built(

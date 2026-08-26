@@ -397,7 +397,8 @@ def github_app_api_scorer() -> Grader:
     """The command may arrive by either leg: the parent writes it into the objective, or the child
     knows it from its own prompt and the final answer carries it back. Both prove the member gets
     the installed-App auth without a connector connection — the connector attempt is the guarded
-    failure, not the order the skill loaded in — and only the delegation route is fixed."""
+    failure. The routing act may be a skill load followed by a spawn or a direct spawn: the outcome
+    is what the case grades, and the verdict names which route ran."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         loaded = False
@@ -417,25 +418,49 @@ def github_app_api_scorer() -> Grader:
                     objectives.append(objective)
                 case _:
                     continue
-        if not loaded:
-            return CapabilityVerdict(False, "never loaded the coding skill")
+        route = "loaded coding and" if loaded else "spawned direct and"
         if not objectives:
             return CapabilityVerdict(False, "no successful coding spawn")
         if any(GITHUB_APP_API_COMMAND in objective for objective in objectives):
-            return CapabilityVerdict(True, "loaded coding and delegated App API auth")
+            return CapabilityVerdict(True, f"{route} delegated App API auth")
         if GITHUB_APP_API_COMMAND in output.response:
             return CapabilityVerdict(
-                True, "loaded coding, delegated, and the answer carries the App API command"
+                True, f"{route} delegated, and the answer carries the App API command"
             )
         return CapabilityVerdict(
             False, "neither a coding objective nor the answer carries the App API auth command"
         )
 
     return DescribedGrader(
-        "coding loads, a coding spawn succeeds, no connector connection is attempted, and the "
+        "a coding spawn succeeds by either route, no connector connection is attempted, and the "
         "objective or the final answer carries the installed-App gh command",
         grade,
     )
+
+
+def handled_inline_scorer() -> Grader:
+    """Delegation is the failure these cases grade. A skill load is not delegation: the head prompt
+    orders a proactive load_skill, and a brief that writes and runs code in /workspace matches the
+    core `sandbox` skill the deploy always indexes, which the skill-loading catalog and the
+    sandbox-cli suite both grade as the correct load."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        delegated = [call.name for call in output.calls if call.name == "spawn"]
+        if delegated:
+            return CapabilityVerdict(False, f"delegated a one-shot task: {', '.join(delegated)}")
+        return CapabilityVerdict(True, "handled inline")
+
+    return DescribedGrader("the head finishes the one-shot itself: no spawn", grade)
+
+
+def head_overhead_scorer(max_own_calls: int) -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        names = ", ".join(call.name for call in output.own_calls)
+        if len(output.own_calls) > max_own_calls:
+            return CapabilityVerdict(False, f"head made {len(output.own_calls)} calls: {names}")
+        return CapabilityVerdict(True, f"head made {len(output.own_calls)} calls: {names}")
+
+    return DescribedGrader(f"the head's own tool calls stay at or under {max_own_calls}", grade)
 
 
 def parallel_checkout_scorer() -> Grader:
@@ -614,7 +639,11 @@ SPECS: list[tuple[str, str, Grader]] = [
         "(ignoring case and spaces) at /workspace/palindrome.py, then self-test it against "
         "'racecar' and 'hello' and report both boolean results. Reply with a single line "
         "'ANSWER: <result for racecar>,<result for hello>' (for example 'ANSWER: True,False').",
-        combine(exact_scorer("True,False"), lane_scorer(frozenset({"coding"}))),
+        combine(
+            exact_scorer("True,False"),
+            lane_scorer(frozenset({"coding"})),
+            head_overhead_scorer(3),
+        ),
     ),
 ]
 
@@ -661,7 +690,9 @@ PROVEN_LOCAL_INVENTORY_OBJECTIVE = (
 
 CASES = (
     *(
-        CapabilityCase(name, brief, grader, digest_tag=f"delegation:{name}:lane-success")
+        CapabilityCase(
+            name, brief, grader, digest_tag=f"delegation:{name}:lane-success:head-budget"
+        )
         for name, brief, grader in SPECS
     ),
     CapabilityCase(
@@ -679,7 +710,22 @@ CASES = (
         "state how it would make a GitHub API write as that App. Do not make the request and do "
         "not connect another GitHub account.",
         github_app_api_scorer(),
-        digest_tag="delegation:coding-subagent-github-app-api:answer-or-objective",
+        digest_tag="delegation:coding-subagent-github-app-api:answer-or-objective:either-route",
+    ),
+    CapabilityCase(
+        "inline-single-function",
+        "Write a Python function reverse_words(s) at /workspace/reverse_words.py that reverses "
+        "the word order of a string, run it on 'one two three', and reply with a single line "
+        "'ANSWER: <the output>'.",
+        combine(exact_scorer("three two one"), handled_inline_scorer()),
+        digest_tag="delegation:inline-single-function:no-routing",
+    ),
+    CapabilityCase(
+        "inline-vowel-count",
+        "Write and run a one-line Python script in the sandbox that counts the vowels (aeiou) in "
+        "'metalcraft artificial intelligence' and reply with a single line 'ANSWER: <count>'.",
+        combine(exact_scorer("13"), handled_inline_scorer()),
+        digest_tag="delegation:inline-vowel-count:no-routing",
     ),
     CapabilityCase(
         "github-app-write-explanation",
