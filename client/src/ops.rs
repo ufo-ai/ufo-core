@@ -17,7 +17,7 @@ pub const OP_EXEC: &str = "exec";
 pub const OP_WRITE: &str = "write";
 pub const OP_READ: &str = "read";
 pub const OP_FILE: &str = "fileop";
-pub const OP_SYSTEM_SKILLS: &str = "system-skills";
+pub const OP_SKILLS: &str = "skills";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,7 +37,7 @@ pub struct OpRuntime {
 /// Run one op and answer its reply body, or the failure string carried in `x-ufo-op-err`.
 pub fn run_op(rt: &OpRuntime, session: &Session, op: &OpRequest) -> Result<Vec<u8>, String> {
     match op.kind.as_str() {
-        OP_EXEC => exec::run(&op.params, &rt.workdir, &rt.cwd, op.timeout_s),
+        OP_EXEC => exec::run_at_home(&op.params, &rt.workdir, &rt.cwd, &rt.home, op.timeout_s),
         OP_WRITE => landed(session, op)
             .map(|_| Vec::new())
             .map_err(|_| format!("EIO: could not write {}", op.arg)),
@@ -51,11 +51,17 @@ pub fn run_op(rt: &OpRuntime, session: &Session, op: &OpRequest) -> Result<Vec<u
                 serde_json::from_str::<ReadBackParams>(&op.params)
                     .map_err(|error| format!("read failed: params are not JSON: {error}"))?
             };
-            read_back(&op.arg, params.max_bytes, params.workspace.as_deref())
+            let path = expand_ufo_path(&op.arg, &rt.home);
+            let workspace = params
+                .workspace
+                .as_deref()
+                .map(|root| expand_ufo_path(root, &rt.home));
+            read_back(&path, params.max_bytes, workspace.as_deref())
         }
         OP_FILE => {
-            let params: serde_json::Value = serde_json::from_str(&op.params)
+            let mut params: serde_json::Value = serde_json::from_str(&op.params)
                 .map_err(|error| format!("fileop failed: params are not JSON: {error}"))?;
+            expand_ufo_home(&mut params, &rt.home);
             fileops::run(&op.name, &params, &rt.workdir).map_err(|error| {
                 if error.starts_with("ENOENT: no bundled program") {
                     error
@@ -64,9 +70,28 @@ pub fn run_op(rt: &OpRuntime, session: &Session, op: &OpRequest) -> Result<Vec<u
                 }
             })
         }
-        OP_SYSTEM_SKILLS => crate::system_skills::load(&rt.home, &rt.cwd, &op.params),
+        OP_SKILLS => crate::system_skills::load_synced(&rt.home, session, &op.params),
         other => Err(format!("unknown op kind: {other}")),
     }
+}
+
+fn expand_ufo_home(params: &mut serde_json::Value, home: &Home) {
+    for key in ["path", "workspace"] {
+        let Some(value) = params.get_mut(key) else {
+            continue;
+        };
+        let Some(path) = value.as_str() else {
+            continue;
+        };
+        *value = serde_json::Value::String(expand_ufo_path(path, home));
+    }
+}
+
+fn expand_ufo_path(path: &str, home: &Home) -> String {
+    path.strip_prefix("$UFO_HOME/").map_or_else(
+        || path.to_string(),
+        |relative| home.root.join(relative).to_string_lossy().into_owned(),
+    )
 }
 
 fn landed(session: &Session, op: &OpRequest) -> Result<(), String> {
@@ -231,33 +256,59 @@ mod tests {
     }
 
     #[test]
-    fn system_skills_load_from_ufo_home_without_an_exec() {
-        let rt = runtime("system-skills");
-        let object = "308c9d25ca09c876af5002d9e89c5b82abd64748c78cc0fc1eeeae882f7e5f88";
-        let bundle = "f".repeat(64);
-        let skills = rt.home.root.join("skills");
-        let source = skills
-            .join("bundles")
-            .join(&bundle)
-            .join("objects")
-            .join(object);
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("SKILL.md"), b"workflow").unwrap();
-        fs::write(skills.join("current"), format!("\"sha256:{bundle}\"\n")).unwrap();
+    fn a_fileop_expands_ufo_home_outside_the_start_directory() {
+        let rt = runtime("ufo-home-read");
+        let skill = rt.home.root.join("skills/probe/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(&skill, b"workflow\n").unwrap();
         let asked = asking(
-            OP_SYSTEM_SKILLS,
+            OP_FILE,
             "",
-            &format!(r#"{{"probe":"sha256:{object}"}}"#),
+            r#"{"path":"$UFO_HOME/skills/probe/SKILL.md","workspace":"/"}"#,
+        );
+
+        let reply = run_op(&rt, &offline_session(), &asked).unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+
+        assert_eq!(result["content"], "1\tworkflow");
+        let _ = fs::remove_dir_all(&rt.workdir);
+    }
+
+    #[test]
+    fn a_bounded_read_expands_ufo_home_and_its_containment_root() {
+        let rt = runtime("ufo-home-document");
+        let skill = rt.home.root.join("skills/probe/reference.pdf");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(&skill, b"pdf bytes").unwrap();
+        let asked = asking(
+            OP_READ,
+            "$UFO_HOME/skills/probe/reference.pdf",
+            r#"{"max_bytes":100,"workspace":"$UFO_HOME/skills"}"#,
+        );
+
+        let reply = run_op(&rt, &offline_session(), &asked).unwrap();
+
+        assert_eq!(reply, b"pdf bytes");
+        let _ = fs::remove_dir_all(&rt.workdir);
+    }
+
+    #[test]
+    fn skills_load_into_ufo_home_without_an_exec() {
+        let rt = runtime("skills");
+        let asked = asking(
+            OP_SKILLS,
+            "",
+            r#"{"system":{},"user":{"probe":{"digest":"sha256:308c9d25ca09c876af5002d9e89c5b82abd64748c78cc0fc1eeeae882f7e5f88","files":{"SKILL.md":"d29ya2Zsb3c="}}}}"#,
         );
 
         let reply = run_op(&rt, &offline_session(), &asked).unwrap();
 
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&reply).unwrap(),
-            serde_json::json!({"mounted": ["probe"]})
+            serde_json::json!({"roots": {"probe": rt.home.root.join("skills/probe")}})
         );
         assert_eq!(
-            fs::read(rt.cwd.join(".skills/probe/SKILL.md")).unwrap(),
+            fs::read(rt.home.root.join("skills/probe/SKILL.md")).unwrap(),
             b"workflow"
         );
         let _ = fs::remove_dir_all(&rt.workdir);

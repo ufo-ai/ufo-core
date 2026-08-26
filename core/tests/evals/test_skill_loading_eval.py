@@ -1,17 +1,19 @@
 """The skill_loading verdict is a pure decision over observed mounts and turn status; the watcher
-derives its watched path from the same runtime constants `mount_skill` writes through; and every
+derives its watched path from the same runtime constants `install_skill` writes through; and every
 catalog case must name a skill the assistant pack carries — a typo'd or uncarried `expected` would
 silently exclude forever, and forbidding a child's own parent would fail every correct load."""
 
 import asyncio
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 
-from evals.harness.mounts import MountObservation, never_started
+from evals.harness.mounts import MountObservation, _observed_skills, never_started
 from evals.harness.registry import narrowed_tasks
+from evals.harness.timing import TurnStep
 from evals.registry import TASKS
 from evals.skill_loading import runner
 from evals.skill_loading.catalog import CASES, SKILL_LOADING_PACKS
@@ -59,13 +61,45 @@ def test_grading_states_the_criteria() -> None:
         expected="website-building",
         forbidden=("website-building/webapp",),
     )
-
     assert plain.grading == "skill 'pdf' mounts within 120s"
     assert CASE.grading == "skill 'office-xlsx' mounts within 120s, never 'office-pptx' without it"
     assert child.grading == (
         "skill 'website-building' mounts within 120s, never 'website-building/webapp' "
         "without it (a forbidden child of it, never at all)"
     )
+
+
+def test_completed_skill_result_names_the_loaded_closure() -> None:
+    result = ToolResultBlock(
+        tool_use_id="call",
+        content="# Skill: website-building/webapp\n\nbody\n\n# Skill: website-building\n",
+    )
+    step = TurnStep(
+        function_name="engine._dispatch_step",
+        completed_at_epoch_ms=2,
+        messages=(Message(role="user", content=(result,)),),
+    )
+
+    assert _observed_skills((((step,), None),)) == (
+        "website-building",
+        "website-building/webapp",
+    )
+
+
+def test_child_loads_and_started_preloads_are_observed() -> None:
+    loaded = ToolResultBlock(tool_use_id="call", content="# Skill: child-loaded\n")
+    step = TurnStep(
+        function_name="engine._dispatch_step",
+        completed_at_epoch_ms=2,
+        messages=(Message(role="user", content=(loaded,)),),
+    )
+    inbound = json.dumps({"preload_skills": ["child-preloaded"]})
+
+    assert _observed_skills((((step,), inbound),)) == (
+        "child-loaded",
+        "child-preloaded",
+    )
+    assert _observed_skills((((), inbound),)) == ()
 
 
 def test_expected_mount_passes() -> None:

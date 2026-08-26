@@ -78,7 +78,7 @@ There is no new logic here. The file simply re-exports selected names from other
 
 This module is like a signposted doorway into the skill system. The real skill logic lives deeper in the project, under `ufo.skills.runtime`, but outside code should not have to know that internal layout. Instead, it can import from `ufo.sdk.skills`, which is a cleaner and more stable public address.
 
-It exposes three things: `RuntimeSkill`, the value object that represents a skill available at runtime; `parse_skill_content`, a helper that reads in-memory skill text and turns it into the project’s skill representation; and `skill_mount_root`, a helper related to where contributed skills are mounted or rooted.
+It exposes three things: `RuntimeSkill`, the value object that represents a skill available at runtime; `parse_skill_content`, a helper that reads in-memory skill text and turns it into the project’s skill representation; and `skill_root`, a helper related to where contributed skills are mounted or rooted.
 
 The comment at the top explains an important design choice: the SDK package keeps its `__init__.py` files empty because project rules forbid code there. So instead of putting public imports at the package root, the SDK uses small named modules like this one. If this file disappeared, extension code would either lose this convenient public import path or be forced to depend directly on internal modules, making future refactors harder and more likely to break users.
 

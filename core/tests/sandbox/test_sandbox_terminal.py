@@ -256,32 +256,37 @@ async def test_create_without_a_public_proxy_fails_closed_on_loopback() -> None:
     assert handle.egress_env["HTTP_PROXY"] == "http://run-token:@127.0.0.1:8080"
 
 
-async def test_a_document_read_relays_bounded_bytes_to_preview() -> None:
+def _rendered_document(kind: str, page: int, text: str) -> bytes:
     target = io.BytesIO()
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr(
             "manifest.json",
             json.dumps(
                 {
-                    "kind": "xlsx",
-                    "total_pages": 2,
-                    "requested_range": {"start_page": 2, "limit": 1},
+                    "kind": kind,
+                    "total_pages": page,
+                    "requested_range": {"start_page": page, "limit": 1},
                     "pages": [
                         {
-                            "number": 2,
+                            "number": page,
                             "file": "page-01.png",
                             "width": 800,
                             "height": 600,
-                            "text": "sheet page two",
+                            "text": text,
                         }
                     ],
                 }
             ),
         )
         archive.writestr("page-01.png", b"\x89PNG\r\n\x1a\nrendered")
+    return target.getvalue()
+
+
+async def test_a_document_read_relays_bounded_bytes_to_preview() -> None:
+    rendered = _rendered_document("xlsx", 2, "sheet page two")
 
     async def preview(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=target.getvalue())
+        return httpx.Response(200, content=rendered)
 
     terminals = Terminals()
     conversation_id = uuid4()
@@ -310,6 +315,49 @@ async def test_a_document_read_relays_bounded_bytes_to_preview() -> None:
     assert result["text"] == "sheet page two"
     assert result["start_page"] == 2
     assert result["pages_returned"] == 1
+
+
+async def test_a_skill_document_read_keeps_ufo_home_as_its_containment_root() -> None:
+    async def preview(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=_rendered_document("pdf", 1, "showcase"),
+        )
+
+    terminals = Terminals()
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/p", None)
+    carrier = TerminalCarrier(
+        terminals=terminals,
+        document_renderer=DocumentRenderer(
+            service_url="https://preview.test",
+            token="preview-real",
+            transport=httpx.MockTransport(preview),
+        ),
+    )
+    handle = await carrier.create(_spec(conversation_id, "/p"))
+    running = asyncio.create_task(
+        carrier.file_op(
+            handle,
+            "read",
+            {
+                "path": "$UFO_HOME/skills/theme-factory/theme-showcase.pdf",
+                "workspace": "$UFO_HOME/skills",
+                "limit": 1,
+            },
+        )
+    )
+
+    op = await _answer(terminals, conversation_id, b"pdf bytes")
+
+    assert op.kind == "read"
+    assert op.arg == "$UFO_HOME/skills/theme-factory/theme-showcase.pdf"
+    assert _op_params(op) == {
+        "max_bytes": DOCUMENT_INPUT_MAX_BYTES,
+        "workspace": "$UFO_HOME/skills",
+    }
+    result = await running
+    assert result["type"] == "pdf"
 
 
 async def test_attach_answers_only_the_bound_directory() -> None:
@@ -355,37 +403,26 @@ async def test_exec_names_its_program_with_rewritten_argv_and_decodes_the_reply(
     assert result.exit_code == 0 and result.stdout == "out\n"
 
 
-async def test_system_skills_use_the_running_clients_native_cache_operation() -> None:
+async def test_skills_use_the_running_clients_native_operation() -> None:
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
     terminals.connect(conversation_id, "/Users/member/proj", None)
     handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
     session = SandboxSession(carrier=carrier, handle=handle)
-    requested = {"sandbox": "sha256:aaa"}
+    requested = {"system": {"sandbox": "sha256:aaa"}, "user": {}}
 
-    running = asyncio.create_task(session.mount_system_skills(requested))
-    op = await _answer(terminals, conversation_id, b'{"mounted":["sandbox"]}')
+    running = asyncio.create_task(session.load_skills(requested))
+    op = await _answer(
+        terminals,
+        conversation_id,
+        b'{"roots":{"sandbox":"/Users/member/.ufo/skills/sandbox"}}',
+    )
 
-    assert op.kind == "system-skills"
+    assert op.kind == "skills"
     assert op.name == "" and op.arg == ""
     assert _op_params(op) == requested
-    assert await running == frozenset({"sandbox"})
-
-
-async def test_system_skills_fall_back_when_the_native_operation_is_unavailable() -> None:
-    terminals = Terminals()
-    carrier = TerminalCarrier(terminals=terminals)
-    conversation_id = uuid4()
-    terminals.connect(conversation_id, "/Users/member/proj", None)
-    handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
-    session = SandboxSession(carrier=carrier, handle=handle)
-
-    running = asyncio.create_task(session.mount_system_skills({"sandbox": "sha256:aaa"}))
-    op = await _refuse(terminals, conversation_id, "unknown op kind: system-skills")
-
-    assert op.kind == "system-skills"
-    assert await running == frozenset()
+    assert await running == {"sandbox": "/Users/member/.ufo/skills/sandbox"}
 
 
 async def test_exec_keeps_a_presigned_url_whole_beside_the_path_it_uploads() -> None:

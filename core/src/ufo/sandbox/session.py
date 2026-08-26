@@ -2,15 +2,16 @@
 
 Everything downstream (tools, engine) depends only on this module; the Docker carrier and the
 egress proxy implement against it. A deploy swaps the carrier (E2B, remote) without touching a
-tool. The invariant the sandbox exists to hold: a tool reaches only the conversation's
-`/workspace`, never the transcript or compaction records, which live in the blob store the sandbox
-holds no credential for.
+tool. The invariant the sandbox exists to hold: a file tool reaches only the conversation's
+`/workspace` and the `$UFO_HOME/skills` runtime tree, never the transcript or compaction records,
+which live in the blob store the sandbox holds no credential for.
 
 A caller holds a sandbox either way round: `SandboxSession` over one that exists, and `LateSandbox`
 over one the first operation creates — the same operations, so no tool knows which it was handed."""
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.auth.token_signing import SignedTokenError, sign_token, verify_token
@@ -62,6 +63,235 @@ target. The mode repeats `WORKSPACE_WRITE_MODE` because a `-c` program inside th
 import it."""
 TOOL_OUTPUT_DIRNAME = ".tool-output"
 TOOL_OUTPUT_DIR = f"{WORKSPACE_DIR}/{TOOL_OUTPUT_DIRNAME}"
+SKILL_LOAD_STAGING_PREFIX = f"{WORKSPACE_DIR}/.ufo-skill-load-"
+SYSTEM_SKILL_SYNC_STAGING_PREFIX = f"{WORKSPACE_DIR}/.ufo-system-skills-"
+SKILL_LOAD_PROG = """
+import base64
+import hashlib
+import json
+import os
+import shutil
+import sys
+from pathlib import Path, PurePosixPath
+
+from containment import contained_file
+
+
+def safe(value):
+    path = PurePosixPath(value)
+    return (
+        bool(value)
+        and not path.is_absolute()
+        and all(part not in (".", "..") for part in path.parts)
+    )
+
+
+def safe_name(value):
+    path = PurePosixPath(value)
+    return safe(value) and len(path.parts) == 1 and not path.parts[0].startswith(".")
+
+
+def digest(files):
+    value = hashlib.sha256()
+    for name, content in sorted(files):
+        value.update(hashlib.sha256(name.encode()).digest())
+        value.update(hashlib.sha256(content).digest())
+    return "sha256:" + value.hexdigest()
+
+
+def remove(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+payload_path = Path(sys.argv[1])
+with contained_file(payload_path, sys.argv[3]) as staged_payload:
+    payload_bytes = staged_payload.read_bytes(64 * 1024 * 1024)
+    staged_payload.unlink()
+if hashlib.sha256(payload_bytes).hexdigest() != sys.argv[4]:
+    raise ValueError("skill load payload changed after staging")
+payload = json.loads(payload_bytes)
+root = Path(sys.argv[2])
+root.mkdir(parents=True, exist_ok=True)
+try:
+    manifest = json.loads((root / ".system-manifest.json").read_bytes())
+except (FileNotFoundError, json.JSONDecodeError, TypeError):
+    manifest = {"skills": {}}
+declared = manifest.get("skills")
+system = payload.get("system")
+user = payload.get("user")
+if not isinstance(declared, dict) or not isinstance(system, dict) or not isinstance(user, dict):
+    raise TypeError("invalid skill load payload")
+roots = {}
+for name, expected in system.items():
+    if not isinstance(name, str) or not isinstance(expected, str) or not safe(name):
+        raise TypeError("invalid system skill")
+    entry = declared.get(name)
+    if not isinstance(entry, dict) or entry.get("digest") != expected:
+        continue
+    paths = entry.get("files")
+    if not isinstance(paths, list) or any(
+        not isinstance(path, str) or not safe(path) for path in paths
+    ):
+        raise TypeError("invalid system skill manifest: " + name)
+    files = []
+    for relative in paths:
+        target = root / name / relative
+        if target.is_symlink() or not target.is_file():
+            files = []
+            break
+        files.append((relative, target.read_bytes()))
+    if files and digest(files) == expected:
+        roots[name] = str(root / name)
+system_names = tuple(system)
+for name, entry in user.items():
+    if not isinstance(name, str) or not safe_name(name) or not isinstance(entry, dict):
+        raise TypeError("invalid user skill")
+    if any(
+        item == name or item.startswith(name + "/") or name.startswith(item + "/")
+        for item in system_names
+    ):
+        raise ValueError("user skill conflicts with system skill: " + name)
+    expected = entry.get("digest")
+    encoded = entry.get("files")
+    if not isinstance(expected, str) or not isinstance(encoded, dict):
+        raise TypeError("invalid user skill: " + name)
+    files = []
+    for relative, content in encoded.items():
+        if not isinstance(relative, str) or not safe(relative) or not isinstance(content, str):
+            raise TypeError("invalid user skill file: " + name)
+        files.append((relative, base64.urlsafe_b64decode(content)))
+    if digest(files) != expected:
+        raise ValueError("user skill does not match its digest: " + name)
+    staging = root / (".user-" + str(os.getpid()))
+    remove(staging)
+    staging.mkdir()
+    for relative, content in files:
+        target = staging / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    target = root / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    remove(target)
+    os.replace(staging, target)
+    roots[name] = str(target)
+print(json.dumps({"roots": roots}, sort_keys=True, separators=(",", ":")))
+"""
+SYSTEM_SKILL_SYNC_PROG = """
+import hashlib
+import io
+import json
+import os
+import shutil
+import sys
+import zipfile
+from pathlib import Path, PurePosixPath
+
+from containment import contained_file
+
+
+def safe(value):
+    path = PurePosixPath(value)
+    return (
+        bool(value)
+        and not path.is_absolute()
+        and all(part not in (".", "..") for part in path.parts)
+    )
+
+
+def digest(files):
+    value = hashlib.sha256()
+    for name, content in sorted(files):
+        value.update(hashlib.sha256(name.encode()).digest())
+        value.update(hashlib.sha256(content).digest())
+    return "sha256:" + value.hexdigest()
+
+
+def remove(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+archive_path = Path(sys.argv[1])
+with contained_file(archive_path, sys.argv[3]) as staged_archive:
+    with staged_archive.open_bytes() as source:
+        archive_bytes = source.read()
+    staged_archive.unlink()
+if hashlib.sha256(archive_bytes).hexdigest() != sys.argv[4]:
+    raise ValueError("system skill archive changed after staging")
+root = Path(sys.argv[2])
+root.mkdir(parents=True, exist_ok=True)
+with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+    manifest = json.loads(archive.read("manifest.json"))
+    skills = manifest.get("skills")
+    if not isinstance(skills, dict):
+        raise TypeError("invalid system skill manifest")
+    payload = json.dumps({"skills": skills}, sort_keys=True, separators=(",", ":")).encode()
+    if manifest.get("digest") != "sha256:" + hashlib.sha256(payload).hexdigest():
+        raise ValueError("invalid system skill manifest digest")
+    declared = {"manifest.json"}
+    for name, entry in skills.items():
+        if not isinstance(name, str) or not safe(name) or not isinstance(entry, dict):
+            raise TypeError("invalid system skill")
+        paths = entry.get("files")
+        if not isinstance(paths, list) or any(
+            not isinstance(path, str) or not safe(path) for path in paths
+        ):
+            raise TypeError("invalid system skill files: " + name)
+        files = [(path, archive.read(name + "/" + path)) for path in paths]
+        if digest(files) != entry.get("digest"):
+            raise ValueError("system skill does not match its digest: " + name)
+        declared.update(name + "/" + path for path in paths)
+    archived = {entry.filename for entry in archive.infolist() if not entry.is_dir()}
+    if archived != declared:
+        raise ValueError("system skills archive contains undeclared files")
+    try:
+        previous = json.loads((root / ".system-manifest.json").read_bytes()).get("skills", {})
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    top_levels = {PurePosixPath(name).parts[0] for name in skills}
+    merged = {
+        name: entry
+        for name, entry in previous.items()
+        if isinstance(name, str) and PurePosixPath(name).parts[0] not in top_levels
+    }
+    merged.update(skills)
+    staging = root / (".install-" + str(os.getpid()))
+    remove(staging)
+    staging.mkdir()
+    try:
+        for name, entry in skills.items():
+            for relative in entry["files"]:
+                target = staging / name / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(name + "/" + relative))
+        for name in top_levels:
+            target = root / name
+            remove(target)
+            os.replace(staging / name, target)
+        payload = json.dumps({"skills": merged}, sort_keys=True, separators=(",", ":")).encode()
+        installed = json.dumps(
+            {"digest": "sha256:" + hashlib.sha256(payload).hexdigest(), "skills": merged},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        manifest_path = root / (".system-manifest-" + str(os.getpid()))
+        manifest_path.write_bytes(installed)
+        os.replace(manifest_path, root / ".system-manifest.json")
+        if "bundles" not in top_levels:
+            remove(root / "bundles")
+        current = root / "current"
+        if "current" not in top_levels and (current.is_symlink() or current.is_file()):
+            current.unlink()
+    finally:
+        remove(staging)
+"""
 DEFAULT_EXEC_TIMEOUT_SECONDS = 120
 DOCUMENT_READ_EXEC_TIMEOUT_SECONDS = 360
 DOCUMENT_READ_SUFFIXES = frozenset((".pdf", ".pptx", ".docx", ".xlsx"))
@@ -83,19 +313,22 @@ PLAYWRIGHT_BROWSERS_DIR = "/usr/local/lib/playwright"
 PLAYWRIGHT_VERSION = "1.62.0"
 PLAYWRIGHT_CHROMIUM_REVISION = "1234"
 UFO_HOME_ENV = "UFO_HOME"
+SYSTEM_SKILLS_BAKED_ENV = "UFO_SYSTEM_SKILLS_BAKED"
 SANDBOX_UFO_HOME = "/home/user/.ufo"
 SYSTEM_SKILLS_ROOT = f"{SANDBOX_UFO_HOME}/skills"
 SANDBOX_TMPDIR = "/var/tmp"
 SANDBOX_ENV: dict[str, str] = {
     "NODE_PATH": NODE_GLOBAL_MODULES,
     "PLAYWRIGHT_BROWSERS_PATH": PLAYWRIGHT_BROWSERS_DIR,
+    SYSTEM_SKILLS_BAKED_ENV: "1",
     UFO_HOME_ENV: SANDBOX_UFO_HOME,
     "TMPDIR": SANDBOX_TMPDIR,
 }
 """Runtime env the sandbox image needs beyond its base: NODE_PATH so node resolves the globally
 installed skill modules from any cwd, PLAYWRIGHT_BROWSERS_PATH so scripts find the Chromium baked
-at build time, UFO_HOME so the baked client reads the same skill-cache path as a terminal, and
-TMPDIR so scratch lands on the disk. The guest mounts `/tmp` as a tmpfs sized to half its memory,
+at build time, UFO_SYSTEM_SKILLS_BAKED so the client uses the image's local system bundle,
+UFO_HOME so the baked client reads the same skill-cache path as a terminal, and TMPDIR so scratch
+lands on the disk. The guest mounts `/tmp` as a tmpfs sized to half its memory,
 so a byte written there is a resident page — one whole-suite run of a python repository costs 2.5 GB
 of scratch, which does not fit that ceiling below the largest tier and does fit the 27 GB root many
 times over. Every caller that resolves temp the standard way moves with the one variable: python
@@ -485,12 +718,28 @@ class CommandStopping(Protocol):
 
 
 @runtime_checkable
-class SystemSkillMounting(Protocol):
-    """A carrier whose connected runtime reads system skills through its native operation."""
+class SkillLoading(Protocol):
+    """A carrier whose connected runtime loads skills through its native operation."""
 
-    async def mount_system_skills(
-        self, handle: SandboxHandle, skills: Mapping[str, str]
+    async def load_skills(
+        self, handle: SandboxHandle, payload: Mapping[str, object]
     ) -> ExecResult: ...
+
+
+@runtime_checkable
+class SkillExecuting(Protocol):
+    """A container carrier that runs the server-carried skill programs as root."""
+
+    async def exec_skill(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult: ...
+
+
+@runtime_checkable
+class SystemSkillSeeding(Protocol):
+    """A carrier whose runtime filesystem is created in this process."""
+
+    def seed_system_skills(self, archive: bytes) -> None: ...
 
 
 async def ufo_fs_file_op(
@@ -563,6 +812,12 @@ def workspace_path(path: str) -> str:
     if resolved != root and root not in resolved.parents:
         raise ValueError(f"path {path!r} escapes {WORKSPACE_DIR}")
     return str(resolved)
+
+
+def rooted_path(path: str, root: str) -> str:
+    """Normalize a path under `root` with the workspace guard and preserve its root spelling."""
+    normalized = workspace_path(f"{WORKSPACE_DIR}{path.removeprefix(root)}")
+    return f"{root}{normalized.removeprefix(WORKSPACE_DIR)}"
 
 
 def _resolve_parts(parts: tuple[str, ...]) -> list[str]:
@@ -658,44 +913,99 @@ class Sandbox:
         bound = await self._bound()
         await bound.carrier.write(bound.handle, workspace_path(path), content)
 
-    async def mount_system_skills(self, skills: Mapping[str, str]) -> frozenset[str]:
-        """Mount content-addressed system skills from the carrier's local bundle in one call."""
-        if not skills:
-            return frozenset()
+    async def load_skills(self, payload: Mapping[str, object]) -> dict[str, str]:
+        """Load system and member skills under the runtime's `$UFO_HOME/skills`."""
         bound = await self._bound()
-        if isinstance(bound.carrier, SystemSkillMounting):
-            result = await bound.carrier.mount_system_skills(bound.handle, skills)
+        if isinstance(bound.carrier, SkillLoading):
+            native = True
+            result = await bound.carrier.load_skills(bound.handle, payload)
         else:
-            result = await bound.carrier.exec(
-                bound.handle,
-                (
-                    "sh",
-                    "-c",
-                    'if command -v ufo >/dev/null 2>&1; then exec ufo fs "$@"; fi; '
-                    'if command -v sbxfs >/dev/null 2>&1; then exec sbxfs "$@"; fi; exit 2',
-                    "sh",
-                    "system-skills",
-                    json.dumps(skills, sort_keys=True, separators=(",", ":")),
-                ),
-                timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
-            )
-        if result.exit_code == 2:
-            return frozenset()
+            native = False
+            result = await self._run_staged_skill_load(bound, payload)
+        expected: set[str] = set()
+        for tier in ("system", "user"):
+            entries = payload.get(tier)
+            if isinstance(entries, Mapping):
+                expected.update(str(name) for name in entries)
+        system = payload.get("system")
+        system_names = set(str(name) for name in system) if isinstance(system, Mapping) else set()
+        refreshed = False
+        while True:
+            if result.exit_code != 0:
+                raise OSError(result.stderr.strip() or "skill load failed")
+            try:
+                response = json.loads(result.stdout)
+                roots = response["roots"]
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise RuntimeError("skill load returned an invalid result") from error
+            if not isinstance(roots, dict) or any(
+                not isinstance(name, str) or not isinstance(path, str)
+                for name, path in roots.items()
+            ):
+                raise RuntimeError("skill load returned invalid paths")
+            unexpected = set(roots) - expected
+            if unexpected:
+                raise RuntimeError(f"skill load returned unexpected names: {sorted(unexpected)}")
+            if (
+                native
+                or refreshed
+                or not (system_names - set(roots))
+                or not bound.system_skill_archive
+            ):
+                return roots
+            await self._sync_system_skills(bound)
+            result = await self._run_staged_skill_load(bound, payload)
+            refreshed = True
+
+    async def _run_staged_skill_load(
+        self, bound: "SandboxSession", payload: Mapping[str, object]
+    ) -> ExecResult:
+        staged = f"{SKILL_LOAD_STAGING_PREFIX}{uuid4()}.json"
+        content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        await bound.carrier.write(
+            bound.handle,
+            staged,
+            content,
+        )
+        return await self._exec_skill(
+            bound,
+            (
+                "python3",
+                SANDBOX_PYTHON_FLAG,
+                "-c",
+                f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+                staged,
+                SYSTEM_SKILLS_ROOT,
+                WORKSPACE_DIR,
+                hashlib.sha256(content).hexdigest(),
+            ),
+        )
+
+    async def _sync_system_skills(self, bound: "SandboxSession") -> None:
+        staged = f"{SYSTEM_SKILL_SYNC_STAGING_PREFIX}{uuid4()}.zip"
+        await bound.carrier.write(bound.handle, staged, bound.system_skill_archive)
+        result = await self._exec_skill(
+            bound,
+            (
+                "python3",
+                SANDBOX_PYTHON_FLAG,
+                "-c",
+                f"{SANDBOX_MODULE_BOOTSTRAP}{SYSTEM_SKILL_SYNC_PROG}",
+                staged,
+                SYSTEM_SKILLS_ROOT,
+                WORKSPACE_DIR,
+                hashlib.sha256(bound.system_skill_archive).hexdigest(),
+            ),
+        )
         if result.exit_code != 0:
-            raise OSError(result.stderr.strip() or "system skill mount failed")
-        try:
-            payload = json.loads(result.stdout)
-            mounted = payload["mounted"]
-        except (json.JSONDecodeError, KeyError, TypeError) as error:
-            raise RuntimeError("system skill mount returned an invalid result") from error
-        if not isinstance(mounted, list) or any(not isinstance(name, str) for name in mounted):
-            raise RuntimeError("system skill mount returned invalid names")
-        unexpected = set(mounted) - skills.keys()
-        if unexpected:
-            raise RuntimeError(
-                f"system skill mount returned unexpected names: {sorted(unexpected)}"
-            )
-        return frozenset(mounted)
+            raise OSError(result.stderr.strip() or "system skill sync failed")
+
+    async def _exec_skill(self, bound: "SandboxSession", argv: tuple[str, ...]) -> ExecResult:
+        if not isinstance(bound.carrier, SkillExecuting):
+            raise RuntimeError("sandbox carrier cannot execute privileged skill programs")
+        return await bound.carrier.exec_skill(
+            bound.handle, argv, timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS
+        )
 
     async def ensure_tool_output_dir(self) -> bool:
         """Guarantee the engine's private `.tool-output` offload dir exists, reclaiming a
@@ -732,15 +1042,26 @@ class Sandbox:
 
     async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
         """Run one in-sandbox file op through the carrier and return its parsed JSON. A `path` arg
-        is workspace-scoped here so every op inherits the same subtree guard, and the `workspace`
-        root each op confines itself to is set here rather than passed in: which subtree a file op
-        may touch is not a caller's choice. Everything below that — how the op runs inside the
-        sandbox, and which failure the model may recover from — is `Carrier.file_op`."""
+        is workspace-scoped except for reads, globs, and greps under `$UFO_HOME/skills`."""
         params = dict(args)
         raw_path = params.get("path")
+        root = WORKSPACE_DIR
         if isinstance(raw_path, str):
-            params["path"] = workspace_path(raw_path)
-        params["workspace"] = WORKSPACE_DIR
+            if raw_path == "$UFO_HOME/skills" or raw_path.startswith("$UFO_HOME/skills/"):
+                if op not in {"read", "glob", "grep"}:
+                    raise ValueError(f"path {raw_path!r} escapes {WORKSPACE_DIR}")
+                params["path"] = rooted_path(raw_path, "$UFO_HOME/skills")
+                root = "$UFO_HOME/skills"
+            elif raw_path == SYSTEM_SKILLS_ROOT or raw_path.startswith(f"{SYSTEM_SKILLS_ROOT}/"):
+                if op not in {"read", "glob", "grep"}:
+                    raise ValueError(f"path {raw_path!r} escapes {WORKSPACE_DIR}")
+                params["path"] = rooted_path(raw_path, SYSTEM_SKILLS_ROOT)
+                root = SYSTEM_SKILLS_ROOT
+            elif raw_path.startswith("$UFO_HOME/"):
+                raise ValueError(f"path {raw_path!r} escapes {WORKSPACE_DIR}")
+            else:
+                params["path"] = workspace_path(raw_path)
+        params["workspace"] = root
         bound = await self._bound()
         return await bound.carrier.file_op(bound.handle, op, params)
 
@@ -771,6 +1092,7 @@ class SandboxSession(Sandbox):
 
     carrier: Carrier
     handle: SandboxHandle
+    system_skill_archive: bytes = b""
 
     @property
     def conversation_id(self) -> UUID:
@@ -809,6 +1131,7 @@ class SandboxSession(Sandbox):
                 egress_env={**authorized, **env},
                 turn_id=self.handle.turn_id,
             ),
+            system_skill_archive=self.system_skill_archive,
         )
 
 

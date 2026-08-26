@@ -6,7 +6,7 @@ Principles for charts, graphs, and data visualizations across all formats (web, 
 
 ## Chart Color Sequence
 
-Use in order for data series (bar, pie, line, scatter). Every entry is one of the two accents, a step derived from one, or a neutral — see `.skills/design-foundations/references/color.md`:
+Use in order for data series (bar, pie, line, scatter). Every entry is one of the two accents, a step derived from one, or a neutral — see `$UFO_HOME/skills/design-foundations/references/color.md`:
 
 | #   | Hex       | Name                          |
 | --- | --------- | ----------------------------- |

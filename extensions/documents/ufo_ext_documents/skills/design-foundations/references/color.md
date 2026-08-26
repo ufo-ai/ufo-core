@@ -80,7 +80,7 @@ Nothing outside this table is set as text. Body-size text clears 4.5:1; a row ma
 
 **How a pale tone is derived:** the same 50% over `--bkgd-100`, applied to a fill — `#7DC7FB` from the accent. A tint behind a mark, or the light end of a sequential chart ramp.
 
-**Data visualization needs more colors than this** to separate categories and series — that is legitimate. The sequence built from these hexes is in `.skills/design-foundations/references/dataviz.md`. Chart colors belong to the same design system as the rest of the page: for sequential data, shades of one accent.
+**Data visualization needs more colors than this** to separate categories and series — that is legitimate. The sequence built from these hexes is in `$UFO_HOME/skills/design-foundations/references/dataviz.md`. Chart colors belong to the same design system as the rest of the page: for sequential data, shades of one accent.
 
 ---
 

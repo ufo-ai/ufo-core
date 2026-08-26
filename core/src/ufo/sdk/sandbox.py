@@ -43,6 +43,7 @@ from ufo.sandbox.session import SandboxHandle as SandboxHandle
 from ufo.sandbox.session import SandboxSession as SandboxSession
 from ufo.sandbox.session import SandboxSpec as SandboxSpec
 from ufo.sandbox.session import SandboxUnreachable as SandboxUnreachable
+from ufo.sandbox.session import SkillExecuting as SkillExecuting
 from ufo.sandbox.session import egress_proxy_env as egress_proxy_env
 from ufo.sandbox.session import ufo_fs_file_op as ufo_fs_file_op
 from ufo.sandbox.session import workspace_path as workspace_path

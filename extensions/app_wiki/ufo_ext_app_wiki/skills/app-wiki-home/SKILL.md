@@ -11,7 +11,7 @@ sections, its people, and the details behind each entry.
 To change it:
 
 1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
-   `cp .skills/app-wiki-home/app.tsx .skills/app-wiki-home/index.html wiki-home/`.
+   `cp "$UFO_HOME/skills/app-wiki-home/app.tsx" "$UFO_HOME/skills/app-wiki-home/index.html" wiki-home/`.
 2. Edit `app.tsx`. Import only from `ufo/kit` — React and its hooks, the portal's components,
    `SectionApp`, `mountApp`, `getJson`, `navigate`. Any other bare import fails the deploy with
    `failed to resolve import`; never install it, because a local `node_modules` makes that build

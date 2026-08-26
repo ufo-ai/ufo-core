@@ -28,7 +28,7 @@ shadow. Copy it and `assets/fonts/` into the project with the same relative layo
 stylesheet first, and name only its variables afterwards — a raw hex or a raw measurement in the
 page is the drift this skill exists to stop. Never fetch a house font from the network.
 
-Paths are relative to this skill's mounted directory (`.skills/ufo-style/`).
+Paths are relative to this skill's directory (`$UFO_HOME/skills/ufo-style/`).
 
 ## What the tokens commit you to
 

@@ -867,6 +867,7 @@ class RecordingCarrier:
     )
     calls: list[tuple[str, ...]] = field(default_factory=list)
     writes: list[tuple[str, bytes]] = field(default_factory=list)
+    skill_loads: list[dict[str, object]] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)
     write_error: Exception | None = None
     stops: int = 0
@@ -885,9 +886,16 @@ class RecordingCarrier:
     ) -> ExecResult:
         self.calls.append(argv)
         self.operations.append(f"exec:{argv[-1]}")
-        if len(argv) >= 2 and argv[-2] == "system-skills":
-            return ExecResult(stdout="", stderr="", exit_code=2)
         return self.result
+
+    async def load_skills(self, handle: SandboxHandle, payload: dict[str, object]) -> ExecResult:
+        self.skill_loads.append(payload)
+        system = payload["system"]
+        user = payload["user"]
+        assert isinstance(system, dict) and isinstance(user, dict)
+        names = (*system, *user)
+        roots = {name: f"/home/user/.ufo/skills/{name}" for name in names}
+        return ExecResult(stdout=json.dumps({"roots": roots}), stderr="", exit_code=0)
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         self.operations.append(f"write:{path}")
@@ -3464,7 +3472,7 @@ async def test_a_load_after_an_overflow_compaction_costs_no_workflow(
     instructions = CORE_SKILL_REGISTRY.named("sandbox").instructions
     assert instructions in first
     assert instructions not in second
-    assert second.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
+    assert second.startswith("Already in context above, not repeated: sandbox\n\nLoaded files:")
 
 
 async def test_a_second_load_of_a_skill_still_in_the_window_costs_no_workflow(
@@ -3483,9 +3491,8 @@ async def test_a_second_load_of_a_skill_still_in_the_window_costs_no_workflow(
     instructions = CORE_SKILL_REGISTRY.named("sandbox").instructions
     assert instructions in first
     assert instructions not in second
-    assert second.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
-    mounts = [path for path, _ in carrier.writes if path.endswith("/.skills/sandbox/SKILL.md")]
-    assert len(mounts) == 2
+    assert second.startswith("Already in context above, not repeated: sandbox\n\nLoaded files:")
+    assert len(carrier.skill_loads) == 2
 
 
 async def test_a_load_after_a_mid_round_compaction_costs_no_workflow(
@@ -3514,7 +3521,7 @@ async def test_a_load_after_a_mid_round_compaction_costs_no_workflow(
     instructions = CORE_SKILL_REGISTRY.named("sandbox").instructions
     assert instructions in first
     assert instructions not in second
-    assert second.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
+    assert second.startswith("Already in context above, not repeated: sandbox\n\nLoaded files:")
 
 
 async def _serve_terminal_ops(
@@ -3832,7 +3839,7 @@ async def test_a_load_of_a_dependency_an_earlier_load_pulled_costs_no_workflow(
     first, second = model.results
     assert "# Skill: base (dependency of leaf)\n\nBASE BODY" in first
     assert "BASE BODY" not in second
-    assert second.startswith("Already in context above, not repeated: base\n\nMounted files:")
+    assert second.startswith("Already in context above, not repeated: base\n\nLoaded files:")
 
 
 async def test_a_preloaded_skill_counts_as_already_in_context(db: None, tmp_path: Path) -> None:
@@ -3852,7 +3859,7 @@ async def test_a_preloaded_skill_counts_as_already_in_context(db: None, tmp_path
     assert frame is not None and frame.status == "done"
     (only,) = model.results
     assert CORE_SKILL_REGISTRY.named("sandbox").instructions not in only
-    assert only.startswith("Already in context above, not repeated: sandbox\n\nMounted files:")
+    assert only.startswith("Already in context above, not repeated: sandbox\n\nLoaded files:")
 
 
 @dataclass(frozen=True)

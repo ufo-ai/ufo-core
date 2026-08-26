@@ -88,7 +88,7 @@ Rules:
 
 Use OKLCH as your primary color space. Define a layered system with semantic roles — never hardcode hex values.
 
-**Color restraint philosophy:** See `.skills/design-foundations/references/color.md` for the full rationale. In brief: 1 accent + neutrals for most pages. The status colors appear only where the content is a status, and a chart draws its series from the sequence in that same skill.
+**Color restraint philosophy:** See `$UFO_HOME/skills/design-foundations/references/color.md` for the full rationale. In brief: 1 accent + neutrals for most pages. The status colors appear only where the content is a status, and a chart draws its series from the sequence in that same skill.
 
 ### Light & Dark Mode (Mandatory)
 
@@ -113,7 +113,7 @@ When building a custom palette (steps 1-2), maintain the same variable structure
 
 ### The Default Palette (Fallback)
 
-Three surface steps, two text tones, two accents — the palette the product's own interface is painted from, and a safe fallback rather than the default for every site. For the format-agnostic hex palette, the contrast table, and the rules that derive every step, see `.skills/design-foundations/references/color.md`. Below is the CSS variable implementation.
+Three surface steps, two text tones, two accents — the palette the product's own interface is painted from, and a safe fallback rather than the default for every site. For the format-agnostic hex palette, the contrast table, and the rules that derive every step, see `$UFO_HOME/skills/design-foundations/references/color.md`. Below is the CSS variable implementation.
 
 ```css
 /* DEFAULT PALETTE — warm neutral surfaces, a blue accent, an orange second accent */

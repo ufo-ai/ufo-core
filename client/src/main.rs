@@ -596,7 +596,7 @@ impl Wire {
     fn handle(&mut self, directive: Directive) -> bool {
         match directive {
             Directive::Run(op) => {
-                let visible = op.kind != ops::OP_SYSTEM_SKILLS;
+                let visible = op.kind != ops::OP_SKILLS;
                 if visible {
                     let _ = self.evt.send(WireEvent::OpStarted(op.clone()));
                 }
@@ -1705,11 +1705,11 @@ mod tests {
         let (mut wire, _cmd, evt) = listening_wire(None);
         let ended = wire.handle(Directive::Run(OpRequest {
             op_id: "skills".into(),
-            kind: ops::OP_SYSTEM_SKILLS.into(),
+            kind: ops::OP_SKILLS.into(),
             name: String::new(),
             timeout_s: 30,
             arg: String::new(),
-            params: "{}".into(),
+            params: r#"{"system":{},"user":{}}"#.into(),
         }));
 
         assert!(ended);
@@ -1720,7 +1720,7 @@ mod tests {
         assert_eq!(op_id, "skills");
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&reply.unwrap()).unwrap(),
-            serde_json::json!({"mounted": []})
+            serde_json::json!({"roots": {}})
         );
     }
 

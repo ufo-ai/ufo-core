@@ -1659,11 +1659,12 @@ async def test_a_stale_client_is_told_to_install_except_on_an_op_reply(
     monkeypatch.setenv("UFO_CLIENT_VERSION", "9.9.9")
     headers = {"authorization": f"Bearer {token}", "x-ufo-script": "1a2b3c4d5e6f"}
     streamed = await client.post("/surface/ufo/stale", content=b"hello", headers=headers)
-    assert _lines(streamed.content)[0] == ["install"]
+    assert _lines(streamed.content) == [["install"], ["say", "Updated ufo. Run ufo again."]]
+    assert await _turn_count(workspace_id) == 0
     replied = await client.post(
         "/surface/ufo/stale", content=b"", headers={**headers, "x-ufo-op": "deadbeef"}
     )
-    assert ["install"] not in _lines(replied.content)
+    assert _lines(replied.content) == [["poll", "0"]]
     current = await client.post(
         "/surface/ufo/stale", content=b"", headers={**headers, "x-ufo-script": "9.9.9"}
     )

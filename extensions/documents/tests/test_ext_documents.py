@@ -3,13 +3,13 @@
 that a skill-name collision across packs is refused where the registry is built."""
 
 import re
+from base64 import urlsafe_b64decode
 
 import pytest
 import ufo_ext_documents.manifest as documents
 
 from ufo.ext.loader import skill_registry
-from ufo.sandbox.session import WORKSPACE_DIR
-from ufo.skills.runtime import SKILL_MD, mount_skill
+from ufo.skills.runtime import SKILL_MD, install_skill
 
 DESIGN_FOUNDATIONS_DEPENDENTS = ("office-docx", "office-pptx", "pdf", "theme-factory")
 HOUSE_STYLE = "ufo-style"
@@ -88,41 +88,54 @@ async def test_loading_a_dependent_mounts_every_file_in_its_closure(dependent: s
     written: dict[str, bytes] = {}
 
     class _Sandbox:
-        async def write_file(self, path: str, content: bytes) -> None:
-            written[path] = content
+        async def load_skills(self, payload: dict[str, object]) -> dict[str, str]:
+            user = payload["user"]
+            assert isinstance(user, dict)
+            roots = {}
+            for name, wire in user.items():
+                assert isinstance(name, str) and isinstance(wire, dict)
+                files = wire["files"]
+                assert isinstance(files, dict)
+                root = f"$UFO_HOME/skills/{name}"
+                for path, content in files.items():
+                    assert isinstance(path, str) and isinstance(content, str)
+                    written[f"{root}/{path}"] = urlsafe_b64decode(content)
+                roots[name] = root
+            return roots
 
     loaded = await registry.materialize(registry.closure(dependent))
     for entry in loaded:
-        await mount_skill(_Sandbox(), entry.skill)
+        await install_skill(_Sandbox(), entry.skill)
 
     for reference in ("color", "typography", "dataviz"):
-        assert f"/workspace/.skills/design-foundations/references/{reference}.md" in written
+        assert f"$UFO_HOME/skills/design-foundations/references/{reference}.md" in written
     expected = {
-        f"{entry.skill.mount_root()}/{path}"
-        for entry in loaded
-        for path in entry.skill.mounted_files()
+        f"{entry.skill.root()}/{path}" for entry in loaded for path in entry.skill.all_files()
     }
     assert written.keys() == expected
 
 
 async def test_every_design_foundations_path_a_dependent_cites_is_one_it_mounts() -> None:
     """A citation naming a file that the load does not mount is a dead end the agent cannot follow.
-    Every `.skills/design-foundations/...` path written in a dependent's own files must resolve to a
-    path that dependent's closure actually mounts."""
+    Every `$UFO_HOME/skills/design-foundations/...` path written in a dependent's own files must
+    resolve to a path that dependent's closure actually loads."""
     registry = skill_registry((documents.manifest(),))
     for name in DESIGN_FOUNDATIONS_DEPENDENTS:
         mounted = {
-            f"{entry.skill.mount_root()}/{path}"
+            f"{entry.skill.root()}/{path}"
             for entry in await registry.materialize(registry.closure(name))
-            for path in entry.skill.mounted_files()
+            for path in entry.skill.all_files()
         }
         skill = registry.named(name)
         sources = {SKILL_MD: skill.raw_skill_md.encode(), **dict(skill.files)}
         for source, content in sources.items():
             if not source.endswith(".md"):
                 continue
-            for cited in re.findall(r"\.skills/design-foundations/[\w./-]+\.md", content.decode()):
-                assert f"{WORKSPACE_DIR}/{cited}" in mounted, f"{name}:{source} cites {cited}"
+            citations = re.findall(
+                r"\$UFO_HOME/skills/design-foundations/[\w./-]+\.md", content.decode()
+            )
+            for cited in citations:
+                assert cited in mounted, f"{name}:{source} cites {cited}"
 
 
 def test_the_references_table_routes_each_topic_to_the_file_that_holds_it() -> None:

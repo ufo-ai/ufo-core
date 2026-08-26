@@ -12,7 +12,7 @@ workspace's starter prompts.
 To change it:
 
 1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
-   `cp .skills/app-chat-home/app.tsx .skills/app-chat-home/index.html chat-home/`.
+   `cp $UFO_HOME/skills/app-chat-home/app.tsx $UFO_HOME/skills/app-chat-home/index.html chat-home/`.
 2. Edit `app.tsx`.
 3. `deploy_website` with that directory and `site_name` `chat-home`. It builds the page against
    the deploy's own kit and hosts what the build wrote — do not run a build yourself, and do not

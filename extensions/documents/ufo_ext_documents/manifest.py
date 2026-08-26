@@ -2,9 +2,9 @@
 the `writing` subagent that drafts and edits the prose they carry.
 
 Each skill is a folder under `skills/` — its `SKILL.md` workflow plus the scripts and assets it
-references — that the loader parses into the loadable-skill registry and mounts into the sandbox
-under `.skills/<name>/` when `load_skill` resolves it. `office-docx`, `office-pptx`, `pdf`, and
-`theme-factory` build on `design-foundations`, the shared visual baseline, which each names in its
+references — that the loader parses into the loadable-skill registry and loads under
+`$UFO_HOME/skills/<name>/`. `office-docx`, `office-pptx`, `pdf`, and `theme-factory` build on
+`design-foundations`, the shared visual baseline, which each names in its
 `depends` so loading any of them pulls it too. `design-foundations` names core's `ufo-style` the
 same way, so an artifact the member gave no style direction for is drawn in the house style
 whichever of these skills owns it. `document-review` reviews any of the office formats, loading

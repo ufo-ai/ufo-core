@@ -1,9 +1,8 @@
-"""Skill loading probed live and settled early: each case sends one natural task, watches the
-conversation workspace for the `.skills/<name>/SKILL.md` files `load_skill` mounts as it
-dispatches, and decides at the first observed mount — cancelling the still-running turn, so a case
-costs the rounds before the load instead of the full task. The mount is durable workspace state,
-so the verdict needs no terminal transcript and a cancelled turn grades the same as a finished
-one; a turn that ends or stalls without the expected mount fails at its terminal or the deadline.
+"""Skill loading probed live and settled early: each case sends one natural task, watches completed
+`load_skill` steps, and decides at the first observed load — cancelling the still-running turn, so
+a case costs the rounds before the load instead of the full task. A cancelled turn grades the same
+as a finished one; a turn that ends or stalls without the expected load fails at its terminal or
+the deadline.
 A turn that reaches its own terminal also records its response, calls, and redacted trajectory,
 so the archive shows what the agent did instead of loading. A case whose expected skill is not
 loadable under the active pack or its own seeded corpus is excluded, not failed.

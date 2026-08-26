@@ -2708,7 +2708,7 @@ async def write_file(self, path: str, content: bytes) -> None
 
 **Call relations**: The skill runtime calls this when mounting skill files into the sandbox. It delegates safety checking to workspace_path and the actual byte transfer to the carrier.
 
-*Call graph*: calls 1 internal fn (workspace_path); called by 1 (mount_skill).
+*Call graph*: calls 1 internal fn (workspace_path); called by 1 (install_skill).
 
 
 ##### `SandboxSession.ensure_tool_output_dir`  (lines 525–547)

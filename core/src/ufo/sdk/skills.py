@@ -14,5 +14,5 @@ from ufo.skills.runtime import (
     parse_skill_content as parse_skill_content,
 )
 from ufo.skills.runtime import (
-    skill_mount_root as skill_mount_root,
+    skill_root as skill_root,
 )

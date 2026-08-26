@@ -86,6 +86,7 @@ from ufo.sandbox.session import (
     RunTokenCodec,
     Sandbox,
     SandboxSession,
+    SystemSkillSeeding,
     _LateSandbox,
 )
 from ufo.schema import tables
@@ -109,7 +110,8 @@ from ufo.skills.runtime import (
     SkillCard,
     SkillMaterializer,
     SkillRegistry,
-    mount_skills,
+    SystemSkillBundle,
+    load_skills,
 )
 from ufo.skills.selection import (
     SKILL_QUERY_MAX_CHARS,
@@ -343,6 +345,13 @@ def init_runtime(runtime: Runtime) -> None:
     global _runtime
     if _runtime is not None:
         raise RuntimeError("runtime already initialized")
+    bundle = SystemSkillBundle.from_skills(runtime.skills.bundled_skills())
+    for carrier in (
+        runtime.sandboxes.carrier,
+        *(entry[0] for entry in runtime.sandboxes.resume_carriers.values()),
+    ):
+        if isinstance(carrier, SystemSkillSeeding):
+            carrier.seed_system_skills(bundle.archive)
     _runtime = runtime
 
 
@@ -676,7 +685,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
         )
         if preload:
             with span("skills.mount", count=len(preload)):
-                await mount_skills(sandbox, preload, skills.by_name)
+                await load_skills(sandbox, preload)
         engine = TurnEngine(
             turn=turn,
             agent=resolved,

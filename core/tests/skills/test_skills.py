@@ -1,6 +1,7 @@
 import json
 import re
 import zipfile
+from base64 import urlsafe_b64decode
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
@@ -29,8 +30,8 @@ from ufo.skills.runtime import (
     SkillRegistry,
     SystemSkillBundle,
     discover_skills,
+    install_skill,
     loaded_context,
-    mount_skill,
     parse_skill,
     parse_skill_content,
 )
@@ -114,8 +115,8 @@ def test_the_house_style_cites_only_paths_its_own_load_mounts() -> None:
             if Path(path).suffix in {".css", ".md"}
         ),
     )
-    cited = {path for text in sources for path in re.findall(r"\.skills/[\w./-]+", text)}
-    assert cited == {f".skills/{HOUSE_STYLE}/"}
+    cited = {path for text in sources for path in re.findall(r"\$UFO_HOME/skills/[\w./-]+", text)}
+    assert cited == {f"$UFO_HOME/skills/{HOUSE_STYLE}/"}
 
 
 def test_the_house_style_states_that_the_members_own_style_wins() -> None:
@@ -174,15 +175,19 @@ def test_system_skill_bundle_is_content_addressed_and_deterministic(tmp_path: Pa
     assert first == second
     manifest = json.loads(first.manifest)
     assert manifest["digest"] == first.digest
-    assert manifest["skills"] == {"probe": {"digest": skill.content_digest()}}
-    object_id = skill.content_digest().removeprefix("sha256:")
+    assert manifest["skills"] == {
+        "probe": {
+            "digest": skill.content_digest(),
+            "files": ["SKILL.md", "scripts/run.py"],
+        }
+    }
     with zipfile.ZipFile(BytesIO(first.archive)) as archive:
         assert set(archive.namelist()) == {
             "manifest.json",
-            f"objects/{object_id}/SKILL.md",
-            f"objects/{object_id}/scripts/run.py",
+            "probe/SKILL.md",
+            "probe/scripts/run.py",
         }
-        assert archive.read(f"objects/{object_id}/scripts/run.py") == b"print('hi')"
+        assert archive.read("probe/scripts/run.py") == b"print('hi')"
 
 
 def test_system_skill_content_digest_moves_with_a_path_or_its_bytes() -> None:
@@ -222,7 +227,7 @@ def test_system_skill_content_digest_moves_with_a_path_or_its_bytes() -> None:
         "sha256:308c9d25ca09c876af5002d9e89c5b82abd64748c78cc0fc1eeeae882f7e5f88"
     )
     assert SystemSkillBundle.from_skills((wire,)).digest == (
-        "sha256:10936b8d47be11283777bb3e27dee5f7d8d0c7c116f424a55c7ec4f1ec390c98"
+        "sha256:388dfef6e74ce8b837f4fb4344089ec1a6f654bf1845e2fb4ac05882bb65ec03"
     )
 
 
@@ -294,12 +299,12 @@ async def test_loaded_context_closes_with_one_tree_for_the_whole_closure(tmp_pat
 
     text = loaded_context(await registry.materialize(registry.closure("leaf")))
 
-    assert text.count("Mounted files:") == 1
+    assert text.count("Loaded files:") == 1
     assert "BUNDLED CONTENT" not in text
-    assert text.index("leaf body") < text.index("base body") < text.index("Mounted files:")
+    assert text.index("leaf body") < text.index("base body") < text.index("Loaded files:")
     assert text.endswith(
-        "Mounted files:\n"
-        "/workspace/.skills/\n"
+        "Loaded files:\n"
+        "$UFO_HOME/skills/\n"
         "  base/\n"
         "    SKILL.md\n"
         "    notes.md\n"
@@ -323,8 +328,8 @@ async def test_a_skill_already_in_context_costs_a_note_instead_of_its_workflow(
 
     assert "BODY" not in text
     assert "# Skill:" not in text
-    assert text.startswith("Already in context above, not repeated: leaf, base\n\nMounted files:")
-    assert "/workspace/.skills/\n  base/\n    SKILL.md\n  leaf/\n    SKILL.md" in text
+    assert text.startswith("Already in context above, not repeated: leaf, base\n\nLoaded files:")
+    assert "$UFO_HOME/skills/\n  base/\n    SKILL.md\n  leaf/\n    SKILL.md" in text
 
 
 async def test_a_dependency_already_in_context_still_injects_the_asked_for_workflow(
@@ -341,7 +346,7 @@ async def test_a_dependency_already_in_context_still_injects_the_asked_for_workf
     assert "# Skill: leaf\n\nLEAF BODY" in text
     assert "BASE BODY" not in text
     assert "Already in context above, not repeated: base" in text
-    assert text.index("LEAF BODY") < text.index("not repeated: base") < text.index("Mounted files:")
+    assert text.index("LEAF BODY") < text.index("not repeated: base") < text.index("Loaded files:")
 
 
 def test_loaded_skills_reseeds_from_the_closure_a_load_injected(tmp_path: Path) -> None:
@@ -460,14 +465,11 @@ async def test_mount_writes_a_nested_child_under_its_parent_path(tmp_path: Path)
     _write_nested_child(parent_dir, "app", "child", "c")
     child = discover_skills(parent_dir)["site/app"]
 
-    written: dict[str, bytes] = {}
+    sandbox = _RecordingSandbox()
 
-    class _Sandbox:
-        async def write_file(self, path: str, content: bytes) -> None:
-            written[path] = content
+    await install_skill(sandbox, child)
 
-    await mount_skill(_Sandbox(), child)
-    assert "/workspace/.skills/site/app/SKILL.md" in written
+    assert "$UFO_HOME/skills/site/app/SKILL.md" in sandbox.files
 
 
 class _RecordingSandbox:
@@ -478,8 +480,20 @@ class _RecordingSandbox:
     def __init__(self, files: dict[str, bytes] | None = None) -> None:
         self.files = files if files is not None else {}
 
-    async def write_file(self, path: str, content: bytes) -> None:
-        self.files[path] = content
+    async def load_skills(self, payload: dict[str, object]) -> dict[str, str]:
+        roots: dict[str, str] = {}
+        user = payload["user"]
+        assert isinstance(user, dict)
+        for name, wire in user.items():
+            assert isinstance(name, str) and isinstance(wire, dict)
+            files = wire["files"]
+            assert isinstance(files, dict)
+            root = f"$UFO_HOME/skills/{name}"
+            for path, content in files.items():
+                assert isinstance(path, str) and isinstance(content, str)
+                self.files[f"{root}/{path}"] = urlsafe_b64decode(content)
+            roots[name] = root
+        return roots
 
 
 def _bundle(root: Path, name: str, body: str, depends: tuple[str, ...] = ()) -> Path:
@@ -503,14 +517,14 @@ async def test_a_load_mounts_every_file_of_every_skill_it_pulls(tmp_path: Path) 
     sandbox = _RecordingSandbox()
 
     for entry in await registry.materialize(registry.closure("leaf")):
-        await mount_skill(sandbox, entry.skill)
+        await install_skill(sandbox, entry.skill)
 
     assert set(sandbox.files) == {
-        f"/workspace/.skills/{name}/{path}"
+        f"$UFO_HOME/skills/{name}/{path}"
         for name in ("base", "leaf")
         for path in ("SKILL.md", "notes.md", "scripts/run.py", "scripts/templates/seed.xml")
     }
-    assert sandbox.files["/workspace/.skills/base/scripts/templates/seed.xml"] == b"<base/>"
+    assert sandbox.files["$UFO_HOME/skills/base/scripts/templates/seed.xml"] == b"<base/>"
 
 
 async def test_loading_a_skill_then_pulling_it_as_a_dependency_remounts_it_cleanly(
@@ -524,14 +538,14 @@ async def test_loading_a_skill_then_pulling_it_as_a_dependency_remounts_it_clean
     sandbox = _RecordingSandbox()
 
     for entry in await registry.materialize(registry.closure("base")):
-        await mount_skill(sandbox, entry.skill)
+        await install_skill(sandbox, entry.skill)
     first = dict(sandbox.files)
     for entry in await registry.materialize(registry.closure("leaf")):
-        await mount_skill(sandbox, entry.skill)
+        await install_skill(sandbox, entry.skill)
 
     assert first.items() <= sandbox.files.items()
-    assert sandbox.files["/workspace/.skills/base/notes.md"] == b"base notes"
-    assert "/workspace/.skills/leaf/notes.md" in sandbox.files
+    assert sandbox.files["$UFO_HOME/skills/base/notes.md"] == b"base notes"
+    assert "$UFO_HOME/skills/leaf/notes.md" in sandbox.files
 
 
 async def test_a_later_load_leaves_everything_else_in_the_workspace_alone(tmp_path: Path) -> None:
@@ -541,15 +555,15 @@ async def test_a_later_load_leaves_everything_else_in_the_workspace_alone(tmp_pa
     skill = parse_skill(tmp_path / "base")
     produced = {
         "/workspace/report.docx": b"the deliverable",
-        "/workspace/.skills/base/scratch.md": b"agent scratch",
+        "$UFO_HOME/skills/base/scratch.md": b"agent scratch",
     }
     sandbox = _RecordingSandbox(dict(produced))
 
-    await mount_skill(sandbox, skill)
-    await mount_skill(sandbox, skill)
+    await install_skill(sandbox, skill)
+    await install_skill(sandbox, skill)
 
     assert produced.items() <= sandbox.files.items()
-    assert sandbox.files["/workspace/.skills/base/SKILL.md"] == skill.raw_skill_md.encode()
+    assert sandbox.files["$UFO_HOME/skills/base/SKILL.md"] == skill.raw_skill_md.encode()
 
 
 def test_a_dependency_cycle_resolves_each_skill_once_however_it_is_shaped() -> None:
@@ -667,12 +681,7 @@ def test_merged_with_never_lets_a_generated_skill_shadow_a_core_skill() -> None:
 
 
 async def test_mount_writes_the_verbatim_skill_md_and_assets_under_the_workspace() -> None:
-    written: dict[str, bytes] = {}
-
-    class _Sandbox:
-        async def write_file(self, path: str, content: bytes) -> None:
-            written[path] = content
-
+    sandbox = _RecordingSandbox()
     skill = RuntimeSkill(
         name="probe",
         description="d",
@@ -680,16 +689,14 @@ async def test_mount_writes_the_verbatim_skill_md_and_assets_under_the_workspace
         files=(("data/notes.txt", b"kept"),),
         raw_skill_md="---\nname: probe\n---\nbody\n",
     )
-    await mount_skill(_Sandbox(), skill)
-    assert written["/workspace/.skills/probe/SKILL.md"] == b"---\nname: probe\n---\nbody\n"
-    assert written["/workspace/.skills/probe/data/notes.txt"] == b"kept"
+    await install_skill(sandbox, skill)
+    assert sandbox.files["$UFO_HOME/skills/probe/SKILL.md"] == b"---\nname: probe\n---\nbody\n"
+    assert sandbox.files["$UFO_HOME/skills/probe/data/notes.txt"] == b"kept"
 
 
 @pytest.mark.parametrize("key", ["../../evil.md", "data/../../../evil.md", "/workspace/evil.md"])
 async def test_mount_refuses_a_file_key_that_climbs_out_of_the_skill(key: str) -> None:
-    """A file key is contained at `.skills/<name>/`, not at the workspace: a key climbing to
-    `/workspace/evil.md` is inside the workspace and still refused, because a saved skill would
-    otherwise rewrite that file on every load, in every conversation of its agent."""
+    """A file key is contained at `$UFO_HOME/skills/<name>/`."""
     sandbox = _RecordingSandbox()
     skill = RuntimeSkill(
         name="probe",
@@ -700,33 +707,34 @@ async def test_mount_refuses_a_file_key_that_climbs_out_of_the_skill(key: str) -
     )
 
     with pytest.raises(ContainmentError):
-        await mount_skill(sandbox, skill)
+        await install_skill(sandbox, skill)
 
     assert not any(path.endswith("evil.md") for path in sandbox.files)
 
 
-async def test_mount_refuses_a_planted_symlink_inside_the_mount(tmp_path: Path) -> None:
-    """Through a real carrier: the agent can write inside its own mounted skill directory, so it can
-    leave a link there between loads. The next mount is refused at the linked component rather than
-    writing the skill's file into whatever the link points at."""
+async def test_install_replaces_a_planted_user_skill_tree_without_following_links(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            workspace_host_path=str(workspace),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
+            run_token="run-token",
+        )
+    )
     session = SandboxSession(
         carrier=carrier,
-        handle=await carrier.create(
-            SandboxSpec(
-                conversation_id=uuid4(),
-                image_ref="ufo-sandbox:latest",
-                workspace_host_path=str(workspace),
-                proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
-                run_token="run-token",
-            )
-        ),
+        handle=handle,
     )
     outside = tmp_path / "outside"
     outside.mkdir()
-    (workspace / ".skills" / "probe").mkdir(parents=True)
-    (workspace / ".skills" / "probe" / "data").symlink_to(outside)
+    ufo_home = Path(handle.egress_env["UFO_HOME"])
+    (ufo_home / "skills" / "probe").mkdir(parents=True)
+    (ufo_home / "skills" / "probe" / "data").symlink_to(outside)
     skill = RuntimeSkill(
         name="probe",
         description="d",
@@ -735,10 +743,48 @@ async def test_mount_refuses_a_planted_symlink_inside_the_mount(tmp_path: Path) 
         raw_skill_md="---\nname: probe\n---\nbody\n",
     )
 
-    with pytest.raises(ContainmentError):
-        await mount_skill(session, skill)
+    await install_skill(session, skill)
 
     assert list(outside.iterdir()) == []
+    assert (ufo_home / "skills" / "probe" / "data" / "notes.txt").read_bytes() == b"kept"
+
+
+async def test_install_replaces_a_top_level_user_skill_symlink_without_following_it(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(
+        SandboxSpec(
+            conversation_id=uuid4(),
+            image_ref="ufo-sandbox:latest",
+            workspace_host_path=str(workspace),
+            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
+            run_token="run-token",
+        )
+    )
+    session = SandboxSession(carrier=carrier, handle=handle)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "kept.txt"
+    sentinel.write_text("kept")
+    ufo_home = Path(handle.egress_env["UFO_HOME"])
+    root = ufo_home / "skills"
+    root.mkdir(parents=True, exist_ok=True)
+    name = "top-level-link-probe"
+    (root / name).symlink_to(outside, target_is_directory=True)
+    skill = RuntimeSkill(
+        name=name,
+        description="d",
+        instructions="i",
+        raw_skill_md=f"---\nname: {name}\n---\nbody\n",
+    )
+
+    await install_skill(session, skill)
+
+    assert sentinel.read_text() == "kept"
+    assert not (root / name).is_symlink()
+    assert (root / name / "SKILL.md").read_text() == skill.raw_skill_md
 
 
 def _member_registry(

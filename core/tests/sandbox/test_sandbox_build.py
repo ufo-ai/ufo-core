@@ -39,7 +39,9 @@ from sandbox.build_template import (
     system_skill_bundle,
     template_name,
 )
+from ufo.sandbox.session import SYSTEM_SKILLS_BAKED_ENV
 from ufo.sdk.sandbox import PLAYWRIGHT_VERSION, SANDBOX_SIZES, SYSTEM_SKILLS_ROOT
+from ufo.skills.runtime import CORE_SKILL_REGISTRY
 
 
 @pytest.fixture(autouse=True)
@@ -218,11 +220,25 @@ def test_the_containment_guard_is_baked_beside_the_client() -> None:
 
 def test_system_skills_are_baked_into_each_sandbox_image() -> None:
     dockerfile = pod_dockerfile()
+    bundle = system_skill_bundle()
+    manifest = json.loads(bundle.manifest)
+    assert SANDBOX_ENV[SYSTEM_SKILLS_BAKED_ENV] == "1"
+    assert f"{SYSTEM_SKILLS_BAKED_ENV}=1" in dockerfile
     assert str(SYSTEM_SKILLS_STAGE_PATH.relative_to(ROOT)) in dockerfile
     assert SYSTEM_SKILLS_ROOT in dockerfile
-    assert system_skill_bundle().digest.removeprefix("sha256:") in dockerfile
-    assert system_skill_bundle().archive == SYSTEM_SKILLS_STAGE_PATH.read_bytes()
-    assert f'test -f "{SYSTEM_SKILLS_ROOT}/current"' in SANDBOX_TEMPLATE_READY_COMMAND
+    assert f"{SYSTEM_SKILLS_ROOT}/.system-manifest.json" in dockerfile
+    assert f"chmod -R a-w {SYSTEM_SKILLS_ROOT}" in dockerfile
+    assert f"chmod 1777 {SYSTEM_SKILLS_ROOT}" in dockerfile
+    assert f"chown {RUNTIME_USER}:{RUNTIME_USER} {SYSTEM_SKILLS_ROOT}" not in dockerfile
+    assert "sandbox" in manifest["skills"]
+    assert (
+        manifest["skills"]["sandbox"]["digest"]
+        == CORE_SKILL_REGISTRY.named("sandbox").content_digest()
+    )
+    assert "office-docx" in manifest["skills"]
+    assert "core/src/ufo/skills/sandbox" not in manifest["skills"]
+    assert bundle.archive == SYSTEM_SKILLS_STAGE_PATH.read_bytes()
+    assert f'test -f "{SYSTEM_SKILLS_ROOT}/.system-manifest.json"' in SANDBOX_TEMPLATE_READY_COMMAND
 
 
 def test_the_baked_client_moves_the_drift_digest_with_its_source(monkeypatch, tmp_path) -> None:

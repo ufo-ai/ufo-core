@@ -310,13 +310,13 @@ Create an annotated copy of the document with issues as comments. `{base_name}` 
      Example `comment.py` call for a spelling issue:
 
      ```bash
-     python .skills/office-docx/scripts/comment.py unpacked/ 0 "[Spelling/Grammar | low] The word 'acheived' is misspelled." --author "Flying Object"
+     python "$UFO_HOME/skills/office-docx/scripts/comment.py" unpacked/ 0 "[Spelling/Grammar | low] The word 'acheived' is misspelled." --author "Flying Object"
      ```
 
      Example for a numerical consistency issue:
 
      ```bash
-     python .skills/office-docx/scripts/comment.py unpacked/ 1 "[Numerical Consistency | high] Region totals sum to 800, not the stated 900." --author "Flying Object"
+     python "$UFO_HOME/skills/office-docx/scripts/comment.py" unpacked/ 1 "[Numerical Consistency | high] Region totals sum to 800, not the stated 900." --author "Flying Object"
      ```
 
   2. **Apply tracked changes** (best effort) when `new_text` differs from `original_text`: find the exact `<w:r>` in `document.xml` whose `<w:t>` contains `original_text` and replace that `<w:r>` with a `<w:del>` + `<w:ins>` pair. Copy the `<w:rPr>` from that specific `<w:r>` into both the `<w:del>` and `<w:ins>` runs — do NOT use `<w:rPr>` from any other run (e.g., the title or a different paragraph). Wrap the comment markers tightly around the `<w:del>` and `<w:ins>` so the comment is anchored to the change.

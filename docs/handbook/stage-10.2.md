@@ -324,7 +324,7 @@ async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResu
 
 **Call relations**: This is the public handler for the `load_skill` tool. It calls the skill runtime to mount files and prepare the readable workflow text the agent will follow.
 
-*Call graph*: 4 external calls (__init__, __init__, loaded_context, mount_skill).
+*Call graph*: 4 external calls (__init__, __init__, loaded_context, install_skill).
 
 
 ##### `_grantee_agent_id`  (lines 991–1014)

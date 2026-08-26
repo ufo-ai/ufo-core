@@ -39,6 +39,9 @@ def test_catalog_skill_lists_every_registered_model_with_its_facts(tmp_path: Pat
 def test_catalog_skill_registers_in_the_loadable_index(tmp_path: Path) -> None:
     registry = skill_registry((), (model_catalog_skill(_registry(tmp_path)),))
     assert MODEL_CATALOG_SKILL_NAME in dict(registry.index())
+    assert MODEL_CATALOG_SKILL_NAME not in (registry.bundled_names or ())
+    assert MODEL_CATALOG_SKILL_NAME not in {skill.name for skill in registry.bundled_skills()}
+    assert "sandbox" in {skill.name for skill in registry.bundled_skills()}
 
 
 def test_skill_registry_rejects_a_colliding_generated_skill(tmp_path: Path) -> None:

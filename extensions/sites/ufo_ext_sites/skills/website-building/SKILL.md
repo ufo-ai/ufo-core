@@ -25,7 +25,7 @@ workflow, or format. Keep the first laptop screen dense with the most useful fac
 use a compact screen title, grouped content, and no decorative empty region.
 
 Member-supplied design direction wins. Internal pages otherwise use the house style: read
-`.skills/ufo-style/references/tokens.css`, copy it into the project, and use its variables. For a
+`$UFO_HOME/skills/ufo-style/references/tokens.css`, copy it into the project, and use its variables. For a
 public site without member direction, derive the visual identity from its subject and use
 `shared/01-design-tokens.md` and `shared/02-typography.md`.
 

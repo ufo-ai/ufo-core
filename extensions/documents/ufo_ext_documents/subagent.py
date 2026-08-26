@@ -3,8 +3,8 @@
 It lives in this pack because the pack owns `writing-drafts`, the workflow the profile runs on: the
 skill and the child that always has it in hand ship and version together. Its payload defaults
 `preload_skills` to that skill, so every spawn starts with the workflow and its checklist already in
-the child's context and mounted under `.skills/writing-drafts/` instead of spending a round loading
-it; a caller naming other skills replaces the default and must include `writing-drafts` itself.
+the child's context and loaded under `$UFO_HOME/skills/writing-drafts/` instead of spending a round
+loading it; a caller naming other skills replaces the default and must include `writing-drafts`.
 
 Its tool subset is the file builtins it reads a draft and saves one with, plus `load_skill` for the
 skill that owns the artifact's shape. No `bash` and no REPL: a prose child that could run a script

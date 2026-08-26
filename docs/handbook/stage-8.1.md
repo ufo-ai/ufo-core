@@ -26,57 +26,57 @@ If this file were removed, behavior would depend on the Python version and packa
 
 A skill is a small package of guidance for the agent: a folder with a `SKILL.md` file plus optional extra files. The `SKILL.md` starts with YAML frontmatter, which is structured metadata such as the skill name, description, and dependencies, followed by the human-readable instructions the agent should see.
 
-This file is the bridge between those folders and the running agent. First, it can parse a skill from disk or from already-loaded bytes. It checks that the declared name matches the folder name, separates metadata from instructions, and keeps the original `SKILL.md` text so it can be mounted exactly as written.
+This file is the bridge between those folders and the running agent. First, it can parse a skill from disk or from already-loaded bytes. It checks that the declared name matches the folder name, separates metadata from instructions, and keeps the original `SKILL.md` text exactly as written.
 
 It also understands nested child skills. A child skill can live inside a parent folder and gets a name like `parent/child`, but nesting alone does not automatically load the parent. If one skill needs another, it must say so through `depends`.
 
-At runtime, `SkillRegistry` acts like the skill catalog. Given one or more requested names, it finds those skills plus all their dependencies, only once, and in a safe order. `loaded_context` then builds the text shown to the model: new workflows are included, already-seen workflows are summarized, and a small file tree tells the agent where mounted files live. Finally, `mount_skill` writes the skill files into `.skills/<name>/` inside the sandbox, using path containment checks so a skill cannot write outside its own mount area.
+At runtime, `SkillRegistry` acts like the skill catalog. Given one or more requested names, it finds those skills plus all their dependencies, only once, and in a safe order. `loaded_context` then builds the text shown to the model: new workflows are included, already-seen workflows are summarized, and a small file tree tells the agent where loaded files live. `load_skills` resolves bundled files already under `$UFO_HOME/skills` and installs materialized user files into the same tree.
 
 #### Function details
 
-##### `skill_mount_root`  (lines 44–47)
+##### `skill_root`  (lines 44–47)
 
 ```
-def skill_mount_root(name: str) -> str
+def skill_root(name: str) -> str
 ```
 
-**Purpose**: Builds the workspace path where one skill’s files should live. It gives every skill its own area under `.skills`, like assigning each tool its own labeled drawer.
+**Purpose**: Builds the `$UFO_HOME/skills` path where one skill’s files live.
 
-**Data flow**: It takes a skill name as text, combines it with the shared skills mount directory, and returns a path string such as `workspace/.skills/example-skill`. It does not touch the filesystem.
+**Data flow**: It takes a skill name as text, combines it with the shared skills directory, and returns `$UFO_HOME/skills/example-skill`. It does not touch the filesystem.
 
-**Call relations**: A `RuntimeSkill` asks this helper for its mount location through `RuntimeSkill.mount_root`. Later, `mount_skill` uses that location before writing the skill’s files into the sandbox.
+**Call relations**: A `RuntimeSkill` asks this helper for its location through `RuntimeSkill.root`. `install_skill` uses that location when tests write one skill directly.
 
-*Call graph*: called by 1 (mount_root).
+*Call graph*: called by 1 (root).
 
 
-##### `RuntimeSkill.mounted_files`  (lines 66–67)
+##### `RuntimeSkill.all_files`  (lines 66–67)
 
 ```
-def mounted_files(self) -> dict[str, bytes]
+def all_files(self) -> dict[str, bytes]
 ```
 
 **Purpose**: Returns all files that should be copied into the sandbox for this skill. This includes the original `SKILL.md` plus any bundled asset files.
 
 **Data flow**: It reads the skill’s stored raw `SKILL.md` text and its stored asset file list, turns the markdown into bytes, and returns a dictionary from file path to file contents. The result is ready to be written into the sandbox.
 
-**Call relations**: `mount_skill` calls this when it is time to actually place a skill’s files in the workspace. It relies on this method so all skills are mounted with the same file set and with `SKILL.md` preserved exactly.
+**Call relations**: The bundle builder, loader, and direct test installer use this method so all paths receive the same file set and preserve `SKILL.md` exactly.
 
-*Call graph*: called by 1 (mount_skill).
+*Call graph*: called by 1 (install_skill).
 
 
-##### `RuntimeSkill.mount_root`  (lines 69–70)
+##### `RuntimeSkill.root`  (lines 69–70)
 
 ```
-def mount_root(self) -> str
+def root(self) -> str
 ```
 
-**Purpose**: Reports the sandbox folder where this particular skill should be mounted. It keeps the naming rule in one place so the rest of the code does not have to rebuild paths by hand.
+**Purpose**: Reports the sandbox folder where this particular skill lives.
 
-**Data flow**: It reads the skill’s `name`, passes that name to `skill_mount_root`, and returns the resulting mount path string. It does not change the skill or the sandbox.
+**Data flow**: It reads the skill’s `name`, passes that name to `skill_root`, and returns the resulting path string. It does not change the skill or the sandbox.
 
-**Call relations**: `mount_skill` calls this before writing files. Internally, this method delegates the path-building detail to `skill_mount_root`.
+**Call relations**: Load and direct-install paths call this before resolving files. Internally, this method delegates path construction to `skill_root`.
 
-*Call graph*: calls 1 internal fn (skill_mount_root); called by 1 (mount_skill).
+*Call graph*: calls 1 internal fn (skill_root).
 
 
 ##### `LoadedSkill.prompt_body`  (lines 82–92)
@@ -300,15 +300,15 @@ def merged_with(self, user_skills: tuple[RuntimeSkill, ...]) -> 'SkillRegistry'
 *Call graph*: 2 external calls (__init__, log).
 
 
-##### `_mounted_tree`  (lines 309–327)
+##### `_loaded_tree`  (lines 309–327)
 
 ```
-def _mounted_tree(loaded: tuple[LoadedSkill, ...]) -> str
+def _loaded_tree(loaded: tuple[LoadedSkill, ...]) -> str
 ```
 
-**Purpose**: Creates a compact, readable tree of all files mounted for a skill load. This tells the agent where files are available without repeating long paths over and over.
+**Purpose**: Creates a compact tree of all files resolved for a skill load.
 
-**Data flow**: It receives the loaded skill entries, asks each skill for the paths of files that will be mounted, sorts them, and formats them as an indented tree under the `.skills` directory. The output is plain text for the prompt.
+**Data flow**: It receives the loaded skill entries, sorts their file paths, and formats them as an indented tree under `$UFO_HOME/skills`.
 
 **Call relations**: `loaded_context` calls this after building workflow instruction blocks. The tree covers the whole closure at once, so dependencies and requested skills appear together in one file map.
 
@@ -321,28 +321,28 @@ def _mounted_tree(loaded: tuple[LoadedSkill, ...]) -> str
 def loaded_context(loaded: tuple[LoadedSkill, ...], in_context: Container[str]=frozenset()) -> str
 ```
 
-**Purpose**: Builds the full text that a skill load contributes to the model. It includes new skill instructions, notes any instructions already present, and appends the mounted-file tree.
+**Purpose**: Builds the full text that a skill load contributes to the model. It includes new skill instructions, notes any instructions already present, and appends the loaded-file tree.
 
-**Data flow**: It receives loaded skill entries and a set of skill names already in context. For each new skill, it includes the prompt body; for each repeated skill, it adds its name to an “already loaded” note. It then appends `Mounted files:` followed by the tree from `_mounted_tree` and returns the final text.
+**Data flow**: It receives loaded skill entries and a set of skill names already in context. For each new skill, it includes the prompt body; for each repeated skill, it adds its name to an “already loaded” note. It then appends `Loaded files:` followed by the tree from `_loaded_tree` and returns the final text.
 
-**Call relations**: This is shared by normal skill loading and subagent preloading so skills look the same in both places. It calls `_mounted_tree` to describe the files that `mount_skill` will make available.
+**Call relations**: This is shared by normal skill loading and subagent preloading so skills look the same in both places. It calls `_loaded_tree` to describe the resolved files.
 
-*Call graph*: calls 1 internal fn (_mounted_tree).
+*Call graph*: calls 1 internal fn (_loaded_tree).
 
 
-##### `mount_skill`  (lines 347–355)
+##### `install_skill`  (lines 347–355)
 
 ```
-async def mount_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None
+async def install_skill(sandbox: SandboxSession, skill: RuntimeSkill) -> None
 ```
 
-**Purpose**: Writes one skill’s files into the sandboxed workspace under that skill’s own `.skills/<name>/` folder. The containment check is important because skill file paths can come from user-controlled saved data.
+**Purpose**: Writes one skill’s files into the sandboxed workspace under that skill’s own `$UFO_HOME/skills/<name>/` folder. The containment check is important because skill file paths can come from user-controlled saved data.
 
-**Data flow**: It receives a sandbox session and a `RuntimeSkill`. It gets the skill’s mount root, gets all files to mount, checks each file path so it stays inside that mount root, and writes the bytes into the sandbox. The sandbox filesystem changes; the function returns nothing.
+**Data flow**: It receives a sandbox session and a `RuntimeSkill`. It gets the skill’s root and files, checks each file path so it stays inside that root, and writes the bytes into the sandbox. The sandbox filesystem changes; the function returns nothing.
 
-**Call relations**: This is the step that turns a resolved skill into actual reachable files. It calls `RuntimeSkill.mount_root`, `RuntimeSkill.mounted_files`, the containment helper, and the sandbox’s `write_file` method.
+**Call relations**: This test helper calls `RuntimeSkill.root`, `RuntimeSkill.all_files`, the containment helper, and the sandbox’s `write_file` method.
 
-*Call graph*: calls 3 internal fn (write_file, mount_root, mounted_files); 1 external calls (contained_relative).
+*Call graph*: calls 3 internal fn (write_file, root, all_files); 1 external calls (contained_relative).
 
 
 ### Built-in catalog skill

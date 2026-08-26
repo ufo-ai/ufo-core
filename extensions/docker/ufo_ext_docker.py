@@ -305,19 +305,32 @@ class DockerCarrier:
         reclaim's reach for exactly the call's duration, whatever that duration is, and the
         completion stamp then grants a full idle span after it — so a container is stoppable only
         when genuinely between calls."""
+        env_args = tuple(
+            arg for name, value in handle.egress_env.items() for arg in ("--env", f"{name}={value}")
+        )
+        return await self._exec_with(handle, argv, timeout_s, env_args)
+
+    async def exec_skill(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
+        """Run a server-carried skill load or sync as root."""
+        return await self._exec_with(handle, argv, timeout_s, ("--user", "root"))
+
+    async def _exec_with(
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        options: tuple[str, ...],
+    ) -> ExecResult:
         self._inflight[handle.conversation_id] += 1
         self._touched[handle.conversation_id] = self.clock()
         try:
-            env_args = tuple(
-                arg
-                for name, value in handle.egress_env.items()
-                for arg in ("--env", f"{name}={value}")
-            )
             code, stdout, stderr = await _docker(
                 "exec",
                 "--workdir",
                 WORKSPACE_DIR,
-                *env_args,
+                *options,
                 handle.container_id,
                 *argv,
                 timeout_s=timeout_s,
@@ -328,7 +341,7 @@ class DockerCarrier:
                         "exec",
                         "--workdir",
                         WORKSPACE_DIR,
-                        *env_args,
+                        *options,
                         handle.container_id,
                         *argv,
                         timeout_s=timeout_s,

@@ -51,7 +51,7 @@ from ufo.sdk.sandbox import (
     SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
 )
-from ufo.skills.runtime import SystemSkillBundle, parse_skill
+from ufo.skills.runtime import SystemSkillBundle, discover_skills
 
 ROOT = Path(__file__).resolve().parents[1]
 E2B_TEMPLATE_NAME = "ufo-sbx"
@@ -212,7 +212,7 @@ command -v soffice >/dev/null
 command -v gh >/dev/null
 test "$(TMPDIR={SANDBOX_TMPDIR} python3 -c 'import tempfile; print(tempfile.gettempdir())')" \\
   = "{SANDBOX_TMPDIR}"
-test -f "{SYSTEM_SKILLS_ROOT}/current"
+test -f "{SYSTEM_SKILLS_ROOT}/.system-manifest.json"
 browser="$(command -v chromium || command -v chromium-browser \\
   || command -v google-chrome || command -v google-chrome-stable || true)"
 test -n "$browser"
@@ -275,10 +275,13 @@ def system_skill_bundle() -> SystemSkillBundle:
             *ROOT.glob("packs/**/skills/**/SKILL.md"),
         }
     )
-    skills = tuple(
-        parse_skill(path.parent, registry_name=path.parent.relative_to(ROOT).as_posix())
-        for path in paths
+    directories = {path.parent for path in paths}
+    roots = sorted(
+        directory
+        for directory in directories
+        if not any(parent in directories for parent in directory.parents)
     )
+    skills = tuple(skill for root in roots for skill in discover_skills(root).values())
     return SystemSkillBundle.from_skills(skills)
 
 
@@ -326,9 +329,6 @@ def build_definition_digest(sizing: Sizing | None) -> str:
 
 
 def apply_layers(builder: object, digest: str) -> object:
-    skill_bundle = system_skill_bundle()
-    skill_bundle_id = skill_bundle.digest.removeprefix("sha256:")
-    skill_bundle_root = f"{SYSTEM_SKILLS_ROOT}/bundles/{skill_bundle_id}"
     builder.set_user(BUILD_USER)
     builder.run_cmd(
         "apt-get update && apt-get install -y --no-install-recommends "
@@ -352,10 +352,13 @@ def apply_layers(builder: object, digest: str) -> object:
     builder.set_envs(SANDBOX_ENV)
     builder.copy(SYSTEM_SKILLS_STAGE_PATH.relative_to(ROOT), SYSTEM_SKILLS_ARCHIVE_PATH, mode=0o644)
     builder.run_cmd(
-        f"mkdir -p {skill_bundle_root} && "
-        f"python3 -m zipfile -e {SYSTEM_SKILLS_ARCHIVE_PATH} {skill_bundle_root} && "
-        f"printf '%s\\n' '\"{skill_bundle.digest}\"' > {SYSTEM_SKILLS_ROOT}/current && "
-        f"rm {SYSTEM_SKILLS_ARCHIVE_PATH} && chmod -R a-w {SYSTEM_SKILLS_ROOT}"
+        f"mkdir -p {SYSTEM_SKILLS_ROOT} && "
+        f"python3 -m zipfile -e {SYSTEM_SKILLS_ARCHIVE_PATH} {SYSTEM_SKILLS_ROOT} && "
+        f"mv {SYSTEM_SKILLS_ROOT}/manifest.json "
+        f"{SYSTEM_SKILLS_ROOT}/.system-manifest.json && "
+        f"rm {SYSTEM_SKILLS_ARCHIVE_PATH} && "
+        f"chmod -R a-w {SYSTEM_SKILLS_ROOT} && "
+        f"chmod 1777 {SYSTEM_SKILLS_ROOT}"
     )
     client = f"{SBX_BIN_DIR}/{CLIENT_BINARY_NAME}"
     builder.copy(CLIENT_STAGE_PATH.relative_to(ROOT), client, mode=0o755)

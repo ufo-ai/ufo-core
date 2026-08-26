@@ -603,11 +603,12 @@ def skill_registry(
                         f"which is already registered"
                     )
                 by_name[skill.name] = skill
+    bundled_names = frozenset(by_name)
     for skill in generated:
         if skill.name in by_name:
             raise ValueError(f"generated skill {skill.name!r} is already registered")
         by_name[skill.name] = skill
-    return SkillRegistry(by_name)
+    return SkillRegistry(by_name, bundled_names=bundled_names)
 
 
 def turn_subagents(manifests: tuple[Manifest, ...]) -> tuple[SubagentProfile, ...]:

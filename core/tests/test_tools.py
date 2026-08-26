@@ -1,6 +1,7 @@
 import hashlib
 import json
 import shlex
+from base64 import urlsafe_b64decode
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.ext.loader import skill_registry
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
 from ufo.sandbox.local import LocalCarrier
@@ -60,8 +62,10 @@ class FakeSandbox:
         default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
     )
     files: dict[str, bytes] = field(default_factory=dict)
-    system_skills: frozenset[str] = frozenset()
-    system_skill_mounts: list[dict[str, str]] = field(default_factory=list)
+    available_system_skills: frozenset[str] = field(
+        default_factory=lambda: frozenset(CORE_SKILL_REGISTRY.by_name)
+    )
+    skill_loads: list[dict[str, object]] = field(default_factory=list)
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return self.bash_result
@@ -75,9 +79,24 @@ class FakeSandbox:
     async def write_file(self, path: str, content: bytes) -> None:
         self.files[path] = content
 
-    async def mount_system_skills(self, skills: dict[str, str]) -> frozenset[str]:
-        self.system_skill_mounts.append(skills)
-        return self.system_skills & skills.keys()
+    async def load_skills(self, payload: dict[str, object]) -> dict[str, str]:
+        self.skill_loads.append(payload)
+        system = payload["system"]
+        user = payload["user"]
+        assert isinstance(system, dict) and isinstance(user, dict)
+        roots = {
+            name: f"$UFO_HOME/skills/{name}"
+            for name in self.available_system_skills & system.keys()
+        }
+        for name, wire in user.items():
+            assert isinstance(name, str) and isinstance(wire, dict)
+            files = wire["files"]
+            assert isinstance(files, dict)
+            for path, content in files.items():
+                assert isinstance(path, str) and isinstance(content, str)
+                self.files[f"$UFO_HOME/skills/{name}/{path}"] = urlsafe_b64decode(content)
+            roots[name] = f"$UFO_HOME/skills/{name}"
+        return roots
 
 
 async def _unavailable_spawn(
@@ -547,7 +566,7 @@ async def _load_skill(ctx: ToolContext, name: str):
     return await tool.handler(ctx, tool.input_model.model_validate({"name": name}))
 
 
-async def test_load_skill_mounts_files_under_the_workspace_and_returns_instructions(
+async def test_load_skill_reads_bundled_files_from_ufo_home_and_returns_instructions(
     tmp_path: Path,
 ) -> None:
     sandbox = FakeSandbox()
@@ -556,23 +575,53 @@ async def test_load_skill_mounts_files_under_the_workspace_and_returns_instructi
     assert result.is_error is False
     assert "# Skill: sandbox" in result.content[0].text
     assert CORE_SKILL_REGISTRY.named("sandbox").instructions in result.content[0].text
-    mounted = sandbox.files["/workspace/.skills/sandbox/SKILL.md"]
-    assert b"name: sandbox" in mounted
+    assert "Loaded files:\n$UFO_HOME/skills/\n  sandbox/\n    SKILL.md" in result.content[0].text
+    assert sandbox.files == {}
 
 
 async def test_load_skill_mounts_a_deploy_skill_from_the_local_system_bundle(
     tmp_path: Path,
 ) -> None:
-    sandbox = FakeSandbox(system_skills=frozenset({"sandbox"}))
+    sandbox = FakeSandbox(available_system_skills=frozenset({"sandbox"}))
     ctx = make_context(sandbox, tmp_path)
 
     result = await _load_skill(ctx, "sandbox")
 
     assert result.is_error is False
     assert sandbox.files == {}
-    assert sandbox.system_skill_mounts == [
-        {"sandbox": CORE_SKILL_REGISTRY.named("sandbox").content_digest()}
+    assert sandbox.skill_loads == [
+        {
+            "system": {"sandbox": CORE_SKILL_REGISTRY.named("sandbox").content_digest()},
+            "user": {},
+        }
     ]
+
+
+async def test_load_skill_installs_a_generated_deploy_skill_from_its_payload(
+    tmp_path: Path,
+) -> None:
+    generated = RuntimeSkill(
+        name="model-catalog",
+        description="the models",
+        instructions="MODEL CATALOG",
+        raw_skill_md="---\nname: model-catalog\ndescription: the models\n---\nMODEL CATALOG\n",
+    )
+    sandbox = FakeSandbox()
+    ctx = replace(
+        make_context(sandbox, tmp_path),
+        skills=skill_registry((), (generated,)),
+    )
+
+    result = await _load_skill(ctx, generated.name)
+
+    assert result.is_error is False
+    assert sandbox.skill_loads[0]["system"] == {}
+    user = sandbox.skill_loads[0]["user"]
+    assert isinstance(user, dict)
+    assert user[generated.name]["digest"] == generated.content_digest()
+    assert sandbox.files["$UFO_HOME/skills/model-catalog/SKILL.md"] == (
+        generated.raw_skill_md.encode()
+    )
 
 
 async def test_load_skill_mounts_and_injects_the_skill_then_each_dependency(
@@ -586,24 +635,23 @@ async def test_load_skill_mounts_and_injects_the_skill_then_each_dependency(
     )
     sandbox = FakeSandbox()
     ctx = replace(
-        make_context(sandbox, tmp_path), skills=SkillRegistry({"base": base, "leaf": leaf})
+        make_context(sandbox, tmp_path),
+        skills=SkillRegistry({"base": base, "leaf": leaf}, bundled_names=frozenset()),
     )
 
     text = (await _load_skill(ctx, "leaf")).content[0].text
 
     assert text.index("# Skill: leaf") < text.index("# Skill: base")
-    assert text.index("LEAF BODY") < text.index("BASE BODY") < text.index("Mounted files:")
-    assert text.count("Mounted files:") == 1
-    assert "/workspace/.skills/base/SKILL.md" in sandbox.files
+    assert text.index("LEAF BODY") < text.index("BASE BODY") < text.index("Loaded files:")
+    assert text.count("Loaded files:") == 1
+    assert "$UFO_HOME/skills/base/SKILL.md" in sandbox.files
     assert "leaf skill" not in text
 
 
-async def test_a_second_load_of_a_skill_in_context_mounts_again_without_its_workflow(
+async def test_a_second_load_of_a_skill_in_context_resolves_without_repeating_its_workflow(
     tmp_path: Path,
 ) -> None:
-    """The agent re-loads a skill whose workflow it is already reading: the files are written again
-    (cheap, idempotent, and it restores whatever the agent did to them), the tree still lists them,
-    and the instructions are named rather than repeated. Never an error — re-loading is fair."""
+    """A repeated load verifies the local files and names the workflow instead of repeating it."""
     sandbox = FakeSandbox()
     ctx = make_context(sandbox, tmp_path)
     skill = CORE_SKILL_REGISTRY.named("sandbox")
@@ -614,11 +662,11 @@ async def test_a_second_load_of_a_skill_in_context_mounts_again_without_its_work
     repeat = await _load_skill(ctx, "sandbox")
 
     text = repeat.content[0].text
-    tree = first[first.index("Mounted files:") :]
+    tree = first[first.index("Loaded files:") :]
     assert repeat.is_error is False
     assert skill.instructions not in text
     assert text == f"Already in context above, not repeated: sandbox\n\n{tree}"
-    assert sandbox.files["/workspace/.skills/sandbox/SKILL.md"] == skill.raw_skill_md.encode()
+    assert sandbox.files == {}
 
 
 async def test_a_load_whose_dependency_is_in_context_still_injects_the_new_workflow(
@@ -635,7 +683,10 @@ async def test_a_load_whose_dependency_is_in_context_still_injects_the_new_workf
     sandbox = FakeSandbox()
     ctx = replace(
         make_context(sandbox, tmp_path),
-        skills=SkillRegistry({"base": base, "first": first_skill, "second": second_skill}),
+        skills=SkillRegistry(
+            {"base": base, "first": first_skill, "second": second_skill},
+            bundled_names=frozenset(),
+        ),
     )
 
     await _load_skill(ctx, "first")
@@ -646,7 +697,7 @@ async def test_a_load_whose_dependency_is_in_context_still_injects_the_new_workf
     assert "BASE BODY" not in text
     assert "Already in context above, not repeated: base" in text
     assert text.endswith(
-        "Mounted files:\n/workspace/.skills/\n  base/\n    SKILL.md\n  second/\n    SKILL.md"
+        "Loaded files:\n$UFO_HOME/skills/\n  base/\n    SKILL.md\n  second/\n    SKILL.md"
     )
 
 
@@ -683,8 +734,8 @@ async def test_load_skill_mounts_a_member_skill_from_its_materialized_row(tmp_pa
     text = (await _load_skill(ctx, "greet")).content[0].text
 
     assert "# Skill: greet\n\nGREET BODY" in text
-    assert sandbox.files["/workspace/.skills/greet/SKILL.md"] == saved.raw_skill_md.encode()
-    assert sandbox.files["/workspace/.skills/greet/notes.md"] == b"kept"
+    assert sandbox.files["$UFO_HOME/skills/greet/SKILL.md"] == saved.raw_skill_md.encode()
+    assert sandbox.files["$UFO_HOME/skills/greet/notes.md"] == b"kept"
 
 
 async def test_member_skill_dependencies_use_the_local_system_bundle(tmp_path: Path) -> None:
@@ -695,16 +746,20 @@ async def test_member_skill_dependencies_use_the_local_system_bundle(tmp_path: P
         depends=("sandbox",),
         raw_skill_md="---\nname: greet\ndescription: say hi\n---\nGREET BODY\n",
     )
-    sandbox = FakeSandbox(system_skills=frozenset({"sandbox"}))
+    sandbox = FakeSandbox(available_system_skills=frozenset({"sandbox"}))
     ctx = replace(make_context(sandbox, tmp_path), skills=_member_tier(saved))
 
     await _load_skill(ctx, "greet")
 
-    assert sandbox.system_skill_mounts == [
-        {"sandbox": CORE_SKILL_REGISTRY.named("sandbox").content_digest()}
-    ]
-    assert "/workspace/.skills/greet/SKILL.md" in sandbox.files
-    assert "/workspace/.skills/sandbox/SKILL.md" not in sandbox.files
+    assert len(sandbox.skill_loads) == 1
+    assert sandbox.skill_loads[0]["system"] == {
+        "sandbox": CORE_SKILL_REGISTRY.named("sandbox").content_digest()
+    }
+    user = sandbox.skill_loads[0]["user"]
+    assert isinstance(user, dict)
+    assert user["greet"]["digest"] == saved.content_digest()
+    assert "$UFO_HOME/skills/greet/SKILL.md" in sandbox.files
+    assert "$UFO_HOME/skills/sandbox/SKILL.md" not in sandbox.files
 
 
 async def test_load_skill_of_a_vanished_member_row_fails_loud(tmp_path: Path) -> None:

@@ -28,9 +28,9 @@ metadata:
 
 ## Design and Typography
 
-**Design defaults:** See `.skills/design-foundations/references/color.md` for the palette, `.skills/design-foundations/references/typography.md` for fonts + PDF pairings, and `.skills/design-foundations/references/dataviz.md` for chart colors. The `design-foundations` core principles (1 accent + neutrals, no decorative imagery, accessibility) apply throughout.
+**Design defaults:** See `$UFO_HOME/skills/design-foundations/references/color.md` for the palette, `$UFO_HOME/skills/design-foundations/references/typography.md` for fonts + PDF pairings, and `$UFO_HOME/skills/design-foundations/references/dataviz.md` for chart colors. The `design-foundations` core principles (1 accent + neutrals, no decorative imagery, accessibility) apply throughout.
 
-**Typography:** PDFs embed any TTF font — use distinctive, professional fonts, not system defaults. Download from Google Fonts at runtime, register with ReportLab, and it embeds automatically. See [libraries/reportlab.md](libraries/reportlab.md) (Custom Fonts section) and `.skills/design-foundations/references/typography.md` (PDF Pairings table + Font Strategy by Format). Default to a clean sans-serif (Inter, DM Sans, Work Sans).
+**Typography:** PDFs embed any TTF font — use distinctive, professional fonts, not system defaults. Download from Google Fonts at runtime, register with ReportLab, and it embeds automatically. See [libraries/reportlab.md](libraries/reportlab.md) (Custom Fonts section) and `$UFO_HOME/skills/design-foundations/references/typography.md` (PDF Pairings table + Font Strategy by Format). Default to a clean sans-serif (Inter, DM Sans, Work Sans).
 
 **CJK text:** Fonts like Inter and DM Sans only cover Latin glyphs. ReportLab has no automatic font fallback — unregistered scripts render as tofu. Register Noto Sans CJK for Chinese, Japanese, or Korean text. See [libraries/reportlab.md](libraries/reportlab.md) (CJK Font Support).
 

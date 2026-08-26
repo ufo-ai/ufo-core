@@ -12,7 +12,7 @@ conversation it holds.
 To change it:
 
 1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
-   `cp .skills/app-issues-home/app.tsx .skills/app-issues-home/index.html issues-home/`.
+   `cp "$UFO_HOME/skills/app-issues-home/app.tsx" "$UFO_HOME/skills/app-issues-home/index.html" issues-home/`.
 2. Edit `app.tsx`. Import only from `ufo/kit` — React and its hooks, the portal's components,
    `SectionApp`, `mountApp`, `getJson`, `navigate`. Any other bare import fails the deploy with
    `failed to resolve import`; never install it, because a local `node_modules` makes that build

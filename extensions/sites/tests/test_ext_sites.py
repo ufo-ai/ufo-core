@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from base64 import urlsafe_b64decode
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -164,7 +165,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.manifest import Deny, HookContext, PreToolUse
 from ufo.sdk.tools import TextContent, ToolResult
-from ufo.skills.runtime import mount_skill
+from ufo.skills.runtime import install_skill
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.workspace import ws
@@ -176,6 +177,26 @@ PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
 APPLICATION_QA_GUIDANCE = "shared/13-ufo-application-qa.md"
 APPLICATION_DESIGN = '<svg viewBox="0 0 1440 900"><rect width="1440" height="900" /></svg>'
 JS_CELL = re.compile(r"```javascript\n(.*?)```", re.S)
+
+
+@dataclass
+class _SkillSandbox:
+    written: dict[str, bytes]
+
+    async def load_skills(self, payload: dict[str, object]) -> dict[str, str]:
+        user = payload["user"]
+        assert isinstance(user, dict)
+        roots = {}
+        for name, wire in user.items():
+            assert isinstance(name, str) and isinstance(wire, dict)
+            files = wire["files"]
+            assert isinstance(files, dict)
+            root = f"$UFO_HOME/skills/{name}"
+            for path, content in files.items():
+                assert isinstance(path, str) and isinstance(content, str)
+                self.written[f"{root}/{path}"] = urlsafe_b64decode(content)
+            roots[name] = root
+        return roots
 
 
 def _playwright_guidance() -> str:
@@ -1371,17 +1392,13 @@ async def test_the_webapp_child_declares_its_parent_and_mounts_it_nested() -> No
 
     written: dict[str, bytes] = {}
 
-    class _Sandbox:
-        async def write_file(self, path: str, content: bytes) -> None:
-            written[path] = content
-
     for entry in await registry.materialize(registry.closure("website-building/webapp")):
-        await mount_skill(_Sandbox(), entry.skill)
+        await install_skill(_SkillSandbox(written), entry.skill)
 
-    assert "/workspace/.skills/website-building/SKILL.md" in written
-    assert "/workspace/.skills/website-building/webapp/SKILL.md" in written
-    assert "/workspace/.skills/website-building/shared/01-design-tokens.md" in written
-    assert not any(path.startswith("/workspace/.skills/website-building-") for path in written)
+    assert "$UFO_HOME/skills/website-building/SKILL.md" in written
+    assert "$UFO_HOME/skills/website-building/webapp/SKILL.md" in written
+    assert "$UFO_HOME/skills/website-building/shared/01-design-tokens.md" in written
+    assert not any(path.startswith("$UFO_HOME/skills/website-building-") for path in written)
 
 
 def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
@@ -2534,13 +2551,9 @@ async def test_website_building_pulls_the_house_style_and_scopes_it_to_our_own_p
 
     written: dict[str, bytes] = {}
 
-    class _Sandbox:
-        async def write_file(self, path: str, content: bytes) -> None:
-            written[path] = content
-
     for entry in await registry.materialize(registry.closure("website-building")):
-        await mount_skill(_Sandbox(), entry.skill)
-    assert f"/workspace/.skills/{HOUSE_STYLE}/{HOUSE_STYLE_TOKENS}" in written
+        await install_skill(_SkillSandbox(written), entry.skill)
+    assert f"$UFO_HOME/skills/{HOUSE_STYLE}/{HOUSE_STYLE_TOKENS}" in written
 
     instructions = registry.named("website-building").instructions
     assert HOUSE_STYLE in instructions

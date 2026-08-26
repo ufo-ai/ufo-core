@@ -11,7 +11,7 @@ scheduled tasks and its source triggers, each with the state it is in.
 To change it:
 
 1. Copy this skill's `app.tsx` and `index.html` into a directory of their own —
-   `cp .skills/app-tasks-home/app.tsx .skills/app-tasks-home/index.html tasks-home/`.
+   `cp "$UFO_HOME/skills/app-tasks-home/app.tsx" "$UFO_HOME/skills/app-tasks-home/index.html" tasks-home/`.
 2. Edit `app.tsx`. Import only from `ufo/kit` — React and its hooks, the portal's components,
    `SectionApp`, `mountApp`, `getJson`, `navigate`. Any other bare import fails the deploy with
    `failed to resolve import`; never install it, because a local `node_modules` makes that build

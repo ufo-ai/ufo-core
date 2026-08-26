@@ -2,10 +2,10 @@
 ask_user, request_credentials, load_skill, skill_search, connect_account,
 cancel_spawn, message_spawn.
 
-Each file/shell handler reaches the workspace only through `ctx.sandbox`, so the carrier's scoping
-and egress rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and
-`write` run the in-sandbox `ufo fs` CLI, so windowing and ripgrep happen beside the files and only a
-bounded JSON result crosses back. Document reads send bounded bytes to `ufo-preview`; a connected
+Each file/shell handler reaches files only through `ctx.sandbox`, so the carrier's path and egress
+rules apply whether a byte arrives via a shell command or a file op. `read`, `edit`, and `write` run
+the in-sandbox `ufo fs` CLI, so windowing happens beside the files and only a bounded JSON result
+crosses back. Document reads send bounded bytes to `ufo-preview`; a connected
 terminal relays those bytes through the deploy because it cannot reach the synthetic preview host.
 `read` records every path it returns so `edit`/`write` can refuse to touch a file the
 turn has not read — the guard that keeps a blind string-replace from clobbering content the model
@@ -25,8 +25,8 @@ structures a question or confirmation the agent poses in its reply, whose answer
 next message — no out-of-band prompt. `request_credentials` is its secret-collecting sibling: it
 seals which slots the speaking owner will fill and ends the turn; a capable surface prompts for the
 values privately and fulfillment lands them in the encrypted store, never the transcript.
-`load_skill` mounts a skill's `SKILL.md` and assets — and those of the whole chain it `depends` on —
-into the workspace, and returns each one's workflow followed by one tree of everything mounted; the
+`load_skill` loads a skill's `SKILL.md` and assets — and those of the whole chain it `depends` on —
+under `$UFO_HOME/skills`, and returns each one's workflow followed by one tree of those files; the
 system prompt's `<available_skills>` block indexes the deploy tier and a member turn's
 `<saved_skills>` block the agent's saved skills. `skill_search` ranks every loadable skill's
 routing card by keyword and returns matching lines, the reach into whatever neither block shows.
@@ -65,7 +65,7 @@ from ufo.sandbox.preview import PREVIEW_HOST
 from ufo.sandbox.session import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
-from ufo.skills.runtime import loaded_context, mount_skills
+from ufo.skills.runtime import load_skills, loaded_context
 from ufo.skills.selection import SKILL_LINE_MAX_CHARS, lexical_score
 from ufo.tools.context import (
     AmbiguousSpawnTarget,
@@ -221,6 +221,11 @@ class GlobInput(BaseModel):
 
 class GrepInput(BaseModel):
     pattern: str = Field(description="The regex pattern to search for.")
+    path: str | None = Field(
+        default=None,
+        description="Absolute path to the directory to search in. If omitted, searches from the "
+        "workspace root.",
+    )
     glob: str | None = Field(
         default=None, description="Glob pattern to filter which files to search, e.g. '**/*.py'."
     )
@@ -546,12 +551,12 @@ async def glob_handler(ctx: ToolContext, args: GlobInput) -> ToolResult:
 
 
 async def grep_handler(ctx: ToolContext, args: GrepInput) -> ToolResult:
-    """Search file contents for a regex across the workspace through the in-sandbox `ufo fs`
+    """Search file contents for a regex under one directory through the in-sandbox `ufo fs`
     ripgrep, so the scan runs in the container and a bounded result crosses back. `head_limit` caps
     the matches returned."""
     params: dict[str, object] = {
         "pattern": args.pattern,
-        "path": WORKSPACE_DIR,
+        "path": args.path or WORKSPACE_DIR,
         "head_limit": args.head_limit if args.head_limit is not None else GREP_HEAD_LIMIT,
     }
     if args.glob is not None:
@@ -931,14 +936,14 @@ async def ask_user_handler(ctx: ToolContext, args: AskUserCall) -> ToolResult:
 async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult:
     """Resolve the named skill and the full chain of what it `depends` on over routing cards,
     materialize each one's files — a deploy skill from the registry, a member skill read from its
-    stored row — mount deploy objects from the carrier's local bundle and copy member objects into
-    the workspace under `.skills/<name>/`, and return each one's `SKILL.md` workflow — the asked-for
-    skill first, so its workflow leads — closing with one tree of everything mounted. A workflow
+    stored row — resolve deploy files from the verified local bundle and install member files under
+    `$UFO_HOME/skills/<name>/`, and return each one's `SKILL.md` workflow — the asked-for skill
+    first, so its workflow leads — closing with one tree of everything loaded. A workflow
     the context already holds is named in one note instead of injected again, while its files still
-    mount, so re-loading is cheap and self-healing rather than an error. An unknown name fails loud
+    resolve, so re-loading is cheap rather than an error. An unknown name fails loud
     as a recoverable tool error."""
     loaded = await ctx.skills.materialize(ctx.skills.closure(args.name))
-    await mount_skills(ctx.sandbox, loaded, ctx.skills.by_name)
+    await load_skills(ctx.sandbox, loaded)
     text = loaded_context(loaded, ctx.loaded_skills.in_context)
     return ToolResult(content=(TextContent(text=text),))
 
@@ -1107,7 +1112,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="read",
         description=(
-            "Reads a file from the workspace. Returns up to 2000 lines by default; use "
+            "Reads a file by absolute path. Returns up to 2000 lines by default; use "
             "offset/limit for large files. Lines longer than 2000 chars are truncated. For "
             "images: returns visual content for analysis. For PDFs: extracts text and renders "
             "page images (default 20 pages). For PPTX: renders slides as images (default 20 "
@@ -1152,7 +1157,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
     ToolDef(
         name="grep",
         description=(
-            "Search for a regex pattern in file contents across the workspace. Use instead of bash "
+            "Search for a regex pattern in file contents below a directory. Use instead of bash "
             "`grep` or `rg`. Pattern is a regex, not a literal string — escape metacharacters such "
             "as ( ) . * + ? [ ] { } | when searching for a literal name, e.g. a function call "
             "site: `foo\\(`."
@@ -1217,9 +1222,9 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         name="load_skill",
         description=(
             "Load a skill — a bundle of workflow instructions and files — so you can follow it. "
-            "The skill and anything it depends on are mounted under the workspace, and each one's "
-            "instructions come back with a tree of the files it mounted, so any path the workflow "
-            "cites is already there to read. Load a skill proactively whenever its subject is "
+            "The skill and anything it depends on are loaded under `$UFO_HOME/skills`, and each "
+            "one's instructions come back with a tree of those files, so any path the workflow "
+            "cites is ready to read. Load a skill proactively whenever its subject is "
             "relevant to the task. Cheap operation — be aggressive about loading."
         ),
         input_model=LoadSkillInput,

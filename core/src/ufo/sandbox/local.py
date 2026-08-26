@@ -21,10 +21,15 @@ PATH, locale and tmp passthrough, the proxy exports, the spec's own env — neve
 environment is the deploy's secrets."""
 
 import asyncio
+import hashlib
+import io
+import json
 import os
 import sys
 import tempfile
-from collections.abc import AsyncIterator
+import zipfile
+from base64 import urlsafe_b64decode
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from functools import cache
 from io import BufferedReader
@@ -33,7 +38,12 @@ from signal import SIGKILL
 
 from ufo.o11y import warn
 from ufo.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
-from ufo.sandbox.containment import PathNotFound, contained_file
+from ufo.sandbox.containment import (
+    PathNotFound,
+    contained_file,
+    contained_relative,
+    contained_remove,
+)
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
     SENTINEL_MODEL_KEY,
@@ -87,6 +97,153 @@ def _provision_scratch() -> Path:
 class LocalCarrier:
     _scratch: Path = field(default_factory=_provision_scratch)
 
+    @property
+    def ufo_home(self) -> Path:
+        """The local runtime's `$UFO_HOME`."""
+        return self._scratch / "home" / ".ufo"
+
+    def seed_system_skills(self, archive: bytes) -> None:
+        root = self.ufo_home / "skills"
+        root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+            manifest_bytes = bundle.read("manifest.json")
+            manifest = json.loads(manifest_bytes)
+            if not isinstance(manifest, Mapping):
+                raise TypeError("invalid system skill manifest")
+            old = self._system_manifest(root)
+            old_skills = old.get("skills")
+            new_skills = manifest.get("skills")
+            if not isinstance(old_skills, Mapping) or not isinstance(new_skills, Mapping):
+                raise TypeError("invalid system skill manifest")
+            if any(not isinstance(name, str) for name in (*old_skills, *new_skills)):
+                raise TypeError("invalid system skill name")
+            top_levels = {
+                Path(contained_relative(name, str(root))).relative_to(root).parts[0]
+                for name in (*old_skills, *new_skills)
+            }
+            for name in top_levels:
+                contained_remove(root / name, root)
+            for entry in bundle.infolist():
+                if entry.is_dir() or entry.filename == "manifest.json":
+                    continue
+                target = contained_relative(entry.filename, str(root))
+                with contained_file(target, root, create_parent=True) as output:
+                    output.replace_bytes(bundle.read(entry), 0o644)
+            with contained_file(root / ".system-manifest.json", root) as output:
+                output.replace_bytes(manifest_bytes, 0o644)
+
+    async def load_skills(self, handle: SandboxHandle, payload: Mapping[str, object]) -> ExecResult:
+        """Resolve system and user skills under the local runtime's `$UFO_HOME/skills`."""
+        try:
+            roots = await asyncio.to_thread(self._load_skills, payload)
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            return ExecResult(stdout="", stderr=str(error), exit_code=1)
+        return ExecResult(
+            stdout=json.dumps({"roots": roots}, sort_keys=True),
+            stderr="",
+            exit_code=0,
+        )
+
+    def _load_skills(self, payload: Mapping[str, object]) -> dict[str, str]:
+        root = self.ufo_home / "skills"
+        root.mkdir(parents=True, exist_ok=True)
+        manifest = self._system_manifest(root)
+        manifest_skills = manifest["skills"]
+        system = payload["system"]
+        user = payload["user"]
+        if not isinstance(manifest_skills, Mapping):
+            raise TypeError("invalid system skill manifest")
+        if any(not isinstance(name, str) for name in manifest_skills):
+            raise TypeError("invalid system skill name")
+        if not isinstance(system, Mapping) or not isinstance(user, Mapping):
+            raise TypeError("invalid skill load payload")
+        roots: dict[str, str] = {}
+        for name, digest in system.items():
+            if not isinstance(name, str) or not isinstance(digest, str):
+                raise TypeError("invalid system skill")
+            contained_relative(name, str(root))
+            declared = manifest_skills.get(name)
+            if not isinstance(declared, Mapping) or declared.get("digest") != digest:
+                continue
+            files = declared.get("files")
+            if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
+                raise TypeError(f"invalid system skill manifest: {name}")
+            contents = self._read_skill_files(root, name, files)
+            if self._skill_digest(contents) == digest:
+                roots[name] = contained_relative(name, str(root))
+        system_names = tuple(system)
+        for name, encoded in user.items():
+            if not isinstance(name, str) or not isinstance(encoded, Mapping):
+                raise TypeError("invalid user skill")
+            self._validate_user_skill_name(name, root)
+            if any(
+                system_name == name
+                or system_name.startswith(f"{name}/")
+                or name.startswith(f"{system_name}/")
+                for system_name in system_names
+            ):
+                raise ValueError(f"user skill conflicts with system skill: {name}")
+            digest = encoded.get("digest")
+            files = encoded.get("files")
+            if not isinstance(digest, str) or not isinstance(files, Mapping):
+                raise TypeError(f"invalid user skill: {name}")
+            contents = []
+            for path, content in files.items():
+                if not isinstance(path, str) or not isinstance(content, str):
+                    raise TypeError(f"invalid user skill file: {name}")
+                contained_relative(path, f"/{name}")
+                contents.append((path, urlsafe_b64decode(content)))
+            contents.sort()
+            if self._skill_digest(contents) != digest:
+                raise ValueError(f"user skill does not match its digest: {name}")
+            self._install_user_skill(root, name, contents)
+            roots[name] = contained_relative(name, str(root))
+        return roots
+
+    @staticmethod
+    def _system_manifest(root: Path) -> Mapping[str, object]:
+        with contained_file(root / ".system-manifest.json", root) as source:
+            if source.lstat() is None:
+                return {"skills": {}}
+            with source.open_bytes() as contents:
+                manifest = json.load(contents)
+        if not isinstance(manifest, Mapping):
+            raise TypeError("invalid system skill manifest")
+        return manifest
+
+    @staticmethod
+    def _read_skill_files(root: Path, name: str, files: list[str]) -> list[tuple[str, bytes]]:
+        contents = []
+        for path in files:
+            target_path = contained_relative(f"{name}/{path}", str(root))
+            with contained_file(target_path, root) as target:
+                with target.open_bytes() as source:
+                    contents.append((path, source.read()))
+        return contents
+
+    @staticmethod
+    def _install_user_skill(root: Path, name: str, files: list[tuple[str, bytes]]) -> None:
+        destination = contained_relative(name, str(root))
+        contained_remove(destination, root)
+        for path, content in files:
+            target = contained_relative(f"{name}/{path}", str(root))
+            with contained_file(target, root, create_parent=True) as output:
+                output.replace_bytes(content, 0o644)
+
+    @staticmethod
+    def _validate_user_skill_name(name: str, root: Path) -> None:
+        relative = Path(contained_relative(name, str(root))).relative_to(root)
+        if len(relative.parts) != 1 or relative.parts[0].startswith("."):
+            raise ValueError(f"invalid skill name: {name}")
+
+    @staticmethod
+    def _skill_digest(files: list[tuple[str, bytes]]) -> str:
+        digest = hashlib.sha256()
+        for path, content in files:
+            digest.update(hashlib.sha256(path.encode()).digest())
+            digest.update(hashlib.sha256(content).digest())
+        return f"sha256:{digest.hexdigest()}"
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         root = Path(spec.workspace_host_path)
         await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
@@ -135,6 +292,7 @@ class LocalCarrier:
         return {
             **passed,
             "HOME": str(self._scratch / "home"),
+            "UFO_HOME": str(self.ufo_home),
             "PATH": f"{self._scratch / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": str(self._scratch / "home" / ".gitconfig"),

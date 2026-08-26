@@ -9,6 +9,7 @@ breaks this probe, and a Manifest field the sample stops registering breaks the 
 
 import asyncio
 import json
+from base64 import urlsafe_b64decode
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -112,7 +113,7 @@ from ufo.serve import (
     _source_backends,
     _validate_requires,
 )
-from ufo.skills.runtime import mount_skill
+from ufo.skills.runtime import install_skill
 from ufo.sources.sync import CorePageFeed, SyncDriver
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.turns.audience import audience_subjects, conversation_audience
@@ -836,8 +837,8 @@ def test_pack_prompt_section_reaches_the_rendered_system_prompt() -> None:
 async def test_sample_skill_parses_indexes_and_mounts_with_its_script() -> None:
     """The skills seam end to end through the probe: the skill the sample contributes parses into
     the registry the loader aggregates, renders into the `{{skill_index}}` the main prompt carries,
-    and mounts into the sandbox under `.skills/<name>/` with its bundled script — every step the
-    real `load_skill` path runs, minus the live-sandbox execution deferred to the Docker proofs."""
+    and loads into `$UFO_HOME/skills/<name>/` with its bundled script — every step the real
+    `load_skill` path runs, minus the live-sandbox execution deferred to the Docker proofs."""
     manifest = _sample_manifest()
     registry = skill_registry((manifest,))
 
@@ -850,13 +851,25 @@ async def test_sample_skill_parses_indexes_and_mounts_with_its_script() -> None:
     written: dict[str, bytes] = {}
 
     class _Recorder:
-        async def write_file(self, path: str, content: bytes) -> None:
-            written[path] = content
+        async def load_skills(self, payload: dict[str, object]) -> dict[str, str]:
+            user = payload["user"]
+            assert isinstance(user, dict)
+            roots = {}
+            for name, wire in user.items():
+                assert isinstance(name, str) and isinstance(wire, dict)
+                files = wire["files"]
+                assert isinstance(files, dict)
+                root = f"$UFO_HOME/skills/{name}"
+                for path, content in files.items():
+                    assert isinstance(path, str) and isinstance(content, str)
+                    written[f"{root}/{path}"] = urlsafe_b64decode(content)
+                roots[name] = root
+            return roots
 
     for entry in await registry.materialize(registry.closure(sample.SKILL_NAME)):
-        await mount_skill(_Recorder(), entry.skill)
+        await install_skill(_Recorder(), entry.skill)
 
-    root = f"/workspace/.skills/{sample.SKILL_NAME}"
+    root = f"$UFO_HOME/skills/{sample.SKILL_NAME}"
     assert f"name: {sample.SKILL_NAME}" in written[f"{root}/SKILL.md"].decode()
     assert sample.SKILL_SCRIPT_MARKER in written[f"{root}/{sample.SKILL_SCRIPT}"].decode()
 

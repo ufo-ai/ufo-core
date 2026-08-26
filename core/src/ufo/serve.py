@@ -258,6 +258,7 @@ def run() -> None:
     subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests)))
     subagent_grants = turn_subagent_grants(manifests)
     skills = skill_registry(manifests, (model_catalog_skill(registry),))
+    system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())
     connectors = _connector_registry(config, manifests, credentials)
     run_tokens = RunTokenCodec.from_env()
     preview = _preview_settings(config)
@@ -310,6 +311,7 @@ def run() -> None:
             workspace_root=config.sandbox.workspace_root,
             terminals=_select_terminal_transport(config, manifests, fleet_blob),
             document_renderer=document_renderer,
+            system_skill_archive=system_skill_bundle.archive,
         ),
         hub=hub,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
@@ -1038,7 +1040,7 @@ def _mount_shared_surfaces(
     )
     tailer = HubTailer(hub=hub, billing_url=billing_url)
     stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
-    system_skill_bundle = SystemSkillBundle.from_skills(skills.by_name.values())
+    system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())
     registered: dict[str, SurfaceSpec] = {}
     listeners = []
 

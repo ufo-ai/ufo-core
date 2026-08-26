@@ -100,13 +100,13 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.loop.engine import REQUEST_CREDENTIALS_TOOL
 from ufo.schema import tables
-from ufo.skills.runtime import SKILLS_MOUNT_DIR
+from ufo.skills.runtime import SKILLS_ROOT
 from ufo.turns.activity import SKILL_LOAD_TOOL
 from ufo.workspace import ws_current
 
 ONBOARDING_HELP_PACKS = ("assistant_hosted",)
 CORPUS_SKILL = "customer-onboarding-help"
-REFERENCES_DIR = f"{SKILLS_MOUNT_DIR}/{CORPUS_SKILL}/references"
+REFERENCES_DIR = f"{SKILLS_ROOT}/{CORPUS_SKILL}/references"
 
 
 def _corpus_load(output: CapabilityOutput) -> ToolInvocation | None:

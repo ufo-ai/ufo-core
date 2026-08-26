@@ -1,6 +1,6 @@
 # Typography (Web-Specific)
 
-For universal typography principles (Bringhurst foundations, economy of styles, display vs. body classification, serif vs. sans-serif strategy, brand fonts, font blacklist, and recommended pairings), see `.skills/design-foundations/references/typography.md`.
+For universal typography principles (Bringhurst foundations, economy of styles, display vs. body classification, serif vs. sans-serif strategy, brand fonts, font blacklist, and recommended pairings), see `$UFO_HOME/skills/design-foundations/references/typography.md`.
 
 This file adds **web-specific** rules that extend those foundations with CSS tokens and implementation details.
 
@@ -37,7 +37,7 @@ Use this table as a starting point — vary based on the specific project. **Eve
 
 **System fonts are fallback only.** Never use Arial, Helvetica, Georgia, Calibri, Times New Roman, Verdana, Tahoma, or Trebuchet MS as the primary chosen font for a website. They exist only as fallback in the `font-family` stack — the browser uses them if the real font fails to load. The font-family declaration should always be: `'Chosen Font', 'system-fallback', sans-serif`.
 
-See `.skills/design-foundations/references/typography.md` → Font Strategy by Format for why websites differ from slides/documents.
+See `$UFO_HOME/skills/design-foundations/references/typography.md` → Font Strategy by Format for why websites differ from slides/documents.
 
 ---
 

@@ -235,9 +235,9 @@ def _contained_keys(name: str, spec: UserSkillSpec) -> None
 
 **Data flow**: It receives the skill name and the proposed skill spec. It computes the skill’s mount root, tests each file key against that root, and either finishes silently or raises a ValueError naming the unsafe path.
 
-**Call relations**: SkillObjects.apply calls this before saving anything. It relies on skill_mount_root to find the safe folder and contained_relative to enforce the “do not climb out” rule.
+**Call relations**: SkillObjects.apply calls this before saving anything. It relies on skill_root to find the safe folder and contained_relative to enforce the “do not climb out” rule.
 
-*Call graph*: called by 1 (apply); 2 external calls (contained_relative, skill_mount_root).
+*Call graph*: called by 1 (apply); 2 external calls (contained_relative, skill_root).
 
 
 ##### `_text`  (lines 118–124)

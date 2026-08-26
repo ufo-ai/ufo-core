@@ -148,7 +148,7 @@ degrades to a search instead of a dead end.
 ## Evals — extending `evals/skill_loading/`
 
 The existing rig is already the right instrument: each case sends one natural member message,
-watches the conversation workspace for the `.skills/<name>/SKILL.md` mounts `load_skill` produces,
+watches the conversation workspace for the `$UFO_HOME/skills/<name>/SKILL.md` mounts `load_skill` produces,
 and settles at the first observed mount with an expected-present verdict over a `forbidden` set
 (`evals/skill_loading/runner.py`) — recall@1 with distractors, cheap because the turn cancels at
 the first mount. Today it only exercises pack skills against the deploy index. Five rig changes

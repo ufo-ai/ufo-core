@@ -1,9 +1,7 @@
-"""What a running turn mounted into its conversation workspace, watched until the answer is
-settled. `load_skill` writes `.skills/<name>/SKILL.md` as it dispatches, so a routing verdict is
-durable workspace state that needs neither the terminal transcript nor the rest of the task. The
-watch ends at the first watched mount, the turn's own terminal, or the deadline, and ends a turn
-still running — a case costs the rounds before the decision instead of the whole task. Status reads
-before mounts, so a terminal status guarantees the mount set is final.
+"""Completed `load_skill` results watched until the routing decision is settled. The watch ends at
+the first watched load, the turn's own terminal, or the deadline, and ends a turn still running — a
+case costs the rounds before the decision instead of the whole task. Status reads before tool steps,
+so a terminal status guarantees the load set is final.
 
 The load deadline is charged from the turn's own work, not from admission. A shard runs its cases
 against one box that also carries serve, its scheduler, and Postgres, so between admission and the
@@ -15,6 +13,8 @@ turn that never starts is reported as such rather than graded as a routing failu
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from dataclasses import dataclass
 from time import time
 from typing import Protocol
@@ -23,15 +23,15 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from evals.harness.target import EvalConversations
-from evals.harness.timing import TurnSteps
+from evals.harness.timing import TurnStep, TurnSteps
 from ufo.db import workspace_tx
-from ufo.sandbox.session import WORKSPACE_DIR
 from ufo.schema import tables
 from ufo.schema.records import TurnStatus
 from ufo.sdk.context import Trajectory
-from ufo.skills.runtime import SKILL_MD, SKILLS_MOUNT_DIR
+from ufo.sdk.models import TextBlock, ToolResultBlock
 
 MOUNT_POLL_SECONDS = 0.5
+SKILL_HEADER = re.compile(r"^# Skill: ([^\s]+)", re.M)
 TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 START_DEADLINE_SECONDS = 900.0
 """How long the watch waits for the turn to begin its own work. It bounds the rig's own latency —
@@ -107,11 +107,33 @@ async def watch_mounts(
                     sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
                 )
             ).scalar_one_or_none()
+            children = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.status,
+                        tables.turn.c.inbound,
+                    ).where(tables.turn.c.parent_turn_id == turn_id)
+                )
+            ).all()
+        steps = await target.turn_steps.steps(turn_id)
+        child_steps = await asyncio.gather(
+            *(target.turn_steps.steps(child.id) for child in children)
+        )
         if working_from is None:
-            found = await _work_started(target, turn_id)
+            found = _work_started(steps)
             if found is not None:
                 working_from = min(max(found, admitted), clock())
-        mounted = tuple(name for name in names if _mounted(target, conversation_id, name))
+        present = _observed_skills(
+            (
+                (steps, None),
+                *(
+                    (recorded, child.inbound)
+                    for child, recorded in zip(children, child_steps, strict=True)
+                ),
+            )
+        )
+        mounted = tuple(name for name in names if name in present)
         now = clock()
         charged = 0.0 if working_from is None else now - working_from
         expired = (
@@ -119,15 +141,25 @@ async def watch_mounts(
             if working_from is None
             else charged >= deadline_seconds
         )
-        terminal = status in TERMINAL_STATUSES
+        terminal = status in TERMINAL_STATUSES and all(
+            child.status in TERMINAL_STATUSES for child in children
+        )
         if any(name in mounted for name in settling) or terminal or expired:
-            cancelled = False if terminal else await target.outcome.cancel(turn_id)
+            live = (
+                *((turn_id,) if status not in TERMINAL_STATUSES else ()),
+                *(child.id for child in children if child.status not in TERMINAL_STATUSES),
+            )
+            cancelled = (
+                False
+                if terminal
+                else any(await asyncio.gather(*(target.outcome.cancel(item) for item in live)))
+            )
             return MountObservation(
                 mounted=mounted,
                 status=status,
                 cancelled=cancelled,
                 elapsed_seconds=clock() - admitted,
-                present=_present(target, conversation_id),
+                present=present,
                 charged_seconds=charged,
                 startup_seconds=None if working_from is None else working_from - admitted,
             )
@@ -142,41 +174,49 @@ def never_started(observation: MountObservation) -> bool:
     return observation.startup_seconds is None and observation.status not in TERMINAL_STATUSES
 
 
-async def _work_started(target: MountWatchTarget, turn_id: UUID) -> float | None:
+def _work_started(steps: tuple[TurnStep, ...]) -> float | None:
     """The loop time the turn began its own work, read from the earliest durable engine step it
     recorded — the arrivals drain that opens the round loop, which the engine reaches only after the
     dispatch claim, the sandbox boot, and the preloaded mounts. `None` while no step is recorded
     yet."""
-    steps = await target.turn_steps.steps(turn_id)
     starts = [step.started_at_epoch_ms for step in steps if step.started_at_epoch_ms is not None]
     if not starts:
         return None
     return asyncio.get_running_loop().time() - max(time() - min(starts) / 1000, 0.0)
 
 
-def _mounted(target: MountWatchTarget, conversation_id: UUID, name: str) -> bool:
-    relative = f"{SKILLS_MOUNT_DIR}/{name}/{SKILL_MD}".removeprefix(f"{WORKSPACE_DIR}/")
-    return target.conversations.workspace_path(conversation_id, relative).exists()
-
-
-def _present(target: MountWatchTarget, conversation_id: UUID) -> tuple[str, ...]:
-    """Every skill mounted under the conversation, read once at decision time. A child skill mounts
-    inside its parent's directory and names itself the way the registry does."""
-    root = target.conversations.workspace_path(
-        conversation_id, SKILLS_MOUNT_DIR.removeprefix(f"{WORKSPACE_DIR}/")
-    )
-    try:
-        entries = sorted(root.iterdir()) if root.is_dir() else []
-    except OSError:
-        return ()
-    names: list[str] = []
-    for entry in entries:
-        if not (entry / SKILL_MD).is_file():
-            continue
-        names.append(entry.name)
-        names.extend(
-            f"{entry.name}/{child.name}"
-            for child in sorted(entry.iterdir())
-            if (child / SKILL_MD).is_file()
-        )
-    return tuple(names)
+def _observed_skills(
+    turns: tuple[tuple[tuple[TurnStep, ...], str | None], ...],
+) -> tuple[str, ...]:
+    names: set[str] = set()
+    for steps, inbound in turns:
+        if steps and inbound is not None:
+            try:
+                payload = json.loads(inbound)
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            if isinstance(payload, dict):
+                preload = payload.get("preload_skills")
+                if isinstance(preload, list) and all(isinstance(name, str) for name in preload):
+                    names.update(preload)
+        for step in steps:
+            if (
+                not step.function_name.endswith("_dispatch_step")
+                or step.completed_at_epoch_ms is None
+            ):
+                continue
+            for message in step.messages:
+                if isinstance(message.content, str):
+                    continue
+                for block in message.content:
+                    if not isinstance(block, ToolResultBlock) or block.is_error:
+                        continue
+                    text = (
+                        block.content
+                        if isinstance(block.content, str)
+                        else "".join(
+                            part.text for part in block.content if isinstance(part, TextBlock)
+                        )
+                    )
+                    names.update(SKILL_HEADER.findall(text))
+    return tuple(sorted(names))

@@ -551,7 +551,7 @@ def test_every_case_names_a_reference_the_corpus_ships() -> None:
     corpus = skill_registry(load_manifests(ONBOARDING_HELP_PACKS[0])).by_name[CORPUS_SKILL]
     shipped = {
         path.removeprefix("references/")
-        for path in corpus.mounted_files()
+        for path in corpus.all_files()
         if path.startswith("references/")
     }
     graded = {

@@ -97,6 +97,7 @@ TIMEZONE_HEADER = "x-ufo-timezone"
 CLIENT_VERSION_ENV = "UFO_CLIENT_VERSION"
 QUEUE_KEY_SEPARATOR = ":"
 TURN_FAILED_MESSAGE = "The agent could not complete the request. Try again."
+STALE_CLIENT_MESSAGE = "Updated ufo. Run ufo again."
 
 # Hold a live stream open just under the shell's `curl --max-time 90`, so a turn that outruns the
 # hold ends on `poll` (the shell reconnects) rather than the client's own timeout truncating it.
@@ -533,11 +534,15 @@ def _utf8_header(request: Request, name: str) -> str:
 
 def _stale_client(request: Request) -> bool:
     """Whether this client's x-ufo-script version differs from the client the deploy serves
-    (`UFO_CLIENT_VERSION`) — unset in local dev, so no install is ever pushed there. The stale
-    client is told to update by an `install` prepended to its next screen; an op reply and a
-    secret fulfillment stay pure, so the directive rides only a message or resume stream."""
+    (`UFO_CLIENT_VERSION`) — unset in local dev, so no install is ever pushed there. A stale
+    client is stopped before admitting or tailing a turn; its new binary must run before it can
+    receive this deploy's operations."""
     served = os.environ.get(CLIENT_VERSION_ENV, "")
     return bool(served) and request.headers.get(SCRIPT_HEADER, "").strip() != served
+
+
+def _client_update() -> bytes:
+    return directive("install") + directive("say", STALE_CLIENT_MESSAGE)
 
 
 def _resumed_from(request: Request, turn_id: UUID) -> str:
@@ -600,7 +605,10 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         return PlainTextResponse("x-ufo-cwd must be an absolute path", status_code=400)
     queue_key = f"{email}{QUEUE_KEY_SEPARATOR}{request.path_params['channel']}"
     conversation_id = await ctx.conversation_for(queue_key, conversation_audience(member_id))
+    stale = _stale_client(request)
     if request.headers.get(SEND_HEADER, "").strip():
+        if stale:
+            return PlainTextResponse("ufo update required", status_code=409)
         return await _send(ctx, request, conversation_id, member_id, email, cwd)
     if UNSEND_HEADER in request.headers:
         unsend = request.headers[UNSEND_HEADER].strip()
@@ -608,7 +616,6 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
     note: bytes | None = None
     sent: bytes | None = None
     resumed = False
-    update = b""
     marked = bool(request.headers.get(LISTEN_HEADER, "").strip())
     op_id = request.headers.get(OP_HEADER, "").strip()
     if op_id:
@@ -620,6 +627,8 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
             return PlainTextResponse("op reply too large", status_code=413)
         failed = _utf8_header(request, OP_ERR_HEADER) or None
         ctx.terminal_resolve(conversation_id, op_id, bytes(reply), failed, member_id)
+        if stale:
+            return PlainTextResponse(directive("poll", "0"))
         turn_id = await ctx.latest_turn(conversation_id)
         if turn_id is None:
             return PlainTextResponse(directive("ask", PROMPT))
@@ -630,15 +639,17 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         if turn_id is None:
             return PlainTextResponse(directive("ask", PROMPT))
         await ctx.stop_turn(conversation_id, turn_id)
+        if stale:
+            return PlainTextResponse(_client_update())
     else:
-        if _stale_client(request):
-            update = directive("install")
+        if stale:
+            return PlainTextResponse(_client_update())
         body = (await request.body()).decode("utf-8", "replace").strip()
         if not body:
             resumed = True
             turn_id = await ctx.latest_turn(conversation_id)
             if turn_id is None:
-                return PlainTextResponse(update + directive("ask", PROMPT))
+                return PlainTextResponse(directive("ask", PROMPT))
             named, _, held = request.headers.get(SINCE_HEADER, "").strip().partition(":")
             if marked and named == str(turn_id) and await ctx.turn_is_terminal(turn_id):
                 return PlainTextResponse(
@@ -691,8 +702,6 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         if cwd:
             ctx.terminal_connect(conversation_id, cwd, member_id)
         try:
-            if update:
-                yield update
             if sent is not None:
                 yield sent
             for line in history:

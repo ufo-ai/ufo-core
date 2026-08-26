@@ -14,6 +14,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use flate2::read::GzDecoder;
 
+use crate::config::Home;
+
 const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
 const TRUST_BUNDLE_FILE: &str = "trust-bundle.pem";
 const PEM_LINE_BYTES: usize = 64;
@@ -61,7 +63,18 @@ struct Params {
 /// signal makes it exit `128 + SIGKILL`, the same code a member's own `kill` produces. The server
 /// reads it to report the budget that expired, and the work a command detached into its own group
 /// keeps running behind that report.
+#[cfg(test)]
 pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<Vec<u8>, String> {
+    run_at_home(params, workdir, cwd, &Home::resolve(), timeout_s)
+}
+
+pub fn run_at_home(
+    params: &str,
+    workdir: &Path,
+    cwd: &Path,
+    home: &Home,
+    timeout_s: u64,
+) -> Result<Vec<u8>, String> {
     let parsed: Params =
         serde_json::from_str(params).map_err(|error| format!("bad exec params: {error}"))?;
     let Some(program) = parsed.argv.first() else {
@@ -84,7 +97,8 @@ pub fn run(params: &str, workdir: &Path, cwd: &Path, timeout_s: u64) -> Result<V
         .stdin(Stdio::null())
         .stdout(Stdio::from(sink(&out_path)?))
         .stderr(Stdio::from(sink(&err_path)?))
-        .env("UFO_OP_WORKDIR", workdir);
+        .env("UFO_OP_WORKDIR", workdir)
+        .env("UFO_HOME", &home.root);
     for (name, value) in &parsed.env {
         if name == CA_CERT_ENV {
             continue;

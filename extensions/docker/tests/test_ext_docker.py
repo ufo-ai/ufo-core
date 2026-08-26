@@ -216,8 +216,10 @@ async def test_attach_to_a_running_container_carries_the_second_turns_env(
     the env lives on the per-turn handle, never on the container."""
     conversation = uuid4()
     running: list[str] = []
+    calls: list[tuple[str, ...]] = []
 
     async def fake_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
         if argv[0] == "run":
             running.append("cid1")
             return 0, b"cid1\n", b""
@@ -258,6 +260,35 @@ async def test_attach_to_a_running_container_carries_the_second_turns_env(
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-b" in exec_argv
     assert "HTTPS_PROXY=http://turn-a:@host.docker.internal:8080" not in exec_argv
     assert "GH_TOKEN=UFO_SENTINEL_GRANT_acct-a" not in exec_argv
+
+
+async def test_skill_programs_run_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        return 0, b"loaded", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", record_docker)
+    handle = SandboxHandle(conversation_id=uuid4(), container_id="cid")
+
+    result = await DockerCarrier().exec_skill(handle, ("python3", "-I", "-c", "pass"), 30)
+
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            "exec",
+            "--workdir",
+            WORKSPACE_DIR,
+            "--user",
+            "root",
+            "cid",
+            "python3",
+            "-I",
+            "-c",
+            "pass",
+        )
+    ]
 
 
 async def test_write_streams_the_content_over_stdin_and_never_on_the_command_line(

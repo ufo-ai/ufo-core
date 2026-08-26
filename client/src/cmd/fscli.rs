@@ -23,7 +23,7 @@ pub const USAGE: &str = "usage: ufo fs {read|write|edit|grep|glob|changes} <json
 /// through the verb loop would post `fs read {…}` as a chat message.
 #[cfg(not(unix))]
 pub fn main(args: &[String]) -> i32 {
-    if args.first().map(String::as_str) == Some("system-skills") {
+    if args.first().map(String::as_str) == Some("skills") {
         return crate::system_skills::main(&args[1..]);
     }
     eprintln!("{USAGE}");
@@ -41,7 +41,7 @@ pub struct Outcome {
 /// Run one `ufo fs` call from the launch directory and answer the exit code.
 #[cfg(unix)]
 pub fn main(args: &[String]) -> i32 {
-    if args.first().map(String::as_str) == Some("system-skills") {
+    if args.first().map(String::as_str) == Some("skills") {
         return crate::system_skills::main(&args[1..]);
     }
     let workdir = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
@@ -68,11 +68,24 @@ pub fn run(args: &[String], workdir: &Path) -> Outcome {
             code: 2,
         };
     }
-    let params = match serde_json::from_str::<serde_json::Value>(&args[1]) {
+    let mut params = match serde_json::from_str::<serde_json::Value>(&args[1]) {
         Ok(params) if params.is_object() => params,
         Ok(_) => return refusal("params must be a JSON object"),
         Err(error) => return refusal(&format!("ValueError: {error}")),
     };
+    let home = crate::config::Home::resolve();
+    for key in ["path", "workspace"] {
+        let Some(value) = params.get_mut(key) else {
+            continue;
+        };
+        let Some(path) = value.as_str() else {
+            continue;
+        };
+        if let Some(relative) = path.strip_prefix("$UFO_HOME/") {
+            *value =
+                serde_json::Value::String(home.root.join(relative).to_string_lossy().into_owned());
+        }
+    }
     match fileops::run_contained(&args[0], &params, workdir) {
         Ok(result) => Outcome {
             stdout: serde_json::to_vec(&result).expect("op results serialize"),

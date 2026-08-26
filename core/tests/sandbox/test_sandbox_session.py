@@ -1,7 +1,10 @@
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +22,14 @@ from ufo.sandbox.session import (
     DOCUMENT_READ_EXEC_TIMEOUT_SECONDS,
     NO_PROXY_HOSTS,
     PROXY_ENV_NAMES,
+    SANDBOX_MODULE_BOOTSTRAP,
+    SANDBOX_PYTHON_FLAG,
     SENTINEL_MODEL_KEY,
+    SKILL_LOAD_PROG,
+    SKILL_LOAD_STAGING_PREFIX,
+    SYSTEM_SKILL_SYNC_PROG,
+    SYSTEM_SKILL_SYNC_STAGING_PREFIX,
+    SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
     ExecResult,
     ProbeToken,
@@ -35,6 +45,7 @@ from ufo.sandbox.session import (
     ufo_fs_file_op,
 )
 from ufo.schema.records import Agent, Turn
+from ufo.skills.runtime import RuntimeSkill, SystemSkillBundle
 from ufo.tools.builtins import BashInput, bash_handler
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.tasks import (
@@ -49,6 +60,8 @@ from ufo.turns.audience import conversation_audience
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
 PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")
+LARGE_SKILL_BYTES = 1_000_000
+LINUX_MAX_ARG_STRLEN = 131_072
 
 
 def test_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
@@ -175,6 +188,7 @@ def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_ba
     proxy = f"http://{common}:@proxy:9000"
     base = SandboxSession(
         carrier=_RecordingCarrier(),
+        system_skill_archive=b"bundle",
         handle=SandboxHandle(
             conversation_id=conversation_id,
             container_id="c",
@@ -197,6 +211,7 @@ def test_authorized_session_scopes_proxy_and_cli_environment_without_mutating_ba
     )
 
     assert authorized.handle.run_token == member
+    assert authorized.system_skill_archive == b"bundle"
     assert all(
         member in authorized.handle.egress_env[name]
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
@@ -270,17 +285,25 @@ class _RecordingCarrier:
     answers the liveness probe as a sandbox that never ran the command at all — no wrapper alive,
     no exit file — which is the one expiry that is still the caller's error rather than a task."""
 
-    def __init__(self, result: ExecResult | None = None, probe: ExecResult | None = None) -> None:
+    def __init__(
+        self,
+        result: ExecResult | None = None,
+        probe: ExecResult | None = None,
+        results: list[ExecResult] | None = None,
+    ) -> None:
         self.timeouts: list[int] = []
         self.commands: list[str] = []
         self.argvs: list[tuple[str, ...]] = []
+        self.writes: list[tuple[str, bytes]] = []
         self.result = result or ExecResult(stdout="", stderr="", exit_code=0)
         self.probe = probe
+        self.results = list(results or ())
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         raise NotImplementedError
 
-    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None: ...
+    async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        self.writes.append((path, content))
 
     async def exec(
         self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
@@ -292,7 +315,14 @@ class _RecordingCarrier:
             return self.probe
         if TASK_PROBE in argv:
             return ExecResult(stdout="", stderr="", exit_code=0)
+        if self.results:
+            return self.results.pop(0)
         return self.result
+
+    async def exec_skill(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
+        return await self.exec(handle, argv, timeout_s)
 
     def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
         raise NotImplementedError
@@ -376,41 +406,438 @@ async def test_a_carrier_that_declares_no_stop_is_never_asked_for_one() -> None:
     assert not hasattr(session.carrier, "stop_commands")
 
 
-async def test_system_skills_mount_in_one_container_command() -> None:
+async def test_skills_load_from_one_staged_container_payload() -> None:
     carrier = _RecordingCarrier(
-        result=ExecResult(stdout='{"mounted":["sandbox"]}', stderr="", exit_code=0)
+        result=ExecResult(
+            stdout='{"roots":{"sandbox":"/home/user/.ufo/skills/sandbox"}}',
+            stderr="",
+            exit_code=0,
+        )
     )
     session = SandboxSession(
         carrier=carrier,
         handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
     )
 
-    mounted = await session.mount_system_skills(
-        {"sandbox": "sha256:aaa", "ufo-style": "sha256:bbb"}
+    roots = await session.load_skills(
+        {
+            "system": {"sandbox": "sha256:aaa", "ufo-style": "sha256:bbb"},
+            "user": {},
+        }
     )
 
-    assert mounted == frozenset({"sandbox"})
+    assert roots == {"sandbox": "/home/user/.ufo/skills/sandbox"}
+    [(staged, content)] = carrier.writes
+    assert staged.startswith(SKILL_LOAD_STAGING_PREFIX)
+    assert staged.endswith(".json")
+    assert json.loads(content) == {
+        "system": {"sandbox": "sha256:aaa", "ufo-style": "sha256:bbb"},
+        "user": {},
+    }
     assert carrier.argvs == [
         (
-            "sh",
+            "python3",
+            SANDBOX_PYTHON_FLAG,
             "-c",
-            'if command -v ufo >/dev/null 2>&1; then exec ufo fs "$@"; fi; '
-            'if command -v sbxfs >/dev/null 2>&1; then exec sbxfs "$@"; fi; exit 2',
-            "sh",
-            "system-skills",
-            '{"sandbox":"sha256:aaa","ufo-style":"sha256:bbb"}',
+            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            staged,
+            SYSTEM_SKILLS_ROOT,
+            WORKSPACE_DIR,
+            hashlib.sha256(content).hexdigest(),
         )
     ]
 
 
-async def test_system_skill_mount_falls_back_when_the_container_operation_is_unavailable() -> None:
-    carrier = _RecordingCarrier(result=ExecResult(stdout="", stderr="", exit_code=2))
+async def test_large_skill_payload_never_enters_a_container_command_argument() -> None:
+    carrier = _RecordingCarrier(
+        result=ExecResult(
+            stdout='{"roots":{"large":"/home/user/.ufo/skills/large"}}',
+            stderr="",
+            exit_code=0,
+        )
+    )
+    session = SandboxSession(
+        carrier=carrier,
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+    )
+    encoded = base64.urlsafe_b64encode(b"x" * LARGE_SKILL_BYTES).decode()
+
+    roots = await session.load_skills(
+        {
+            "system": {},
+            "user": {
+                "large": {
+                    "digest": "sha256:aaa",
+                    "files": {"reference.bin": encoded},
+                }
+            },
+        }
+    )
+
+    assert roots == {"large": "/home/user/.ufo/skills/large"}
+    assert len(carrier.writes[0][1]) > LARGE_SKILL_BYTES
+    assert max(len(arg) for arg in carrier.argvs[0]) < LINUX_MAX_ARG_STRLEN
+
+
+async def test_skill_load_fails_when_the_container_loader_fails() -> None:
+    carrier = _RecordingCarrier(result=ExecResult(stdout="", stderr="missing", exit_code=2))
     session = SandboxSession(
         carrier=carrier,
         handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
     )
 
-    assert await session.mount_system_skills({"sandbox": "sha256:aaa"}) == frozenset()
+    with pytest.raises(OSError, match="missing"):
+        await session.load_skills({"system": {"sandbox": "sha256:aaa"}, "user": {}})
+
+
+async def test_a_stale_sandbox_refreshes_before_loading_the_requested_system_skill() -> None:
+    class _PrivilegedCarrier(_RecordingCarrier):
+        async def exec_skill(
+            self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        ) -> ExecResult:
+            return await super().exec(handle, argv, timeout_s)
+
+        async def exec(
+            self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+        ) -> ExecResult:
+            raise AssertionError("skill programs must use privileged execution")
+
+    carrier = _PrivilegedCarrier(
+        results=[
+            ExecResult(stdout='{"roots":{}}', stderr="", exit_code=0),
+            ExecResult(stdout="", stderr="", exit_code=0),
+            ExecResult(
+                stdout='{"roots":{"sandbox":"/home/user/.ufo/skills/sandbox"}}',
+                stderr="",
+                exit_code=0,
+            ),
+        ]
+    )
+    session = SandboxSession(
+        carrier=carrier,
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+        system_skill_archive=b"current bundle",
+    )
+    payload = {"system": {"sandbox": "sha256:current"}, "user": {}}
+
+    roots = await session.load_skills(payload)
+
+    assert roots == {"sandbox": "/home/user/.ufo/skills/sandbox"}
+    assert len(carrier.argvs) == 3
+    assert carrier.argvs[0][3] == f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}"
+    assert carrier.argvs[1][3] == f"{SANDBOX_MODULE_BOOTSTRAP}{SYSTEM_SKILL_SYNC_PROG}"
+    assert carrier.argvs[2][3] == f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}"
+    assert all(argv[0] == "python3" for argv in carrier.argvs)
+    assert carrier.writes[0][0].startswith(SKILL_LOAD_STAGING_PREFIX)
+    assert carrier.writes[1][0].startswith(SYSTEM_SKILL_SYNC_STAGING_PREFIX)
+    assert carrier.writes[1][1] == b"current bundle"
+    assert carrier.writes[2][0].startswith(SKILL_LOAD_STAGING_PREFIX)
+
+
+def test_current_loader_refreshes_a_stale_bundle_and_installs_an_inactive_user_skill(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    inactive = RuntimeSkill(
+        name="inactive",
+        description="inactive",
+        instructions="inactive",
+        raw_skill_md="inactive",
+    )
+    active = RuntimeSkill(
+        name="active/child",
+        description="active",
+        instructions="active",
+        raw_skill_md="active",
+    )
+    for index, bundle in enumerate(
+        (
+            SystemSkillBundle.from_skills((inactive,)),
+            SystemSkillBundle.from_skills((active,)),
+        )
+    ):
+        archive = tmp_path / f"bundle-{index}.zip"
+        archive.write_bytes(bundle.archive)
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                f"{SANDBOX_MODULE_BOOTSTRAP}{SYSTEM_SKILL_SYNC_PROG}",
+                str(archive),
+                str(root),
+                str(tmp_path),
+                hashlib.sha256(bundle.archive).hexdigest(),
+            ],
+            check=True,
+        )
+        if index == 0:
+            (root / "bundles" / "old").mkdir(parents=True)
+            (root / "current").write_text("old")
+    user = RuntimeSkill(
+        name="inactive",
+        description="user",
+        instructions="user",
+        raw_skill_md="user",
+    )
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "system": {active.name: active.content_digest()},
+                "user": {
+                    "inactive": {
+                        "digest": user.content_digest(),
+                        "files": {"SKILL.md": base64.urlsafe_b64encode(b"user").decode()},
+                    }
+                },
+            }
+        )
+    )
+
+    loaded = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            str(payload),
+            str(root),
+            str(tmp_path),
+            hashlib.sha256(payload.read_bytes()).hexdigest(),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(loaded.stdout) == {
+        "roots": {
+            "active/child": str(root / "active" / "child"),
+            "inactive": str(root / "inactive"),
+        }
+    }
+    assert (root / "active" / "child" / "SKILL.md").read_text() == "active"
+    assert (root / "inactive" / "SKILL.md").read_text() == "user"
+    assert not (root / "bundles").exists()
+    assert not (root / "current").exists()
+    assert not payload.exists()
+
+
+def test_privileged_loader_refuses_a_changed_staged_payload(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    root.mkdir()
+    manifest = root / ".system-manifest.json"
+    manifest.write_text('{"skills":{}}')
+    payload = tmp_path / "payload.json"
+    original = b'{"system":{},"user":{}}'
+    payload.write_bytes(b'{"system":{},"user":{".system-manifest.json":{}}}')
+
+    loaded = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            str(payload),
+            str(root),
+            str(tmp_path),
+            hashlib.sha256(original).hexdigest(),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert loaded.returncode != 0
+    assert "skill load payload changed after staging" in loaded.stderr
+    assert manifest.read_text() == '{"skills":{}}'
+
+
+def test_privileged_loader_refuses_an_internal_skill_name(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    root.mkdir()
+    manifest = root / ".system-manifest.json"
+    manifest.write_text('{"skills":{}}')
+    user = RuntimeSkill(
+        name=".system-manifest.json",
+        description="user",
+        instructions="user",
+        raw_skill_md="user",
+    )
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "system": {},
+                "user": {
+                    user.name: {
+                        "digest": user.content_digest(),
+                        "files": {"SKILL.md": base64.urlsafe_b64encode(b"user").decode()},
+                    }
+                },
+            }
+        )
+    )
+
+    loaded = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            str(payload),
+            str(root),
+            str(tmp_path),
+            hashlib.sha256(payload.read_bytes()).hexdigest(),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert loaded.returncode != 0
+    assert "invalid user skill" in loaded.stderr
+    assert manifest.read_text() == '{"skills":{}}'
+
+
+def test_privileged_loader_refuses_a_nested_skill_name_through_a_symlink(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    root.mkdir()
+    manifest = root / ".system-manifest.json"
+    manifest.write_text('{"skills":{}}')
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "pack").symlink_to(outside, target_is_directory=True)
+    user = RuntimeSkill(
+        name="pack/subskill",
+        description="user",
+        instructions="user",
+        raw_skill_md="user",
+    )
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {
+                "system": {},
+                "user": {
+                    user.name: {
+                        "digest": user.content_digest(),
+                        "files": {"SKILL.md": base64.urlsafe_b64encode(b"user").decode()},
+                    }
+                },
+            }
+        )
+    )
+
+    loaded = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            str(payload),
+            str(root),
+            str(tmp_path),
+            hashlib.sha256(payload.read_bytes()).hexdigest(),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert loaded.returncode != 0
+    assert "invalid user skill" in loaded.stderr
+    assert not (outside / "subskill").exists()
+    assert manifest.read_text() == '{"skills":{}}'
+
+
+async def test_read_glob_and_grep_accept_skill_paths_outside_the_workspace() -> None:
+    class _FileCarrier(_RecordingCarrier):
+        def __init__(self) -> None:
+            super().__init__()
+            self.file_ops: list[tuple[str, dict[str, object]]] = []
+
+        async def file_op(
+            self, handle: SandboxHandle, op: str, params: dict[str, object]
+        ) -> dict[str, object]:
+            self.file_ops.append((op, params))
+            return {}
+
+    carrier = _FileCarrier()
+    session = SandboxSession(
+        carrier=carrier,
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+    )
+
+    await session.run_ufo_fs("read", {"path": "/home/user/.ufo/skills/probe/SKILL.md"})
+    await session.run_ufo_fs("glob", {"path": "$UFO_HOME/skills", "pattern": "**/*.md"})
+    await session.run_ufo_fs(
+        "grep", {"path": "/home/user/.ufo/skills/reference", "pattern": "probe"}
+    )
+
+    assert carrier.file_ops == [
+        (
+            "read",
+            {
+                "path": "/home/user/.ufo/skills/probe/SKILL.md",
+                "workspace": "/home/user/.ufo/skills",
+            },
+        ),
+        (
+            "glob",
+            {
+                "path": "$UFO_HOME/skills",
+                "pattern": "**/*.md",
+                "workspace": "$UFO_HOME/skills",
+            },
+        ),
+        (
+            "grep",
+            {
+                "path": "/home/user/.ufo/skills/reference",
+                "pattern": "probe",
+                "workspace": "/home/user/.ufo/skills",
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("op", "path"),
+    (
+        ("read", "/etc/passwd"),
+        ("glob", "/opt/reference"),
+        ("grep", "$UFO_HOME/config.toml"),
+        ("read", "$UFO_HOME/skills/../credentials"),
+        ("glob", "/home/user/.ufo/skills/../../config.toml"),
+    ),
+)
+async def test_file_reads_outside_the_workspace_and_skill_tree_are_refused(
+    op: str, path: str
+) -> None:
+    session = SandboxSession(
+        carrier=_RecordingCarrier(),
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+    )
+
+    with pytest.raises(ValueError, match="escapes"):
+        await session.run_ufo_fs(op, {"path": path, "pattern": "probe"})
+
+
+async def test_write_and_edit_remain_workspace_confined() -> None:
+    session = SandboxSession(
+        carrier=_RecordingCarrier(),
+        handle=SandboxHandle(conversation_id=uuid4(), container_id="c"),
+    )
+
+    with pytest.raises(ValueError, match="escapes /workspace"):
+        await session.run_ufo_fs("write", {"path": "/home/user/outside.txt"})
+    with pytest.raises(ValueError, match="escapes /workspace"):
+        await session.run_ufo_fs("edit", {"path": "/home/user/outside.txt"})
+    with pytest.raises(ValueError, match="escapes /workspace"):
+        await session.run_ufo_fs("write", {"path": "$UFO_HOME/skills/probe/SKILL.md"})
+    with pytest.raises(ValueError, match="escapes /workspace"):
+        await session.run_ufo_fs("edit", {"path": "$UFO_HOME/skills/probe/SKILL.md"})
 
 
 async def test_document_file_ops_outlive_the_preview_request() -> None:

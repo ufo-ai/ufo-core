@@ -7,7 +7,7 @@ metadata:
 ---
 # Data Visualization
 
-Chart selection, Python patterns, and design principles. Read `.skills/design-foundations/references/color.md` for color palettes and `.skills/design-foundations/SKILL.md` for foundational design rules.
+Chart selection, Python patterns, and design principles. Read `$UFO_HOME/skills/design-foundations/references/color.md` for color palettes and `$UFO_HOME/skills/design-foundations/SKILL.md` for foundational design rules.
 
 ## Render, Inspect, Revise
 

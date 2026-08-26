@@ -1948,10 +1948,8 @@ async def test_subagent_extended_context_lifts_the_round_ceiling(surface: Turns)
 
 
 async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Turns) -> None:
-    """A subagent whose payload carries `preload_skills` starts with the skill written into the
-    workspace it runs in and its instructions already in the system prompt — no `load_skill` round
-    needed. That workspace is the spawning turn's, since a subagent reuses its sandbox: the skill
-    lands under the parent's conversation and the child's own never gets a directory."""
+    """A subagent preload resolves the local skill and injects its instructions without a
+    `load_skill` round or a child workspace."""
     runtime = loop_queue._runtime
     assert runtime is not None
     skill = runtime.skills.named("sandbox")
@@ -1975,11 +1973,8 @@ async def test_subagent_preload_skills_mounts_and_injects_the_skill(surface: Tur
             )
         ).scalar_one()
     assert child_conversation != parent_conversation
-    skill_md = (
-        runtime.sandboxes.workspace_root
-        / str(parent_conversation)
-        / f".skills/{skill.name}/SKILL.md"
-    )
+    assert isinstance(runtime.sandboxes.carrier, LocalCarrier)
+    skill_md = runtime.sandboxes.carrier.ufo_home / "skills" / skill.name / "SKILL.md"
     assert await asyncio.to_thread(skill_md.read_bytes) == skill.raw_skill_md.encode()
     assert not (runtime.sandboxes.workspace_root / str(child_conversation)).exists()
     assert any(skill.instructions in system for system in SEEN_SYSTEM_PROMPTS)

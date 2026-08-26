@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from base64 import urlsafe_b64encode
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
@@ -38,6 +39,7 @@ from ufo.sandbox.session import (
     SandboxSession,
     SandboxSpec,
 )
+from ufo.skills.runtime import RuntimeSkill, SystemSkillBundle
 
 ROOT = Path(__file__).parents[3]
 RUN_TOKEN = "run-token-abc"
@@ -79,6 +81,123 @@ def test_supported_local_builds_produce_the_client() -> None:
     assert "FROM golang:1.27.0-bookworm AS gh" in dockerfile
     assert "github.com/cli/cli/v2/cmd/gh@v2.97.0" in dockerfile
     assert "UFO_GH_ARCHIVE=/tmp/ufo-gh.gz" in dockerfile
+
+
+def test_system_skills_seed_directly_and_preserve_user_skills(tmp_path: Path) -> None:
+    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    first = RuntimeSkill(
+        name="first",
+        description="first",
+        instructions="first",
+        raw_skill_md="first",
+    )
+    carrier.seed_system_skills(SystemSkillBundle.from_skills((first,)).archive)
+    user = carrier.ufo_home / "skills" / "user" / "SKILL.md"
+    user.parent.mkdir()
+    user.write_text("user")
+    second = RuntimeSkill(
+        name="second",
+        description="second",
+        instructions="second",
+        raw_skill_md="second",
+    )
+
+    carrier.seed_system_skills(SystemSkillBundle.from_skills((second,)).archive)
+
+    root = carrier.ufo_home / "skills"
+    assert not (root / "first").exists()
+    assert (root / "second" / "SKILL.md").read_text() == "second"
+    assert user.read_text() == "user"
+    assert (root / ".system-manifest.json").is_file()
+
+
+async def test_a_user_skill_may_replace_an_inactive_seeded_skill(tmp_path: Path) -> None:
+    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    system = RuntimeSkill(
+        name="probe",
+        description="system",
+        instructions="system",
+        raw_skill_md="system",
+    )
+    carrier.seed_system_skills(SystemSkillBundle.from_skills((system,)).archive)
+    user = RuntimeSkill(
+        name="probe",
+        description="user",
+        instructions="user",
+        raw_skill_md="user",
+    )
+
+    result = await carrier.load_skills(
+        SandboxHandle(conversation_id=uuid4(), container_id=LOCAL_CONTAINER_ID),
+        {
+            "system": {},
+            "user": {
+                "probe": {
+                    "digest": user.content_digest(),
+                    "files": {"SKILL.md": urlsafe_b64encode(b"user").decode()},
+                }
+            },
+        },
+    )
+
+    assert result.exit_code == 0
+    assert (carrier.ufo_home / "skills" / "probe" / "SKILL.md").read_text() == "user"
+
+
+async def test_a_nested_system_skill_seeds_and_loads(tmp_path: Path) -> None:
+    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    system = RuntimeSkill(
+        name="website-building/webapp",
+        description="system",
+        instructions="system",
+        raw_skill_md="system",
+    )
+    carrier.seed_system_skills(SystemSkillBundle.from_skills((system,)).archive)
+
+    result = await carrier.load_skills(
+        SandboxHandle(conversation_id=uuid4(), container_id=LOCAL_CONTAINER_ID),
+        {"system": {system.name: system.content_digest()}, "user": {}},
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "roots": {system.name: str(carrier.ufo_home / "skills" / "website-building" / "webapp")}
+    }
+
+
+async def test_a_user_skill_cannot_replace_the_system_manifest(tmp_path: Path) -> None:
+    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    system = RuntimeSkill(
+        name="probe",
+        description="system",
+        instructions="system",
+        raw_skill_md="system",
+    )
+    carrier.seed_system_skills(SystemSkillBundle.from_skills((system,)).archive)
+    manifest = carrier.ufo_home / "skills" / ".system-manifest.json"
+    before = manifest.read_bytes()
+    user = RuntimeSkill(
+        name=".system-manifest.json",
+        description="user",
+        instructions="user",
+        raw_skill_md="user",
+    )
+
+    result = await carrier.load_skills(
+        SandboxHandle(conversation_id=uuid4(), container_id=LOCAL_CONTAINER_ID),
+        {
+            "system": {},
+            "user": {
+                user.name: {
+                    "digest": user.content_digest(),
+                    "files": {"SKILL.md": urlsafe_b64encode(b"user").decode()},
+                }
+            },
+        },
+    )
+
+    assert result.exit_code == 1
+    assert manifest.read_bytes() == before
 
 
 async def _descendant_pid(workspace: Path) -> int:
@@ -660,17 +779,6 @@ async def test_an_in_sandbox_program_carries_the_guard_it_runs(tmp_path: Path) -
     assert "not a regular file" in refused.stderr
     assert "accepted" not in refused.stdout
     assert reachable.exit_code == 0 and "accepted" in reachable.stdout
-
-
-async def test_system_skill_mount_falls_back_without_a_local_client(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    bare = replace(handle, egress_env={**handle.egress_env, "PATH": BARE_PATH})
-    session = SandboxSession(carrier=carrier, handle=bare)
-
-    assert shutil.which("ufo", path=BARE_PATH) is None
-    assert await session.mount_system_skills({"sandbox": "sha256:" + "a" * 64}) == frozenset()
 
 
 async def test_the_container_copy_in_program_replaces_a_planted_symlink(tmp_path: Path) -> None:

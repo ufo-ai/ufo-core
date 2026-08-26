@@ -286,7 +286,7 @@ class E2BCarrier:
     already failed to answer twice, and every later command on it would otherwise pay its whole
     deadline before saying so — but only until the mark runs out, since the same silence is what a
     saturated box gives while it thrashes."""
-    _launched: dict[tuple[str, UUID | None], set[int]] = field(default_factory=dict)
+    _launched: dict[tuple[str, UUID | None], dict[int, str | None]] = field(default_factory=dict)
     """Per container and turn, the process groups this carrier launched and has not seen end — what
     a member's cancel stops through `stop_commands`. The container is in the key because a pid means
     nothing outside the box that issued it; the turn is, because one box serves every turn of a
@@ -632,6 +632,21 @@ class E2BCarrier:
         is left running and only `stop_commands` ever signals it. The lease still goes, since
         dropping the reference cannot be interrupted and a lease the next call trusts is worse than
         one it re-leases: the cancel says nothing about how long this container still answers."""
+        return await self._exec_with(handle, argv, timeout_s, None)
+
+    async def exec_skill(
+        self, handle: SandboxHandle, argv: tuple[str, ...], timeout_s: int
+    ) -> ExecResult:
+        """Run a server-carried skill load or sync as root."""
+        return await self._exec_with(handle, argv, timeout_s, "root")
+
+    async def _exec_with(
+        self,
+        handle: SandboxHandle,
+        argv: tuple[str, ...],
+        timeout_s: int,
+        user: str | None,
+    ) -> ExecResult:
         sandbox = await self._sandbox(handle, timeout_s + LEASE_MARGIN_SECONDS)
         await self._still_there(sandbox, handle.container_id)
         command = f"{SESSION_LEADER_CMD} {shlex.join(argv)}"
@@ -641,11 +656,12 @@ class E2BCarrier:
             running = await sandbox.commands.run(
                 command,
                 cwd=WORKSPACE_DIR,
-                envs={**SANDBOX_ENV, **handle.egress_env},
+                envs=(SANDBOX_ENV if user is not None else {**SANDBOX_ENV, **handle.egress_env}),
+                user=user,
                 timeout=timeout_s,
                 background=True,
             )
-            self._launched.setdefault((handle.container_id, handle.turn_id), set()).add(running.pid)
+            self._launched.setdefault((handle.container_id, handle.turn_id), {})[running.pid] = user
             result = await running.wait()
         except CommandExitException as error:
             return ExecResult(stdout=error.stdout, stderr=error.stderr, exit_code=error.exit_code)
@@ -654,7 +670,7 @@ class E2BCarrier:
             if running is None:
                 self._mark_silent(handle.container_id)
             else:
-                await self._stop_group(sandbox, handle.container_id, running.pid)
+                await self._stop_group(sandbox, handle.container_id, running.pid, user)
             return ExecResult(
                 stdout="",
                 stderr=str(error),
@@ -690,12 +706,12 @@ class E2BCarrier:
         every stop. What the signal reaches is what the deadline's stop reaches — whatever the
         command detached into a group of its own keeps running, to be reattached by the task files
         it keeps."""
-        pids = self._launched.pop((handle.container_id, handle.turn_id), set())
-        if not pids:
+        groups = self._launched.pop((handle.container_id, handle.turn_id), {})
+        if not groups:
             return
         sandbox = await self._sandbox(handle, LEASE_MARGIN_SECONDS)
-        for pid in sorted(pids):
-            await self._stop_group(sandbox, handle.container_id, pid)
+        for pid, user in sorted(groups.items()):
+            await self._stop_group(sandbox, handle.container_id, pid, user)
 
     def _forget_group(self, handle: SandboxHandle, pid: int) -> None:
         """Drop a group that ended on its own or under the deadline's stop, and the turn's entry
@@ -705,11 +721,13 @@ class E2BCarrier:
         groups = self._launched.get(key)
         if groups is None:
             return
-        groups.discard(pid)
+        groups.pop(pid, None)
         if not groups:
             del self._launched[key]
 
-    async def _stop_group(self, sandbox: E2BSandbox, container_id: str, pid: int) -> None:
+    async def _stop_group(
+        self, sandbox: E2BSandbox, container_id: str, pid: int, user: str | None
+    ) -> None:
         """Signal the stopped command's whole process group, which `setsid` made the pid's own —
         the negation is what reaches the descendants rather than the leader alone. It carries no
         `--`: the signal already took the option slot, so the negative pid is unambiguous without
@@ -726,7 +744,9 @@ class E2BCarrier:
         for a bounded span, so the next command inside it asks whether the box is there before
         agreeing to wait for it."""
         try:
-            await sandbox.commands.run(f"kill -9 -{pid}", timeout=EXEC_STOP_TIMEOUT_SECONDS)
+            await sandbox.commands.run(
+                f"kill -9 -{pid}", user=user, timeout=EXEC_STOP_TIMEOUT_SECONDS
+            )
         except TimeoutException:
             self._mark_silent(container_id)
             emit_metric("sandbox_exec_stop_failed_total", carrier=CARRIER_NAME)

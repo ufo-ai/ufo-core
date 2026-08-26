@@ -1,9 +1,8 @@
-"""Skills: the value object, the SKILL.md parser, the load-time registry, and mounting into the
-sandbox.
+"""Skills: the value object, the SKILL.md parser, the load-time registry, and runtime loading.
 
 A skill is a folder of files — a `SKILL.md` (YAML frontmatter + markdown workflow) plus any assets.
 A skill folder MAY nest child skills: an immediate subdirectory that itself holds a `SKILL.md` is a
-child, registered under the path-form name `<parent>/<child-dir>` and mounting nested under the
+child, registered under the path-form name `<parent>/<child-dir>` and loaded nested under the
 parent. Nesting is naming only: a child that needs its parent's files says so with `depends`, the
 one mechanism that pulls another skill in. Core's own skills teach its builtins and the house style
 every other skill defaults to, held to a fixed set by `CORE_SKILL_NAMES` and a CI gate. Packs
@@ -11,17 +10,18 @@ contribute more through the manifest `skills` point, which the loader aggregates
 one `SkillRegistry` per boot.
 
 `load_skill` resolves the named skill and its transitive `depends` through `SkillRegistry.closure`,
-then mounts each under `.skills/<name>/`: deploy skills from a content-addressed bundle local to the
-carrier, member skills from the exact stored rows materialized for the load. It injects each
+then loads each under `$UFO_HOME/skills/<name>/`: deploy skills from the verified startup bundle,
+member skills from the exact stored rows materialized for the load. It injects each
 `SKILL.md` workflow under a header saying whether the agent asked for it or a dependency pulled it.
-One tree of everything mounted closes the load. A workflow already in the context is not injected a
-second time: `LoadedSkills` tracks what the window holds, so a repeat load re-mounts the files and
+One tree of every loaded file closes the load. A workflow already in the context is not injected a
+second time: `LoadedSkills` tracks what the window holds, so a repeat load verifies the files and
 names the skill in one line instead of paying for its instructions again."""
 
 import hashlib
 import io
 import json
 import zipfile
+from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from difflib import get_close_matches
@@ -31,11 +31,11 @@ import yaml
 
 from ufo.o11y import log
 from ufo.sandbox.containment import contained_relative
-from ufo.sandbox.session import WORKSPACE_DIR, Sandbox
+from ufo.sandbox.session import Sandbox
 
 SKILL_MD = "SKILL.md"
 FRONTMATTER_FENCE = "---\n"
-SKILLS_MOUNT_DIR = f"{WORKSPACE_DIR}/.skills"
+SKILLS_ROOT = "$UFO_HOME/skills"
 CORE_SKILLS_ROOT = Path(__file__).parent
 CORE_SKILL_NAMES = frozenset({"sandbox", "create-application", "ufo-style"})
 TREE_INDENT = "  "
@@ -45,14 +45,12 @@ SKILL_BLOCK_SEPARATOR = "\n\n---\n\n"
 ALREADY_LOADED_NOTE = "Already in context above, not repeated: {names}"
 SUGGESTION_LIMIT = 5
 SYSTEM_SKILL_DIGEST_PREFIX = "sha256:"
-SYSTEM_SKILL_OBJECTS_DIR = "objects"
 SYSTEM_SKILL_MANIFEST = "manifest.json"
 
 
-def skill_mount_root(name: str) -> str:
-    """Where a skill's files live in the workspace — the root every one of its file keys is confined
-    at, both where a skill is saved and where a later load mounts it."""
-    return f"{SKILLS_MOUNT_DIR}/{name}"
+def skill_root(name: str) -> str:
+    """The skill's stable path under the runtime's `$UFO_HOME`."""
+    return f"{SKILLS_ROOT}/{name}"
 
 
 @dataclass(frozen=True)
@@ -74,10 +72,10 @@ class SkillCard:
 @dataclass(frozen=True)
 class RuntimeSkill:
     """One parsed skill: its identity and workflow from the frontmatter/body, the raw `SKILL.md`
-    mounted verbatim (no round-trip drift), and any bundled asset files. `name` is the registry
+    stored verbatim (no round-trip drift), and any bundled asset files. `name` is the registry
     name — plain for a top-level skill, the path form `<parent>/<child-dir>` for a child. `parent`,
-    when set, is the enclosing skill the child's name and mount path nest under — it carries no
-    pull. `depends` names the skills that mount alongside this one."""
+    when set, is the enclosing skill the child's name and load path nest under — it carries no
+    pull. `depends` names the skills loaded alongside this one."""
 
     name: str
     description: str
@@ -88,11 +86,11 @@ class RuntimeSkill:
     raw_skill_md: str = ""
     agents: tuple[str, ...] = ()
 
-    def mounted_files(self) -> dict[str, bytes]:
+    def all_files(self) -> dict[str, bytes]:
         return {SKILL_MD: self.raw_skill_md.encode(), **dict(self.files)}
 
-    def mount_root(self) -> str:
-        return skill_mount_root(self.name)
+    def root(self) -> str:
+        return skill_root(self.name)
 
     def card(self) -> SkillCard:
         """This skill's routing view — what closure resolution and search walk for a deploy skill,
@@ -107,7 +105,7 @@ class RuntimeSkill:
     def content_digest(self) -> str:
         """The content address shared by the serve registry, terminal cache, and sandbox image."""
         digest = hashlib.sha256()
-        for path, content in sorted(self.mounted_files().items()):
+        for path, content in sorted(self.all_files().items()):
             digest.update(hashlib.sha256(path.encode()).digest())
             digest.update(hashlib.sha256(content).digest())
         return SYSTEM_SKILL_DIGEST_PREFIX + digest.hexdigest()
@@ -129,7 +127,13 @@ class SystemSkillBundle:
             if existing is not None and existing.content_digest() != skill.content_digest():
                 raise ValueError(f"duplicate system skill name: {skill.name}")
             named[skill.name] = skill
-        cards = {name: {"digest": skill.content_digest()} for name, skill in sorted(named.items())}
+        cards = {
+            name: {
+                "digest": skill.content_digest(),
+                "files": sorted(skill.all_files()),
+            }
+            for name, skill in sorted(named.items())
+        }
         payload = json.dumps({"skills": cards}, sort_keys=True, separators=(",", ":")).encode()
         digest = SYSTEM_SKILL_DIGEST_PREFIX + hashlib.sha256(payload).hexdigest()
         manifest = json.dumps(
@@ -138,17 +142,9 @@ class SystemSkillBundle:
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
             cls._write(archive, SYSTEM_SKILL_MANIFEST, manifest)
-            objects: dict[str, RuntimeSkill] = {}
-            for skill in named.values():
-                objects.setdefault(skill.content_digest(), skill)
-            for content_digest, skill in sorted(objects.items()):
-                object_id = content_digest.removeprefix(SYSTEM_SKILL_DIGEST_PREFIX)
-                for path, content in sorted(skill.mounted_files().items()):
-                    cls._write(
-                        archive,
-                        f"{SYSTEM_SKILL_OBJECTS_DIR}/{object_id}/{path}",
-                        content,
-                    )
+            for name, skill in sorted(named.items()):
+                for path, content in sorted(skill.all_files().items()):
+                    cls._write(archive, f"{name}/{path}", content)
         return cls(digest=digest, archive=output.getvalue(), manifest=manifest)
 
     @staticmethod
@@ -166,12 +162,13 @@ class LoadedSkill:
 
     skill: RuntimeSkill
     dependency_of: str | None = None
+    bundled: bool = False
 
     def prompt_body(self) -> str:
         """What one skill contributes to the context: a header naming it and how it got here, then
         its `SKILL.md` workflow. Nothing else — the frontmatter's `description` and `depends` are
         load-time routing metadata, not instructions the agent acts on, and no bundled file's
-        content is ever injected. A file is reached by its mounted path, which the tree lists."""
+        content is ever injected. A file is reached by its loaded path, which the tree lists."""
         pulled = (
             ""
             if self.dependency_of is None
@@ -184,7 +181,7 @@ class LoadedSkill:
 class LoadedRef:
     """One skill in a resolved load, by its routing card — what `closure` yields before any body is
     read. `dependency_of` names the skill whose `depends` pulled it, `None` when the agent asked for
-    it by name; `materialize` turns a ref into the `LoadedSkill` a mount needs."""
+    it by name; `materialize` turns a ref into the `LoadedSkill` the runtime needs."""
 
     card: SkillCard
     dependency_of: str | None = None
@@ -350,7 +347,7 @@ class SkillRegistry:
     changes, so the system prompt's `{{skill_index}}` renders `index()` over it byte-identically
     across workspaces. The member tier (`member_cards`) is the bound agent's saved skills as
     routing cards, joined per turn by `with_member`: `closure` resolves over cards from both tiers,
-    and `materialize` turns a resolved closure into mountable skills — deploy from `by_name`,
+    and `materialize` turns a resolved closure into runtime skills — deploy from `by_name`,
     member through the `materializer`, which reads exactly the named rows. A name collision (a pack
     shadowing another skill) is refused where the deploy tier is built, so a lookup here is always
     unambiguous."""
@@ -358,6 +355,11 @@ class SkillRegistry:
     by_name: dict[str, RuntimeSkill]
     member_cards: dict[str, SkillCard] = field(default_factory=dict)
     materializer: SkillMaterializer | None = None
+    bundled_names: frozenset[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.bundled_names is None:
+            object.__setattr__(self, "bundled_names", frozenset(self.by_name))
 
     def named(self, name: str) -> RuntimeSkill:
         try:
@@ -391,11 +393,16 @@ class SkillRegistry:
             *self.member_cards.values(),
         )
 
+    def bundled_skills(self) -> tuple[RuntimeSkill, ...]:
+        """The static deploy skills shipped in the terminal archive and sandbox image."""
+        names = self.bundled_names or ()
+        return tuple(skill for name, skill in self.by_name.items() if name in names)
+
     def closure(self, *names: str) -> tuple[LoadedRef, ...]:
         """One load of the named skills, resolved over routing cards — never a stored body: every
         name first in the order given, then the transitive `depends` of each, once apiece and
         paired with the skill that pulled it. `depends` is the only pull — a child skill reaches
-        its parent by declaring it, never by nesting — so this is both the set mounted and the
+        its parent by declaring it, never by nesting — so this is both the set loaded and the
         order injected, the asked-for workflows leading. A named skill is always direct, never
         labelled a dependency, even when another named skill also depends on it: seeding every name
         before the walk is what makes that hold whatever order they arrive in. Claiming a skill
@@ -418,7 +425,7 @@ class SkillRegistry:
         return tuple(refs.values())
 
     async def materialize(self, refs: Sequence[LoadedRef]) -> tuple[LoadedSkill, ...]:
-        """The mountable skills a resolved closure names, in closure order: a deploy skill from
+        """The runtime skills a resolved closure names, in closure order: a deploy skill from
         `by_name`, a member skill through the materializer — one stored-row read per name, the only
         place a member skill's bytes are touched. A member ref whose row vanished between the card
         projection and this read fails loud naming the skill."""
@@ -432,7 +439,13 @@ class SkillRegistry:
                 raise ValueError(f"skill {name!r} is no longer available")
             if skill.name != name:
                 raise ValueError(f"materializing {name!r} returned skill {skill.name!r}")
-            loaded.append(LoadedSkill(skill=skill, dependency_of=ref.dependency_of))
+            loaded.append(
+                LoadedSkill(
+                    skill=skill,
+                    dependency_of=ref.dependency_of,
+                    bundled=name in (self.bundled_names or ()),
+                )
+            )
         return tuple(loaded)
 
     def index(self) -> tuple[tuple[str, str], ...]:
@@ -462,13 +475,18 @@ class SkillRegistry:
             if name in by_name:
                 log("skill.member_shadow_refused", skill=name)
                 del member_cards[name]
-        return SkillRegistry(by_name, member_cards=member_cards, materializer=self.materializer)
+        return SkillRegistry(
+            by_name,
+            member_cards=member_cards,
+            materializer=self.materializer,
+            bundled_names=self.bundled_names,
+        )
 
     def with_member(
         self, cards: Sequence[SkillCard], materialize: SkillMaterializer
     ) -> "SkillRegistry":
         """This registry with the bound agent's saved skills as its member tier. A member skill is
-        member-controlled text mounted into the agent's own context, so it may never shadow a
+        member-controlled text loaded into the agent's own context, so it may never shadow a
         deploy skill: the deploy tier always wins on a name collision and the card is dropped with
         a log. The save path refuses a colliding name up front, so this guard is the structural
         backstop that makes the no-shadow invariant hold even against a stale row."""
@@ -478,23 +496,28 @@ class SkillRegistry:
                 log("skill.member_shadow_refused", skill=card.name)
                 continue
             member_cards[card.name] = card
-        return SkillRegistry(self.by_name, member_cards=member_cards, materializer=materialize)
+        return SkillRegistry(
+            self.by_name,
+            member_cards=member_cards,
+            materializer=materialize,
+            bundled_names=self.bundled_names,
+        )
 
 
 CORE_SKILL_REGISTRY = SkillRegistry(dict(CORE_SKILLS_BY_NAME))
 
 
-def _mounted_tree(loaded: tuple[LoadedSkill, ...]) -> str:
-    """Everything a load mounted, as one indented tree under the mount dir: each directory named
+def _loaded_tree(loaded: Sequence[LoadedSkill]) -> str:
+    """Everything a load resolved, as one indented tree under the skills root: each directory named
     once and each file named by its own segment, so a bundle of eighty files costs eighty short
     lines instead of eighty repetitions of the same prefix. One tree for the whole closure, not one
     per skill — a nested child's files land under the parent's directory, where they in fact are."""
-    lines = [f"{SKILLS_MOUNT_DIR}/"]
+    lines = [f"{SKILLS_ROOT}/"]
     directories: set[tuple[str, ...]] = set()
-    mounted = sorted(
-        f"{entry.skill.name}/{path}" for entry in loaded for path in entry.skill.mounted_files()
+    paths = sorted(
+        f"{entry.skill.name}/{path}" for entry in loaded for path in entry.skill.all_files()
     )
-    for path in mounted:
+    for path in paths:
         parts = PurePosixPath(path).parts
         for depth in range(len(parts) - 1):
             branch = parts[: depth + 1]
@@ -509,40 +532,40 @@ def loaded_context(
     loaded: tuple[LoadedSkill, ...], in_context: Container[str] = frozenset()
 ) -> str:
     """What one load puts in front of the model: each skill's header and workflow in closure order —
-    the asked-for skill, then what it pulled — and one tree of everything mounted, at the end. A
+    the asked-for skill, then what it pulled — and one tree of every loaded file, at the end. A
     skill named in `in_context` is already in front of the model, so it contributes its name to one
     note instead of its workflow a second time; suppression is per skill, so loading a skill whose
     dependency is already there still injects the one workflow that is new. Every skill in the
-    closure still mounts and still appears in the tree, so the files a repeat load rewrites are
-    reachable whatever the agent did to them. Shared by `load_skill` and a subagent's
+    closure still resolves and still appears in the tree. Shared by `load_skill` and a subagent's
     `preload_skills`, so a skill reads the same each way."""
     blocks = [entry.prompt_body() for entry in loaded if entry.skill.name not in in_context]
     if repeated := tuple(entry.skill.name for entry in loaded if entry.skill.name in in_context):
         blocks.append(ALREADY_LOADED_NOTE.format(names=", ".join(repeated)))
-    return SKILL_BLOCK_SEPARATOR.join(blocks) + f"\n\nMounted files:\n{_mounted_tree(loaded)}"
+    return SKILL_BLOCK_SEPARATOR.join(blocks) + f"\n\nLoaded files:\n{_loaded_tree(loaded)}"
 
 
-async def mount_skill(sandbox: Sandbox, skill: RuntimeSkill) -> None:
-    """Write a skill's files under its own mount root. A file key is authored input — a member's
-    saved skill carries whatever keys it was applied with — so each is confined at `.skills/<name>/`
-    and not merely at the workspace: a key climbing out of the mount is still inside the
-    workspace, which would make a saved skill a durable write primitive over the agent's own
-    files, rewritten on every load in every conversation of that agent."""
-    root = skill.mount_root()
-    for path, content in skill.mounted_files().items():
-        await sandbox.write_file(contained_relative(path, root), content)
-
-
-async def mount_skills(
-    sandbox: Sandbox, loaded: Sequence[LoadedSkill], deploy_names: Container[str]
-) -> None:
-    """Mount deploy skills from the carrier's local objects and copy every other skill in."""
-    deploy = {
-        entry.skill.name: entry.skill.content_digest()
-        for entry in loaded
-        if entry.skill.name in deploy_names
+def _wire_skill(skill: RuntimeSkill) -> dict[str, object]:
+    files = {
+        contained_relative(path, skill.root()).removeprefix(f"{skill.root()}/"): (
+            urlsafe_b64encode(content).decode()
+        )
+        for path, content in skill.all_files().items()
     }
-    mounted = await sandbox.mount_system_skills(deploy)
-    for entry in loaded:
-        if entry.skill.name not in mounted:
-            await mount_skill(sandbox, entry.skill)
+    return {"digest": skill.content_digest(), "files": files}
+
+
+async def install_skill(sandbox: Sandbox, skill: RuntimeSkill) -> None:
+    """Load one materialized skill into the runtime's `$UFO_HOME/skills`."""
+    roots = await sandbox.load_skills({"system": {}, "user": {skill.name: _wire_skill(skill)}})
+    if skill.name not in roots:
+        raise OSError(f"skill load returned no path for {skill.name}")
+
+
+async def load_skills(sandbox: Sandbox, loaded: Sequence[LoadedSkill]) -> None:
+    """Load deploy skills locally and network-loaded member skills into one runtime directory."""
+    deploy = {entry.skill.name: entry.skill.content_digest() for entry in loaded if entry.bundled}
+    user = {entry.skill.name: _wire_skill(entry.skill) for entry in loaded if not entry.bundled}
+    roots = await sandbox.load_skills({"system": deploy, "user": user})
+    still_missing = [entry.skill.name for entry in loaded if entry.skill.name not in roots]
+    if still_missing:
+        raise OSError(f"skill load returned no paths for {', '.join(still_missing)}")

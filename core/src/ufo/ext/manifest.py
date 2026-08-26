@@ -638,10 +638,10 @@ class SubagentToolGrant:
 class SkillSpec:
     """A skill a pack contributes: the directory holding its `SKILL.md` and any bundled scripts and
     assets. The loader parses each into the skill registry `load_skill` and the `{{skill_index}}`
-    consult, so a pack's workflow joins the loadable set beside core's own; its files mount into
-    the sandbox under `.skills/<name>/` exactly as a core skill's do. `path` is resolved by the
-    extension against its own package (`Path(__file__).parent / "skills" / <name>`), so the content
-    ships and is digested with the extension."""
+    consult, so a pack's workflow joins the loadable set beside core's own; its files load under
+    `$UFO_HOME/skills/<name>/` exactly as a core skill's do. `path` is resolved by the extension
+    against its package (`Path(__file__).parent / "skills" / <name>`), so the content ships and is
+    digested with the extension."""
 
     path: Path
 
@@ -650,7 +650,7 @@ class SkillSpec:
 class MemberSkillsSpec:
     """A source of the bound agent's member-authored skills, in three verbs: `cards` answers the
     turn's routing set (name, description, depends, pinned — never file bytes), `materialize`
-    parses one named skill's stored files into the `RuntimeSkill` a load mounts, and
+    parses one named skill's stored files into the `RuntimeSkill` a load resolves, and
     `materialize_all` reads every saved skill whole in one store read — the portal's listing
     projection, where a corrupt row is skipped with a log rather than failing the page. Core calls
     each under the turn's workspace and agent scope with the extension's ExtensionContext and

@@ -100,6 +100,7 @@ class ConversationSandbox:
     """Backends kept live only for the stored handles bearing their scheme (`[sandbox]
     resume_backends`): a conversation whose workspace another provider still holds keeps opening
     there, while a fresh conversation always opens on the deploy's own carrier."""
+    system_skill_archive: bytes = b""
 
     def _route(self, stored: str | None) -> tuple[Carrier, str, bool]:
         """The carrier a stored handle's backend scheme selects: a resume backend's for the handles
@@ -150,10 +151,18 @@ class ConversationSandbox:
             )
             persisted = f"{backend}{SANDBOX_HANDLE_SEP}{handle.container_id}"
             if persisted == stored:
-                return SandboxSession(carrier=carrier, handle=handle)
+                return SandboxSession(
+                    carrier=carrier,
+                    handle=handle,
+                    system_skill_archive=self.system_skill_archive,
+                )
             winner = await self._claim(conversation_id, stored, persisted)
             if winner == persisted:
-                return SandboxSession(carrier=carrier, handle=handle)
+                return SandboxSession(
+                    carrier=carrier,
+                    handle=handle,
+                    system_skill_archive=self.system_skill_archive,
+                )
             stored = winner
         raise RuntimeError(
             f"conversation {conversation_id}'s sandbox handle kept moving across "
@@ -184,7 +193,15 @@ class ConversationSandbox:
                     resume_id=bound_path,
                 )
             )
-            return None if handle is None else SandboxSession(carrier=carrier, handle=handle)
+            return (
+                None
+                if handle is None
+                else SandboxSession(
+                    carrier=carrier,
+                    handle=handle,
+                    system_skill_archive=self.system_skill_archive,
+                )
+            )
         routed, backend, off_cluster = self._route(stored)
         resume_id = sandbox_handle_id(backend, stored)
         if resume_id is None:
@@ -206,7 +223,15 @@ class ConversationSandbox:
                 resume_id=resume_id,
             )
         )
-        return None if handle is None else SandboxSession(carrier=routed, handle=handle)
+        return (
+            None
+            if handle is None
+            else SandboxSession(
+                carrier=routed,
+                handle=handle,
+                system_skill_archive=self.system_skill_archive,
+            )
+        )
 
     async def claim_terminal(self, conversation_id: UUID, cwd: str) -> bool:
         """Bind an unbound conversation to the terminal at `cwd`, reporting whether this call made

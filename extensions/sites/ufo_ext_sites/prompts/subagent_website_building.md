@@ -8,7 +8,7 @@ Always start your turn by loading ANY skills that might be relevant to the task 
 
 {{skill_index}}
 
-When the task already carries preloaded skill instructions — a "Preloaded skill(s)" section earlier in this system prompt, with the same files mounted under `.skills/<name>/` — those skills are already in hand: do not call load_skill for them again.
+When the task already carries preloaded skill instructions — a "Preloaded skill(s)" section earlier in this system prompt, with the same files mounted under `$UFO_HOME/skills/<name>/` — those skills are already in hand: do not call load_skill for them again.
 
 <workspace>
 You share /workspace with the parent agent and any sibling subagent.

@@ -54,7 +54,7 @@ OP_EXEC = "exec"
 OP_WRITE = "write"
 OP_READ = "read"
 OP_FILE = "fileop"
-OP_SYSTEM_SKILLS = "system-skills"
+OP_SKILLS = "skills"
 OP_NOT_FOUND_PREFIX = "ENOENT"
 EXEC_TIMEOUT_CODE = 124
 """What an exec the op's own deadline stopped exits with, whatever the client's signal made of the
@@ -95,10 +95,16 @@ printf "D\000%s\000" "$(/usr/bin/git -C "$r" -c core.quotePath=false diff HEAD -
 2>/dev/null)"
 """
 WALK_ENUMERATION = {
-    "grep": rf"""/usr/bin/find "$UFO_WALK_ROOT" \( {_UNSKIPPED_ROOT} -a \( {_SKIPPED} \) \) -prune \
+    "grep": rf"""case "$UFO_WALK_ROOT" in
+'$UFO_HOME/'*) UFO_WALK_ROOT="$UFO_HOME/${{UFO_WALK_ROOT#\$UFO_HOME/}}" ;;
+esac
+/usr/bin/find "$UFO_WALK_ROOT" \( {_UNSKIPPED_ROOT} -a \( {_SKIPPED} \) \) -prune \
 -o \( -type d -o -type f \) -print0 > "$UFO_OP_WORKDIR/grep-enum"
 """,
-    "glob": r"""measure() {
+    "glob": r"""case "$UFO_WALK_ROOT" in
+'$UFO_HOME/'*) UFO_WALK_ROOT="$UFO_HOME/${UFO_WALK_ROOT#\$UFO_HOME/}" ;;
+esac
+measure() {
 if /usr/bin/stat --version > /dev/null 2>&1; then
 /usr/bin/xargs -0 -r /usr/bin/stat -c '%s %.9Y'
 else
@@ -634,20 +640,16 @@ class TerminalCarrier:
         root = _root(handle)
         return await self._exec(handle, host_argv(argv, root), timeout_s)
 
-    async def mount_system_skills(
-        self, handle: SandboxHandle, skills: Mapping[str, str]
-    ) -> ExecResult:
-        """Ask the running client to read its `$UFO_HOME/skills` cache without a subprocess."""
+    async def load_skills(self, handle: SandboxHandle, payload: Mapping[str, object]) -> ExecResult:
+        """Ask the running client to load skills under `$UFO_HOME/skills`."""
         try:
             reply = await self.terminals.send(
                 handle.conversation_id,
-                OP_SYSTEM_SKILLS,
+                OP_SKILLS,
                 DEFAULT_EXEC_TIMEOUT_SECONDS,
-                params=json.dumps(skills, sort_keys=True, separators=(",", ":")),
+                params=json.dumps(payload, sort_keys=True, separators=(",", ":")),
             )
         except TerminalOpFailed as error:
-            if str(error) == f"unknown op kind: {OP_SYSTEM_SKILLS}":
-                return ExecResult(stdout="", stderr="", exit_code=2)
             raise RuntimeError(str(error)) from error
         return ExecResult(stdout=reply.decode(), stderr="", exit_code=0)
 
@@ -751,6 +753,9 @@ class TerminalCarrier:
             and kind is not None
             and self.document_renderer is not None
         ):
+            workspace = rewritten.get("workspace", root)
+            if not isinstance(workspace, str):
+                raise ValueError("workspace must be a path")
             offset = rewritten.get("offset", 1)
             limit = rewritten.get("limit", DOCUMENT_PAGES_MAX)
             if not isinstance(offset, int) or isinstance(offset, bool):
@@ -766,7 +771,7 @@ class TerminalCarrier:
                     params=json.dumps(
                         {
                             "max_bytes": DOCUMENT_INPUT_MAX_BYTES,
-                            "workspace": root,
+                            "workspace": workspace,
                         },
                         separators=(",", ":"),
                     ),
@@ -790,8 +795,7 @@ class TerminalCarrier:
             await self._enumerate(handle, op, root, CHANGES_ENUMERATION, tuple(targets))
         elif op in WALK_ENUMERATION:
             rewritten["enum"] = f"{op}-enum"
-            walk_root = rewritten.get("path") if op == "grep" else None
-            walk_root = walk_root or rewritten.get("workspace") or root
+            walk_root = rewritten.get("path") or rewritten.get("workspace") or root
             await self._enumerate(handle, op, str(walk_root), WALK_ENUMERATION[op])
         try:
             reply = await self.terminals.send(

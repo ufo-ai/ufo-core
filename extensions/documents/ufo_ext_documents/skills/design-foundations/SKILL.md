@@ -30,4 +30,4 @@ An artifact with no style direction of its own is drawn in the house style — t
 | `references/typography.md` | Measure/leading/scale rules, display-vs-body floors, serif-vs-sans, Font Strategy by Format, brand fonts, blacklist, size hierarchy, Slides and PDF pairings | Choosing a typeface or pairing, or setting sizes for a specific output format          |
 | `references/dataviz.md`    | Chart color sequence, chart type selection, data-ink rules, chart typography, KPI cards               | Building a chart, graph, or KPI tile in any medium                                     |
 
-Paths are relative to this skill's mounted directory (`.skills/design-foundations/`).
+Paths are relative to this skill's directory (`$UFO_HOME/skills/design-foundations/`).

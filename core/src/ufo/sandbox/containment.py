@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -311,6 +312,36 @@ def contained_dir(
     finally:
         os.close(descriptor)
     return resolved
+
+
+def contained_remove(path: str | os.PathLike[str], root: str | os.PathLike[str]) -> None:
+    """Remove one file or directory tree under `root` without following a symlink at any level."""
+    canonical_root = contained_root(root)
+    target = rooted(path, canonical_root)
+    if target.name in UNUSABLE_NAMES:
+        raise RelativeEscape(f"{target} is not a removable path")
+    parent = target.parent.resolve()
+    if not _inside(parent, canonical_root):
+        raise LocationEscape(f"{target} escapes {canonical_root}")
+    descriptor = _open_root(canonical_root)
+    try:
+        try:
+            for part in parent.relative_to(canonical_root).parts:
+                descriptor = _descend(descriptor, part, target)
+        except PathNotFound:
+            return
+        try:
+            entry = os.stat(target.name, dir_fd=descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(entry.st_mode):
+            if not shutil.rmtree.avoids_symlink_attacks:
+                raise ContainmentError("recursive removal is not symlink-safe on this platform")
+            shutil.rmtree(target.name, dir_fd=descriptor)
+        else:
+            os.unlink(target.name, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def contained_regular(path: str | os.PathLike[str], root: str | os.PathLike[str]) -> Path:

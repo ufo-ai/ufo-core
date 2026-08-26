@@ -2233,10 +2233,26 @@ async def test_spec_env_joins_the_exec_env() -> None:
     assert envs["GH_TOKEN"] == "UFO_SENTINEL_GRANT_acct-1"
 
 
+async def test_skill_programs_run_as_root() -> None:
+    sdk = _Sdk()
+    carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
+    handle = await carrier.create(_spec(uuid4()))
+    commands = sdk.sandboxes["sbx-1"].commands
+
+    result = await carrier.exec_skill(handle, ("python3", "-I", "-c", "pass"), 30)
+
+    assert result.exit_code == 0
+    assert commands.runs[-1] == (
+        "setsid python3 -I -c pass",
+        WORKSPACE_DIR,
+        30,
+    )
+    assert commands.users[-1] == "root"
+    assert commands.envs[-1] is not None
+    assert "HTTPS_PROXY" not in commands.envs[-1]
+
+
 async def test_create_provisions_ca_then_workspace_as_root_on_every_branch() -> None:
-    """create ensures `/workspace` as root after the CA lands, on the fresh, resumed, and
-    reconnected paths alike — the first process to touch a sandbox is not always the one that
-    created it, and the sandbox user can neither create nor own a directory under root's `/`."""
     sdk = _Sdk()
     carrier = E2BCarrier(api_key="k", templates=_templates("t"), sdk=sdk)
     conversation = uuid4()

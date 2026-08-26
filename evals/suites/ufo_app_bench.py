@@ -1379,7 +1379,7 @@ class _AppCopyProbe:
 from pathlib import Path
 
 root = Path('/workspace')
-excluded = {'.skills', '.eval-output', 'node_modules'}
+excluded = {'.eval-output', 'node_modules'}
 pages = [
     path
     for path in root.rglob('*.html')

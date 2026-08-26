@@ -3429,25 +3429,14 @@ async def test_the_load_clock_starts_at_the_turns_first_durable_step() -> None:
     boot, so a case could expire before its turn ran a round. The clock starts at the first
     recorded step — the arrivals drain, which the engine reaches after the claim and the boot."""
 
-    @dataclass(frozen=True)
-    class Steps:
-        recorded: tuple[TurnStep, ...]
-
-        async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]:
-            return self.recorded
-
     started_ms = int((time.time() - 5.0) * 1000)
-    target = SimpleNamespace(
-        turn_steps=Steps(
-            (
-                TurnStep(function_name="_claim_arrivals", started_at_epoch_ms=started_ms),
-                TurnStep(function_name="_stream_once", started_at_epoch_ms=started_ms + 900),
-            )
-        )
+    steps = (
+        TurnStep(function_name="_claim_arrivals", started_at_epoch_ms=started_ms),
+        TurnStep(function_name="_stream_once", started_at_epoch_ms=started_ms + 900),
     )
 
-    working_from = await mounts._work_started(target, uuid4())
-    unstarted = await mounts._work_started(SimpleNamespace(turn_steps=Steps(())), uuid4())
+    working_from = mounts._work_started(steps)
+    unstarted = mounts._work_started(())
 
     assert unstarted is None
     assert working_from is not None

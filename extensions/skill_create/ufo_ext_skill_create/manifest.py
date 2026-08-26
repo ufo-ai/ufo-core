@@ -30,7 +30,7 @@ from ufo.sdk.objects import (
     object_page,
 )
 from ufo.sdk.sandbox import ContainmentError, contained_relative, workspace_path
-from ufo.sdk.skills import RuntimeSkill, SkillCard, skill_mount_root
+from ufo.sdk.skills import RuntimeSkill, SkillCard, skill_root
 from ufo.sdk.tools import ToolContext
 from ufo_ext_skill_create.store import (
     MAX_PINNED_USER_SKILLS,
@@ -89,7 +89,7 @@ class FileFrom(BaseModel):
 
 class FileRef(BaseModel):
     """A stored file by content digest — what get returns instead of inline bodies, and what an
-    apply passes to keep a file unchanged. Content is read through `load_skill`'s mount, never
+    apply passes to keep a file unchanged. Content is read through `load_skill`, never
     echoed into context."""
 
     model_config = ConfigDict(extra="forbid")
@@ -123,11 +123,8 @@ def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
 
 
 def _contained_keys(name: str, spec: UserSkillSpec) -> None:
-    """Every file key names a file inside the skill's own mount directory. A saved skill is written
-    into the workspace again by each later `load_skill`, so a key climbing out of `.skills/<name>/`
-    is a durable write primitive over the agent's other files — refused here, where the key is
-    persisted, as well as at the mount that would carry it out."""
-    root = skill_mount_root(name)
+    """Every file key names a file inside the skill's own load directory."""
+    root = skill_root(name)
     for path in spec.files:
         try:
             contained_relative(path, root)
@@ -325,7 +322,7 @@ class SkillObjects:
 SKILL_OBJECT = ObjectKind(
     name=SKILL_KIND,
     description=(
-        "A member-authored skill of the workspace: SKILL.md plus bundled text files, mounted into "
+        "A member-authored skill of the workspace: SKILL.md plus bundled text files, added to "
         "the loadable skill set on later turns. Any member may create, update, or delete; a skill "
         "can never shadow a built-in one."
     ),
@@ -339,7 +336,7 @@ SKILL_OBJECT = ObjectKind(
         "use_workspace_skills setting holds loads the set; frontmatter `metadata.agents` "
         "(a list of agent names) narrows one skill to those agents' turns. Get "
         "returns each file as {sha256, size}, never inline content — read a saved skill's "
-        "content with load_skill, which mounts the files; on re-apply, keep an unchanged file "
+        "content with load_skill, which loads the files; on re-apply, keep an unchanged file "
         "by passing its {sha256: <digest>} back. Carry the `generation` object_get returned as "
         "a top-level manifest key on every edit: a stale one is refused because another writer "
         "saved first — get the skill again and re-apply from the current state. Load the "

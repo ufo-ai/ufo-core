@@ -1,6 +1,6 @@
 # Charts & Data Visualization (Web-Specific)
 
-For universal data visualization principles (data-ink ratio, chart type selection, chart color sequence, labeling rules, KPI card patterns), see `.skills/design-foundations/references/dataviz.md`.
+For universal data visualization principles (data-ink ratio, chart type selection, chart color sequence, labeling rules, KPI card patterns), see `$UFO_HOME/skills/design-foundations/references/dataviz.md`.
 
 This file adds **web-specific** library recommendations, CSS token integration, and implementation patterns.
 
@@ -42,11 +42,11 @@ This file adds **web-specific** library recommendations, CSS token integration, 
 
 ### Chart Color Direction
 
-**Data viz needs extra colors — but they should fit the art direction.** Multiple hues are natural for distinguishing categories and series. For sequential data, use monochromatic shades of the primary accent. For categorical data, use the curated chart color sequence from `.skills/design-foundations/references/dataviz.md` or derive harmonious hues from the project's palette. The chart colors should feel like part of the same design system — not random or disconnected from the page's visual identity.
+**Data viz needs extra colors — but they should fit the art direction.** Multiple hues are natural for distinguishing categories and series. For sequential data, use monochromatic shades of the primary accent. For categorical data, use the curated chart color sequence from `$UFO_HOME/skills/design-foundations/references/dataviz.md` or derive harmonious hues from the project's palette. The chart colors should feel like part of the same design system — not random or disconnected from the page's visual identity.
 
 ### Typography & Color
 
-See `.skills/design-foundations/references/dataviz.md` for chart typography rules and chart color sequence. CSS token mapping: body font → `--font-body`, axis labels → `--text-xs`/`--text-sm`, titles → `--text-base`/`--text-lg` bold, tooltips → `--text-sm`. Always `font-variant-numeric: tabular-nums lining-nums`.
+See `$UFO_HOME/skills/design-foundations/references/dataviz.md` for chart typography rules and chart color sequence. CSS token mapping: body font → `--font-body`, axis labels → `--text-xs`/`--text-sm`, titles → `--text-base`/`--text-lg` bold, tooltips → `--text-sm`. Always `font-variant-numeric: tabular-nums lining-nums`.
 
 ### Layout
 
@@ -90,4 +90,4 @@ Use Chart.js with all axes hidden, or draw with SVG `<polyline>` for minimal ove
 
 ## KPI Cards (Web Tokens)
 
-Pattern from `.skills/design-foundations/references/dataviz.md`. Web token mapping: value → `--text-xl`/`--text-2xl` + `tabular-nums`, label → `--text-xs`/`--text-sm` + `--color-text-muted`, delta → `--color-success` (up) / `--color-error` (down) / `--color-text-faint` (flat). Animate with NumberFlow (React) or CSS `@property` counter.
+Pattern from `$UFO_HOME/skills/design-foundations/references/dataviz.md`. Web token mapping: value → `--text-xl`/`--text-2xl` + `tabular-nums`, label → `--text-xs`/`--text-sm` + `--color-text-muted`, delta → `--color-success` (up) / `--color-error` (down) / `--color-text-faint` (flat). Animate with NumberFlow (React) or CSS `@property` counter.

@@ -13,8 +13,10 @@ asserted — the derived chunk rows are."""
 import asyncio
 import hashlib
 import json
+import shutil
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -66,7 +68,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.index import IndexScope
 from ufo.sdk.skills import SkillCard
-from ufo.skills.runtime import CORE_SKILL_NAMES, mount_skill
+from ufo.skills.runtime import CORE_SKILL_NAMES, install_skill
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.tools.registry import ToolDef
 from ufo.workspace import ws
@@ -1252,8 +1254,8 @@ async def test_apply_refuses_shadow_and_frontmatter_mismatch(db: None, tmp_path)
 )
 async def test_apply_refuses_a_file_key_outside_the_skill(db: None, tmp_path, bad_key: str) -> None:
     """A saved skill's file keys are written into the workspace afresh by every later load, so a key
-    that is not a path inside `.skills/<name>/` is refused where it would be persisted — a key
-    landing at `/workspace/notes.md` is inside the workspace and still not this skill's to write."""
+    that is not a path inside `$UFO_HOME/skills/<name>/` is refused where it would be persisted —
+    `/workspace/notes.md` is still not this skill's to write."""
     workspace_id, agent_id = await _workspace_agent()
     ctx = _tool_ctx(workspace_id, None, tmp_path, agent_id)
     apply = _object_tool("object_apply")
@@ -1294,11 +1296,13 @@ async def test_a_saved_skills_mount_replaces_a_planted_symlink(db: None, tmp_pat
         )
         saved = await _store().materialize("greet")
     assert saved is not None
-    mount = tmp_path / "workspace" / ".skills" / "greet" / "references"
+    mount = Path(session.handle.egress_env["UFO_HOME"]) / "skills" / "greet" / "references"
+    if mount.parent.is_dir():
+        shutil.rmtree(mount.parent)
     mount.mkdir(parents=True)
     (mount / "tone.md").symlink_to(outside)
 
-    await mount_skill(session, saved)
+    await install_skill(session, saved)
 
     mounted = mount / "tone.md"
     assert not mounted.is_symlink()
