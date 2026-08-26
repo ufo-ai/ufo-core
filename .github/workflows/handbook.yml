@@ -15,7 +15,9 @@ concurrency:
 jobs:
   regenerate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The pipeline reads one LLM call per staged source file, so its wall clock grows
+    # with the tree: 23m over 575 files, 34m over 654. Keep headroom over that curve.
+    timeout-minutes: 60
     env:
       OPENAI_MODEL: gpt-5.5
     permissions:

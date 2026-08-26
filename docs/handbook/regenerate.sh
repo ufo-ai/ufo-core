@@ -27,6 +27,13 @@ trap 'rm -rf "$SCRATCH"' EXIT
 TOOL="$SCRATCH/tool"
 STAGE="$SCRATCH/src"
 WORK="$SCRATCH/work"
+SOURCE_ROOTS=(core extensions servers/control sandbox packs)
+
+# A source move leaves this list stale. Say so here, before the tool install and the
+# paid pipeline, instead of failing on an rsync stat error further down.
+for d in "${SOURCE_ROOTS[@]}"; do
+  [ -d "$REPO_ROOT/$d" ] || { echo "source root '$d' is missing; update SOURCE_ROOTS in ${BASH_SOURCE[0]}" >&2; exit 1; }
+done
 
 echo "==> clone tool @ ${TOOL_SHA:0:12}"
 git clone --quiet "$TOOL_REPO" "$TOOL"
@@ -44,7 +51,7 @@ uv pip install --quiet tree-sitter==0.26.0 tree-sitter-language-pack==1.13.3 pyy
 
 echo "==> stage Python source (tests/caches excluded)"
 mkdir -p "$STAGE"
-for d in core extensions servers/control sandbox packs; do
+for d in "${SOURCE_ROOTS[@]}"; do
   rsync -a \
     --exclude='__pycache__/' --exclude='.venv/' --exclude='node_modules/' \
     --exclude='.mypy_cache/' --exclude='.pytest_cache/' --exclude='.ruff_cache/' \
