@@ -513,11 +513,19 @@ class HookContext:
 class HookSpec:
     """One reactive lifecycle hook. `handler` runs with the extension's scoped context on `event`;
     for the `*_tool_use` events `tools` matches by tool name (empty = every tool). A hook is a
-    runtime policy filter over the turn's granted tools, never a second grant path."""
+    runtime policy filter over the turn's granted tools, never a second grant path.
+
+    A best-effort user-prompt hook may still return Deny, but a handler fault drops only its
+    injection instead of denying the turn. No tool gate can fail open."""
 
     event: HookEvent
     handler: Callable[[HookContext], Awaitable[HookOutcome]]
     tools: tuple[str, ...] = ()
+    best_effort: bool = False
+
+    def __post_init__(self) -> None:
+        if self.best_effort and self.event != "user_prompt_submit":
+            raise ValueError("only user_prompt_submit hooks may be best effort")
 
 
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$")

@@ -77,7 +77,7 @@ from ufo.kinds.credential_kind import (
 from ufo.kinds.members import MEMBER_OBJECT
 from ufo.kinds.workspace_kind import WORKSPACE_OBJECT
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
-from ufo.o11y import log
+from ufo.o11y import log, log_error
 from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
 from ufo.schema.records import Agent, Turn
 from ufo.skills.runtime import (
@@ -885,8 +885,9 @@ class HookChain:
         sees the prior's result; InjectContext concatenates in order. Composition trust is the pin
         alone — no hook can admit a tool grants withheld. A gating hook (pre_tool_use,
         user_prompt_submit) that raises or exceeds the timeout fails closed to a Deny (fail loud); a
-        non-gating hook (post_tool_use and every observe event) that raises — or returns an outcome
-        its event does not permit — is swallowed with a log, never failing the turn."""
+        best-effort user_prompt_submit hook drops only its injection on a fault. A non-gating hook
+        (post_tool_use and every observe event) that raises — or returns an outcome its event does
+        not permit — is swallowed with a log, never failing the turn."""
         bound = self.hooks.get(event, ())
         gating = event in GATING_EVENTS
         tool_input = payload.tool_input if isinstance(payload, PreToolUse) else None
@@ -922,7 +923,7 @@ class HookChain:
                 if outcome is not None and not isinstance(outcome, ALLOWED_OUTCOMES[event]):
                     raise HookOutcomeNotAllowed(f"{event} hook returned {type(outcome).__name__}")
             except Exception as error:
-                if gating:
+                if gating and not hook.spec.best_effort:
                     return HookResolution(
                         denied=(
                             f"hook {hook.ext.store.extension!r} failed closed on {event}: "
@@ -930,7 +931,8 @@ class HookChain:
                         ),
                         failed_closed=type(error).__name__,
                     )
-                log(
+                emit = log_error if hook.spec.best_effort else log
+                emit(
                     "hook.swallowed",
                     extension=hook.ext.store.extension,
                     hook_event=event,

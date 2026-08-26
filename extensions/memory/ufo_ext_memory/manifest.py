@@ -9,9 +9,9 @@ into index chunks + a mirror row, and `derive_facts` distills each into durable 
 memory_items with a bounded metered model pass. Three JobSpecs run the interval derivations:
 `memory_index` turns committed items into index chunks, `memory_consolidate` clusters aged facts
 into `semantic` summaries that supersede their originals, and `memory_dedup` sweeps one group of
-duplicate copies per tick onto its newest copy. Recall stays best-effort under a
-gating hook: the handler owns a soft timeout below the hook deadline and swallows every error,
-returning None rather than ever denying the turn.
+duplicate copies per tick onto its newest copy. Recall is a best-effort prompt hook: the handler
+owns a soft timeout below the hook deadline and records recall failures, while the hook chain logs
+an outer fault at error severity and continues the turn without an injection.
 """
 
 import asyncio
@@ -377,9 +377,9 @@ async def memory_update_handler(ctx: ToolContext, args: MemoryUpdateInput) -> To
 
 async def recall_hook(ctx: HookContext) -> HookOutcome:
     """Auto-inject memory relevant to the inbound after the submitted message in the model context.
-    user_prompt_submit is gating — a raising or slow handler denies the turn — so recall stays
-    strictly best-effort: it runs under its own soft timeout below the hook deadline and swallows
-    every error, returning None on any failure or empty result rather than ever failing the turn.
+    Recall's user_prompt_submit spec is best effort: this handler's soft timeout records recall
+    failures, and the hook chain logs and drops the injection if its outer deadline or another fault
+    escapes the handler. A missing result never denies the turn.
     Injected lines are bounded per-item (RECALL_ITEM_MAX_CHARS, truncated with
     RECALL_TRUNCATION_MARK) and in total
     (RECALL_TOTAL_MAX_CHARS counted against each rendered "- " line plus its "\n" separator, so the
@@ -667,7 +667,7 @@ def manifest() -> Manifest:
         ),
         objects=(MEMORY_OBJECT,),
         hooks=(
-            HookSpec(event="user_prompt_submit", handler=recall_hook),
+            HookSpec(event="user_prompt_submit", handler=recall_hook, best_effort=True),
             HookSpec(event="page_change", handler=index_pages),
             HookSpec(event="page_change", handler=derive_facts),
         ),

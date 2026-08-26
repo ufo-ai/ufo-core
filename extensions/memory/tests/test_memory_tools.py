@@ -62,6 +62,11 @@ def test_memory_update_is_side_effecting() -> None:
     assert MEMORY_TOOLS["memory_update"].side_effecting
 
 
+def test_recall_hook_is_best_effort() -> None:
+    recall = next(hook for hook in memory.manifest().hooks if hook.event == "user_prompt_submit")
+    assert recall.best_effort
+
+
 def vec(*axes: tuple[int, float]) -> tuple[float, ...]:
     values = [0.0] * EMBED_DIM
     for index, value in axes:

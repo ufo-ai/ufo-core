@@ -14,6 +14,7 @@ against a real hub and a real turn row. The data-plane page_change seam and its 
 test_page_change."""
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -333,6 +334,56 @@ async def test_gating_hook_exceeding_the_timeout_fails_closed(monkeypatch: objec
     resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
     assert resolution.denied is not None
     assert "failed closed" in resolution.denied
+
+
+async def test_best_effort_prompt_hook_exceeding_the_timeout_is_swallowed(
+    caplog: pytest.LogCaptureFixture, monkeypatch: object
+) -> None:
+    import asyncio
+
+    async def slow(ctx: HookContext) -> HookOutcome:
+        await asyncio.sleep(1.0)
+        return None
+
+    monkeypatch.setattr(loader, "HOOK_TIMEOUT_SECONDS", 0.05)
+    ext = _ext()
+    chain = _chain(
+        "user_prompt_submit",
+        ext,
+        HookSpec(event="user_prompt_submit", handler=slow, best_effort=True),
+    )
+    with caplog.at_level(logging.ERROR, logger="ufo"):
+        resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
+    assert resolution.denied is None
+    assert resolution.failed_closed is None
+    assert ("ufo", logging.ERROR, "hook.swallowed") in caplog.record_tuples
+
+
+async def test_raising_best_effort_prompt_hook_is_logged_and_swallowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def boom(ctx: HookContext) -> HookOutcome:
+        raise RuntimeError("recall failed")
+
+    ext = _ext()
+    chain = _chain(
+        "user_prompt_submit",
+        ext,
+        HookSpec(event="user_prompt_submit", handler=boom, best_effort=True),
+    )
+    with caplog.at_level(logging.ERROR, logger="ufo"):
+        resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
+    assert resolution.denied is None
+    assert resolution.failed_closed is None
+    assert ("ufo", logging.ERROR, "hook.swallowed") in caplog.record_tuples
+
+
+def test_tool_hook_cannot_be_best_effort() -> None:
+    async def hook(ctx: HookContext) -> HookOutcome:
+        return None
+
+    with pytest.raises(ValueError, match="only user_prompt_submit hooks may be best effort"):
+        HookSpec(event="pre_tool_use", handler=hook, best_effort=True)
 
 
 async def test_raising_observe_hook_is_swallowed_leaving_the_output_unchanged() -> None:
