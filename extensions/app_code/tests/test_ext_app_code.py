@@ -128,10 +128,13 @@ CANONICAL_PROCEDURE = (
     "Do not process a result until both reviewers have started.",
     "Do not spawn preparation, synthesis, or adjudication subagents.",
     "Resolve disagreements yourself.",
+    "Do not create or update a plan, objective, journal, or todo for a review.",
     # One bounded evidence pass, as wide as its known operations.
     "up to eight tool calls",
     "If two or more operations are ready, a response with one tool call is invalid.",
     "Do not leave a known independent operation for a later round.",
+    "Return exactly one JSON object in the finish result",
+    "Put no Markdown fence or text before or after it",
     # A new head preempts, and the work it replaces is cancelled and discarded together.
     "Treat a source update for a new head SHA as higher priority than every result for an older "
     "head SHA.",
@@ -248,6 +251,13 @@ def test_the_review_agent_bounds_each_child_evidence_pass() -> None:
     assert "Maximize same-round tool use." in agent.spec.prompt
     assert "Do not repeat a command when its output was complete." in agent.spec.prompt
     assert "return the JSON result immediately" in agent.spec.prompt
+
+
+def test_the_review_agent_requires_one_strict_json_result() -> None:
+    (agent,) = app_code.manifest().agents
+    prompt = agent.spec.prompt
+    assert "Return exactly one JSON object in the finish result" in prompt
+    assert "contains no text outside it" in prompt
 
 
 def test_the_review_agent_reaches_github_through_the_slot_this_pack_declares() -> None:

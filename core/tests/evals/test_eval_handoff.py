@@ -31,6 +31,14 @@ def test_a_regenerated_report_is_read_as_duplication() -> None:
     assert record.duplication == 1.0
 
 
+def test_a_handoff_records_whether_the_complete_result_is_one_json_object() -> None:
+    clean = handoff_record(CONVERSATION, (), '{"complete": true}')
+    trailing = handoff_record(CONVERSATION, (), '{"complete": true}\nDone.')
+
+    assert clean.result_json_object is True
+    assert trailing.result_json_object is False
+
+
 def test_working_narration_is_not_read_as_duplication() -> None:
     record = handoff_record(CONVERSATION, (assistant(NARRATION, tool="bash"),), REPORT)
     assert record.closing_chars == len(NARRATION)

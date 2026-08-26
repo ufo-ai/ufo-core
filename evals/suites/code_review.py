@@ -32,9 +32,13 @@ OLD_HEAD_SHA = "1111111111111111111111111111111111111111"
 PAGE_ID = UUID("20000000-0000-0000-0000-000000000001")
 PREEMPT_PAGE_ID = UUID("20000000-0000-0000-0000-000000000002")
 INSTRUCTION_PAGE_ID = UUID("20000000-0000-0000-0000-000000000003")
+NO_PLAN_PAGE_ID = UUID("20000000-0000-0000-0000-000000000004")
+STRICT_RESULT_PAGE_ID = UUID("20000000-0000-0000-0000-000000000005")
 SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
 PREEMPT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000002")
 INSTRUCTION_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000003")
+NO_PLAN_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000004")
+STRICT_RESULT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000005")
 OLD_SPAWNS = (
     "40000000-0000-0000-0000-000000000001",
     "40000000-0000-0000-0000-000000000002",
@@ -234,6 +238,28 @@ async def _seed_instruction_read(
     )
 
 
+async def _seed_no_plan(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    await _seed_page(
+        workspace_id,
+        agent_id,
+        blob,
+        NO_PLAN_PAGE_ID,
+        NO_PLAN_SOURCE_ID,
+        HEAD_SHA,
+    )
+
+
+async def _seed_strict_result(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    await _seed_page(
+        workspace_id,
+        agent_id,
+        blob,
+        STRICT_RESULT_PAGE_ID,
+        STRICT_RESULT_SOURCE_ID,
+        HEAD_SHA,
+    )
+
+
 async def _git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
     process = await asyncio.create_subprocess_exec(
         "git",
@@ -417,6 +443,50 @@ async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
     )
 
 
+async def _grade_no_parent_plan(output: CapabilityOutput) -> CapabilityVerdict:
+    spawns = tuple(
+        call
+        for call in output.own_calls
+        if call.name == "spawn"
+        and isinstance(target := call.input.get("target"), str)
+        and target.removeprefix("profile:") == "coding"
+        and call.input.get("background") is True
+    )
+    planning = tuple(
+        call
+        for call in output.own_calls
+        if call.name.startswith(("plan", "objective", "journal", "todo"))
+    )
+    evidence: JsonObject = {
+        "spawn_count": len(spawns),
+        "planning_calls": [call.name for call in planning],
+    }
+    if len(spawns) < 2:
+        return CapabilityVerdict(
+            False, f"started {len(spawns)} background reviewers, expected at least 2", evidence
+        )
+    if planning:
+        return CapabilityVerdict(
+            False, "the parent created durable review planning state", evidence
+        )
+    return CapabilityVerdict(True, "the parent started review without a plan", evidence)
+
+
+async def _grade_strict_reviewer_json(output: CapabilityOutput) -> CapabilityVerdict:
+    handoffs = output.handoffs
+    evidence: JsonObject = {
+        "handoff_count": len(handoffs),
+        "json_objects": [handoff.result_json_object for handoff in handoffs],
+    }
+    if len(handoffs) != 2:
+        return CapabilityVerdict(
+            False, f"recorded {len(handoffs)} reviewer handoffs, expected 2", evidence
+        )
+    if any(not handoff.result_json_object for handoff in handoffs):
+        return CapabilityVerdict(False, "a reviewer added text outside its JSON object", evidence)
+    return CapabilityVerdict(True, "both reviewers returned one exact JSON object", evidence)
+
+
 async def _grade_instruction_reads(output: CapabilityOutput) -> CapabilityVerdict:
     children = _child_calls(output)
     failures = _review_failures(output)
@@ -516,6 +586,32 @@ CASES = (
         prepare=_prepare_review,
         wait_for_background=True,
         digest_tag="code-review:instruction-files:v1",
+    ),
+    CapabilityCase(
+        name="code-review-starts-without-parent-plan",
+        message=_source_change(NO_PLAN_PAGE_ID),
+        grader=DescribedGrader(
+            "the parent starts exactly two reviewers without a plan, objective, journal, or todo",
+            _grade_no_parent_plan,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_no_plan,
+        prepare=_prepare_review,
+        digest_tag="code-review:no-parent-plan:v1",
+    ),
+    CapabilityCase(
+        name="code-review-returns-strict-reviewer-json",
+        message=_source_change(STRICT_RESULT_PAGE_ID),
+        grader=DescribedGrader(
+            "both reviewers return exactly one valid review JSON object with no text before or "
+            "after it",
+            _grade_strict_reviewer_json,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_strict_result,
+        prepare=_prepare_review,
+        wait_for_background=True,
+        digest_tag="code-review:strict-reviewer-json:v1",
     ),
     CapabilityCase(
         name="code-review-new-head-preempts-reviewers",

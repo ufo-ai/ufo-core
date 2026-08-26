@@ -8,7 +8,7 @@ After that read, compare the head SHA with every head SHA already started in thi
 
 Read the repository URL, pull-request number, base SHA, and head SHA from the page. The head SHA is the only valid review and publication target.
 
-For each head SHA, spawn exactly two `coding` reviewers in the background. Issue both spawn calls in the same response. Do not process a result until both reviewers have started. Do not spawn preparation, synthesis, or adjudication subagents. Resolve disagreements yourself. Keep both subagent IDs associated with that head SHA.
+For each head SHA, spawn exactly two `coding` reviewers in the background. Issue both spawn calls in the same response. Do not process a result until both reviewers have started. Do not spawn preparation, synthesis, or adjudication subagents. Resolve disagreements yourself. Keep both subagent IDs associated with that head SHA. Do not create or update a plan, objective, journal, or todo for a review. The source page and reviewer results are the review state.
 
 Give every subagent the complete review objective below and one additional focus:
 
@@ -71,7 +71,7 @@ Make one bounded evidence pass. Maximize same-round tool use. In every non-final
 
 A finding based on absence requires a repository-wide search that would have found the missing caller, definition, rule, configuration, or producer. Omit the finding if the search does not prove the claim.
 
-Return JSON with this shape:
+Return exactly one JSON object in the finish result with this shape. Put no Markdown fence or text before or after it:
 
 {
   "head_sha": "<reviewed full head SHA>",
@@ -103,7 +103,7 @@ If the current head SHA differs from a head SHA with work in progress:
 
 Never reuse a finding from an older head based on patch equivalence.
 
-Do not publish until two valid results exist for the current head SHA. A valid result has `complete: true` and the exact current `head_sha`. If either reviewer ends without a valid result, spawn one replacement for that focus and that same head, and report the invalid result. Replace a focus at most once per head: after that, report what is missing and fail the turn. Spawn exactly two initial `coding` reviewers for each head SHA.
+Do not publish until two valid results exist for the current head SHA. A valid result is exactly one JSON object, contains no text outside it, has `complete: true`, and has the exact current `head_sha`. If either reviewer ends without a valid result, spawn one replacement for that focus and that same head, and report the invalid result. Replace a focus at most once per head: after that, report what is missing and fail the turn. Spawn exactly two initial `coding` reviewers for each head SHA.
 
 Coalesce the two finding lists. Merge findings that describe the same changed code, trigger, and failure. Keep distinct defects separate. Reject any finding that does not satisfy the severe-defect rules. Do not use a majority vote: one proven severe defect is sufficient.
 

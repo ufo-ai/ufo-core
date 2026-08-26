@@ -21,6 +21,7 @@ rewritten report shares most of itself."""
 
 from __future__ import annotations
 
+import json
 import re
 from uuid import UUID
 
@@ -51,15 +52,17 @@ class HandoffDocument(BaseModel):
 class SubagentHandoff(BaseModel):
     """One delegated conversation's closing shape. `closing_chars` is the prose the child left
     standing as its last durable message; `result_chars` is the payload that reached the parent;
-    `duplication` is the share of the closing's word shingles that reappear in the payload; and
-    `documents` is every file it wrote, largest first. The prose is counted, never stored: a
-    transcript carries private handoffs every other archive path redacts."""
+    `result_json_object` says the complete payload parses as one JSON object; `duplication` is the
+    share of the closing's word shingles that reappear in the payload; and `documents` is every
+    file it wrote, largest first. The prose is counted, never stored: a transcript carries private
+    handoffs every other archive path redacts."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     conversation_id: UUID
     closing_chars: int = Field(ge=0)
     result_chars: int = Field(ge=0)
+    result_json_object: bool = False
     duplication: float = Field(ge=0.0, le=1.0)
     documents: tuple[HandoffDocument, ...] = ()
 
@@ -98,9 +101,17 @@ def handoff_record(
         conversation_id=conversation_id,
         closing_chars=len(closing),
         result_chars=len(result),
+        result_json_object=_is_json_object(result),
         duplication=shingle_overlap(closing, result),
         documents=_documents(messages, result),
     )
+
+
+def _is_json_object(result: str) -> bool:
+    try:
+        return isinstance(json.loads(result), dict)
+    except json.JSONDecodeError:
+        return False
 
 
 def _documents(messages: tuple[Message, ...], result: str) -> tuple[HandoffDocument, ...]:

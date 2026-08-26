@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
+from evals.harness.handoff import SubagentHandoff
 from evals.harness.harness import JsonObject
 from evals.harness.timing import CaseTiming, StepTiming, TurnRole, TurnTiming
 from evals.registry import TASKS
@@ -139,6 +140,57 @@ async def test_parallel_review_grader_requires_two_same_round_spawns_and_child_b
         ),
     )
     assert (await code_review._grade_parallel_review(durable_only)).passed
+
+
+async def test_no_parent_plan_grader_rejects_durable_plan() -> None:
+    first = _call("spawn", "spawn-1", {"target": "coding", "background": True})
+    second = _call("spawn", "spawn-2", {"target": "coding", "background": True})
+    plan = _call("plan_objective", "plan-1", {"objective": "Review the pull request"})
+
+    passed = await code_review._grade_no_parent_plan(
+        CapabilityOutput("", (first, second), own_calls=(first, second))
+    )
+    replacements = await code_review._grade_no_parent_plan(
+        CapabilityOutput(
+            "", (first, second, first, second), own_calls=(first, second, first, second)
+        )
+    )
+    failed = await code_review._grade_no_parent_plan(
+        CapabilityOutput("", (first, second, plan), own_calls=(first, second, plan))
+    )
+
+    assert passed.passed, passed.reason
+    assert replacements.passed, replacements.reason
+    assert not failed.passed
+    assert "durable review planning state" in failed.reason
+
+
+async def test_strict_reviewer_json_grader_rejects_trailing_text() -> None:
+    valid = SubagentHandoff(
+        conversation_id=uuid4(),
+        closing_chars=0,
+        result_chars=2,
+        result_json_object=True,
+        duplication=0,
+    )
+    trailing = SubagentHandoff(
+        conversation_id=uuid4(),
+        closing_chars=0,
+        result_chars=7,
+        result_json_object=False,
+        duplication=0,
+    )
+
+    passed = await code_review._grade_strict_reviewer_json(
+        CapabilityOutput("", (), handoffs=(valid, valid))
+    )
+    failed = await code_review._grade_strict_reviewer_json(
+        CapabilityOutput("", (), handoffs=(valid, trailing))
+    )
+
+    assert passed.passed, passed.reason
+    assert not failed.passed
+    assert "text outside its JSON object" in failed.reason
 
 
 async def test_instruction_grader_requires_both_files_without_checkout_errors() -> None:
