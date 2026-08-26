@@ -3584,6 +3584,9 @@ def test_portal_source_maps_upload_under_the_service_and_version_the_page_record
     assert "--minified-path-prefix=/surface/web/static/assets/" in run
     assert "rm -f extensions/web/ufo_ext_web/static/assets/*.map" in run
     assert run.index("sourcemaps upload") < run.index("ufoctl bundle")
+    assert run.index("ufoctl bundle") < run.index("docker build")
+    assert 'load_manifests("assistant_hosted")' in run
+    assert run.index("load_manifests") < run.index("docker push")
 
     template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     assert '- {name: UFO_WEB_RUM_VERSION, value: "${image_tag}"}' in template

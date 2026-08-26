@@ -1026,14 +1026,14 @@ def bundle(out: Path) -> None:
     """Freeze this deploy into a runnable artifact: OCI image recipe, pinned config, lockfile."""
     config = load_config()
     catalog = read_catalog(config.ext.store) if config.ext.store is not None else None
-    result = Bundle(config_path=config_path(), catalog=catalog, out=out).build()
     subprocess.run(
-        ("uv", "build", "--wheel", str(_ufo_project_dir()), "--out-dir", str(result.out)),
+        ("uv", "build", "--wheel", str(_ufo_project_dir()), "--out-dir", str(out)),
         check=True,
     )
-    wheel = result.out / wheel_name()
+    wheel = out / wheel_name()
     if not wheel.exists():
         raise click.ClickException(f"wheel build produced no {wheel}")
+    result = Bundle(config_path=config_path(), catalog=catalog, out=out, wheel=wheel).build()
     click.echo(
         f"bundle at {result.out} — {len(result.pins)} extension(s) pinned, wheel {wheel.name}"
     )

@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import importlib.util
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from importlib.machinery import ModuleSpec
 from importlib.metadata import EntryPoint, entry_points
@@ -230,10 +231,15 @@ def extension_digest(entry: EntryPoint) -> str:
     else:
         origin = Path(spec.origin)  # type: ignore[arg-type]
         files = {origin.name: origin}
+    return extension_content_digest({name: path.read_bytes() for name, path in files.items()})
+
+
+def extension_content_digest(files: Mapping[str, bytes]) -> str:
+    """Hash the named files that make one installed extension package."""
     digest = hashlib.sha256()
     for name in sorted(files):
         digest.update(hashlib.sha256(name.encode()).digest())
-        digest.update(hashlib.sha256(files[name].read_bytes()).digest())
+        digest.update(hashlib.sha256(files[name]).digest())
     return DIGEST_PREFIX + digest.hexdigest()
 
 

@@ -204,6 +204,8 @@ jobs:
             rm -f extensions/web/ufo_ext_web/static/assets/*.map
             UFO_CONFIG=hosted.toml uv run ufoctl bundle --out bundle
             docker build -t "$ECR_REGISTRY/ufo:$IMAGE_TAG" bundle
+            docker run --rm --entrypoint python "$ECR_REGISTRY/ufo:$IMAGE_TAG" \
+              -c 'from ufo.ext.loader import load_manifests; load_manifests("assistant_hosted")'
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
           fi
 

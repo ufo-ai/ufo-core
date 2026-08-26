@@ -3,18 +3,26 @@ lockfile.
 
 The bundle pins every extension the deploy already runs (the current lockfile, or every discovered
 extension when none is pinned yet) plus every catalog entry marked bundle-only — those disabled in
-the store install here, at bundle time, and never at runtime. Each pin re-checks the installed
-digest, so a bundle cannot freeze an extension the environment lacks. The output directory is a
-`docker build` context: the Dockerfile installs the one `ufo` distribution (core and every
-first-party extension and pack ship in it) and copies the pinned config and lockfile, whose pins
-narrow the active set and verify each digest at boot — so the same artifact boots identically on
-any machine."""
+the store install here, at bundle time, and never at runtime. Each pin hashes the built wheel, so
+the lock names the bytes the image installs even when the local environment holds older source.
+The output directory is a `docker build` context: the Dockerfile installs the one `ufo`
+distribution (core and every first-party extension and pack ship in it) and copies the pinned
+config and lockfile, whose pins narrow the active set and verify each digest at boot — so the same
+artifact boots identically on any machine."""
 
 from dataclasses import dataclass
 from pathlib import Path
+from zipfile import ZipFile
 
-from ufo.ext.loader import ExtensionPin, Lockfile, discovered, lockfile_path, read_lockfile
-from ufo.ext.store import Catalog, pin_for, ufo_version
+from ufo.ext.loader import (
+    ExtensionPin,
+    Lockfile,
+    discovered,
+    extension_content_digest,
+    lockfile_path,
+    read_lockfile,
+)
+from ufo.ext.store import Catalog, ufo_version
 
 DOCKERFILE_BASE = "python:3.12-slim"
 BUNDLE_CONFIG_NAME = "ufo.toml"
@@ -45,6 +53,7 @@ class Bundle:
     config_path: Path
     catalog: Catalog | None
     out: Path
+    wheel: Path
 
     def build(self) -> BundleResult:
         pins = self._pins()
@@ -75,7 +84,37 @@ class Bundle:
             else ()
         )
         names = list(dict.fromkeys((*base, *bundle_only)))
-        return tuple(pin_for(name) for name in names)
+        pins: list[ExtensionPin] = []
+        for name in names:
+            found = installed.get(name)
+            if found is None:
+                raise RuntimeError(f"extension {name!r} is not installed in this environment")
+            manifest, entry = found
+            top = entry.module.split(".", 1)[0]
+            prefix = f"{top}/"
+            with ZipFile(self.wheel) as wheel:
+                package = {
+                    path.removeprefix(prefix): wheel.read(path)
+                    for path in wheel.namelist()
+                    if path.startswith(prefix)
+                    and not path.endswith("/")
+                    and "__pycache__" not in Path(path).parts
+                    and Path(path).suffix != ".pyc"
+                }
+                module = f"{top}.py"
+                files = package or (
+                    {Path(module).name: wheel.read(module)} if module in wheel.namelist() else {}
+                )
+            if not files:
+                raise RuntimeError(f"extension package {top!r} is absent from {self.wheel.name}")
+            pins.append(
+                ExtensionPin(
+                    name=name,
+                    version=manifest.version,
+                    digest=extension_content_digest(files),
+                )
+            )
+        return tuple(pins)
 
     def _dockerfile(self) -> str:
         return "\n".join(

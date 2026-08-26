@@ -2,6 +2,7 @@ import importlib
 from importlib.metadata import EntryPoint
 from pathlib import Path
 from uuid import UUID, uuid4
+from zipfile import ZipFile
 
 import pytest
 import sqlalchemy as sa
@@ -14,6 +15,7 @@ from ufo.ext.loader import (
     LOCKFILE_PATH_ENV,
     ExtensionPin,
     Lockfile,
+    discovered,
     extension_digest,
     load_manifests,
     write_lockfile,
@@ -43,6 +45,16 @@ def _pinned_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     lock = tmp_path / "ufo.lock"
     monkeypatch.setenv(LOCKFILE_PATH_ENV, str(lock))
     return lock
+
+
+def _sample_wheel(tmp_path: Path) -> Path:
+    wheel = tmp_path / "ufo.whl"
+    root = Path(sample.__file__).parent
+    with ZipFile(wheel, "w") as archive:
+        for path in root.rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
+                archive.write(path, f"ufo_ext_sample/{path.relative_to(root).as_posix()}")
+    return wheel
 
 
 async def _workspace() -> UUID:
@@ -209,7 +221,12 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
     config_path = tmp_path / "ufo.toml"
     config_path.write_text(CONFIG_TOML)
     out = tmp_path / "out"
-    result = Bundle(config_path=config_path, catalog=_catalog(disabled=True), out=out).build()
+    result = Bundle(
+        config_path=config_path,
+        catalog=_catalog(disabled=True),
+        out=out,
+        wheel=_sample_wheel(tmp_path),
+    ).build()
     assert [pin.name for pin in result.pins] == [sample.NAME]
     assert result.config.read_text() == CONFIG_TOML
     locked = Lockfile.model_validate_json(result.lockfile.read_text())
@@ -223,6 +240,26 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
     assert dockerfile.rstrip().endswith('CMD ["serve"]')
 
 
+def test_bundle_pins_the_wheel_instead_of_the_installed_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pinned_lock(tmp_path, monkeypatch)
+    write_lockfile(tmp_path / "ufo.lock", Lockfile(ufo_version="0.1.0"))
+    config_path = tmp_path / "ufo.toml"
+    config_path.write_text(CONFIG_TOML)
+    wheel = _sample_wheel(tmp_path)
+    with ZipFile(wheel, "a") as archive:
+        archive.writestr("ufo_ext_sample/probe.txt", b"shipped only\n")
+    result = Bundle(
+        config_path=config_path,
+        catalog=_catalog(disabled=True),
+        out=tmp_path / "out",
+        wheel=wheel,
+    ).build()
+    entry = discovered()[sample.NAME][1]
+    assert result.pins[0].digest != extension_digest(entry)
+
+
 async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -230,7 +267,12 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
     write_lockfile(tmp_path / "ufo.lock", Lockfile(ufo_version="0.1.0"))
     config_path = tmp_path / "ufo.toml"
     config_path.write_text(CONFIG_TOML)
-    bundle = Bundle(config_path=config_path, catalog=_catalog(disabled=True), out=tmp_path / "out")
+    bundle = Bundle(
+        config_path=config_path,
+        catalog=_catalog(disabled=True),
+        out=tmp_path / "out",
+        wheel=_sample_wheel(tmp_path),
+    )
     result = bundle.build()
     monkeypatch.setenv(LOCKFILE_PATH_ENV, str(result.lockfile))
     assert [manifest.name for manifest in load_manifests()] == [sample.NAME]
