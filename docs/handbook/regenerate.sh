@@ -44,7 +44,7 @@ uv pip install --quiet tree-sitter==0.26.0 tree-sitter-language-pack==1.13.3 pyy
 
 echo "==> stage Python source (tests/caches excluded)"
 mkdir -p "$STAGE"
-for d in core extensions control sandbox packs; do
+for d in core extensions servers/control sandbox packs; do
   rsync -a \
     --exclude='__pycache__/' --exclude='.venv/' --exclude='node_modules/' \
     --exclude='.mypy_cache/' --exclude='.pytest_cache/' --exclude='.ruff_cache/' \
