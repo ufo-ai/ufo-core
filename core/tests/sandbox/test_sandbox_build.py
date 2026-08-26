@@ -44,7 +44,14 @@ from sandbox.build_template import (
     template_name,
 )
 from ufo.sandbox.session import SYSTEM_SKILLS_BAKED_ENV
-from ufo.sdk.sandbox import PLAYWRIGHT_VERSION, SANDBOX_SIZES, SYSTEM_SKILLS_ROOT
+from ufo.sdk.sandbox import (
+    PLAYWRIGHT_VERSION,
+    SANDBOX_GID,
+    SANDBOX_RUNS_ROOT,
+    SANDBOX_SIZES,
+    SANDBOX_UID,
+    SYSTEM_SKILLS_ROOT,
+)
 from ufo.skills.runtime import CORE_SKILL_REGISTRY
 
 
@@ -349,6 +356,11 @@ def test_rendered_dockerfile_runs_as_the_non_root_user() -> None:
     dockerfile = pod_dockerfile()
     assert f"USER {RUNTIME_USER}" in dockerfile
     assert dockerfile.rstrip().rfind(f"USER {RUNTIME_USER}") > dockerfile.rfind("USER root")
+
+
+def test_runtime_root_is_writable_by_the_sandbox_user() -> None:
+    dockerfile = pod_dockerfile()
+    assert f"install -d -o {SANDBOX_UID} -g {SANDBOX_GID} -m 0700 {SANDBOX_RUNS_ROOT}" in dockerfile
 
 
 def test_build_definition_digest_is_stable_and_prefixed() -> None:

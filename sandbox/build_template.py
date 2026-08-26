@@ -46,8 +46,11 @@ from ufo.sdk.sandbox import (
     PLAYWRIGHT_BROWSERS_DIR,
     PLAYWRIGHT_VERSION,
     SANDBOX_ENV,
+    SANDBOX_GID,
+    SANDBOX_RUNS_ROOT,
     SANDBOX_SIZES,
     SANDBOX_TMPDIR,
+    SANDBOX_UID,
     SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
 )
@@ -345,6 +348,12 @@ def build_definition_digest(sizing: Sizing | None) -> str:
         "pip": list(PIP_PACKAGES),
         "npm": list(NPM_PACKAGES),
         "env": SANDBOX_ENV,
+        "runtime_root": {
+            "path": SANDBOX_RUNS_ROOT,
+            "uid": SANDBOX_UID,
+            "gid": SANDBOX_GID,
+            "mode": "0700",
+        },
         "client": client_definition(),
         "system_skills": system_skill_bundle().digest,
         "modules": [
@@ -382,6 +391,7 @@ def apply_layers(builder: object, digest: str) -> object:
     builder.run_cmd(
         f"mkdir -p {WORKSPACE_DIR} && chown {RUNTIME_USER}:{RUNTIME_USER} {WORKSPACE_DIR}"
     )
+    builder.run_cmd(f"install -d -o {SANDBOX_UID} -g {SANDBOX_GID} -m 0700 {SANDBOX_RUNS_ROOT}")
     builder.run_cmd(f"printf '%s' '{digest}' > {BUILD_DIGEST_PATH}")
     builder.set_envs(SANDBOX_ENV)
     builder.copy(SYSTEM_SKILLS_STAGE_PATH.relative_to(ROOT), SYSTEM_SKILLS_ARCHIVE_PATH, mode=0o644)

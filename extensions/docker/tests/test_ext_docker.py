@@ -24,6 +24,8 @@ from ufo.sandbox.select import select_carrier
 from ufo.schema import tables
 from ufo.sdk.sandbox import (
     NO_PROXY_HOSTS,
+    SANDBOX_GID,
+    SANDBOX_UID,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     ProxyEndpoint,
@@ -96,12 +98,20 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     assert run_argv[run_argv.index("-v") + 1] == f"/tmp/ws:{WORKSPACE_DIR}"
     assert run_argv[run_argv.index("--network") + 1] == (f"ufo-sandbox-{spec.conversation_id.hex}")
     assert run_argv[run_argv.index("--cap-drop") + 1] == "NET_RAW"
-    runtime_call = next(argv for argv in calls if "mkdir" in argv)
+    runtime_call = next(argv for argv in calls if "install" in argv)
     assert runtime_call == (
         "exec",
+        "-u",
+        "root",
         "cid1",
-        "mkdir",
-        "-p",
+        "install",
+        "-d",
+        "-o",
+        str(SANDBOX_UID),
+        "-g",
+        str(SANDBOX_GID),
+        "-m",
+        "0700",
         sandbox_runtime_root(spec.conversation_id),
     )
 
@@ -329,6 +339,25 @@ async def test_write_streams_the_content_over_stdin_and_never_on_the_command_lin
     assert docker_ext.COPY_IN_PROG in argv[-3]
     assert "from containment import" in argv[-3]
     assert not any("cat > " in arg for arg in argv)
+
+
+async def test_write_derives_the_runtime_root_when_the_handle_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
+        calls.append(argv)
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_ext, "_docker", record_docker)
+    conversation_id = uuid4()
+    root = sandbox_runtime_root(conversation_id)
+    handle = SandboxHandle(conversation_id=conversation_id, container_id="cid1")
+
+    await DockerCarrier().write(handle, f"{root}/tool-output/call.txt", b"payload")
+
+    assert calls[-1][-2:] == (f"{root}/tool-output/call.txt", root)
 
 
 async def test_write_raises_with_the_container_error_on_a_nonzero_exit(

@@ -29,8 +29,10 @@ from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
     COPY_IN_PROG,
     NO_PROXY_HOSTS,
+    SANDBOX_GID,
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
+    SANDBOX_UID,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     CarrierSpec,
@@ -396,11 +398,8 @@ class DockerCarrier:
     async def _write_started(
         self, handle: SandboxHandle, path: str, content: bytes
     ) -> tuple[int, bytes]:
-        root = (
-            handle.runtime_root
-            if handle.runtime_root and PurePosixPath(path).is_relative_to(handle.runtime_root)
-            else WORKSPACE_DIR
-        )
+        runtime_root = handle.runtime_root or sandbox_runtime_root(handle.conversation_id)
+        root = runtime_root if PurePosixPath(path).is_relative_to(runtime_root) else WORKSPACE_DIR
         code, _, stderr = await _docker(
             "exec",
             "-i",
@@ -639,9 +638,17 @@ class DockerCarrier:
     async def _ensure_runtime_root(self, container_id: str, conversation_id: UUID) -> None:
         code, _, stderr = await _docker(
             "exec",
+            "-u",
+            "root",
             container_id,
-            "mkdir",
-            "-p",
+            "install",
+            "-d",
+            "-o",
+            str(SANDBOX_UID),
+            "-g",
+            str(SANDBOX_GID),
+            "-m",
+            "0700",
             sandbox_runtime_root(conversation_id),
             timeout_s=RUNTIME_ROOT_TIMEOUT_SECONDS,
         )

@@ -317,6 +317,7 @@ UFO_HOME_ENV = "UFO_HOME"
 SYSTEM_SKILLS_BAKED_ENV = "UFO_SYSTEM_SKILLS_BAKED"
 SANDBOX_UFO_HOME = "/home/user/.ufo"
 SYSTEM_SKILLS_ROOT = f"{SANDBOX_UFO_HOME}/skills"
+SANDBOX_RUNS_ROOT = f"{SANDBOX_UFO_HOME}/{RUNTIME_DIRNAME}"
 SANDBOX_TMPDIR = "/var/tmp"
 SANDBOX_ENV: dict[str, str] = {
     "NODE_PATH": NODE_GLOBAL_MODULES,
@@ -831,7 +832,7 @@ def runtime_relative(path: str) -> PurePosixPath:
 
 def sandbox_runtime_root(conversation_id: UUID) -> str:
     """The per-conversation runtime root inside an isolated sandbox."""
-    return f"{SANDBOX_UFO_HOME}/{RUNTIME_DIRNAME}/{conversation_id.hex}"
+    return f"{SANDBOX_RUNS_ROOT}/{conversation_id.hex}"
 
 
 def shell_path(path: str) -> str:
