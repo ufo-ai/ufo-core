@@ -28,6 +28,8 @@ DOCKERFILE_BASE = "python:3.12-slim"
 BUNDLE_CONFIG_NAME = "ufo.toml"
 BUNDLE_LOCKFILE_NAME = "ufo.lock"
 BUNDLE_DOCKERFILE_NAME = "Dockerfile"
+BUNDLE_CLIENT_BINARY_NAME = "ufo-sandbox-client"
+BUNDLE_CLIENT_INSTALL_PATH = f"/usr/local/bin/{BUNDLE_CLIENT_BINARY_NAME}"
 
 
 def wheel_name() -> str:
@@ -42,6 +44,7 @@ class BundleResult:
     dockerfile: Path
     config: Path
     lockfile: Path
+    client_binary: Path | None
     pins: tuple[ExtensionPin, ...]
 
 
@@ -54,6 +57,7 @@ class Bundle:
     catalog: Catalog | None
     out: Path
     wheel: Path
+    client_binary: Path | None = None
 
     def build(self) -> BundleResult:
         pins = self._pins()
@@ -64,10 +68,19 @@ class Bundle:
         lockfile.write_text(
             Lockfile(ufo_version=ufo_version(), extensions=pins).model_dump_json(indent=2) + "\n"
         )
+        bundled_client = None
+        if self.client_binary is not None:
+            bundled_client = self.out / BUNDLE_CLIENT_BINARY_NAME
+            bundled_client.write_bytes(self.client_binary.read_bytes())
         dockerfile = self.out / BUNDLE_DOCKERFILE_NAME
         dockerfile.write_text(self._dockerfile())
         return BundleResult(
-            out=self.out, dockerfile=dockerfile, config=config, lockfile=lockfile, pins=pins
+            out=self.out,
+            dockerfile=dockerfile,
+            config=config,
+            lockfile=lockfile,
+            client_binary=bundled_client,
+            pins=pins,
         )
 
     def _pins(self) -> tuple[ExtensionPin, ...]:
@@ -117,6 +130,14 @@ class Bundle:
         return tuple(pins)
 
     def _dockerfile(self) -> str:
+        sandbox_client = (
+            (
+                f"COPY --chmod=0555 {BUNDLE_CLIENT_BINARY_NAME} {BUNDLE_CLIENT_INSTALL_PATH}",
+                f"ENV UFO_CLIENT_BINARY={BUNDLE_CLIENT_INSTALL_PATH}",
+            )
+            if self.client_binary is not None
+            else ()
+        )
         return "\n".join(
             (
                 f"FROM {DOCKERFILE_BASE}",
@@ -126,6 +147,7 @@ class Bundle:
                 f"COPY {wheel_name()} /tmp/{wheel_name()}",
                 f"RUN pip install --no-cache-dir /tmp/{wheel_name()} && rm /tmp/{wheel_name()}",
                 f"COPY {BUNDLE_CONFIG_NAME} {BUNDLE_LOCKFILE_NAME} /app/",
+                *sandbox_client,
                 'ENTRYPOINT ["ufoctl"]',
                 'CMD ["serve"]',
                 "",

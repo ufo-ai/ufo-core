@@ -240,6 +240,29 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
     assert dockerfile.rstrip().endswith('CMD ["serve"]')
 
 
+def test_bundle_carries_the_sandbox_client_named_by_the_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pinned_lock(tmp_path, monkeypatch)
+    write_lockfile(tmp_path / "ufo.lock", Lockfile(ufo_version="0.1.0"))
+    config_path = tmp_path / "ufo.toml"
+    config_path.write_text(CONFIG_TOML)
+    client = tmp_path / "ufo"
+    client.write_bytes(b"sandbox-client")
+    result = Bundle(
+        config_path=config_path,
+        catalog=_catalog(disabled=True),
+        out=tmp_path / "out",
+        wheel=_sample_wheel(tmp_path),
+        client_binary=client,
+    ).build()
+    assert result.client_binary is not None
+    assert result.client_binary.read_bytes() == b"sandbox-client"
+    dockerfile = result.dockerfile.read_text()
+    assert "COPY --chmod=0555 ufo-sandbox-client /usr/local/bin/ufo-sandbox-client" in dockerfile
+    assert "ENV UFO_CLIENT_BINARY=/usr/local/bin/ufo-sandbox-client" in dockerfile
+
+
 def test_bundle_pins_the_wheel_instead_of_the_installed_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

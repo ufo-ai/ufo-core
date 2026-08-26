@@ -422,6 +422,20 @@ def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:
     assert "memory" in lockfile
 
 
+def test_bundle_accepts_a_sandbox_client(cli_home: CliRunner) -> None:
+    _init(cli_home)
+    client = Path("ufo-sandbox-client")
+    client.write_bytes(b"client")
+    result = cli_home.invoke(
+        cli.main,
+        ["bundle", "--out", "bundle", "--client-binary", str(client)],
+    )
+    assert result.exit_code == 0, result.output
+    assert Path("bundle/ufo-sandbox-client").read_bytes() == b"client"
+    dockerfile = Path("bundle/Dockerfile").read_text()
+    assert "ENV UFO_CLIENT_BINARY=/usr/local/bin/ufo-sandbox-client" in dockerfile
+
+
 def test_ext_search_lists_the_catalog(cli_home: CliRunner) -> None:
     Path("ufo.toml").write_text(EXT_STORE_CONFIG)
     Path("catalog.toml").write_text(CATALOG)

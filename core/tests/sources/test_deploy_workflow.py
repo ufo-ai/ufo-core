@@ -3585,8 +3585,22 @@ def test_portal_source_maps_upload_under_the_service_and_version_the_page_record
     assert "rm -f extensions/web/ufo_ext_web/static/assets/*.map" in run
     assert run.index("sourcemaps upload") < run.index("ufoctl bundle")
     assert run.index("ufoctl bundle") < run.index("docker build")
+    assert '--client-binary "$SANDBOX_CLIENT_BINARY"' in run
     assert 'load_manifests("assistant_hosted")' in run
     assert run.index("load_manifests") < run.index("docker push")
+
+    workflow = _workflow(WORKFLOWS / "deploy.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    bundle = jobs["bundle"]
+    assert bundle["needs"] == ["changes", "client"]
+    steps = bundle["steps"]
+    assert isinstance(steps, list)
+    build = _step("bundle", "Build + push bundle image")
+    assert steps.index(build) > steps.index(
+        next(step for step in steps if step.get("uses") == "actions/download-artifact@v4")
+    )
+    assert steps.index(build) > steps.index(_step("bundle", "Reuse the pushed client binaries"))
 
     template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     assert '- {name: UFO_WEB_RUM_VERSION, value: "${image_tag}"}' in template

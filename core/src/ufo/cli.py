@@ -1022,7 +1022,12 @@ def _ufo_project_dir() -> Path:
 @click.option(
     "--out", type=click.Path(path_type=Path), default=DEFAULT_BUNDLE_DIR, show_default=True
 )
-def bundle(out: Path) -> None:
+@click.option(
+    "--client-binary",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+)
+def bundle(out: Path, client_binary: Path | None) -> None:
     """Freeze this deploy into a runnable artifact: OCI image recipe, pinned config, lockfile."""
     config = load_config()
     catalog = read_catalog(config.ext.store) if config.ext.store is not None else None
@@ -1033,7 +1038,13 @@ def bundle(out: Path) -> None:
     wheel = out / wheel_name()
     if not wheel.exists():
         raise click.ClickException(f"wheel build produced no {wheel}")
-    result = Bundle(config_path=config_path(), catalog=catalog, out=out, wheel=wheel).build()
+    result = Bundle(
+        config_path=config_path(),
+        catalog=catalog,
+        out=out,
+        wheel=wheel,
+        client_binary=client_binary,
+    ).build()
     click.echo(
         f"bundle at {result.out} — {len(result.pins)} extension(s) pinned, wheel {wheel.name}"
     )
