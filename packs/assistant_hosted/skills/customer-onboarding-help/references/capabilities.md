@@ -7,24 +7,28 @@ assemble an install step, a link, or a request for a token here.
 
 ## Finding existing work
 
-When a member asks where to inspect work that already exists:
+Radar, Artifacts, and Tasks are under Apps in the web portal:
 
 - Radar opens each scheduled run as a full report with its files and conversation.
 - Artifacts lists shared files and hosted sites.
 - Tasks lists recurring tasks and source triggers.
-- The portal's Memory view lets a member read and correct saved facts. The agent can also correct a
-  fact when the member states the correction in chat.
+- In Memory in the web portal, a member can read saved facts and record a correction that
+  supersedes the earlier statement. The agent can also correct a fact when the member states the
+  correction in chat.
 
-These are read views. When the member asks you to change something you can change, do it in chat.
+These pages let the member inspect work. Tasks can also pause or resume a scheduled task and edit
+or delete a row. Radar can rebuild its entries. When the member asks you to change something you
+can change, do it in chat.
 
 ## Explaining application creation
 
 A question about how application creation works is product help. A request to build one is the
 member's work: load `create-application` and do it instead of answering with this overview.
 
-The builder asks what job the application is for and who can use it. A guided build proposes the
-job, previews the homepage, and creates the application only after the member accepts it. Never say
-an application exists before the creation result confirms it.
+A member who names the job goes straight to the interview. It asks what job the application is for
+and who can use it. A member who does not name the job gets a guided build: a proposal, the
+interview, a homepage preview, and creation only after the member accepts it. Never say an
+application exists before the creation result confirms it.
 
 ## Connecting the customer's accounts
 

@@ -51,9 +51,10 @@ TASK_SCHEDULING_SKILL_MD = (
     "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/skills/task-scheduling/SKILL.md"
 )
 CREATE_APPLICATION_SKILL_MD = "core/src/ufo/skills/create-application/SKILL.md"
-RADAR_MANIFEST = "extensions/app_radar/ufo_ext_app_radar/manifest.py"
-ARTIFACTS_MANIFEST = "extensions/app_artifacts/ufo_ext_app_artifacts/manifest.py"
-TASKS_MANIFEST = "extensions/app_tasks/ufo_ext_app_tasks/manifest.py"
+RADAR_HOME = "extensions/app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx"
+ARTIFACTS_HOME = "extensions/app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx"
+TASKS_HOME = "extensions/app_tasks/ufo_ext_app_tasks/skills/app-tasks-home/app.tsx"
+WEB_OBJECTS = "extensions/web/frontend/src/kernel/objects.tsx"
 MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
 WEB_MEMORY_VIEW = "extensions/web/frontend/src/views/Memory.tsx"
 
@@ -409,33 +410,76 @@ CLAIMS = (
     Claim(
         claim="Radar opens a scheduled run with its report, files, and conversation",
         corpus="references/capabilities.md",
-        phrase="Radar opens each scheduled run as a full report with its files and conversation",
-        source=RADAR_MANIFEST,
-        pattern=r'opening into the full story with its files, its report, its "\n\s+"conversation',
+        phrase="Radar opens each scheduled run as a full report with its files and\n  conversation",
+        source=RADAR_HOME,
+        pattern=(
+            r"Each scheduled run reports here: the reply it closed with and the files it shared"
+        ),
     ),
     Claim(
         claim="Artifacts lists shared files and hosted sites",
         corpus="references/capabilities.md",
         phrase="Artifacts lists shared files and hosted sites",
-        source=ARTIFACTS_MANIFEST,
-        pattern=r'hosted "\n\s+"sites and shared files in one grid',
+        source=ARTIFACTS_HOME,
+        pattern=r"A file or site an app makes in a conversation is listed here",
     ),
     Claim(
         claim="Tasks lists scheduled work and source triggers",
         corpus="references/capabilities.md",
         phrase="Tasks lists recurring tasks and source triggers",
-        source=TASKS_MANIFEST,
-        pattern=r'tasks screen: two listings — "\n\s+"Scheduled and Triggers',
+        source=TASKS_HOME,
+        pattern=(
+            r'\{ kind: "scheduled_task", label: "Scheduled" \},\n'
+            r'\s+\{ kind: "source_trigger", label: "Triggers" \}'
+        ),
     ),
     Claim(
-        claim="the portal memory view reads and corrects saved facts",
+        claim="Tasks can pause or resume a scheduled task",
         corpus="references/capabilities.md",
-        phrase="Memory view lets a member read and correct saved facts",
+        phrase="Tasks can also pause or resume a scheduled task",
+        source=TASKS_HOME,
+        pattern=r'\{paused \? "Resume" : "Pause"\}',
+    ),
+    Claim(
+        claim="Tasks uses the editable object panel for its rows",
+        corpus="references/capabilities.md",
+        phrase="edit\nor delete a row",
+        source=TASKS_HOME,
+        pattern=r"<ObjectDetail",
+    ),
+    Claim(
+        claim="the object panel can edit or delete a row",
+        corpus="references/capabilities.md",
+        phrase="edit\nor delete a row",
+        source=WEB_OBJECTS,
+        pattern=(
+            r"<Button variant=\"send\" onClick=\{\(\) => setEditing\(record\)\}>\n"
+            r"\s+Edit\n(?:.*\n){0,3}\s+<ConfirmButton verb=\"Delete\""
+        ),
+    ),
+    Claim(
+        claim="Radar can rebuild its entries",
+        corpus="references/capabilities.md",
+        phrase="Radar can rebuild its entries",
+        source=RADAR_HOME,
+        pattern=r'<RebuildDialog title="Rebuild Entries" action="Rebuild entries"',
+    ),
+    Claim(
+        claim="the portal memory view reads saved facts and records corrections",
+        corpus="references/capabilities.md",
+        phrase="In Memory in the web portal, a member can read saved facts and record a correction",
         source=WEB_MEMORY_VIEW,
         pattern=(
             r"usePanelRead<MemoryPayload>\((?:.*\n)*?\s+"
             r"<DialogTitle>Correct Memory</DialogTitle>"
         ),
+    ),
+    Claim(
+        claim="a portal memory correction supersedes instead of editing the earlier statement",
+        corpus="references/capabilities.md",
+        phrase="a correction that\n  supersedes the earlier statement",
+        source=WEB_PANELS,
+        pattern=r"The named item is never edited or removed",
     ),
     Claim(
         claim="the agent records a correction through the memory update tool",
@@ -452,9 +496,16 @@ CLAIMS = (
         pattern=r"^name: create-application$",
     ),
     Claim(
-        claim="the application builder asks for the job and its audience",
+        claim="a member who names the job goes straight to the application interview",
         corpus="references/capabilities.md",
-        phrase="asks what job the application is for and who can use it",
+        phrase="A member who names the job goes straight to the interview",
+        source=CREATE_APPLICATION_SKILL_MD,
+        pattern=r"A member who named the job gets the interview straight away",
+    ),
+    Claim(
+        claim="the application interview asks for the job and its audience",
+        corpus="references/capabilities.md",
+        phrase="It asks what job the application is for\nand who can use it",
         source=CREATE_APPLICATION_SKILL_MD,
         pattern=(
             r"\| What job is it for\? \| the prompt \|\n"
@@ -462,9 +513,18 @@ CLAIMS = (
         ),
     ),
     Claim(
-        claim="a guided application build proposes and previews its homepage",
+        claim="a member who does not name the job gets the guided application build",
         corpus="references/capabilities.md",
-        phrase="A guided build proposes the job, previews the homepage",
+        phrase="A member who does not name the job gets a guided build",
+        source=CREATE_APPLICATION_SKILL_MD,
+        pattern=(
+            r"A member who did not — `Build me a\nnew app\.` is the portal's `New application`"
+        ),
+    ),
+    Claim(
+        claim="a guided application build proposes, interviews, and previews its homepage",
+        corpus="references/capabilities.md",
+        phrase="a proposal, the\ninterview, a homepage preview",
         source=CREATE_APPLICATION_SKILL_MD,
         pattern=(
             r"gets a\nguided build: propose first, then the interview, then the design of the "
@@ -472,9 +532,9 @@ CLAIMS = (
         ),
     ),
     Claim(
-        claim="a guided application build creates only after the member accepts its design",
+        claim="a guided application build creates only after the member accepts it",
         corpus="references/capabilities.md",
-        phrase="creates the application only after the member accepts it",
+        phrase="creation only after the member accepts it",
         source=CREATE_APPLICATION_SKILL_MD,
         pattern=r"in a guided build with a design pass, `Build it`\nis",
     ),

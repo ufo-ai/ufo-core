@@ -39,6 +39,10 @@ about installing over an install under way, and grading what the install then re
 this suite inside a live Slack handshake it has no business asserting. Both overview phrasings are
 unmeasured — the hillclimb that shaped this description predates them.
 
+The existing-work and application-creation wording is ablated in two matched repeats: it passes
+36/36 samples; removing it leaves application creation at 2/6, memory correction at 2/6, and page
+controls at 0/6.
+
 A case whose point is that the agent *does* something carries `samples=3`, because routing measures
 about nine rounds in ten, so at one sample a suite this size would pass whole only about a third of
 the time — a clean run would say more about luck than about the corpus. A case whose point is that
@@ -374,7 +378,7 @@ CASES = (
         digest_tag="onboarding:find-scheduled-report-files",
         rubric=(
             "The answer says Radar opens a scheduled run as a full report with its conversation.",
-            "The answer says Artifacts is where the member finds shared files and hosted sites.",
+            "The answer says Artifacts is where the member finds shared files.",
             "The answer does not claim it reran the task or recreated the missing file.",
         ),
     ),
@@ -387,7 +391,21 @@ CASES = (
         digest_tag="onboarding:inspect-schedules-and-triggers",
         rubric=(
             "The answer says the Tasks app lists scheduled tasks and source triggers.",
-            "The answer does not claim it created, changed, paused, or deleted any task.",
+            "The answer does not claim it performed a create, change, pause, or delete action.",
+        ),
+    ),
+    CapabilityCase(
+        "manage-existing-work",
+        "Are Tasks and Radar read-only, or can I pause a schedule and rebuild the Radar entries "
+        "there?",
+        corpus_scorer("capabilities.md"),
+        samples=3,
+        digest_tag="onboarding:manage-existing-work",
+        rubric=(
+            "The answer says Tasks can pause or resume a scheduled task.",
+            "The answer says Tasks rows can be edited or deleted.",
+            "The answer says Radar can rebuild its entries.",
+            "The answer does not call Tasks or Radar read-only.",
         ),
     ),
     CapabilityCase(
@@ -404,15 +422,29 @@ CASES = (
         ),
     ),
     CapabilityCase(
+        "explain-memory-correction",
+        "If I correct a saved fact in Memory, does that edit or remove the old row?",
+        corpus_scorer("capabilities.md"),
+        samples=3,
+        digest_tag="onboarding:explain-memory-correction",
+        rubric=(
+            "The answer says Memory records a correction that supersedes the earlier statement.",
+            "The answer does not say the correction directly edits or removes the earlier row.",
+        ),
+    ),
+    CapabilityCase(
         "explain-app-creation",
-        "I do not want to start yet. What happens when I ask ufo to build a new app?",
+        "I do not want to start yet. What happens when I name the job for a new ufo app, and what "
+        "happens if I only say, 'Build me an app'?",
         corpus_scorer("capabilities.md"),
         samples=3,
         digest_tag="onboarding:explain-app-creation",
         rubric=(
-            "The answer says ufo asks what job the app is for and who can use it.",
-            "The answer says a guided build previews the app homepage before creation.",
-            "The answer says ufo creates the app only after the member accepts the proposed app.",
+            "The answer says naming the job goes straight to the interview, which asks what job "
+            "the app is for and who can use it.",
+            "The answer says a request that does not name the job gets a guided build with a "
+            "proposal, the interview, and an app homepage preview.",
+            "The answer says the guided build creates the app only after the member accepts it.",
             "The answer does not claim that an app was created during this question.",
         ),
     ),
