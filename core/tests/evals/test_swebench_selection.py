@@ -5,7 +5,7 @@ import pytest
 
 from evals.swebench.models import SMOKE_CASE_IDS
 from evals.swebench.selection import (
-    HARD_DIFFICULTY,
+    HARDEST_DIFFICULTY,
     SWEBENCH_SELECTION_SEED,
     SubsetBuilder,
 )
@@ -13,7 +13,6 @@ from evals.swebench.selection import (
 POOL_REPOS = {"django/django": 40, "sympy/sympy": 12, "psf/requests": 4, "pallets/flask": 1}
 GRADEABLE = "15 min - 1 hour"
 HARD_INDEX = 900
-HARD_REPOS = tuple(POOL_REPOS)[:3]
 
 
 def row(repo: str, index: int, difficulty: str = GRADEABLE) -> dict[str, str]:
@@ -25,17 +24,23 @@ def row(repo: str, index: int, difficulty: str = GRADEABLE) -> dict[str, str]:
     }
 
 
-def smoke_row(repo: str, instance_id: str) -> dict[str, str]:
-    return {"repo": repo, "instance_id": instance_id, "difficulty": GRADEABLE}
+HARD_CASES = tuple(
+    row(repo, HARD_INDEX + index, HARDEST_DIFFICULTY)
+    for index, repo in enumerate(tuple(POOL_REPOS) * 11)
+)
+
+
+def smoke_row(repo: str, instance_id: str, difficulty: str = GRADEABLE) -> dict[str, str]:
+    return {"repo": repo, "instance_id": instance_id, "difficulty": difficulty}
 
 
 def pool() -> tuple[Mapping[str, object], ...]:
     return (
         *(row(repo, index) for repo, count in POOL_REPOS.items() for index in range(1, count + 1)),
-        *(row(repo, HARD_INDEX, HARD_DIFFICULTY) for repo in HARD_REPOS),
+        *HARD_CASES,
         smoke_row("django/django", SMOKE_CASE_IDS[0]),
         smoke_row("sympy/sympy", SMOKE_CASE_IDS[1]),
-        smoke_row("scikit-learn/scikit-learn", SMOKE_CASE_IDS[2]),
+        smoke_row("scikit-learn/scikit-learn", SMOKE_CASE_IDS[2], "1-4 hours"),
     )
 
 
@@ -67,7 +72,11 @@ def test_the_representative_subsets_are_disjoint_from_smoke_and_hard_cases() -> 
     assert selection.smoke == SMOKE_CASE_IDS
     assert len(set(drawn)) == 20
     assert not set(drawn) & set(SMOKE_CASE_IDS)
-    assert selection.hard == ("django__django-900", "psf__requests-900", "sympy__sympy-900")
+    expected_hard = tuple(
+        sorted((*(item["instance_id"] for item in HARD_CASES), SMOKE_CASE_IDS[2]))
+    )
+    assert selection.hard == expected_hard
+    assert set(selection.smoke) & set(selection.hard) == {SMOKE_CASE_IDS[2]}
     assert not set(drawn) & set(selection.hard)
 
 
@@ -78,10 +87,10 @@ def test_a_pool_short_of_the_roster_refuses_to_draw() -> None:
         SubsetBuilder(rows, SWEBENCH_SELECTION_SEED).build()
 
 
-def test_a_pool_of_only_smoke_and_hard_rows_refuses_to_draw() -> None:
+def test_a_pool_of_only_smoke_and_hardest_rows_refuses_to_draw() -> None:
     rows = (
         smoke_row("django/django", SMOKE_CASE_IDS[0]),
-        row("django/django", 1, HARD_DIFFICULTY),
+        row("django/django", 1, HARDEST_DIFFICULTY),
     )
 
     with pytest.raises(ValueError, match="selection pool is empty"):

@@ -1,6 +1,6 @@
 # SWE-bench Verified
 
-One snapshot carries the whole pinned roster — 26 cases in four subsets, graded by the unmodified
+One snapshot carries the whole pinned roster — 66 cases in four subsets, graded by the unmodified
 `swebench==4.1.0` harness. Docker must be running.
 
 | Subset | Cases | Purpose | Images to pull |
@@ -8,7 +8,7 @@ One snapshot carries the whole pinned roster — 26 cases in four subsets, grade
 | `smoke` | 3 | the frozen comparability set; every historical score is against these | 4 GB |
 | `hillclimb` | 10 | the climb target: one case per repository, seeded draw | 14 GB |
 | `holdout` | 10 | validates a completed climb | 15 GB |
-| `hard` | 3 | every Verified row labeled `>4 hours` | Varies |
+| `hard` | 45 | every Verified row labeled `1-4 hours` or `>4 hours` | Varies |
 
 Sizes are compressed registry bytes; unpacked images take more. Run `docker system df` before a
 pass and `--prune-images` after one, so the hillclimb images are gone before the holdout pass pulls
@@ -17,7 +17,8 @@ the tools refuse it.
 
 The roster is `evals/swebench/data/upstream.json`. `smoke` is frozen. `hillclimb` and `holdout` are
 a seeded, repository-stratified round-robin over every row outside `smoke` and outside the
-`>4 hours` difficulty label; `hard` contains every row with that label. Within a repository, instances rank by
+`>4 hours` label; `hard` independently contains every row estimated above one hour. The frozen
+representative roster overlaps `hard` by two cases, and combined runs execute each once. Within a repository, instances rank by
 `sha256(seed + "\0" + instance_id)`; repositories take turns, largest pool first. The checked-in ids
 are the pin and the algorithm is the enforcement — `build` recomputes the split and refuses a
 snapshot that disagrees.
@@ -55,7 +56,7 @@ uv run python -m evals \
   --swebench-subset all \
   --remote \
   --fresh-workspace \
-  --concurrency 26
+  --concurrency 66
 ```
 
 `--fresh-workspace` derives a new workspace from the run id, founds its admin and main agent through

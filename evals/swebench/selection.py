@@ -1,5 +1,5 @@
 """Recompute the pinned SWE-bench roster: frozen smoke, representative seeded draws, and every
-hardest-difficulty row, each backed by an official image."""
+hard row, each backed by an official image."""
 
 import argparse
 import hashlib
@@ -19,7 +19,8 @@ from evals.swebench.models import (
 from evals.swebench.snapshot import SWEBENCH_UPSTREAM, canonical_json, verify_source
 
 SWEBENCH_SELECTION_SEED = "swebench-hillclimb-2026-08-22"
-HARD_DIFFICULTY = ">4 hours"
+HARD_DIFFICULTIES = frozenset(("1-4 hours", ">4 hours"))
+HARDEST_DIFFICULTY = ">4 hours"
 
 
 def read_parquet(source: bytes, upstream: SWEbenchUpstream) -> tuple[Mapping[str, object], ...]:
@@ -69,7 +70,7 @@ class SubsetBuilder:
     def _hard_cases(self) -> tuple[str, ...]:
         hard = []
         for row in self.rows:
-            if row["difficulty"] != HARD_DIFFICULTY:
+            if row["difficulty"] not in HARD_DIFFICULTIES:
                 continue
             instance_id = row["instance_id"]
             if not isinstance(instance_id, str):
@@ -83,7 +84,7 @@ class SubsetBuilder:
             instance_id = row["instance_id"]
             if not isinstance(instance_id, str) or not isinstance(row["repo"], str):
                 raise ValueError(f"SWE-bench row has a nontextual identity: {row['instance_id']!r}")
-            if instance_id in SMOKE_CASE_IDS or row["difficulty"] == HARD_DIFFICULTY:
+            if instance_id in SMOKE_CASE_IDS or row["difficulty"] == HARDEST_DIFFICULTY:
                 continue
             pool[row["repo"]].append(instance_id)
         if not pool:

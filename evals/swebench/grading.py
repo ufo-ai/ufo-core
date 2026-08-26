@@ -354,15 +354,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     unknown = sorted(set(requested) - available)
     if unknown:
         parser.error(f"unknown SWE-bench case ids: {', '.join(unknown)}")
-    spanned = sorted({selection.subset_of(case_id) for case_id in requested})
-    if len(spanned) > 1 and args.subset != "all":
-        parser.error(f"SWE-bench cases span subsets: {', '.join(spanned)}")
-    if args.subset is None and not spanned:
+    memberships = tuple(selection.subsets_of(case_id) for case_id in requested)
+    if args.subset is None and not memberships:
         parser.error("SWE-bench grading requires --subset or --case")
-    if args.subset not in (None, "all") and spanned and spanned != [args.subset]:
+    if args.subset not in (None, "all") and any(
+        args.subset not in subsets for subsets in memberships
+    ):
         parser.error(
             f"SWE-bench cases are outside the {args.subset} subset: {', '.join(requested)}"
         )
+    spanned = sorted({subset for subsets in memberships for subset in subsets})
+    if args.subset is None and len(spanned) > 1:
+        parser.error(f"SWE-bench cases span subsets: {', '.join(spanned)}")
     subset: GradingSubset = args.subset or spanned[0]
     roster = selection.all_ids if subset == "all" else selection.ids(subset)
     wanted = set(requested) or set(roster)

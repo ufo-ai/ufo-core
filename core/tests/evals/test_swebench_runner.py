@@ -221,7 +221,11 @@ def test_every_subset_loads_as_its_own_concurrent_task(tmp_path: Path) -> None:
         SUBSETS.smoke,
         SUBSETS.hillclimb,
         SUBSETS.holdout,
-        SUBSETS.hard,
+        tuple(
+            case_id
+            for case_id in SUBSETS.hard
+            if case_id not in SUBSETS.smoke + SUBSETS.hillclimb + SUBSETS.holdout
+        ),
     )
     assert all(task.pin_runtime and not task.exclusive for task in tasks)
     assert len({task.digest for task in tasks}) == 4
@@ -235,6 +239,22 @@ def test_one_subset_loads_only_its_own_cases(tmp_path: Path, subset: Subset) -> 
 
     assert task.name == f"swebench_verified.{subset}"
     assert task.cases == SUBSETS.ids(subset)
+
+
+def test_the_hard_subset_keeps_its_frozen_smoke_case_while_all_runs_it_once(
+    tmp_path: Path,
+) -> None:
+    snapshot_root = snapshot(tmp_path / "snapshot")
+    representative = SUBSETS.smoke + SUBSETS.hillclimb + SUBSETS.holdout
+    overlapping = tuple(case_id for case_id in SUBSETS.hard if case_id in representative)
+
+    (hard,) = load_swebench(overlapping, snapshot_root, tmp_path / "hard", "hard")
+    all_tasks = load_swebench(overlapping, snapshot_root, tmp_path / "all", None)
+
+    assert hard.cases == overlapping
+    combined = tuple(case for task in all_tasks for case in task.cases)
+    assert len(combined) == len(overlapping)
+    assert set(combined) == set(overlapping)
 
 
 def test_named_cases_narrow_the_subsets_that_carry_them(tmp_path: Path) -> None:

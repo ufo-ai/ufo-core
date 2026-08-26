@@ -49,11 +49,56 @@ HOLDOUT_IDS = (
     "pytest-dev__pytest-5840",
 )
 HARD_IDS = (
+    "astropy__astropy-13398",
+    "astropy__astropy-13579",
+    "astropy__astropy-14369",
+    "django__django-10554",
+    "django__django-11138",
+    "django__django-11400",
+    "django__django-11885",
+    "django__django-12325",
+    "django__django-12708",
+    "django__django-13128",
+    "django__django-13212",
+    "django__django-13344",
+    "django__django-13449",
+    "django__django-13837",
+    "django__django-14007",
+    "django__django-14011",
+    "django__django-14631",
+    "django__django-15128",
+    "django__django-15268",
+    "django__django-15503",
+    "django__django-15629",
+    "django__django-15957",
+    "django__django-16263",
+    "django__django-16560",
+    "django__django-16631",
+    "pydata__xarray-3993",
     "pydata__xarray-6992",
+    "pylint-dev__pylint-4551",
+    "pylint-dev__pylint-8898",
+    "pytest-dev__pytest-10356",
+    "pytest-dev__pytest-5787",
+    "pytest-dev__pytest-6197",
+    "scikit-learn__scikit-learn-25102",
+    "sphinx-doc__sphinx-11510",
     "sphinx-doc__sphinx-7590",
+    "sphinx-doc__sphinx-8548",
+    "sphinx-doc__sphinx-9229",
+    "sphinx-doc__sphinx-9461",
+    "sympy__sympy-12489",
+    "sympy__sympy-13852",
     "sympy__sympy-13878",
+    "sympy__sympy-14248",
+    "sympy__sympy-16597",
+    "sympy__sympy-17630",
+    "sympy__sympy-18199",
 )
-EXPECTED_IDS = SMOKE_IDS + HILLCLIMB_IDS + HOLDOUT_IDS + HARD_IDS
+REPRESENTATIVE_IDS = SMOKE_IDS + HILLCLIMB_IDS + HOLDOUT_IDS
+EXPECTED_IDS = REPRESENTATIVE_IDS + tuple(
+    instance_id for instance_id in HARD_IDS if instance_id not in REPRESENTATIVE_IDS
+)
 EXPECTED_COLUMNS = (
     "repo",
     "instance_id",
@@ -87,11 +132,7 @@ def _row(instance_id: str, index: int) -> dict[str, str]:
         "FAIL_TO_PASS": json.dumps([f"test_fails_{index}"]),
         "PASS_TO_PASS": json.dumps([f"test_passes_{index}"]),
         "environment_setup_commit": f"{index + 100:040x}",
-        "difficulty": (
-            ">4 hours"
-            if instance_id in HARD_IDS
-            else ("<15 min fix", "15 min - 1 hour", "1-4 hours")[index % 3]
-        ),
+        "difficulty": "1-4 hours" if instance_id in HARD_IDS else "15 min - 1 hour",
     }
 
 
@@ -125,12 +166,13 @@ def test_subset_accessors_name_every_case() -> None:
     assert subsets.ids("hillclimb") == HILLCLIMB_IDS
     assert subsets.ids("holdout") == HOLDOUT_IDS
     assert subsets.ids("hard") == HARD_IDS
-    assert subsets.subset_of(SMOKE_IDS[0]) == "smoke"
-    assert subsets.subset_of(HILLCLIMB_IDS[4]) == "hillclimb"
-    assert subsets.subset_of(HOLDOUT_IDS[9]) == "holdout"
-    assert subsets.subset_of(HARD_IDS[2]) == "hard"
+    assert subsets.subsets_of(SMOKE_IDS[0]) == ("smoke",)
+    assert subsets.subsets_of(HILLCLIMB_IDS[4]) == ("hillclimb",)
+    assert subsets.subsets_of(HOLDOUT_IDS[9]) == ("holdout",)
+    assert subsets.subsets_of(HARD_IDS[2]) == ("hard",)
+    assert subsets.subsets_of(SMOKE_IDS[2]) == ("smoke", "hard")
     with pytest.raises(ValueError, match="unknown SWE-bench instance id"):
-        subsets.subset_of("pallets__flask-99999")
+        subsets.subsets_of("pallets__flask-99999")
 
 
 @pytest.mark.parametrize(
@@ -138,8 +180,11 @@ def test_subset_accessors_name_every_case() -> None:
     (
         ({"smoke": SMOKE_IDS[::-1]}, "smoke case ids must use the approved order"),
         ({"hillclimb": HILLCLIMB_IDS[:9]}, "hillclimb subset requires 10 case ids, found 9"),
-        ({"holdout": (*HOLDOUT_IDS[:9], HILLCLIMB_IDS[0])}, "subsets must be disjoint"),
-        ({"hard": HARD_IDS[:2]}, "hard subset requires 3 case ids, found 2"),
+        (
+            {"holdout": (*HOLDOUT_IDS[:9], HILLCLIMB_IDS[0])},
+            "representative subsets must be disjoint",
+        ),
+        ({"hard": HARD_IDS[:44]}, "hard subset requires 45 case ids, found 44"),
         ({"hillclimb": (*HILLCLIMB_IDS[:9], "not-an-instance")}, "String should match pattern"),
     ),
 )
@@ -201,10 +246,10 @@ def test_snapshot_round_trip_preserves_every_subset_row(tmp_path: Path) -> None:
     snapshot = load_snapshot(root)
     assert snapshot.root == str(root.resolve())
     assert snapshot.manifest.case_ids == EXPECTED_IDS
-    assert snapshot.manifest.cases.records == 26
+    assert snapshot.manifest.cases.records == 66
     assert snapshot.cases == select_cases(_rows())
     payload = gzip.decompress((root / CASES_FILE).read_bytes())
-    assert len(payload.splitlines()) == 26
+    assert len(payload.splitlines()) == 66
     assert tuple(json.loads(line) for line in payload.splitlines()) == _rows()
 
 
@@ -309,7 +354,7 @@ def test_snapshot_load_rejects_manifest_digest_and_count_drift(tmp_path: Path) -
     manifest["digest"] = "sha256:" + "0" * 64
     (count_root / CASES_FILE).write_bytes(gzip.compress(truncated, mtime=0))
     manifest_path.write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match="requires exactly 26 cases"):
+    with pytest.raises(ValueError, match="requires exactly 66 cases"):
         load_snapshot(count_root)
 
 

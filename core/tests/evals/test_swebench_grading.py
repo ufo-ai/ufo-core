@@ -534,6 +534,34 @@ def test_cli_all_grades_the_complete_pinned_roster_once(
     assert summary["official_resolved"] == 5
 
 
+def test_cli_can_grade_the_frozen_smoke_case_as_hard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli_environment(tmp_path, monkeypatch)
+    overlapping = next(case_id for case_id in SUBSETS.smoke if case_id in SUBSETS.hard)
+    workflows: list[SWEbenchGrading] = []
+
+    def run(workflow: SWEbenchGrading) -> Path:
+        workflows.append(workflow)
+        return tmp_path / "summary.json"
+
+    monkeypatch.setattr(SWEbenchGrading, "run", run)
+
+    grading.main(
+        (
+            "--submissions",
+            str(tmp_path / "submissions"),
+            "--subset",
+            "hard",
+            "--case",
+            overlapping,
+        )
+    )
+
+    assert workflows[0].subset == "hard"
+    assert tuple(case.instance_id for case in workflows[0].selected_cases) == (overlapping,)
+
+
 @pytest.mark.parametrize(
     ("arguments", "message"),
     (
@@ -541,6 +569,10 @@ def test_cli_all_grades_the_complete_pinned_roster_once(
         (
             ("--case", SUBSETS.smoke[0], "--case", SUBSETS.holdout[0]),
             "SWE-bench cases span subsets: holdout, smoke",
+        ),
+        (
+            ("--case", next(case for case in SUBSETS.smoke if case in SUBSETS.hard)),
+            "SWE-bench cases span subsets: hard, smoke",
         ),
         (
             ("--subset", "smoke", "--case", SUBSETS.hillclimb[0]),

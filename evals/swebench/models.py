@@ -12,7 +12,7 @@ SMOKE_CASE_IDS = (
     "sympy__sympy-20590",
     "scikit-learn__scikit-learn-25102",
 )
-SUBSET_SIZES: dict[Subset, int] = {"smoke": 3, "hillclimb": 10, "holdout": 10, "hard": 3}
+SUBSET_SIZES: dict[Subset, int] = {"smoke": 3, "hillclimb": 10, "holdout": 10, "hard": 45}
 EXPECTED_PARQUET_COLUMNS = (
     ("repo", "string"),
     ("instance_id", "string"),
@@ -57,7 +57,7 @@ class UpstreamParquet(BoundaryModel):
 
 
 class SubsetSelection(BoundaryModel):
-    """The pinned representative roster and every hardest-difficulty case."""
+    """The pinned representative roster and every hard case."""
 
     seed: str = Field(min_length=1)
     smoke: tuple[InstanceId, ...]
@@ -75,8 +75,9 @@ class SubsetSelection(BoundaryModel):
                 raise ValueError(
                     f"SWE-bench {subset} subset requires {size} case ids, found {found}"
                 )
-        if len(set(self.all_ids)) != len(self.all_ids):
-            raise ValueError("SWE-bench subsets must be disjoint")
+        representative = self.smoke + self.hillclimb + self.holdout
+        if len(set(representative)) != len(representative):
+            raise ValueError("SWE-bench representative subsets must be disjoint")
         return self
 
     def ids(self, subset: Subset) -> tuple[str, ...]:
@@ -91,16 +92,19 @@ class SubsetSelection(BoundaryModel):
             case "hard":
                 return self.hard
 
-    def subset_of(self, instance_id: str) -> Subset:
-        """The subset holding one case id."""
-        for subset in SUBSET_SIZES:
-            if instance_id in self.ids(subset):
-                return subset
-        raise ValueError(f"unknown SWE-bench instance id: {instance_id}")
+    def subsets_of(self, instance_id: str) -> tuple[Subset, ...]:
+        """The subsets holding one case id."""
+        subsets = tuple(subset for subset in SUBSET_SIZES if instance_id in self.ids(subset))
+        if not subsets:
+            raise ValueError(f"unknown SWE-bench instance id: {instance_id}")
+        return subsets
 
     @property
     def all_ids(self) -> tuple[str, ...]:
-        return self.smoke + self.hillclimb + self.holdout + self.hard
+        representative = self.smoke + self.hillclimb + self.holdout
+        return representative + tuple(
+            instance_id for instance_id in self.hard if instance_id not in representative
+        )
 
 
 class SWEbenchUpstream(BoundaryModel):
@@ -130,7 +134,7 @@ class SWEbenchCase(BoundaryModel):
 
 class SnapshotFile(BoundaryModel):
     path: Literal["cases.jsonl.gz"] = "cases.jsonl.gz"
-    records: Literal[26] = 26
+    records: Literal[66] = 66
     sha256: str = Field(pattern=DIGEST_PATTERN)
 
 

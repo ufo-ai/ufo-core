@@ -129,16 +129,19 @@ def load_swebench(
     if unknown:
         raise ValueError(f"unknown SWE-bench case ids: {', '.join(unknown)}")
     tasks = []
+    assigned: set[str] = set()
+    by_id = {case.instance_id: case for case in snapshot.cases}
     for group in SUBSETS:
         if subset is not None and group != subset:
             continue
-        members = frozenset(selection.ids(group))
         cases = tuple(
-            _capability_case(case, parquet_sha256, submissions_root)
-            for case in snapshot.cases
-            if case.instance_id in members and (not requested or case.instance_id in requested)
+            _capability_case(by_id[case_id], parquet_sha256, submissions_root)
+            for case_id in selection.ids(group)
+            if (not requested or case_id in requested)
+            and (subset is not None or case_id not in assigned)
         )
         if cases:
+            assigned.update(case.name for case in cases)
             tasks.append(
                 rewrapped(
                     capability_task(f"{SUITE_NAME}.{group}", cases, packs=SWEBENCH_PACKS),
