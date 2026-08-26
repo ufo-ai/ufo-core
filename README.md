@@ -16,7 +16,8 @@ Extensions supply all other functions: connectors, data sources, tools, subagent
 
 This mode runs as one process. It uses SQLite and local files. It does not need Docker.
 
-1. Run `make install`. This installs the Python and pnpm dependencies and the git hooks.
+1. Run `make install`. This installs the Python and pnpm dependencies and the git hooks. It runs
+   through uv, so install uv first if this machine has none: `pip install uv`.
 2. Run `make setup`. This creates `.env`. It does not change an existing `.env`.
 3. Set `UFO_ANTHROPIC_API_KEY` and `UFO_OPENAI_API_KEY` in `.env`.
 4. Run `make init EMAIL=you@example.com`. This writes `ufo.toml`.
