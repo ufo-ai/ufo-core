@@ -35,3 +35,40 @@ def test_the_pkg_host_allowlist_matches_the_daemons_default() -> None:
     assert block is not None, "DEFAULT_PKG_HOSTS not found in servers/cache/src/config.rs"
     daemon_hosts = tuple(re.findall(r'"([^"]+)"', block.group(1)))
     assert daemon_hosts == CACHE_PKG_HOSTS
+
+
+def test_github_release_assets_follow_the_package_cache_route() -> None:
+    assert {
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com",
+        "github-releases.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "codeload.github.com",
+    } <= set(CACHE_PKG_HOSTS)
+
+
+@pytest.mark.parametrize(
+    ("manager", "hosts"),
+    (
+        (
+            "apt",
+            (
+                "archive.ubuntu.com",
+                "security.ubuntu.com",
+                "ports.ubuntu.com",
+                "deb.debian.org",
+                "security.debian.org",
+                "cdn-fastly.deb.debian.org",
+            ),
+        ),
+        ("cargo", ("index.crates.io", "static.crates.io")),
+        ("gem", ("rubygems.org", "index.rubygems.org", "api.rubygems.org")),
+        ("go", ("proxy.golang.org", "sum.golang.org")),
+        ("npm", ("registry.npmjs.org",)),
+        ("pip", ("pypi.org", "files.pythonhosted.org")),
+    ),
+)
+def test_package_manager_hosts_follow_the_package_cache_route(
+    manager: str, hosts: tuple[str, ...]
+) -> None:
+    assert set(hosts) <= set(CACHE_PKG_HOSTS), manager

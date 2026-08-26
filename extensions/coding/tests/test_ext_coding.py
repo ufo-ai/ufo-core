@@ -60,6 +60,10 @@ def test_coding_manifest_registers_the_coding_profile() -> None:
     assert manifest.hooks == ()
 
 
+def test_coding_manifest_declares_dependency_install_internet() -> None:
+    assert coding.manifest().sandbox_internet
+
+
 def test_coding_result_uses_only_the_shared_register_bound() -> None:
     result = "x" * 10_000
     assert coding.CodingOutput.model_validate({"result": result}).result == result

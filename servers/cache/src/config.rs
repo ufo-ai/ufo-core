@@ -56,8 +56,7 @@ const DEFAULT_GIT_FRESH_TTL_SECS: u64 = 15;
 const DEFAULT_PACK_CACHE_MB: u64 = 4096;
 const DEFAULT_LFS_CACHE_MB: u64 = 4096;
 
-// Public registries and their download CDNs for Node, Python, Rust, and Go — the build/test time
-// sinks. More ecosystems (apt, apk, RubyGems, Maven) drop in through UFO_CACHE_PKG_HOSTS.
+// Public registries, distro archives, and artifact CDNs used by sandbox builds.
 const DEFAULT_PKG_HOSTS: &[&str] = &[
     "registry.npmjs.org",
     "pypi.org",
@@ -67,6 +66,20 @@ const DEFAULT_PKG_HOSTS: &[&str] = &[
     "index.crates.io",
     "proxy.golang.org",
     "sum.golang.org",
+    "rubygems.org",
+    "index.rubygems.org",
+    "api.rubygems.org",
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "ports.ubuntu.com",
+    "deb.debian.org",
+    "security.debian.org",
+    "cdn-fastly.deb.debian.org",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "codeload.github.com",
 ];
 
 impl Config {

@@ -142,6 +142,15 @@ APT_PACKAGES = (
     "tesseract-ocr",
     "ffmpeg",
 )
+APT_HTTPS_COMMAND = (
+    "find /etc/apt -type f \\( -name '*.list' -o -name '*.sources' \\) -exec sed -i '"
+    "s|http://archive.ubuntu.com|https://archive.ubuntu.com|g; "
+    "s|http://security.ubuntu.com|https://security.ubuntu.com|g; "
+    "s|http://ports.ubuntu.com|https://ports.ubuntu.com|g; "
+    "s|http://deb.debian.org|https://deb.debian.org|g; "
+    "s|http://security.debian.org|https://security.debian.org|g; "
+    "s|http://cdn-fastly.deb.debian.org|https://cdn-fastly.deb.debian.org|g' {} +"
+)
 # gh is the sandboxed GitHub CLI behind the grant-sentinel GH_TOKEN (the egress proxy forwards its
 # sentinel-carrying requests through the connector broker). It installs from GitHub's own apt repo —
 # the distro archives lag years behind.
@@ -155,6 +164,23 @@ GH_INSTALL_COMMAND = (
     'https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && '
     "apt-get update && apt-get install -y --no-install-recommends gh && "
     "rm -rf /var/lib/apt/lists/*"
+)
+NODE_VERSION = "24.19.0"
+PNPM_VERSION = "11.24.0"
+NODE_INSTALL_COMMAND = (
+    'case "$(dpkg --print-architecture)" in '
+    "amd64) node_arch=x64; node_sha="
+    "f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4 ;; "
+    "arm64) node_arch=arm64; node_sha="
+    "d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f ;; "
+    '*) echo "unsupported Node architecture" >&2; exit 1 ;; esac && '
+    f"archive=/tmp/node-v{NODE_VERSION}-linux-${{node_arch}}.tar.gz && "
+    f"curl -fsSL https://nodejs.org/dist/v{NODE_VERSION}/"
+    f"node-v{NODE_VERSION}-linux-${{node_arch}}.tar.gz "
+    '-o "$archive" && '
+    'echo "$node_sha  $archive" | sha256sum -c - && '
+    'tar -xzf "$archive" -C /usr/local --strip-components=1 --no-same-owner && '
+    'rm "$archive"'
 )
 # Skill runtimes the office/pdf/media/document-review scripts assume pre-installed.
 PIP_PACKAGES = (
@@ -180,6 +206,7 @@ PIP_PACKAGES = (
 # playwright drives the website-building game test client; its browser binary installs separately
 # into PLAYWRIGHT_BROWSERS_DIR (the npm package alone can't launch).
 NPM_PACKAGES = (
+    f"pnpm@{PNPM_VERSION}",
     "pptxgenjs",
     "vite",
     "react",
@@ -203,6 +230,7 @@ SANDBOX_TEMPLATE_READY_COMMAND = f"""
 set -ex
 command -v python3 >/dev/null
 command -v node >/dev/null
+command -v pnpm >/dev/null
 command -v ufo >/dev/null
 command -v vite >/dev/null
 command -v rg >/dev/null
@@ -210,6 +238,8 @@ command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
 command -v soffice >/dev/null
 command -v gh >/dev/null
+test "$(node --version)" = "v{NODE_VERSION}"
+test "$(pnpm --version)" = "{PNPM_VERSION}"
 test "$(TMPDIR={SANDBOX_TMPDIR} python3 -c 'import tempfile; print(tempfile.gettempdir())')" \\
   = "{SANDBOX_TMPDIR}"
 test -f "{SYSTEM_SKILLS_ROOT}/.system-manifest.json"
@@ -309,7 +339,9 @@ def build_definition_digest(sizing: Sizing | None) -> str:
         "start": START_COMMAND,
         "ready": SANDBOX_TEMPLATE_READY_COMMAND,
         "apt": list(APT_PACKAGES),
+        "apt_https": APT_HTTPS_COMMAND,
         "gh": GH_INSTALL_COMMAND,
+        "node": NODE_INSTALL_COMMAND,
         "pip": list(PIP_PACKAGES),
         "npm": list(NPM_PACKAGES),
         "env": SANDBOX_ENV,
@@ -335,8 +367,10 @@ def apply_layers(builder: object, digest: str) -> object:
         + " ".join(APT_PACKAGES)
         + " && rm -rf /var/lib/apt/lists/*"
     )
+    builder.run_cmd(APT_HTTPS_COMMAND)
     builder.run_cmd("apt-get remove -y sudo || true; rm -rf /etc/sudoers /etc/sudoers.d")
     builder.run_cmd(GH_INSTALL_COMMAND)
+    builder.run_cmd(NODE_INSTALL_COMMAND)
     builder.run_cmd("python3 -m pip install --no-cache-dir " + " ".join(PIP_PACKAGES))
     builder.run_cmd(
         f"npm install -g --prefix /usr/local --no-fund --no-audit {' '.join(NPM_PACKAGES)}"

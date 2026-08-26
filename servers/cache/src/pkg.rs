@@ -53,11 +53,11 @@ fn writing_temp(path: &Path) -> PathBuf {
 }
 
 /// Serves a transparent, shared HTTP forward-cache for public package registries and their download
-/// CDNs (npm, PyPI, crates.io, the Go module proxy). The proxy MITMs each allowlisted host and
-/// relays its requests here; this type honours the origin's `Cache-Control` to cache immutable
-/// downloads while passing mutable metadata through, revalidates stale entries conditionally, and
-/// bounds the tree's disk. Entries are namespaced by host but not by tenant: the artifacts are public
-/// and immutable, so one shared cache is both safe and the whole point.
+/// CDNs. The proxy MITMs each allowlisted host and relays its requests here; this type honours the
+/// origin's `Cache-Control` to cache immutable downloads while passing mutable metadata through,
+/// revalidates stale entries conditionally, and bounds the tree's disk. Entries are namespaced by
+/// host but not by tenant: the artifacts are public and immutable, so one shared cache is both safe
+/// and the whole point.
 pub struct PkgCache {
     root: PathBuf,
     client: reqwest::Client,

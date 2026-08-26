@@ -11,9 +11,10 @@ CACHE_HOST = "cache.ufo.internal"
 CACHE_GIT_HOSTS = ("github.com",)
 
 # The public package registries and download CDNs the proxy transparently routes through the cache
-# for an internet-holding agent. Unlike git, these need no sandbox config: the proxy intercepts the
-# real host, so npm/pip/cargo/go are unchanged and a tarball's own absolute URL still hits the
-# cache. The daemon's own UFO_CACHE_PKG_HOSTS allowlist must stay in step with this list.
+# for an internet-holding agent. The proxy intercepts the real host, so package-manager commands are
+# unchanged and a package's own absolute download URL still hits the cache. The sandbox image makes
+# apt's standard archive URLs HTTPS so they use the proxy's CONNECT path. The daemon's own
+# UFO_CACHE_PKG_HOSTS allowlist must stay in step with this list.
 CACHE_PKG_HOSTS = (
     "registry.npmjs.org",
     "pypi.org",
@@ -23,6 +24,20 @@ CACHE_PKG_HOSTS = (
     "index.crates.io",
     "proxy.golang.org",
     "sum.golang.org",
+    "rubygems.org",
+    "index.rubygems.org",
+    "api.rubygems.org",
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "ports.ubuntu.com",
+    "deb.debian.org",
+    "security.debian.org",
+    "cdn-fastly.deb.debian.org",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "codeload.github.com",
 )
 
 CACHE_CONTROL_TOKEN_ENV = "UFO_CACHE_CONTROL_TOKEN"

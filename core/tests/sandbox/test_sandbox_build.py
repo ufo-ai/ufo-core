@@ -16,13 +16,17 @@ from e2b.template.types import BuildInfo
 
 import sandbox.build_template as build_template
 from sandbox.build_template import (
+    APT_HTTPS_COMMAND,
     APT_PACKAGES,
     CLIENT_ROOT_FILES,
     CLIENT_SOURCE_DIRS,
     CLIENT_STAGE_PATH,
     GH_INSTALL_COMMAND,
+    NODE_INSTALL_COMMAND,
+    NODE_VERSION,
     NPM_PACKAGES,
     PIP_PACKAGES,
+    PNPM_VERSION,
     ROOT,
     RUNTIME_USER,
     SANDBOX_ENV,
@@ -99,6 +103,7 @@ EXPECTED_PIP = (
     "imageio-ffmpeg",
 )
 EXPECTED_NPM = (
+    f"pnpm@{PNPM_VERSION}",
     "pptxgenjs",
     "vite",
     "react",
@@ -115,6 +120,21 @@ def test_apt_packages_match_the_expected_toolchain() -> None:
     assert APT_PACKAGES == EXPECTED_APT
 
 
+def test_runtime_apt_sources_use_https_proxy_tunnels() -> None:
+    dockerfile = pod_dockerfile()
+    assert APT_HTTPS_COMMAND in dockerfile
+    for host in (
+        "archive.ubuntu.com",
+        "security.ubuntu.com",
+        "ports.ubuntu.com",
+        "deb.debian.org",
+        "security.debian.org",
+        "cdn-fastly.deb.debian.org",
+    ):
+        assert f"http://{host}" in APT_HTTPS_COMMAND
+        assert f"https://{host}" in APT_HTTPS_COMMAND
+
+
 def test_pip_packages_match_the_expected_toolchain() -> None:
     """markitdown[pptx] carries the pptx extra the office skills need — the bare package would drop
     it silently."""
@@ -128,6 +148,24 @@ def test_npm_packages_match_the_expected_toolchain() -> None:
 def test_the_playwright_pin_matches_the_edge_suite() -> None:
     edge = json.loads((ROOT / "infra/modules/edge/package.json").read_text())
     assert edge["devDependencies"]["playwright"] == PLAYWRIGHT_VERSION
+
+
+def test_the_sandbox_installs_the_repository_node_and_pnpm_versions() -> None:
+    dockerfile = pod_dockerfile()
+    package_files = (
+        "extensions/debugger/frontend/package.json",
+        "extensions/web/frontend/package.json",
+        "infra/modules/edge/package.json",
+    )
+    package_managers = {
+        json.loads((ROOT / path).read_text())["packageManager"] for path in package_files
+    }
+    assert NODE_INSTALL_COMMAND in dockerfile
+    assert f"node-v{NODE_VERSION}-linux-${{node_arch}}.tar.gz" in dockerfile
+    assert f"pnpm@{PNPM_VERSION}" in dockerfile
+    assert package_managers == {f"pnpm@{PNPM_VERSION}"}
+    assert f'test "$(node --version)" = "v{NODE_VERSION}"' in SANDBOX_TEMPLATE_READY_COMMAND
+    assert f'test "$(pnpm --version)" = "{PNPM_VERSION}"' in SANDBOX_TEMPLATE_READY_COMMAND
 
 
 def test_sandbox_tiers_scale_cpu_and_memory_together() -> None:
@@ -294,6 +332,7 @@ def test_rendered_dockerfile_carries_the_full_install_sequence() -> None:
     assert "--no-install-recommends" in dockerfile
     assert "rm -rf /var/lib/apt/lists/*" in dockerfile
     assert "apt-get remove -y sudo" in dockerfile
+    assert NODE_INSTALL_COMMAND in dockerfile
     assert "pip install --no-cache-dir" in dockerfile
     assert "npm install -g --prefix /usr/local --no-fund --no-audit" in dockerfile
     assert "playwright install chromium" in dockerfile

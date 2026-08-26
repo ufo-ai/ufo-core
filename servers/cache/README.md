@@ -9,9 +9,9 @@ Two kinds of traffic go through it. Git traffic is mirrored per caller: the daem
 credential of its own, and for every git request it asks the control plane for the credential that
 belongs to the workspace, the user, and the host named on that request. It can therefore only ever
 hold the credential of the caller in front of it, and mirrors are kept apart by that same identity,
-so one caller's private mirror is never served to another. Package traffic — the public registries
-and download hosts for Node, Python, Rust, and Go — is anonymous, and cached responses are shared by
-everyone.
+so one caller's private mirror is never served to another. Package traffic — public distro
+archives, language registries, and artifact download hosts — is anonymous, and cached responses are
+shared by everyone.
 
 The daemon fetches allowlisted hosts only. It refuses a request for any other host, so a sandbox
 cannot point the cache at a private address. Each part of the on-disk cache carries its own size
@@ -56,7 +56,7 @@ together.
 | `UFO_CACHE_CONTROL_URL` | Base URL of the control plane the daemon asks for git credentials. Required. |
 | `UFO_CACHE_CONTROL_TOKEN` | Shared secret presented on every credential request. Required. |
 | `UFO_CACHE_GIT_HOSTS` | Comma-separated git hosts the daemon will mirror. Defaults to `github.com`. |
-| `UFO_CACHE_PKG_HOSTS` | Comma-separated package hosts the daemon will cache. Defaults to the public Node, Python, Rust, and Go registries and their download hosts. |
+| `UFO_CACHE_PKG_HOSTS` | Comma-separated package hosts the daemon will cache. Defaults to the public apt, Cargo, RubyGems, Go, npm, and PyPI archives and artifact hosts. |
 | `UFO_CACHE_DISK_LIMIT_BYTES` | Size ceiling for the git mirrors. Defaults to 4 GiB. |
 | `UFO_CACHE_PKG_DISK_LIMIT_BYTES` | Size ceiling for the package cache. Defaults to 8 GiB. |
 | `UFO_CACHE_PACK_CACHE_MB` | Size ceiling in MiB for cached git fetch responses; `0` turns that cache off. Defaults to 4096. |

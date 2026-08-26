@@ -90,12 +90,13 @@ class PerAgentRules:
             if authority is None:
                 return self.base
             with agent(authority.agent_id):
-                rules = (
-                    (*self.base, *self.internet) if authority.internet_access_allowed else self.base
-                )
+                # Cache routes optimize an existing InternetRule. Granting them from the agent flag
+                # alone turns the cache host list into an allowlist and blocks unlisted redirects.
+                internet_allowed = authority.internet_access_allowed and bool(self.internet)
+                rules = (*self.base, *self.internet) if internet_allowed else self.base
                 if isinstance(principal, RunToken):
                     rules = (*rules, ServiceRule(host=TOOL_BRIDGE_HOST))
-                if self.cache_host is not None and authority.internet_access_allowed:
+                if self.cache_host is not None and internet_allowed:
                     rules = (
                         *rules,
                         ServiceRule(host=self.cache_host),

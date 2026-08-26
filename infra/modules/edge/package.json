@@ -1,7 +1,7 @@
 {
   "name": "ufo-edge",
   "private": true,
-  "packageManager": "pnpm@11.23.0",
+  "packageManager": "pnpm@11.24.0",
   "type": "module",
   "description": "Apex edge worker: tests for the worker and its landing page.",
   "scripts": {

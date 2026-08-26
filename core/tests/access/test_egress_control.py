@@ -413,6 +413,30 @@ async def test_resolve_admits_the_preview_host_whatever_the_agents_internet_poli
     }
 
 
+async def test_cache_routes_require_the_deploy_internet_capability(db: None) -> None:
+    async with workspace_tx() as connection:
+        online = await _seed_turn(connection)
+    resolver = PerAgentRules(
+        base=(),
+        grants=None,
+        cache_host=CACHE_HOST,
+        cache_pkg_hosts=("registry.npmjs.org",),
+    )
+    async with _client(_control(resolver)) as client:
+        response = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={
+                "proxy_auth": _basic(
+                    RUN_TOKENS.encode(RunToken(online.workspace_id, online.turn_id))
+                )
+            },
+        )
+    assert response.json() == {
+        "rules": [{"kind": "service", "host": TOOL_BRIDGE_HOST, "daemon_prefix": None}]
+    }
+
+
 async def test_resolve_forged_principal_yields_the_base(db: None) -> None:
     resolver = PerAgentRules(base=(ScopeRule(allowed_hosts=frozenset({HOST})),), grants=None)
     async with _client(_control(resolver)) as client:

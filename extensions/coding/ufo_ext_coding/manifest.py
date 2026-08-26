@@ -20,11 +20,10 @@ The pack ships no agent. It is the machinery a durable one runs on — the child
 skill, the credentials — and a durable agent with work of its own is an application: it ships as
 its own extension, under the slug its page is served at.
 
-The pack also declares the GitHub credential slots, because repository work includes Git and API
-calls. A workspace that installs the App gets authenticated Git and API access, with short-lived
-installation tokens swapped onto each wire and only sentinels inside the sandbox. That is what
-opens `github.com` for a child's checkout — public internet stays blocked, so the fetch rides the
-slot's own egress rule and never the open wire."""
+The pack declares sandbox internet because repository builds install dependencies and download
+their release assets. It also declares the GitHub credential slots, because repository work
+includes authenticated Git and API calls. A workspace that installs the App gets short-lived
+installation tokens swapped onto those exact wires while only sentinels enter the sandbox."""
 
 import os
 from pathlib import Path
@@ -201,6 +200,7 @@ def manifest() -> Manifest:
     return Manifest(
         name=NAME,
         version=VERSION,
+        sandbox_internet=True,
         subagents=(CODING_PROFILE, FABLE_ESCALATION_PROFILE),
         skills=tuple(SkillSpec(path=SKILLS_ROOT / name) for name in SKILL_NAMES),
         credentials=(GIT_INSTALLATION, GIT_CREDENTIAL, GITHUB_API_CREDENTIAL),

@@ -1,7 +1,7 @@
 {
   "name": "ufo-portal",
   "private": true,
-  "packageManager": "pnpm@11.23.0",
+  "packageManager": "pnpm@11.24.0",
   "version": "0.1.0",
   "type": "module",
   "scripts": {

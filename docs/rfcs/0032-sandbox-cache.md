@@ -12,8 +12,8 @@ date: 2026-08-15
 > its own: it phones the Python control plane for a git credential scoped to `(workspace, user,
 > host)`, so the cross-customer mint that sank the first attempt (#1629) is structurally impossible,
 > not policed. The daemon is Rust — it is the first module of the egress **data plane**, while
-> authorization stays in Python (the **control plane**). It caches git and the public package
-> registries (npm, PyPI, crates.io, the Go proxy) — the build/test time sinks.
+> authorization stays in Python (the **control plane**). It caches git, public distro archives,
+> language registries, and artifact downloads — the build/test time sinks.
 
 ## Current state
 
@@ -84,17 +84,16 @@ Two strategies behind one daemon, each fronting an **allowlist** so a sandbox ca
 at a private, in-cluster, or metadata address:
 
 - **git** (`github.com`) — the principal-namespaced mirror below.
-- **packages** (`registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`, `crates.io`,
-  `static.crates.io`, `index.crates.io`, `proxy.golang.org`, `sum.golang.org`) — the transparent
-  HTTP cache below.
+- **packages** (`CACHE_PKG_HOSTS`) — the public apt, Cargo, RubyGems, Go, npm, and PyPI archives and
+  artifact hosts behind the transparent HTTP cache below.
 
 The naïve package approach — point the client at a `/host/<registry>/` path prefix — fails because
 npm rebuilds every tarball URL as `new URL(pathname, registry)`, dropping the prefix. So the proxy
 **transparently intercepts the real registry host** instead (it already MITMs hosts for credential
-injection): npm/pip/cargo/go are unchanged and a metadata document's own absolute download URL still
-resolves to a cached host. Because these artifacts are public and immutable, the package cache is
-**shared across tenants** (one `public` principal) rather than per-principal like git — the opposite
-isolation call, and the right one: it maximises the hit rate and leaks nothing.
+injection): package-manager commands are unchanged and a metadata document's own absolute download
+URL still resolves to a cached host. Because these artifacts are public and immutable, the package
+cache is **shared across tenants** (one `public` principal) rather than per-principal like git — the
+opposite isolation call, and the right one: it maximises the hit rate and leaks nothing.
 
 ### The package strategy: a shared HTTP forward-cache
 
@@ -228,9 +227,6 @@ per-customer boundary is the deploy's RLS-scoped workspace, and the principal na
 
 ## Open decisions
 
-- **More package ecosystems.** apt, apk, RubyGems, and Maven drop in as `allowed_pkg_hosts` +
-  `CACHE_PKG_HOSTS` entries — no new code, since the package strategy is host-agnostic — once a real
-  workload wants them.
 - **Private registries.** The shared package cache serves public registries only; an authenticated
   request passes through uncached. A per-principal package tier (mirroring the git model) would let
   private-registry artifacts cache too, if a workload needs it.
