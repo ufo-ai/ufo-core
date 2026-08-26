@@ -389,6 +389,8 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
     assert tasks["slack_silence"].simulator_model is None
     assert tasks["asd_writing"].judge_model == SEMANTIC_JUDGE_MODEL
     assert tasks["asd_writing"].simulator_model == DEFAULT_BACKGROUND_JOBS_MODEL
+    assert tasks["wiki_generation"].judge_model == SEMANTIC_JUDGE_MODEL
+    assert tasks["wiki_generation"].simulator_model == DEFAULT_BACKGROUND_JOBS_MODEL
     assert tasks["tool_activity"].judge_model == ACTIVITY_MODEL
     assert tasks["tool_activity"].simulator_model is None
     assert all(
@@ -399,6 +401,7 @@ def test_registry_pins_judge_and_simulator_models_by_workload() -> None:
             "semantic_quality",
             "slack_silence",
             "asd_writing",
+            "wiki_generation",
             "scenario_smoke",
             "scenario_env",
             "authority_handoff",
