@@ -448,12 +448,24 @@ overdue queue `Waiting on you`; the later retained-contract check classifies tha
 failure as a grader defect. The unit improves the deterministic repair input and does not change a
 threshold or claim a hard-pass gain.
 
-That retained source also contains one stable scheme-token error. Three styles use
-`--color-ink` as a background and literal white as text. The pair passes light mode and fails dark
-mode because ink changes with the scheme. The source boundary now requires the product's existing
-`--color-ink` and `--color-surface` pair inside the same JSX style object. It rejects the archived
-initial source before compilation and the first 42-second product audit. A scan of 22 retained Vite
-applications finds only this failed source; valid generated pages already use the required pair.
+Keep the product audit's fixed waits. Four inferred-settlement designs fail browser probes. A
+microtask can miss a delayed bridge response. A first-visible-change wait can return before a write
+starts. The bench preview harness answers each call inside one synchronous message handler, so its
+call and response counters never read as busy. The rejected `window.__ufoPending = CALLS.size`
+signal reads zero before a delayed call starts, between action phases, and during a stream. It can
+also measure a late-rendering page before its real text arrives and hide a contrast failure.
+Retained replay does not prove this timing property because the retained application sources
+render fixed fixture data without bridge calls. Reject all four designs. A replacement needs an
+explicit application lifecycle signal for unary calls, streams, and delayed starts, with an
+executing browser regression for each case.
+
+Run `1fec6df8-bc6b-4dce-b990-1f55208d2e30` also contains one stable scheme-token error. Three styles
+use `--color-ink` as a background and literal white as text. The pair passes light mode and fails
+dark mode because ink changes with the scheme. The source guard now rejects literal white on a
+`--color-ink` background and directs the worker to `--color-surface`. It rejects the archived
+initial source before compilation and the first
+42-second product audit. A scan of 22 retained Vite applications finds only this failed source;
+valid generated pages already use the paired tokens.
 The final Stage F reserve case is run `1fec6df8-bc6b-4dce-b990-1f55208d2e30`, so this deterministic
 unit gets focused and archived-source proof without another model call.
 
@@ -1206,4 +1218,4 @@ Only then compare worker models, reasoning settings, and component inputs.
 | 19 | Repeat the unchanged presentation confirmation. | Done | The strict presentation gate fails. Keep the accepted topology and every product failure. |
 | 20 | Recheck reasoning through the Vite application builder. | Done | `medium` and `auto` each pass 1/2 after delivery repair. `auto` moves no case and costs more. Keep `medium`. |
 | 21 | Land the accepted Vite builder and benchmark path. | Active | Merge the benchmark boundary first, then the application-builder changes at an exact reviewed head. |
-| 22 | Reduce deterministic latency and recheck the complete presentation set. | Pending | Follow the next latency campaign. Do not test templates. |
+| 22 | Reduce deterministic latency and recheck the complete presentation set. | Active | Reject four inferred-settlement designs and keep fixed waits. Require an explicit application lifecycle signal before another latency change. |
