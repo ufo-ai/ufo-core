@@ -768,6 +768,8 @@ spec:
           volumeMounts:
             # The rendered shared-fleet config replaces the image's baked dev ufo.toml.
             - {name: config, mountPath: /app/ufo.toml, subPath: ufo.toml}
+          resources:
+            requests: {cpu: 250m}
           # No /healthz in core; a TCP probe confirms uvicorn is bound after fail-loud boot.
           readinessProbe:
             tcpSocket: {port: http}

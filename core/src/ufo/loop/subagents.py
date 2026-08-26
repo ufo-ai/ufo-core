@@ -24,7 +24,8 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
-from dbos import DBOSClient, EnqueueOptions
+from dbos import DBOSClient, EnqueueOptions, WorkflowHandleAsync
+from dbos import error as dbos_error
 from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -78,6 +79,7 @@ from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.turns.untrusted import wall
 
 SUBAGENT_POLL_SECONDS = 0.1
+SUBAGENT_WORKFLOW_POLL_SECONDS = 1.0
 PROFILE_TARGET_KIND = "profile"
 AGENT_TARGET_KIND = "agent"
 STATUS_QUESTION = "question"
@@ -848,11 +850,46 @@ class Subagents:
         into a caller that is long gone. Cancelling is also what makes the raise honest: a park has
         no stored reason, so the parent reports that the child stopped without finishing rather
         than guessing which line stopped it."""
+        workflow_id = str(turn_id)
+        handle: WorkflowHandleAsync[str]
         while True:
+            try:
+                handle = await self.client.retrieve_workflow_async(workflow_id)
+            except dbos_error.DBOSNonExistentWorkflowError:
+                terminal = await self._terminal_or_park(turn_id)
+                if terminal is not None:
+                    return terminal
+                running_attempt = await self._running_attempt(turn_id)
+                if running_attempt is not None:
+                    workflow_id = running_attempt
+                await asyncio.sleep(SUBAGENT_WORKFLOW_POLL_SECONDS)
+                continue
+            try:
+                outcome = await handle.get_result(
+                    polling_interval_sec=SUBAGENT_WORKFLOW_POLL_SECONDS
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                terminal = await self._terminal_or_park(turn_id)
+                if terminal is not None:
+                    return terminal
+                raise
             terminal = await self._terminal_or_park(turn_id)
             if terminal is not None:
                 return terminal
-            await asyncio.sleep(SUBAGENT_POLL_SECONDS)
+            running_attempt = await self._running_attempt(turn_id)
+            if running_attempt is None or running_attempt == workflow_id:
+                raise RuntimeError(f"subagent workflow ended {outcome!r} without a terminal")
+            workflow_id = running_attempt
+
+    async def _running_attempt(self, turn_id: UUID) -> str | None:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(tables.turn.c.running_attempt).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one()
 
     async def _await_terminal_or_detach(self, turn_id: UUID) -> TerminalFrame | None:
         """The same wait, ended early by a member message waiting on the parent's conversation:

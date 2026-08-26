@@ -58,7 +58,7 @@ from ufo.ext.manifest import (
     InjectContext,
     UserPromptSubmit,
 )
-from ufo.hub import Absorbed, Activity, InProcessHub, LiveFrame, Resumed
+from ufo.hub import Absorbed, Activity, InProcessHub, LiveFrame, Resumed, Terminal
 from ufo.loop.compaction import (
     COMPACTED_CONTEXT_PREFIX,
     Compaction,
@@ -3055,6 +3055,39 @@ async def test_terminal_reports_no_spend_when_the_turn_billed_nothing(
     assert frame is not None
     assert (frame.tokens, frame.cost_micro_usd, frame.cache_percent) == (0, 0, 0)
     assert (frame.model, frame.reasoning) == ("", None)
+
+
+async def test_terminal_publishes_after_the_transcript_write(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operations: list[str] = []
+    hub = RecordingHub()
+    publish = hub.publish
+    persist = TurnEngine._persist_transcript
+
+    async def record_publish(turn_id: UUID, frame: LiveFrame) -> str:
+        if isinstance(frame, Terminal):
+            operations.append("terminal")
+        return await publish(turn_id, frame)
+
+    async def record_persist(
+        self: TurnEngine,
+        messages: tuple[Message, ...],
+        answer: str,
+        system: str,
+        injected: str,
+    ) -> None:
+        await persist(self, messages, answer, system, injected)
+        operations.append("transcript")
+
+    monkeypatch.setattr(hub, "publish", record_publish)
+    monkeypatch.setattr(TurnEngine, "_persist_transcript", record_persist)
+    turn = await _seed_turn("queued", None)
+
+    frame = await replace(_engine(turn, EchoModel(), tmp_path), hub=hub).run()
+
+    assert frame is not None and frame.status == "done"
+    assert operations == ["transcript", "terminal"]
 
 
 async def test_already_terminal_turn_republishes_without_clobbering_transcript(

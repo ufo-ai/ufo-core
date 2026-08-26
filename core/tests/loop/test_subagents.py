@@ -400,6 +400,19 @@ def test_a_profile_can_pin_a_distinct_model() -> None:
 
 
 @dataclass
+class _RecordingWorkflowHandle:
+    finished: asyncio.Event | None = None
+    waiting: asyncio.Event = field(default_factory=asyncio.Event)
+    outcome: str = "done"
+
+    async def get_result(self, polling_interval_sec: float) -> str:
+        self.waiting.set()
+        if self.finished is not None:
+            await self.finished.wait()
+        return self.outcome
+
+
+@dataclass
 class _RecordingClient:
     """Records the workflow argument each enqueue carries (the message test reads back which turn
     the workflow placed on the queue) and each turn id a cancel targets (the cancel test reads back
@@ -407,12 +420,39 @@ class _RecordingClient:
 
     enqueued: list[str] = field(default_factory=list)
     cancelled: list[str] = field(default_factory=list)
+    workflow_finished: asyncio.Event | None = None
+    workflow_retrieved: asyncio.Event = field(default_factory=asyncio.Event)
+    handles: list[_RecordingWorkflowHandle] = field(default_factory=list)
 
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         self.enqueued.append(turn_id)
 
     async def cancel_workflow_async(self, workflow_id: str) -> None:
         self.cancelled.append(workflow_id)
+
+    async def retrieve_workflow_async(self, workflow_id: str) -> _RecordingWorkflowHandle:
+        handle = _RecordingWorkflowHandle(finished=self.workflow_finished)
+        self.handles.append(handle)
+        self.workflow_retrieved.set()
+        return handle
+
+
+@dataclass
+class _SequencedWorkflowClient:
+    enqueued: list[str] = field(default_factory=list)
+    cancelled: list[str] = field(default_factory=list)
+    handles: dict[str, _RecordingWorkflowHandle] = field(default_factory=dict)
+    retrieved: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
+
+    async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+        self.enqueued.append(turn_id)
+
+    async def cancel_workflow_async(self, workflow_id: str) -> None:
+        self.cancelled.append(workflow_id)
+
+    async def retrieve_workflow_async(self, workflow_id: str) -> _RecordingWorkflowHandle:
+        await self.retrieved.put(workflow_id)
+        return self.handles[workflow_id]
 
 
 class _FailingClient:
@@ -623,8 +663,9 @@ async def test_a_child_that_dies_in_setup_ends_its_foreground_parents_wait(
     terminal no execution will ever write."""
     workspace_id, agent_id = await _workspace_agent()
     parent = await _parent(workspace_id, agent_id)
+    workflow_finished = asyncio.Event()
     subagents = Subagents(
-        client=_RecordingClient(),
+        client=_RecordingClient(workflow_finished=workflow_finished),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
         audience=conversation_audience(None),
@@ -638,6 +679,7 @@ async def test_a_child_that_dies_in_setup_ends_its_foreground_parents_wait(
     await _commit_failed_terminal(
         InProcessHub(), spawned.turn_id, UnknownSubagentProfile("research", ("coding",))
     )
+    workflow_finished.set()
     async with asyncio.timeout(SETUP_FAILURE_WAIT_SECONDS):
         with pytest.raises(RuntimeError) as caught:
             await awaiting
@@ -2693,6 +2735,103 @@ async def test_a_foreground_child_that_parks_does_not_hold_its_parent_open(
             )
         ).scalar_one()
     assert status == "cancelled"
+
+
+async def test_a_foreground_wait_reads_the_terminal_only_after_workflow_completion(
+    db: None, dbos_launched: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    workflow_finished = asyncio.Event()
+    client = _RecordingClient(workflow_finished=workflow_finished)
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    spawned = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="wait")
+    terminal_reads = 0
+    terminal_or_park = Subagents._terminal_or_park
+
+    async def counted_terminal_or_park(self: Subagents, turn_id: UUID) -> TerminalFrame | None:
+        nonlocal terminal_reads
+        terminal_reads += 1
+        return await terminal_or_park(self, turn_id)
+
+    monkeypatch.setattr(Subagents, "_terminal_or_park", counted_terminal_or_park)
+    awaiting = asyncio.create_task(subagents._await_terminal(spawned.turn_id))
+    await client.workflow_retrieved.wait()
+    await client.handles[0].waiting.wait()
+    assert terminal_reads == 0
+
+    terminal = TerminalFrame(status="done", text='{"finding": "done"}')
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == spawned.turn_id)
+            .values(
+                status="done",
+                terminal=terminal.model_dump(mode="json"),
+                updated_at=sa.func.now(),
+            )
+        )
+    workflow_finished.set()
+
+    assert await asyncio.wait_for(awaiting, timeout=5) == terminal
+    assert terminal_reads == 1
+
+
+async def test_a_foreground_wait_follows_the_workflow_that_resumes_its_child(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    client = _SequencedWorkflowClient()
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    spawned = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="resume")
+    first_finished = asyncio.Event()
+    resumed_finished = asyncio.Event()
+    resumed_attempt = uuid4().hex
+    client.handles[str(spawned.turn_id)] = _RecordingWorkflowHandle(
+        finished=first_finished, outcome="parked"
+    )
+    client.handles[resumed_attempt] = _RecordingWorkflowHandle(finished=resumed_finished)
+
+    awaiting = asyncio.create_task(subagents._await_terminal(spawned.turn_id))
+    assert await asyncio.wait_for(client.retrieved.get(), timeout=5) == str(spawned.turn_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == spawned.turn_id)
+            .values(
+                status="running",
+                running_attempt=resumed_attempt,
+                updated_at=sa.func.now(),
+            )
+        )
+    first_finished.set()
+    assert await asyncio.wait_for(client.retrieved.get(), timeout=5) == resumed_attempt
+
+    terminal = TerminalFrame(status="done", text='{"finding": "done"}')
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == spawned.turn_id)
+            .values(
+                status="done",
+                terminal=terminal.model_dump(mode="json"),
+                updated_at=sa.func.now(),
+            )
+        )
+    resumed_finished.set()
+
+    assert await asyncio.wait_for(awaiting, timeout=5) == terminal
 
 
 DETACH_WAIT_SECONDS = 10

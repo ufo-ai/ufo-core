@@ -33,7 +33,7 @@ SUBMISSIONS_ROOT = LOCAL_ROOT / "submissions"
 SWEBENCH_PACKS = ("assistant", "assistant_hosted")
 WORKFLOW_WAIT_SECONDS = 7_200.0
 PARENT_FORBIDDEN_TOOLS = ("bash", "edit", "grep", "glob")
-ENVELOPE_REVISION = "pinned-fetch-share-1"
+ENVELOPE_REVISION = "pinned-fetch-share-exact-half"
 DIFF_HEADER = b"diff --git "
 OLD_FILE_HEADER = b"--- "
 NEW_FILE_HEADER = b"+++ "
@@ -89,9 +89,16 @@ def load_swebench(
 def _capability_case(
     case: SWEbenchCase, parquet_sha256: str, submissions_root: Path
 ) -> CapabilityCase:
+    lines = case.problem_statement.splitlines(keepends=True)
+    midpoint = len(lines) // 2
+    problem_statement = (
+        "".join(lines[:midpoint])
+        if lines and len(lines) % 2 == 0 and lines[:midpoint] == lines[midpoint:]
+        else case.problem_statement
+    )
     return CapabilityCase(
         name=case.instance_id,
-        message=case.problem_statement + _envelope(case),
+        message=problem_statement + _envelope(case),
         grader=AllOf(
             (
                 PinnedRepositoryRoute(case.repo, case.base_commit),

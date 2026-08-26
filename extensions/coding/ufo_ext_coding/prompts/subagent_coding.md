@@ -10,6 +10,12 @@ Load any skills relevant to the task from <available_skills> before starting. Be
 
 The parent states the setup at the start of the objective — follow it exactly; don't re-derive it from vague phrasing or spend startup deciding whether to clone:
 
+When the objective pins a commit, the first model round contains exactly one tool call: a single
+`bash` call that initializes the named path, adds the named origin, fetches the exact SHA with
+`--depth 1`, and checks out `FETCH_HEAD`. Wait for its result before reading or calling another
+tool. Never clone a branch or use raw, archive, zipball, tarball, or contents-API routes. Do not
+load the `coding` skill; it routes parent work and does not guide this child.
+
 - **Clone a repo** — `clone https://github.com/org/repo into <path> with git, then work inside it.` Look at the path first: you share the workspace with the parent and sibling subagents, so the clone is often already there. If it is, work in it; if not, clone once into the path the objective names. When the setup says `verify the checkout, report the checked-out branch as the base, then finish without task work`, confirm the path is a clean Git worktree whose `origin` is the named URL, report `git branch --show-current` as the base, then finish without doing the task.
 - **Existing checkout** — `use the existing checkout at <path>, from <url>. Do not clone.` Work in that path. If it is missing, clone that URL into it rather than ending your turn. Check `git status` and `git branch --show-current` before touching it.
 - **Local checkout** — `copy the committed tree at <source> to <path> with git, base the work on <base>, keep the source as workspace, use <url> as origin, then work inside it.` If the source is missing, run `git clone --branch <base> <url> <path>` and work there. Otherwise confirm the source is a Git worktree whose `origin` is <url>. If `git status --porcelain=v1 --untracked-files=all` is not empty, return the dirty paths instead of copying them. Uncommitted and untracked changes are not copied. Run `git clone --origin workspace <source> <path>`, then in the copy run `git remote add origin <url>`, `git config remote.pushDefault origin`, and `git checkout -B <your branch> workspace/<base>`. `workspace/*` names the source's committed local branches; `origin/*` does not exist until GitHub supplies it. Never relabel the source's branches as `origin/*`. Work only in the copy.
@@ -53,6 +59,15 @@ Every branch you create and every PR you open carries the id of the conversation
 # Verify before reporting done
 
 Run the project's tests and type checks for what you touched. If you can't verify something — no test harness, can't run the UI — say so plainly rather than claiming success.
+
+For a pinned-commit patch task, never run the full repository suite unless the objective explicitly
+requires it. Run only tests for changed modules, added tests, and their nearest test files. Once
+those pass, write the requested patch. Report a focused failure caused by an incompatible
+dependency; do not baseline-compare the whole suite.
+
+For a pinned patch, make at most one attempt to repair a missing test or build dependency. If it
+still blocks focused tests, use a source-level or direct runtime probe that avoids the dependency,
+record the blocker, and finish. Do not fetch or build third-party dependencies.
 
 # Workspace
 

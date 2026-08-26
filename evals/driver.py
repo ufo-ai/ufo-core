@@ -22,7 +22,8 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from dbos import DBOSClient, WorkflowHandleAsync
 from dbos import error as dbos_error
-from pydantic import JsonValue
+from httpx import AsyncClient
+from pydantic import JsonValue, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from evals.harness.capability import UndeliveredRound, WorkspaceFile
@@ -36,6 +37,13 @@ from ufo.loop.engine import DispatchResult, StreamResult
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
 from ufo.object_name import validate_object_name
+from ufo.onboard.onboard_control import (
+    SIGNUP_GRANT_MICRO_USD,
+    SIGNUP_RESERVE_MICRO_USD,
+    EnsuredWorkspace,
+    SeatRequest,
+    deterministic_workspace_id,
+)
 from ufo.schema import tables
 from ufo.schema.records import (
     PENDING,
@@ -67,12 +75,87 @@ TERMINAL_STATUSES = frozenset({"done", "cancelled", "failed"})
 WORKFLOW_STATUSES = frozenset({"queued", "running"})
 FAILED_WORKFLOW_STATUSES = frozenset({"ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED", "CANCELLED"})
 REMOTE_TOKEN_TTL = timedelta(days=1)
+REMOTE_EVAL_DOMAIN = "eval.invalid"
 
 
 class RemoteTurnTimeout(Exception):
     def __init__(self, turn_id: UUID | None) -> None:
         super().__init__("ufo remote session exceeded the workflow wait")
         self.turn_id = turn_id
+
+
+@dataclass(frozen=True)
+class RemoteWorkspaceProvisioner:
+    client: AsyncClient
+
+    async def provision(self, run_id: UUID) -> UUID:
+        """Found one clean hosted workspace whose identity is derived from the eval run."""
+        domain = f"{run_id.hex}.{REMOTE_EVAL_DOMAIN}"
+        workspace_id = deterministic_workspace_id(domain)
+        request = SeatRequest(
+            workspace_id=workspace_id,
+            domain=domain,
+            email=f"swebench@{domain}",
+        )
+        response = await self.client.post(
+            "/internal/onboard/seat",
+            json=request.model_dump(mode="json"),
+        )
+        if not response.is_success:
+            detail = response.text.strip()[:1_000]
+            raise RuntimeError(
+                f"hosted eval workspace provisioning failed ({response.status_code}): {detail}"
+            )
+        try:
+            provisioned = EnsuredWorkspace.model_validate(response.json())
+        except (ValueError, ValidationError) as error:
+            raise RuntimeError(
+                "hosted eval workspace provisioning returned an invalid response"
+            ) from error
+        if (
+            provisioned.workspace_id != str(workspace_id)
+            or not provisioned.admin
+            or not provisioned.founding
+        ):
+            raise RuntimeError(
+                "hosted eval workspace provisioning did not create the expected admin workspace"
+            )
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                purchases = (
+                    await connection.execute(
+                        sa.select(
+                            tables.balance_purchase.c.reference,
+                            tables.balance_purchase.c.granted_micro_usd,
+                            tables.balance_purchase.c.charged_micro_usd,
+                        ).where(tables.balance_purchase.c.workspace_id == workspace_id)
+                    )
+                ).all()
+                balance = (
+                    await connection.execute(
+                        sa.select(
+                            tables.workspace_balance.c.balance_micro_usd,
+                            tables.workspace_balance.c.reserve_micro_usd,
+                        ).where(tables.workspace_balance.c.workspace_id == workspace_id)
+                    )
+                ).one_or_none()
+                if purchases != [
+                    (f"signup/{workspace_id}", SIGNUP_GRANT_MICRO_USD, 0)
+                ] or balance != (SIGNUP_GRANT_MICRO_USD, SIGNUP_RESERVE_MICRO_USD):
+                    raise RuntimeError(
+                        "hosted eval workspace provisioning returned an unexpected balance"
+                    )
+                await connection.execute(
+                    sa.delete(tables.balance_purchase).where(
+                        tables.balance_purchase.c.workspace_id == workspace_id
+                    )
+                )
+                await connection.execute(
+                    sa.delete(tables.workspace_balance).where(
+                        tables.workspace_balance.c.workspace_id == workspace_id
+                    )
+                )
+        return workspace_id
 
 
 @dataclass(frozen=True)

@@ -91,6 +91,25 @@ def test_coding_prompt_writes_member_prose_in_simplified_technical_english() -> 
     )
 
 
+def test_pinned_patch_verification_stays_on_changed_paths() -> None:
+    assert "never run the full repository suite" in coding.CODING_PROMPT
+    assert "unless the objective explicitly" in coding.CODING_PROMPT
+    assert "tests for changed modules, added tests, and their nearest test files" in (
+        coding.CODING_PROMPT
+    )
+    assert "Once" in coding.CODING_PROMPT
+    assert "those pass, write the requested patch" in coding.CODING_PROMPT
+    assert "do not baseline-compare the whole suite" in coding.CODING_PROMPT
+
+
+def test_pinned_patch_dependency_repair_is_bounded() -> None:
+    assert "make at most one attempt to repair a missing test or build dependency" in (
+        coding.CODING_PROMPT
+    )
+    assert "use a source-level or direct runtime probe" in coding.CODING_PROMPT
+    assert "Do not fetch or build third-party dependencies" in coding.CODING_PROMPT
+
+
 def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_ones() -> None:
     profile = coding.CODING_PROFILE
     builtin_names = {tool.name for tool in BUILTIN_TOOLS}
@@ -339,6 +358,10 @@ def test_coding_skills_parse_and_index() -> None:
     assert tuple(skill.path.name for skill in manifest.skills) == ("coding",)
     assert "coding" in index
     instructions = registry.named("coding").instructions
+    assert (
+        "Do not call\n`update_todo_list`, shell, file, web, or any setup tool first."
+        in instructions
+    )
     assert "only a workspace admin can do it" in instructions
     assert "only the owner" not in instructions
 

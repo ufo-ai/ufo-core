@@ -16,7 +16,6 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from ufo.config import BlobConfig
-from ufo.o11y import log
 from ufo.sandbox.containment import PathNotFound, configured_root
 from ufo.workspace import ws_current
 
@@ -201,6 +200,9 @@ class S3BlobStore:
     _clients: dict[asyncio.AbstractEventLoop, AioBaseClient] = field(
         default_factory=dict, compare=False
     )
+    _client_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = field(
+        default_factory=dict, compare=False
+    )
 
     async def put(self, key: str, data: bytes) -> None:
         client = await self._client()
@@ -372,7 +374,9 @@ class S3BlobStore:
 
     async def close(self) -> None:
         """Close and discard the client owned by the running event loop."""
-        client = self._clients.pop(asyncio.get_running_loop(), None)
+        loop = asyncio.get_running_loop()
+        client = self._clients.pop(loop, None)
+        self._client_locks.pop(loop, None)
         if client is not None:
             await client.close()
 
@@ -386,23 +390,23 @@ class S3BlobStore:
         client = self._clients.get(loop)
         if client is not None:
             return client
-        created = (
-            await get_session()
-            .create_client(
-                "s3",
-                endpoint_url=self.endpoint_url,
-                region_name=self.region,
-                config=S3_PATH_CONFIG if self.endpoint_url is not None else S3_VIRTUAL_CONFIG,
+        lock = self._client_locks.setdefault(loop, asyncio.Lock())
+        async with lock:
+            client = self._clients.get(loop)
+            if client is not None:
+                return client
+            client = (
+                await get_session()
+                .create_client(
+                    "s3",
+                    endpoint_url=self.endpoint_url,
+                    region_name=self.region,
+                    config=S3_PATH_CONFIG if self.endpoint_url is not None else S3_VIRTUAL_CONFIG,
+                )
+                .__aenter__()
             )
-            .__aenter__()
-        )
-        client = self._clients.setdefault(loop, created)
-        if client is not created:
-            try:
-                await created.__aexit__(None, None, None)
-            except Exception:
-                log("blob.redundant_client_close_failed", bucket=self.bucket)
-        return client
+            self._clients[loop] = client
+            return client
 
 
 @dataclass(frozen=True)

@@ -247,6 +247,14 @@ def test_hosted_serve_rolls_all_replacements_before_draining() -> None:
     assert 'command: [sleep, "${prestop_seconds}"]' in SERVE_DEPLOYMENT
 
 
+def test_hosted_serve_reserves_capacity() -> None:
+    deployment = _document(_documents(False), "Deployment", "ufo-serve")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"] == {
+        "requests": {"cpu": "250m"},
+    }
+
+
 def test_hosted_proxy_rolls_all_replacements_and_drains_connections() -> None:
     assert "maxSurge: 100%" in PROXY_DEPLOYMENT
     assert "maxUnavailable: 0" in PROXY_DEPLOYMENT

@@ -178,6 +178,27 @@ def test_one_selected_case_builds_the_exact_pinned_capability_case(tmp_path: Pat
     assert capture.case_id == case.instance_id
 
 
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    (
+        ("First constraint.\nSecond constraint.\n" * 2, "First constraint.\nSecond constraint.\n"),
+        (
+            "First constraint.\nSecond constraint.\nFirst constraint.\nChanged constraint.\n",
+            "First constraint.\nSecond constraint.\nFirst constraint.\nChanged constraint.\n",
+        ),
+    ),
+    ids=("exact-repeat", "near-repeat"),
+)
+def test_only_an_exact_repeated_problem_statement_half_is_collapsed(
+    tmp_path: Path, statement: str, expected: str
+) -> None:
+    case = select_cases(rows())[0].model_copy(update={"problem_statement": statement})
+
+    capability = _capability_case(case, "snapshot", tmp_path / "submissions")
+
+    assert capability.message.startswith(expected + "\n\n---\n")
+
+
 def test_every_subset_loads_as_its_own_concurrent_task(tmp_path: Path) -> None:
     snapshot_root = snapshot(tmp_path / "snapshot")
 
@@ -515,6 +536,46 @@ def test_cli_validates_pack_before_run(
     assert f"swebench requires [pack] name in {SWEBENCH_PACKS}" in error
 
 
+@pytest.mark.parametrize(
+    "args",
+    (
+        ("--fresh-workspace",),
+        ("--fresh-workspace", "--remote"),
+        ("--fresh-workspace", "--swebench", "--swebench-subset", "smoke"),
+    ),
+)
+def test_fresh_workspace_requires_remote_swebench(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    args: tuple[str, ...],
+) -> None:
+    with pytest.raises(SystemExit):
+        evals_main([*args, "--out", str(tmp_path)])
+
+    assert "--fresh-workspace requires --remote --swebench" in capsys.readouterr().err
+
+
+def test_fresh_workspace_conflicts_with_an_explicit_workspace(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        evals_main(
+            [
+                "--fresh-workspace",
+                "--remote",
+                "--swebench",
+                "--swebench-subset",
+                "smoke",
+                "--workspace",
+                str(uuid4()),
+                "--out",
+                str(tmp_path),
+            ]
+        )
+
+    assert "--fresh-workspace conflicts with --workspace" in capsys.readouterr().err
+
+
 def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -526,7 +587,7 @@ def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
         pack=PackConfig(name="assistant"),
     )
     monkeypatch.setattr("evals.__main__.load_config", lambda: config)
-    reached: list[tuple[tuple[str, ...], float, str, bool, int]] = []
+    reached: list[tuple[tuple[str, ...], float, str, bool, bool, int]] = []
 
     async def run(
         _config: object,
@@ -544,7 +605,8 @@ def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
                 workflow_wait_seconds,
                 capsys.readouterr().out,
                 bool(_rest[2]),
-                int(_rest[4]),
+                bool(_rest[3]),
+                int(_rest[5]),
             )
         )
         raise RunStarted
@@ -560,6 +622,7 @@ def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
                 str(snapshot_root),
                 "--swebench-submissions",
                 str(submissions),
+                "--fresh-workspace",
                 "--remote",
                 "--concurrency",
                 "8",
@@ -571,6 +634,7 @@ def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
             ("swebench_verified.hillclimb",),
             WORKFLOW_WAIT_SECONDS,
             f"SWE-bench submissions {submissions}\n",
+            True,
             True,
             8,
         )

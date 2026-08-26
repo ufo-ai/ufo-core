@@ -612,8 +612,14 @@ class InProcessTarget:
             descendant_ids.extend(turn.id for turn in turns)
             if not any(turn.status in TERMINAL_CHILD_STATUSES for turn in turns):
                 continue
+            settled = tuple(turn for turn in turns if turn.status in TERMINAL_CHILD_STATUSES)
             body = await self._await_child_transcript(conversation_id)
             if body is None:
+                if all(turn.status != "done" for turn in settled):
+                    handoffs.append(
+                        handoff_record(conversation_id, (), _terminal_result(settled[-1].terminal))
+                    )
+                    continue
                 failure = f"child turn {turns[0].id} is terminal but its transcript never appeared"
                 return output, tuple(descendant_ids), failure
             try:
@@ -625,7 +631,6 @@ class InProcessTarget:
                     f"child conversation {conversation_id} has a corrupt transcript",
                 )
             child = capability_output(decoded.messages)
-            settled = tuple(turn for turn in turns if turn.status in TERMINAL_CHILD_STATUSES)
             handoffs.append(
                 handoff_record(
                     conversation_id, decoded.messages, _terminal_result(settled[-1].terminal)

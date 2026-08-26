@@ -48,6 +48,7 @@ from evals.driver import (
     CANDIDATE_AGENT_NAME,
     WORKFLOW_WAIT_SECONDS,
     RemoteClient,
+    RemoteWorkspaceProvisioner,
     WorkspaceDriver,
     resolve_workspace_and_agent,
     seed_candidate_agent,
@@ -179,6 +180,7 @@ from ufo.loop.spawn_catalog import spawn_catalog_skill
 from ufo.loop.subagents import SubagentRegistry
 from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.registry import ModelRegistry, model_registry
+from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, ReasoningEffort
 from ufo.surfaces.admission import Admission, AdmissionInvoker
@@ -274,6 +276,11 @@ def main(argv: list[str] | None = None) -> None:
         "--remote",
         action="store_true",
         help="run against the configured remote execution boundary",
+    )
+    parser.add_argument(
+        "--fresh-workspace",
+        action="store_true",
+        help="provision a clean hosted workspace for a remote SWE-bench run",
     )
     parser.add_argument("--s3-bucket", help="private bucket override for --share")
     parser.add_argument("--s3-region", help="S3 region for --share")
@@ -406,6 +413,10 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--concurrency must be at least 1")
     if args.remote and (args.list or args.view or args.share or args.reconstruct):
         parser.error("--remote runs eval suites")
+    if args.fresh_workspace and (not args.remote or not args.swebench):
+        parser.error("--fresh-workspace requires --remote --swebench")
+    if args.fresh_workspace and args.workspace is not None:
+        parser.error("--fresh-workspace conflicts with --workspace")
     names = tuple(args.only)
     if args.case and not names:
         parser.error("--case requires --only naming the suites to narrow")
@@ -772,6 +783,7 @@ def main(argv: list[str] | None = None) -> None:
             workflow_wait_seconds,
             args.mcp_atlas_url,
             args.mcp_atlas_external_url,
+            args.fresh_workspace,
             args.remote,
             args.candidate_from_proposal,
             args.concurrency,
@@ -832,6 +844,7 @@ async def _run(
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS,
     mcp_atlas_url: str | None = None,
     mcp_atlas_external_url: str | None = None,
+    fresh_workspace: bool = False,
     remote: bool = False,
     candidate_proposal: UUID | None = None,
     concurrency: int = 1,
@@ -861,26 +874,6 @@ async def _run(
         async with AsyncExitStack() as stack:
             if collector is not None:
                 await stack.enter_async_context(collector.serving())
-            if candidate_proposal is not None:
-                workspace_id, agent_name = await seed_candidate_agent(
-                    candidate_proposal, workspace_id
-                )
-            (
-                workspace_id,
-                agent_id,
-                agent_prompt,
-                agent_model,
-                agent_reasoning,
-            ) = await resolve_workspace_and_agent(agent_name, workspace_id)
-            recorder.agent_prompt = agent_prompt
-            blob_backend = blob_store_for(config.blob)
-            match blob_backend:
-                case S3BlobStore():
-                    stack.push_async_callback(blob_backend.close)
-            blob = WorkspaceBlobStore(backend=blob_backend)
-            dbos = replay_safe_client(config.database.system_url)
-            registry = model_registry(config, manifests)
-            resolved_agent_model = registry.resolve(agent_model)
             remote_client: RemoteClient | None = None
             if remote:
                 executable = shutil.which("ufo")
@@ -897,6 +890,41 @@ async def _run(
                     home_root=REMOTE_HOME_ROOT,
                 )
                 await remote_client.validate()
+            if fresh_workspace:
+                public_url = config.connect.public_base_url
+                if public_url is None:
+                    raise RuntimeError("--fresh-workspace requires connect.public_base_url")
+                control_token = os.environ.get(ONBOARD_CONTROL_TOKEN_ENV)
+                if not control_token:
+                    raise RuntimeError(f"--fresh-workspace requires {ONBOARD_CONTROL_TOKEN_ENV}")
+                onboard = await stack.enter_async_context(
+                    AsyncClient(
+                        base_url=public_url,
+                        headers={"authorization": f"Bearer {control_token}"},
+                    )
+                )
+                workspace_id = await RemoteWorkspaceProvisioner(onboard).provision(recorder.id)
+            if candidate_proposal is not None:
+                workspace_id, agent_name = await seed_candidate_agent(
+                    candidate_proposal, workspace_id
+                )
+            (
+                workspace_id,
+                agent_id,
+                agent_prompt,
+                agent_model,
+                agent_reasoning,
+            ) = await resolve_workspace_and_agent(agent_name, workspace_id)
+            recorder.agent_prompt = agent_prompt
+            recorder.workspace_id = workspace_id
+            blob_backend = blob_store_for(config.blob)
+            match blob_backend:
+                case S3BlobStore():
+                    stack.push_async_callback(blob_backend.close)
+            blob = WorkspaceBlobStore(backend=blob_backend)
+            dbos = replay_safe_client(config.database.system_url)
+            registry = model_registry(config, manifests)
+            resolved_agent_model = registry.resolve(agent_model)
             driver = WorkspaceDriver(
                 workspace_id,
                 agent_id,

@@ -846,10 +846,10 @@ async def test_redelivery_of_a_finished_turn_republishes_through_the_worker(
     its transcript. The full exchange (arrivals, answer) is written by the original run's normal
     path, not reconstructed here.
 
-    The first turn publishes its terminal frame before writing its transcript, so the redelivery is
-    staged only once that turn's workflow has returned: the queue partitions on the conversation and
-    admits one turn at a time, and this replay reaches the worker entrypoint directly, so the wait
-    is what keeps the two writers of one conversation apart here as the queue does in serve."""
+    The redelivery is staged only once the first turn's workflow has returned: the queue partitions
+    on the conversation and admits one turn at a time, and this replay reaches the worker entrypoint
+    directly, so the wait is what keeps the two writers of one conversation apart here as the queue
+    does in serve."""
     runtime = loop_queue._runtime
     assert runtime is not None
     seed = await _bootstrap()

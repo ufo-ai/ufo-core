@@ -54,9 +54,14 @@ uv run python -m evals \
   --swebench \
   --swebench-subset all \
   --remote \
-  --workspace <workspace-id> \
-  --concurrency 24
+  --fresh-workspace \
+  --concurrency 26
 ```
+
+`--fresh-workspace` derives a new workspace from the run id, founds its admin and main agent through
+hosted onboarding, and records the workspace id with the run. It requires
+`UFO_ONBOARD_CONTROL_TOKEN` and `connect.public_base_url`. Pass `--workspace <workspace-id>` instead
+to reuse an existing workspace.
 
 `--swebench` requires `--swebench-subset` or `--swebench-case`; `all` selects the complete pinned
 roster. Each subset runs as its own

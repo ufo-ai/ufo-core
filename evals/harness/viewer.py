@@ -29,7 +29,8 @@ S3_COMPAT_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "pat
 class EvalRun(BaseModel):
     """One immutable runner invocation persisted for later comparison. `agent_prompt` is the
     target agent's configured base prompt — the fixed half of every case's system prompt — so a
-    reviewer reads the setup the agent answered under without reaching for the workspace."""
+    reviewer reads the setup the agent answered under without reaching for the workspace.
+    `workspace_id` names the durable workspace whose state and remote turns belong to the run."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -38,6 +39,7 @@ class EvalRun(BaseModel):
     label: str
     agent: str
     agent_prompt: str = ""
+    workspace_id: UUID | None = None
     ufo_version: str
     revision: str
     reports: tuple[EvalReport, ...]
@@ -100,6 +102,7 @@ class RunRecorder:
     ufo_version: str
     revision: str
     agent_prompt: str = ""
+    workspace_id: UUID | None = None
     reports: dict[int, EvalReport] = field(default_factory=dict)
 
     def record(self, index: int, report: EvalReport) -> Path:
@@ -115,6 +118,7 @@ class RunRecorder:
             label=self.label,
             agent=self.agent,
             agent_prompt=self.agent_prompt,
+            workspace_id=self.workspace_id,
             ufo_version=self.ufo_version,
             revision=self.revision,
             reports=tuple(self.reports[index] for index in sorted(self.reports)),

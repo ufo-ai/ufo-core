@@ -1150,6 +1150,7 @@ class TurnEngine:
                     await self._persist_transcript(
                         await self._load_messages(), inbound.denied, system, inbound.injected
                     )
+                    await self._publish_terminal(denial)
                     await self._record_workspace_changes(())
                     return denial
                 founding_denial = DENIED_INBOUND_NOTICE.format(reason=escape(inbound.denied))
@@ -1223,6 +1224,7 @@ class TurnEngine:
                     await self._persist_transcript(final_messages, answer, system, injected)
                 else:
                     await self._persist_inbound(tuple(arrival_log), founding_denial)
+                await self._publish_terminal(frame)
                 await self._record_workspace_changes(tuple(change_paths))
                 return frame
         except TurnParked as parked:
@@ -1242,9 +1244,15 @@ class TurnEngine:
             await self._release_unabsorbed(tuple(absorbed_ids))
             raise
         except Exception as error:
-            await self._commit("failed", usage_events, meter, error=error, created=tuple(created))
-            await self._release_unabsorbed(tuple(absorbed_ids))
-            await self._persist_inbound(tuple(arrival_log), founding_denial)
+            frame = await self._commit(
+                "failed", usage_events, meter, error=error, created=tuple(created)
+            )
+            try:
+                await self._release_unabsorbed(tuple(absorbed_ids))
+                await self._persist_inbound(tuple(arrival_log), founding_denial)
+            finally:
+                if frame is not None:
+                    await self._publish_terminal(frame)
             raise
         finally:
             await context.cleanup.drain()
@@ -1359,6 +1367,8 @@ class TurnEngine:
                     created=_created_refs((call,), dispatched_result),
                 )
             await self._persist_transcript(await self._load_messages(), result.text, "", "")
+            if frame is not None:
+                await self._publish_terminal(frame)
             return frame
         except DBOSWorkflowCancelledError:
             meter.exited(CANCELLED)
@@ -1368,7 +1378,9 @@ class TurnEngine:
             meter.exited(PREEMPTED)
             raise
         except Exception as error:
-            await self._commit("failed", usage_events, meter, error=error)
+            frame = await self._commit("failed", usage_events, meter, error=error)
+            if frame is not None:
+                await self._publish_terminal(frame)
             raise
         finally:
             await context.cleanup.drain()
@@ -2847,9 +2859,6 @@ class TurnEngine:
                 delay = min(delay * 2, COMMIT_RETRY_MAX_SECONDS)
         if frame is None:
             return None
-        await self._publish(Terminal(frame=frame))
-        await self._publish_run(status=frame.status)
-        self._stop_activity()
         if committed:
             emit_metric(
                 "turn_terminal_total",
@@ -2872,6 +2881,11 @@ class TurnEngine:
             ),
         )
         return frame
+
+    async def _publish_terminal(self, frame: TerminalFrame) -> None:
+        await self._publish(Terminal(frame=frame))
+        await self._publish_run(status=frame.status)
+        self._stop_activity()
 
     async def _record_workspace_changes(self, targets: tuple[str, ...]) -> None:
         """Refresh what the portal's Changes reads, once the turn has nothing left the member is

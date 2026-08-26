@@ -29,7 +29,7 @@ from aiobotocore.session import get_session
 from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from dbos import error as dbos_error
-from httpx import AsyncClient
+from httpx import AsyncClient, MockTransport, Request, Response
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DEPLOY_TOOL,
     APPLICATION_BUILDER_DESIGN_TOOL,
@@ -53,6 +53,7 @@ from evals.compaction.target import CompactionTarget
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
     RemoteClient,
+    RemoteWorkspaceProvisioner,
     WorkspaceDriver,
     resolve_workspace_and_agent,
     seed_candidate_agent,
@@ -201,6 +202,7 @@ from ufo.access.credentials import (
     seal_installation,
 )
 from ufo.billing.accounting import Pricing
+from ufo.billing.balance import credit, set_reserve
 from ufo.blob import FilesystemBlobStore, S3BlobStore
 from ufo.config import (
     DEFAULT_AMBIENT_REPLY_MODEL,
@@ -243,6 +245,7 @@ from ufo.models.interface import (
 )
 from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef, validate_object_name
+from ufo.onboard.onboard_control import deterministic_workspace_id
 from ufo.schema import tables
 from ufo.schema.records import AgentChange, ToolIntent, TurnContext, TurnStatus, Usage
 from ufo.turns.transcript import (
@@ -1398,6 +1401,7 @@ class StubWorker:
     child_transcript: tuple[Message, ...] | None = None
     child_transcript_missing: bool = False
     child_transcript_corrupt: bool = False
+    child_status: str = "done"
     child_followup_turns: int = 0
     child_artifact: tuple[str, bytes] | None = None
     child_conversation_id: UUID = field(default_factory=uuid4)
@@ -1511,11 +1515,11 @@ class StubWorker:
                             conversation_id=child_conversation_id,
                             agent_id=agent_id,
                             seq=seq,
-                            status="done",
+                            status=self.child_status,
                             inbound="delegated task",
                             parent_turn_id=turn_id,
                             terminal={
-                                "status": "done",
+                                "status": self.child_status,
                                 "text": "Done.",
                                 "model": MODEL,
                                 "tokens": self.child_tokens,
@@ -6109,6 +6113,97 @@ def test_remote_eval_homes_live_under_the_ignored_local_root() -> None:
     assert ".local/" in Path(".gitignore").read_text().splitlines()
 
 
+async def test_remote_workspace_provisioner_founds_an_unmetered_run_derived_workspace(
+    db: None,
+) -> None:
+    run_id = UUID("11111111-2222-3333-4444-555555555555")
+    domain = f"{run_id.hex}.eval.invalid"
+    expected = deterministic_workspace_id(domain)
+    received: list[tuple[str, dict[str, object], str]] = []
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=expected, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await credit(connection, expected, 100_000_000, 0, f"signup/{expected}")
+        await set_reserve(connection, expected, 2_000_000)
+
+    async def handle(request: Request) -> Response:
+        received.append(
+            (
+                request.url.path,
+                loads((await request.aread()).decode()),
+                request.headers["authorization"],
+            )
+        )
+        return Response(
+            200,
+            json={"workspace_id": str(expected), "admin": True, "founding": True},
+        )
+
+    async with AsyncClient(
+        base_url="https://workspace.test",
+        headers={"authorization": "Bearer control-token"},
+        transport=MockTransport(handle),
+    ) as client:
+        workspace_id = await RemoteWorkspaceProvisioner(client).provision(run_id)
+
+    assert workspace_id == expected
+    assert received == [
+        (
+            "/internal/onboard/seat",
+            {
+                "workspace_id": str(expected),
+                "domain": domain,
+                "email": f"swebench@{domain}",
+                "profile": None,
+            },
+            "Bearer control-token",
+        )
+    ]
+    async with workspace_tx() as connection:
+        purchases = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.balance_purchase)
+                .where(tables.balance_purchase.c.workspace_id == expected)
+            )
+        ).scalar_one()
+        balance = (
+            await connection.execute(
+                sa.select(tables.workspace_balance.c.workspace_id).where(
+                    tables.workspace_balance.c.workspace_id == expected
+                )
+            )
+        ).one_or_none()
+    assert purchases == 0
+    assert balance is None
+
+
+@pytest.mark.parametrize("invalid", ("workspace", "admin", "founding"))
+async def test_remote_workspace_provisioner_rejects_a_non_founding_response(
+    invalid: str,
+) -> None:
+    run_id = UUID("11111111-2222-3333-4444-555555555555")
+    expected = deterministic_workspace_id(f"{run_id.hex}.eval.invalid")
+    body = {"workspace_id": str(expected), "admin": True, "founding": True}
+    if invalid == "workspace":
+        body["workspace_id"] = str(uuid4())
+    else:
+        body[invalid] = False
+
+    async def handle(_request: Request) -> Response:
+        return Response(200, json=body)
+
+    async with AsyncClient(
+        base_url="https://workspace.test", transport=MockTransport(handle)
+    ) as client:
+        with pytest.raises(RuntimeError, match="did not create the expected admin workspace"):
+            await RemoteWorkspaceProvisioner(client).provision(run_id)
+
+
 async def test_remote_workspace_driver_uses_the_ufo_json_transport(
     db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -7417,6 +7512,15 @@ def _recorder(root: Path) -> RunRecorder:
     )
 
 
+def test_run_recorder_persists_the_workspace_id(tmp_path: Path) -> None:
+    recorder = _recorder(tmp_path)
+    recorder.workspace_id = uuid4()
+
+    recorder.record(0, EvalReport(name="suite", suite="capability", digest="sha256:a", cases=()))
+
+    assert load_runs(tmp_path)[0].workspace_id == recorder.workspace_id
+
+
 def test_run_recorder_keeps_finished_suites_when_a_later_suite_dies(tmp_path) -> None:
     """The observed failure mode (nightly 2026-08-21, shard 4): one record written at the very end,
     so a suite raising or the step deadline killing the runner discarded seven finished suites'
@@ -7797,6 +7901,74 @@ async def test_eval_run_installs_credentials_pins_model_and_closes_blob_client(
     )
     assert driver_models == [MODEL]
     assert not blob_backend._clients
+
+
+async def test_fresh_workspace_is_provisioned_before_agent_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    recorder = _recorder(tmp_path)
+    calls: list[UUID] = []
+    events: list[str] = []
+
+    async def validate(_client: RemoteClient) -> None:
+        events.append("validated")
+
+    class Provisioner:
+        def __init__(self, client: AsyncClient) -> None:
+            assert client.headers["authorization"] == "Bearer onboard-token"
+
+        async def provision(self, run_id: UUID) -> UUID:
+            assert events == ["validated"]
+            calls.append(run_id)
+            return workspace_id
+
+    async def resolve(agent_name: str, selected: UUID | None):
+        assert agent_name == "assistant"
+        assert selected == workspace_id
+        return workspace_id, agent_id, "prompt", "auto", "auto"
+
+    async def dispose() -> None:
+        return None
+
+    class Provisioned(Exception):
+        pass
+
+    def stop(_config: object) -> object:
+        assert recorder.workspace_id == workspace_id
+        raise Provisioned
+
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setenv("UFO_ONBOARD_CONTROL_TOKEN", "onboard-token")
+    monkeypatch.setenv("UFO_TOKEN_SECRET", "token-secret")
+    monkeypatch.setattr("evals.__main__.init_db", lambda _url: None)
+    monkeypatch.setattr("evals.__main__.dispose_db", dispose)
+    monkeypatch.setattr("evals.__main__.init_workspace_credentials", lambda _store: None)
+    monkeypatch.setattr("evals.__main__.install_credential_requests", lambda _requests: None)
+    monkeypatch.setattr("evals.__main__.load_manifests", lambda _pack: ())
+    monkeypatch.setattr("evals.__main__.shutil.which", lambda _name: "/bin/ufo")
+    monkeypatch.setattr("evals.__main__.RemoteClient.validate", validate)
+    monkeypatch.setattr("evals.__main__.RemoteWorkspaceProvisioner", Provisioner)
+    monkeypatch.setattr("evals.__main__.resolve_workspace_and_agent", resolve)
+    monkeypatch.setattr("evals.__main__.blob_store_for", stop)
+    config = Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
+        blob=BlobConfig(backend="filesystem", root=tmp_path),
+        connect={"public_base_url": "https://workspace.test"},
+    )
+
+    with pytest.raises(Provisioned):
+        await run_evals(
+            config,
+            (),
+            "assistant",
+            recorder,
+            remote=True,
+            fresh_workspace=True,
+        )
+
+    assert calls == [recorder.id]
 
 
 async def test_run_builds_the_compaction_client_inside_the_workspace_scope(
@@ -8213,6 +8385,38 @@ async def test_capability_merge_fails_unclean_when_a_terminal_childs_transcript_
     assert "corrupt transcript" in corrupt_result.failure_reason
     assert corrupt_result.output.tokens == 150
     assert corrupt_result.output.cost_micro_usd == 10
+
+
+async def test_capability_merge_scores_a_failed_child_without_a_transcript(
+    db: None, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(harness_target, "CHILD_TRANSCRIPT_POLL_ATTEMPTS", 1)
+    monkeypatch.setattr(harness_target, "CHILD_TRANSCRIPT_POLL_SECONDS", 0.0)
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = _delegated_worker(
+        blob,
+        workspace_id,
+        child_status="failed",
+        child_transcript_missing=True,
+        tokens=120,
+        cost_micro_usd=8,
+        child_tokens=30,
+        child_cost_micro_usd=2,
+    )
+    target = _delegating_target(blob, worker, agent_id, workspace_id)
+    case = CapabilityCase(
+        "delegated-failed", "browse then remember", required_tools_scorer(("navigate",))
+    )
+
+    with ws(workspace_id):
+        result = await target.run(case)
+
+    assert result.clean is True
+    assert all(call.name != "navigate" for call in result.output.calls)
+    assert result.output.tokens == 150
+    assert result.output.cost_micro_usd == 10
 
 
 async def test_capability_scoring_merges_child_turn_trajectories(db: None, tmp_path) -> None:

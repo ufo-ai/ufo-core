@@ -9108,8 +9108,8 @@ async def test_an_intent_applies_exactly_and_the_turn_is_the_audit_record(
     """The panel contract end to end: a form-shaped POST admits a turn that dispatches the object
     verb verbatim — no model round — so the submitted values land exactly, the terminal frame
     returns synchronously, and the turn row plus its transcript are the audit record. The intent
-    lane publishes that terminal frame before the transcript blob is written, so the read waits on
-    the turn's workflow, which rides the turn's own id and returns only after that write."""
+    lane writes the transcript before publishing its terminal frame, so the synchronous read that
+    follows the response sees the complete audit record."""
     client, workspace_id, agent_id = web
     config, _hub, blob, _sandboxes = dbos_runtime
     admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)

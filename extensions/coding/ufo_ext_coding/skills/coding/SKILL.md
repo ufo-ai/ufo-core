@@ -1,12 +1,15 @@
 ---
 name: coding
-description: Load when the member asks to inspect or change source code, fix a bug, produce a patch or diff, work in a repository or at a pinned commit, clone a repository, or answer how GitHub is connected. Load before any repository action, the setup fetch included.
+description: Load when asked to inspect or change source code, fix bugs, produce patches or diffs, work in or clone repositories, use pinned commits, or check GitHub access. On a repository task, call only `load_skill` for coding in the first round. Call no other tool until it returns.
 ---
 # Coding Subagent Routing
 
 **Scope:** Spawn a coding subagent when the task requires navigating a repository or coding files. Do NOT spawn one for general questions that don't involve code or repos.
 
 **Your turn on a repository task is exactly this procedure — nothing else:**
+
+Call `spawn(target="coding", ...)` immediately after this skill loads. Do not call
+`update_todo_list`, shell, file, web, or any setup tool first.
 
 1. Choose the repository setup mode (below) and `spawn(target="coding", ...)` with the setup sentence as the objective's first line, followed by the task and any instructions the request carried for whoever does the work, verbatim.
 2. Read the child's report; `read` its deliverable if you must inspect it.
