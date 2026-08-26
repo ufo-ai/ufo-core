@@ -321,6 +321,24 @@ def test_a_matrix_row_without_a_corpus_names_no_snapshot(tmp_path: Path) -> None
     assert "memory_ingestion" not in written["run"][0]
 
 
+def test_remote_ablation_routes_every_arm_through_the_remote_transport(tmp_path: Path) -> None:
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("basics",),
+        remote=True,
+        budget_usd=5.0,
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(ArmSpec(name="knockout", files={}),),
+    )
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    written = ablation.matrix(spec.arm[0], tmp_path / "ablate-template.toml")
+    matrix = Matrix.model_validate(tomllib.loads(tomli_w.dumps(written)))
+
+    assert matrix.run[0].args == ("--concurrency", "4", "--remote", "--only", "basics")
+
+
 def test_every_arm_uses_the_experiment_model_and_reasoning(tmp_path: Path) -> None:
     spec = ExperimentSpec(
         name="exp",

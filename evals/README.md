@@ -110,6 +110,7 @@ base = "origin/main"
 suites = ["onboarding_help"]
 cases = ["slack-install-pending", "promised-credits"]
 repeats = 2
+remote = true
 budget_usd = 60.0
 
 [template]
@@ -123,6 +124,9 @@ name = "no-topic-list"
 [arm.files]
 "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "arms/no-topic-list.py"
 ```
+
+Set `remote = true` to admit every arm through `ufo --remote --json`. Each arm still runs against
+its own isolated stack.
 
 Verdicts compare the pass counts for each case, at the sample level. A verdict calls a change only
 in these conditions: the gap is two samples or more at equal sample counts, or a case fully fails,

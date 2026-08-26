@@ -21,6 +21,7 @@ The experiment file:
     suites = ["onboarding_help"]
     cases = ["slack-install-pending", "promised-credits"]
     repeats = 1
+    remote = true
     budget_usd = 60.0
 
     [template]
@@ -133,6 +134,7 @@ class ExperimentSpec(BaseModel):
     repeats: int = 1
     concurrency: int = 4
     max_stacks: int = 3
+    remote: bool = False
     budget_usd: float
     est_usd_per_case: float = 1.20
     model: str | None = None
@@ -567,6 +569,8 @@ class Ablation:
         `--memory-ingestion` and `--memory-ingestion-state`, because it materializes the corpus
         itself and only then knows where the readiness state landed."""
         args = ["--concurrency", str(self.spec.concurrency)]
+        if self.spec.remote:
+            args.append("--remote")
         if self.spec.agent:
             args += ["--agent", self.spec.agent]
         args += ["--only", *self.spec.suites]
