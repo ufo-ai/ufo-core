@@ -247,6 +247,13 @@ class GitHubConnector(RestConnector):
             return shaped
         return {**shaped, stream.primary_key: f"{partition}/{key}"}
 
+    def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
+        """Keep a pull request's update cursor as page metadata, not page content."""
+        if stream.name != "pull_requests":
+            return super().render(record, stream)
+        content = {key: value for key, value in record.items() if key != stream.updated_at_field}
+        return super().render(content, stream)
+
     def paginate_source(
         self,
         client: httpx.AsyncClient,

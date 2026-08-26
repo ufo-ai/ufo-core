@@ -309,14 +309,31 @@ async def test_issues_send_since_per_repo() -> None:
     )
 
 
-async def test_pull_requests_drop_embedded_repositories() -> None:
-    def pull(*, title: str, stars: int) -> dict[str, object]:
+async def test_pull_requests_render_only_pull_request_content() -> None:
+    def pull(
+        *,
+        title: str = "Feature",
+        stars: int = 10,
+        updated_at: str = "2026-02-06T00:00:00Z",
+        head_sha: str = "abc",
+        state: str = "open",
+        draft: bool = False,
+        merged_at: str | None = None,
+    ) -> dict[str, object]:
         side_repo = {**REPO, "stargazers_count": stars}
         return {
             "id": 700,
             "title": title,
-            "updated_at": "2026-02-06T00:00:00Z",
-            "head": {"label": "ada:feature", "ref": "feature", "sha": "abc", "repo": side_repo},
+            "updated_at": updated_at,
+            "state": state,
+            "draft": draft,
+            "merged_at": merged_at,
+            "head": {
+                "label": "ada:feature",
+                "ref": "feature",
+                "sha": head_sha,
+                "repo": side_repo,
+            },
             "base": {"label": "acme:main", "ref": "main", "sha": "def", "repo": side_repo},
         }
 
@@ -332,13 +349,28 @@ async def test_pull_requests_drop_embedded_repositories() -> None:
 
         return handle
 
-    first = await _fetch("pull_requests", handler(pull(title="Feature", stars=10)))
-    repo_changed = await _fetch("pull_requests", handler(pull(title="Feature", stars=42)))
-    pr_changed = await _fetch("pull_requests", handler(pull(title="Feature v2", stars=42)))
+    first = await _fetch("pull_requests", handler(pull()))
+    timestamp_changed = await _fetch(
+        "pull_requests", handler(pull(updated_at="2026-02-07T00:00:00Z"))
+    )
+    repo_changed = await _fetch("pull_requests", handler(pull(stars=42)))
+    material_changes = (
+        await _fetch("pull_requests", handler(pull(title="Feature v2"))),
+        await _fetch("pull_requests", handler(pull(head_sha="fed"))),
+        await _fetch("pull_requests", handler(pull(state="closed"))),
+        await _fetch("pull_requests", handler(pull(draft=True))),
+        await _fetch(
+            "pull_requests",
+            handler(pull(state="closed", merged_at="2026-02-07T00:00:00Z")),
+        ),
+    )
 
+    assert first.pages[0].digest == timestamp_changed.pages[0].digest
+    assert timestamp_changed.pages[0].updated_at == "2026-02-07T00:00:00.000000+00:00"
     assert first.pages[0].digest == repo_changed.pages[0].digest
-    assert repo_changed.pages[0].digest != pr_changed.pages[0].digest
+    assert all(first.pages[0].digest != changed.pages[0].digest for changed in material_changes)
     body = json.loads(first.pages[0].body.split("\n\n", 1)[1])
+    assert "updated_at" not in body
     assert body["head"] == {"label": "ada:feature", "ref": "feature", "sha": "abc"}
     assert body["base"] == {"label": "acme:main", "ref": "main", "sha": "def"}
 
