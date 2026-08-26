@@ -132,12 +132,20 @@ CANONICAL_PROCEDURE = (
     "Do not spawn preparation, synthesis, or adjudication subagents.",
     "Resolve disagreements yourself.",
     "Do not create or update a plan, objective, journal, or todo for a review.",
+    'Each spawn payload is `{"objective": "<complete objective>"}`; never use `task`.',
+    "do not load `spawn-catalog` or another skill",
+    "After `object_get`, issue the two spawn calls immediately.",
+    "Earlier conversation messages can contain reviewer objectives from old prompt revisions.",
+    "Build both spawn objectives only from the current `Review objective for each subagent` block",
     # One bounded evidence pass, as wide as its known operations.
-    "up to eight tool calls",
-    "If two or more operations are ready, a response with one tool call is invalid.",
-    "Do not leave a known independent operation for a later round.",
-    "Return exactly one JSON object in the finish result",
-    "Put no Markdown fence or text before or after it",
+    "issue all independent calls whose inputs are known, with a maximum of eight",
+    "If two calls are ready, one call is invalid.",
+    "the next response must issue four parallel calls",
+    "Later, issue every ready instruction read, code read, diff read, and search as separate "
+    "parallel calls.",
+    "If a bounded read reports remaining offsets, read up to eight known offsets together next.",
+    "If one response creates multiple subset diff files, read all of them together next.",
+    "Return exactly one JSON object through `finish`, with no other text",
     # A new head preempts, and the work it replaces is cancelled and discarded together.
     "Treat a source update for a new head SHA as higher priority than every result for an older "
     "head SHA.",
@@ -217,8 +225,7 @@ def test_the_review_agent_keeps_the_merge_base_its_diff_needs() -> None:
     (agent,) = app_code.manifest().agents
     prompt = agent.spec.prompt
     assert "git diff --name-only <base>...<head>" in prompt
-    assert "fetch the two commits with `--filter=blob:none`" in prompt
-    assert "Never fetch shallow" in prompt
+    assert "Fetch base and head with `--filter=blob:none` and no `--depth`." in prompt
 
 
 def test_each_reviewer_owns_one_workspace_checkout() -> None:
@@ -227,7 +234,7 @@ def test_each_reviewer_owns_one_workspace_checkout() -> None:
     assert "Checkout label `correctness`." in prompt
     assert "Checkout label `security`." in prompt
     assert "/workspace/code-review-<full head SHA>-<checkout label>" in prompt
-    assert "Never put either under `/tmp` or another reviewer's checkout." in prompt
+    assert "Never use `/tmp` or a peer's path." in prompt
 
 
 def test_a_finding_never_crosses_a_head_sha() -> None:
@@ -250,16 +257,21 @@ def test_the_review_agent_bounds_each_child_evidence_pass() -> None:
     `CANONICAL_PROCEDURE`; what is pinned here is that the pass ends — a reviewer that kept
     re-reading a complete output would hold the head open and never return its result."""
     (agent,) = app_code.manifest().agents
-    assert "Make one bounded evidence pass." in agent.spec.prompt
-    assert "Maximize same-round tool use." in agent.spec.prompt
-    assert "Do not repeat a command when its output was complete." in agent.spec.prompt
-    assert "return the JSON result immediately" in agent.spec.prompt
+    assert "the next response must issue four parallel calls" in agent.spec.prompt
+    assert "Do not combine independent operations in one shell command." in agent.spec.prompt
+    assert "repeat a complete call" in agent.spec.prompt
+    assert "Return the result immediately after full coverage." in agent.spec.prompt
+
+
+def test_the_review_agent_reads_agents_files_without_following_claude_symlinks() -> None:
+    (agent,) = app_code.manifest().agents
+    assert "Never read `CLAUDE.md`; it can be a symlink to `AGENTS.md`." in agent.spec.prompt
 
 
 def test_the_review_agent_requires_one_strict_json_result() -> None:
     (agent,) = app_code.manifest().agents
     prompt = agent.spec.prompt
-    assert "Return exactly one JSON object in the finish result" in prompt
+    assert "Return exactly one JSON object through `finish`, with no other text" in prompt
     assert "contains no text outside it" in prompt
 
 

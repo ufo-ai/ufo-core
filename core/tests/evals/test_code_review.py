@@ -85,8 +85,16 @@ def test_agents_is_the_regular_instruction_file() -> None:
 
 
 async def test_parallel_review_grader_requires_two_same_round_spawns_and_child_batches() -> None:
-    first = _call("spawn", "spawn-1", {"target": "coding", "background": True, "payload": {}})
-    second = _call("spawn", "spawn-2", {"target": "coding", "background": True, "payload": {}})
+    first = _call(
+        "spawn",
+        "spawn-1",
+        {"target": "coding", "background": True, "payload": {"objective": "review one"}},
+    )
+    second = _call(
+        "spawn",
+        "spawn-2",
+        {"target": "coding", "background": True, "payload": {"objective": "review two"}},
+    )
     correctness = f"/workspace/code-review-{code_review.HEAD_SHA}-correctness"
     security = f"/workspace/code-review-{code_review.HEAD_SHA}-security"
     alpha = _call("read", "read-1", {"file_path": f"{correctness}/src/alpha.py"})
@@ -140,6 +148,228 @@ async def test_parallel_review_grader_requires_two_same_round_spawns_and_child_b
         ),
     )
     assert (await code_review._grade_parallel_review(durable_only)).passed
+
+    skill = _call("load_skill", "skill-1", {"name": "spawn-catalog"})
+    loaded = replace(output, own_calls=(skill, first, second), calls=(skill, *output.calls))
+    loaded_verdict = await code_review._grade_parallel_review(loaded)
+    assert not loaded_verdict.passed
+    assert "loaded a skill" in loaded_verdict.reason
+
+    long = _call(
+        "spawn",
+        "spawn-3",
+        {
+            "target": "coding",
+            "background": True,
+            "payload": {"objective": "x" * (code_review.MAX_REVIEW_OBJECTIVE_CHARS + 1)},
+        },
+    )
+    long_output = replace(
+        output,
+        own_calls=(long, second),
+        calls=(long, second, alpha, beta, bulk),
+        timing=timing.model_copy(
+            update={
+                "turns": (
+                    _turn("evaluated", _step(long, 2), _step(second, 2)),
+                    *timing.turns[1:],
+                )
+            }
+        ),
+    )
+    long_verdict = await code_review._grade_parallel_review(long_output)
+    assert not long_verdict.passed
+    assert "objective exceeded" in long_verdict.reason
+
+
+async def test_current_objective_grader_rejects_stale_transcript_instructions() -> None:
+    def output(objective: str) -> CapabilityOutput:
+        first = _call(
+            "spawn",
+            "spawn-1",
+            {"target": "coding", "background": True, "payload": {"objective": objective}},
+        )
+        second = _call(
+            "spawn",
+            "spawn-2",
+            {"target": "coding", "background": True, "payload": {"objective": objective}},
+        )
+        return CapabilityOutput(
+            "",
+            (first, second),
+            own_calls=(first, second),
+            timing=CaseTiming(
+                wall_ms=1,
+                turns=(_turn("evaluated", _step(first, 2), _step(second, 2)),),
+            ),
+        )
+
+    current = "\n".join(code_review.CURRENT_OBJECTIVE_MARKERS)
+    stale = f"{current}\n{code_review.STALE_OBJECTIVE_MARKERS[0]}"
+    missing = "\n".join(code_review.CURRENT_OBJECTIVE_MARKERS[:-1])
+
+    passed = await code_review._grade_current_objective(output(current))
+    stale_verdict = await code_review._grade_current_objective(output(stale))
+    missing_verdict = await code_review._grade_current_objective(output(missing))
+
+    assert passed.passed, passed.reason
+    assert not stale_verdict.passed
+    assert "stale objective" in stale_verdict.reason
+    assert not missing_verdict.passed
+    assert "omitted current" in missing_verdict.reason
+
+
+def test_stale_objective_case_contains_the_known_old_rules() -> None:
+    case = next(case for case in code_review.CASES if "stale-reviewer-objective" in case.name)
+
+    assert all(marker in case.prior_messages[-1] for marker in code_review.STALE_OBJECTIVE_MARKERS)
+    assert all(
+        marker not in case.prior_messages[-1] for marker in code_review.CURRENT_OBJECTIVE_MARKERS
+    )
+
+
+async def test_real_review_efficiency_grader_rejects_serial_or_long_reviewers() -> None:
+    first = _call(
+        "spawn",
+        "spawn-1",
+        {"target": "coding", "background": True, "payload": {"objective": "review one"}},
+    )
+    second = _call(
+        "spawn",
+        "spawn-2",
+        {"target": "coding", "background": True, "payload": {"objective": "review two"}},
+    )
+    read = _call("read", "read-1", {"file_path": "one.py"})
+    search = _call("grep", "grep-1", {"pattern": "caller", "path": "src"})
+    timing = CaseTiming(
+        wall_ms=3,
+        turns=(
+            _turn("evaluated", _step(first, 2), _step(second, 2)),
+            _turn("child", _step(read, 4), _step(search, 4)),
+            _turn("child", _step(read, 5), _step(search, 5)),
+        ),
+    )
+    output = CapabilityOutput(
+        "",
+        (first, second, read, search),
+        own_calls=(first, second),
+        timing=timing,
+    )
+
+    passed = await code_review._grade_real_review_efficiency(output)
+    serial = await code_review._grade_real_review_efficiency(
+        replace(
+            output,
+            timing=timing.model_copy(
+                update={
+                    "turns": (
+                        timing.turns[0],
+                        _turn("child", _step(read, 4), _step(search, 5)),
+                        _turn("child", _step(read, 6), _step(search, 7)),
+                    )
+                }
+            ),
+        )
+    )
+    long_turn = timing.turns[1].model_copy(
+        update={"rounds": code_review.MAX_SMALL_REVIEW_ROUNDS + 1}
+    )
+    long = await code_review._grade_real_review_efficiency(
+        replace(
+            output,
+            timing=timing.model_copy(
+                update={"turns": (timing.turns[0], long_turn, timing.turns[2])}
+            ),
+        )
+    )
+
+    assert passed.passed, passed.reason
+    assert not serial.passed
+    assert "no multi-call" in serial.reason
+    assert not long.passed
+    assert "round budget" in long.reason
+
+
+async def test_large_review_efficiency_grader_rejects_later_serial_reads() -> None:
+    first = _call(
+        "spawn",
+        "spawn-1",
+        {"target": "coding", "background": True, "payload": {"objective": "review one"}},
+    )
+    second = _call(
+        "spawn",
+        "spawn-2",
+        {"target": "coding", "background": True, "payload": {"objective": "review two"}},
+    )
+    checkout = _call("bash", "checkout", {"command": "git fetch"})
+    initial = tuple(
+        _call("read", f"initial-{index}", {"file_path": f"initial-{index}"}) for index in range(4)
+    )
+    later = tuple(
+        _call("read", f"later-{index}", {"file_path": f"later-{index}"}) for index in range(4)
+    )
+    serial = tuple(
+        _call("read", f"serial-{index}", {"file_path": f"serial-{index}"})
+        for index in range(code_review.MAX_LARGE_SINGLE_CALL_ROUNDS + 1)
+    )
+
+    def child(later_steps: tuple[StepTiming, ...]) -> TurnTiming:
+        return _turn(
+            "child",
+            _step(checkout, 1),
+            *(_step(call, 2) for call in initial),
+            *later_steps,
+        ).model_copy(update={"rounds": 4})
+
+    passed_timing = CaseTiming(
+        wall_ms=3,
+        turns=(
+            _turn("evaluated", _step(first, 2), _step(second, 2)),
+            child(tuple(_step(call, 3) for call in later)),
+            child(tuple(_step(call, 4) for call in later)),
+        ),
+    )
+    calls = (first, second, checkout, *initial, *later, *serial)
+    output = CapabilityOutput(
+        "",
+        calls,
+        own_calls=(first, second),
+        timing=passed_timing,
+    )
+    serial_timing = passed_timing.model_copy(
+        update={
+            "turns": (
+                passed_timing.turns[0],
+                child(
+                    (
+                        *(_step(call, 3) for call in later),
+                        *(_step(call, 10 + index) for index, call in enumerate(serial)),
+                    )
+                ),
+                passed_timing.turns[2],
+            )
+        }
+    )
+
+    passed = await code_review._grade_large_review_efficiency(output)
+    failed = await code_review._grade_large_review_efficiency(replace(output, timing=serial_timing))
+
+    assert passed.passed, passed.reason
+    assert not failed.passed
+    assert "serial evidence rounds" in failed.reason
+
+
+async def test_large_review_fixture_commits_have_pinned_shas(tmp_path: Path) -> None:
+    for item in code_review.LARGE_WORKSPACE_FILES:
+        path = tmp_path / item.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(item.content)
+
+    await code_review._prepare_large_review(uuid4(), tmp_path)
+
+    assert await code_review._git(tmp_path / "review-target", "rev-parse", "HEAD") == (
+        code_review.LARGE_HEAD_SHA
+    )
 
 
 async def test_no_parent_plan_grader_rejects_durable_plan() -> None:
