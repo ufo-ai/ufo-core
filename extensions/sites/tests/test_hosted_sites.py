@@ -199,6 +199,15 @@ class FakeSandbox:
             return _listed_source()
         return ExecResult(stdout="", stderr="", exit_code=0)
 
+    async def runtime_path(self, relative: str) -> str:
+        return f"/runtime/{relative}"
+
+    async def write_runtime_file(self, relative: str, content: bytes) -> None:
+        return None
+
+    async def write_runtime_path(self, path: str, content: bytes) -> None:
+        return None
+
     async def write_file(self, path: str, content: bytes) -> None:
         return None
 
@@ -227,6 +236,15 @@ class WorkingSandbox:
         if program is ENUMERATE_PROG:
             return ExecResult(stdout=json.dumps(self.listing), stderr="", exit_code=0)
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def runtime_path(self, relative: str) -> str:
+        return f"/runtime/{relative}"
+
+    async def write_runtime_file(self, relative: str, content: bytes) -> None:
+        self.files[f"/runtime/{relative}"] = content
+
+    async def write_runtime_path(self, path: str, content: bytes) -> None:
+        self.files[path] = content
 
     async def write_file(self, path: str, content: bytes) -> None:
         self.files[path] = content
@@ -273,6 +291,15 @@ class ShootingSandbox:
         if program is ENUMERATE_PROG:
             return _listed_source()
         return ExecResult(stdout=self.digest, stderr="", exit_code=0)
+
+    async def runtime_path(self, relative: str) -> str:
+        return f"/runtime/{relative}"
+
+    async def write_runtime_file(self, relative: str, content: bytes) -> None:
+        return None
+
+    async def write_runtime_path(self, path: str, content: bytes) -> None:
+        return None
 
     async def write_file(self, path: str, content: bytes) -> None:
         return None
@@ -2189,6 +2216,9 @@ class FailingSandbox:
         if program is ENUMERATE_PROG:
             return _listed_source()
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def runtime_path(self, relative: str) -> str:
+        return f"/runtime/{relative}"
 
     def read_file(self, path: str) -> AsyncIterator[bytes]:
         async def bytes_of() -> AsyncIterator[bytes]:

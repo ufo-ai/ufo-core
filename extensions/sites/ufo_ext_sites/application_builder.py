@@ -22,7 +22,7 @@ from ufo.sdk.manifest import (
     PreToolUse,
     SubagentProfile,
 )
-from ufo.sdk.sandbox import ContainmentError, contained_relative
+from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, contained_relative
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
@@ -170,8 +170,8 @@ APPLICATION_SOURCE_READ = """from containment import ContainmentError, contained
 import sys
 
 try:
-    with contained_file(sys.argv[1], "/workspace") as target:
-        sys.stdout.write(target.read_text(int(sys.argv[2]) if len(sys.argv) > 2 else 1000000))
+    with contained_file(sys.argv[1], sys.argv[2]) as target:
+        sys.stdout.write(target.read_text(int(sys.argv[3]) if len(sys.argv) > 3 else 1000000))
 except (ContainmentError, OSError) as error:
     raise SystemExit(str(error))"""
 APPLICATION_SOURCE_CLAIM = """import os
@@ -179,7 +179,7 @@ from containment import ContainmentError, contained_file
 import sys
 
 try:
-    with contained_file(sys.argv[1], "/workspace", create_parent=True) as target:
+    with contained_file(sys.argv[1], sys.argv[2], create_parent=True) as target:
         descriptor = os.open(
             target.name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -196,7 +196,7 @@ from containment import ContainmentError, contained_file
 import sys
 
 try:
-    with contained_file(sys.argv[1], "/workspace") as target:
+    with contained_file(sys.argv[1], sys.argv[2]) as target:
         status = target.lstat()
         if status is None or not stat.S_ISREG(status.st_mode):
             raise SystemExit(17)
@@ -368,7 +368,9 @@ class ApplicationBuildAcceptance:
             source_path=APPLICATION_SOURCE_PATH,
         )
         accepted_source = await self.ctx.sandbox.python(
-            APPLICATION_SOURCE_READ, _source_acceptance_path(task, self.child_turn_id)
+            APPLICATION_SOURCE_READ,
+            await _source_acceptance_path(self.ctx, task, self.child_turn_id),
+            await _runtime_root(self.ctx),
         )
         if accepted_source.exit_code != 0:
             return self._blocked(
@@ -559,9 +561,15 @@ def _validate_application_design(source: str) -> None:
         raise ValueError("application design must contain SVG drawing elements only")
 
 
-async def _build_application_project(ctx: ToolContext, project: str) -> None:
-    await ctx.sandbox.write_file(f"{project}/{PROJECT_CONFIG}", PROJECT_CONFIG_BYTES)
-    await unpack_page_kit(ctx, project)
+async def _build_application_project(
+    ctx: ToolContext, project: str, runtime_root: str | None = None
+) -> None:
+    config = f"{project}/{PROJECT_CONFIG}"
+    if runtime_root is None:
+        await ctx.sandbox.write_file(config, PROJECT_CONFIG_BYTES)
+    else:
+        await ctx.sandbox.write_runtime_path(config, PROJECT_CONFIG_BYTES)
+    await unpack_page_kit(ctx, project, runtime_root)
     result = await ctx.sandbox.sh(
         'cd "$1" && vite build', project, timeout_s=APPLICATION_BUILD_TIMEOUT_SECONDS
     )
@@ -573,50 +581,64 @@ async def _build_application_project(ctx: ToolContext, project: str) -> None:
 async def _compile_application_source(
     ctx: ToolContext, task: ApplicationBuilderTask, source: str
 ) -> None:
-    check_root = f"/workspace/.tool-output/application-builder/{ctx.turn.id}/project"
-    index = await ctx.sandbox.python(APPLICATION_SOURCE_READ, f"{task.scaffold_path}/index.html")
+    check_relative = f"tool-output/application-builder/{ctx.turn.id}/project"
+    check_root = await ctx.sandbox.runtime_path(check_relative)
+    runtime_root = await _runtime_root(ctx)
+    index = await ctx.sandbox.python(
+        APPLICATION_SOURCE_READ, f"{task.scaffold_path}/index.html", WORKSPACE_DIR
+    )
     if index.exit_code != 0:
         raise RuntimeError(index.stderr or "application index.html could not be read")
-    await ctx.sandbox.write_file(f"{check_root}/index.html", index.stdout.encode())
-    await ctx.sandbox.write_file(f"{check_root}/app.tsx", source.encode())
-    await _build_application_project(ctx, check_root)
+    await ctx.sandbox.write_runtime_file(f"{check_relative}/index.html", index.stdout.encode())
+    await ctx.sandbox.write_runtime_file(f"{check_relative}/app.tsx", source.encode())
+    await _build_application_project(ctx, check_root, runtime_root)
 
 
-def _source_claim_path(task: ApplicationBuilderTask, turn_id: UUID) -> str:
-    return (
-        "/workspace/.tool-output/application-builder/"
+async def _source_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str:
+    return await ctx.sandbox.runtime_path(
+        "tool-output/application-builder/"
         f"{sha256(task.source_path.encode()).hexdigest()}.{turn_id}.claimed"
     )
+
+
+async def _runtime_root(ctx: ToolContext) -> str:
+    return str(PurePosixPath(await ctx.sandbox.runtime_path("tool-output")).parent)
 
 
 def _design_path(task: ApplicationBuilderTask) -> str:
     return f"{task.scaffold_path}/application-design.svg"
 
 
-def _design_claim_path(task: ApplicationBuilderTask, turn_id: UUID) -> str:
-    return (
-        "/workspace/.tool-output/application-builder/"
+async def _design_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID) -> str:
+    return await ctx.sandbox.runtime_path(
+        "tool-output/application-builder/"
         f"{sha256(_design_path(task).encode()).hexdigest()}.{turn_id}.claimed"
     )
 
 
-def _source_candidate_path(task: ApplicationBuilderTask, turn_id: UUID) -> str:
-    return (
-        "/workspace/.tool-output/application-builder/"
+async def _source_candidate_path(
+    ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID
+) -> str:
+    return await ctx.sandbox.runtime_path(
+        "tool-output/application-builder/"
         f"{sha256(task.source_path.encode()).hexdigest()}.{turn_id}.candidate.tsx"
     )
 
 
-def _source_acceptance_path(task: ApplicationBuilderTask, turn_id: UUID) -> str:
-    return (
-        "/workspace/.tool-output/application-builder/"
+async def _source_acceptance_path(
+    ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID
+) -> str:
+    return await ctx.sandbox.runtime_path(
+        "tool-output/application-builder/"
         f"{sha256(task.source_path.encode()).hexdigest()}.{turn_id}.accepted"
     )
 
 
 async def _require_application_source(ctx: ToolContext, task: ApplicationBuilderTask) -> None:
     claim = await ctx.sandbox.python(
-        APPLICATION_SOURCE_REQUIRE_CLAIM, _source_claim_path(task, ctx.turn.id)
+        APPLICATION_SOURCE_REQUIRE_CLAIM,
+        await _source_claim_path(ctx, task, ctx.turn.id),
+        await _runtime_root(ctx),
     )
     if claim.exit_code == 17:
         raise ValueError("write_application_source must complete before source repair")
@@ -626,13 +648,15 @@ async def _require_application_source(ctx: ToolContext, task: ApplicationBuilder
 
 async def _require_application_design(ctx: ToolContext, task: ApplicationBuilderTask) -> None:
     claim = await ctx.sandbox.python(
-        APPLICATION_SOURCE_REQUIRE_CLAIM, _design_claim_path(task, ctx.turn.id)
+        APPLICATION_SOURCE_REQUIRE_CLAIM,
+        await _design_claim_path(ctx, task, ctx.turn.id),
+        await _runtime_root(ctx),
     )
     if claim.exit_code == 17:
         raise ValueError("write_application_design must complete before write_application_source")
     if claim.exit_code != 0:
         raise RuntimeError(claim.stderr or "application design claim could not be read")
-    result = await ctx.sandbox.python(APPLICATION_SOURCE_READ, _design_path(task))
+    result = await ctx.sandbox.python(APPLICATION_SOURCE_READ, _design_path(task), WORKSPACE_DIR)
     if result.exit_code != 0 or not result.stdout:
         raise ValueError("write_application_design must complete before write_application_source")
     _validate_application_design(result.stdout)
@@ -648,7 +672,8 @@ async def write_application_design(
     design_path = _design_path(task)
     claim = await ctx.sandbox.python(
         APPLICATION_SOURCE_CLAIM,
-        _design_claim_path(task, ctx.turn.id),
+        await _design_claim_path(ctx, task, ctx.turn.id),
+        await _runtime_root(ctx),
     )
     if claim.exit_code == 17:
         raise ValueError("the application design is already fixed for this build")
@@ -677,7 +702,9 @@ async def read_application_source(ctx: ToolContext, args: ReadApplicationSourceI
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
     await _require_application_source(ctx, task)
     result = await ctx.sandbox.python(
-        APPLICATION_SOURCE_READ, _source_candidate_path(task, ctx.turn.id)
+        APPLICATION_SOURCE_READ,
+        await _source_candidate_path(ctx, task, ctx.turn.id),
+        await _runtime_root(ctx),
     )
     if result.exit_code != 0:
         raise RuntimeError(result.stderr or "app.tsx could not be read")
@@ -731,8 +758,10 @@ async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceI
 
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
     await _require_application_source(ctx, task)
-    candidate_path = _source_candidate_path(task, ctx.turn.id)
-    result = await ctx.sandbox.python(APPLICATION_SOURCE_READ, candidate_path)
+    candidate_path = await _source_candidate_path(ctx, task, ctx.turn.id)
+    result = await ctx.sandbox.python(
+        APPLICATION_SOURCE_READ, candidate_path, await _runtime_root(ctx)
+    )
     if result.exit_code != 0:
         raise RuntimeError(result.stderr or "app.tsx could not be read")
     source = result.stdout
@@ -751,13 +780,14 @@ async def edit_application_source(ctx: ToolContext, args: EditApplicationSourceI
         source = source[:start] + new_text + source[end:]
     if len(source) > APPLICATION_SOURCE_MAX_CHARS:
         raise ValueError(f"app.tsx exceeds {APPLICATION_SOURCE_MAX_CHARS} characters")
-    await ctx.sandbox.write_file(candidate_path, source.encode())
+    await ctx.sandbox.write_runtime_path(candidate_path, source.encode())
     _validate_application_source(source)
     await _compile_application_source(ctx, task, source)
     await ctx.sandbox.write_file(task.source_path, source.encode())
     await _build_application_project(ctx, task.scaffold_path)
-    await ctx.sandbox.write_file(
-        _source_acceptance_path(task, ctx.turn.id), sha256(source.encode()).hexdigest().encode()
+    await ctx.sandbox.write_runtime_path(
+        await _source_acceptance_path(ctx, task, ctx.turn.id),
+        sha256(source.encode()).hexdigest().encode(),
     )
     return ToolResult(
         content=(
@@ -782,7 +812,9 @@ async def write_application_source(
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
     await _require_application_design(ctx, task)
     claim = await ctx.sandbox.python(
-        APPLICATION_SOURCE_CLAIM, _source_claim_path(task, ctx.turn.id)
+        APPLICATION_SOURCE_CLAIM,
+        await _source_claim_path(ctx, task, ctx.turn.id),
+        await _runtime_root(ctx),
     )
     if claim.exit_code == 17:
         raise ValueError(
@@ -791,7 +823,9 @@ async def write_application_source(
         )
     if claim.exit_code != 0:
         raise RuntimeError(claim.stderr or "app.tsx ownership could not be claimed")
-    await ctx.sandbox.write_file(_source_candidate_path(task, ctx.turn.id), args.content.encode())
+    await ctx.sandbox.write_runtime_path(
+        await _source_candidate_path(ctx, task, ctx.turn.id), args.content.encode()
+    )
     try:
         _validate_application_source(args.content)
         await _compile_application_source(ctx, task, args.content)
@@ -802,8 +836,8 @@ async def write_application_source(
         ) from error
     await ctx.sandbox.write_file(task.source_path, args.content.encode())
     await _build_application_project(ctx, task.scaffold_path)
-    await ctx.sandbox.write_file(
-        _source_acceptance_path(task, ctx.turn.id),
+    await ctx.sandbox.write_runtime_path(
+        await _source_acceptance_path(ctx, task, ctx.turn.id),
         sha256(args.content.encode()).hexdigest().encode(),
     )
     return ToolResult(
@@ -1009,7 +1043,7 @@ async def _ensure_application_scaffold(ctx: ToolContext) -> None:
         (APPLICATION_SOURCE_PATH, APPLICATION_PLACEHOLDER),
         (f"{APPLICATION_SCAFFOLD_PATH}/preview.html", APPLICATION_PREVIEW_SCAFFOLD),
     ):
-        present = await ctx.sandbox.python(APPLICATION_SOURCE_READ, path, "1")
+        present = await ctx.sandbox.python(APPLICATION_SOURCE_READ, path, WORKSPACE_DIR, "1")
         if present.exit_code != 0:
             await ctx.sandbox.write_file(path, content)
 

@@ -160,18 +160,19 @@ round.
 
 **Related, already-built — the tool-result offload** (`engine.py:525-530`). At dispatch time a
 non-error tool result over `MAX_TOOL_RESULT_CHARS = 1_048_576` (`engine.py:81`) is written to
-`{WORKSPACE_DIR}/.tool-output/<call_id>.txt` and replaced in-context by a
+`$UFO_HOME/runs/<id>/tool-output/<call_id>.txt` and replaced in-context by a
 `TOOL_RESULT_PREVIEW_CHARS = 2_000` preview + an `OFFLOAD_NOTICE` path (`engine.py:83-84,525-530`).
 This is selfhost's structural analogue of Claude Code's micro-compaction — but it fires **at write
-time on one result**, not as a response to window pressure, and it offloads *to a durable workspace
-file* rather than clearing in-context. The compaction pipeline should build on it, not duplicate it.
+time on one result**, not as a response to window pressure, and it offloads to the conversation's
+durable runtime directory rather than clearing in-context. The compaction pipeline should build on
+it, not duplicate it.
 
 **Limits (what the single call costs):**
 
 1. **No structure.** One freeform blob. No enforced intent/decisions/files/errors/pending/next-step
    sections; quality varies call to call, and nothing downstream can read a field.
 2. **No re-injection.** Files read and skills loaded before the boundary vanish unless they happen
-   to sit in the 8-message tail. The offloaded `.tool-output` paths — already durable, re-readable
+   to sit in the 8-message tail. The offloaded runtime paths — already durable, re-readable
    references — are lost from context on the summarize side.
 3. **Lossy summarizer input.** Images are dropped (`_text`), block structure and tool_use/result
    pairing are flattened to `role: text` — the summarizer sees a degraded transcript.
@@ -196,7 +197,7 @@ file* rather than clearing in-context. The compaction pipeline should build on i
 | **Group-aware selection** by API round (`grouping.ts`) | Partial — walk back to one assistant msg (`compaction.py:82-83`) | Group by assistant-id boundary; select/keep whole rounds |
 | **Structured multi-section summary** (`prompt.ts`, 9 sections) | No — one freeform sentence (`compaction.md:1`) | Typed `CompactionSummary` schema + sectioned prompt (§3) |
 | **Verbatim preservation** of recent tail | Yes — `keep_messages` tail (`compaction.py:88-90`) | Keep; express as whole kept rounds |
-| **File re-injection** (`compact.ts`, 5 files / 50k budget) | No | Re-inject **references** to recent `.tool-output` files + recently-read paths (workspace-is-truth: reference, don't re-inline) |
+| **File re-injection** (`compact.ts`, 5 files / 50k budget) | No | Re-inject **references** to recent runtime offloads + recently-read paths (reference, don't re-inline) |
 | **Skill re-injection** (`postCompactCleanup.ts`) | No | Carry loaded-skill names in the summary; re-mount is the model's next act |
 | **PTL recovery** — drop oldest groups, retry (`compact.ts`, `MAX_PTL_RETRIES = 3`) | No — summarize overflow re-raises (`engine.py:368`) | Bounded head-group-drop retry before giving up |
 | **Reconstruction** with boundary metadata (`compact.ts`) | Partial — summary msg + tail (`compaction.py:90`) | Render `CompactionSummary` + preserved rounds + reference block; keep before/after records |
@@ -220,7 +221,7 @@ maybe_compact
      2. _prepare       render head to summarizer input: block-structured, images→markers  [deterministic]
      3. _summarize     ONE metered model call → validated CompactionSummary            [external, bounded]
         └─ _recover_ptl on summarize overflow: drop oldest head rounds, retry ≤ N       [bounded]
-     4. _references    collect recent .tool-output paths + read files to re-reference   [deterministic]
+     4. _references    collect recent runtime paths + read files to re-reference        [deterministic]
      5. _reconstruct   after = [summary render] + [kept_rounds] + [reference block]     [deterministic]
      6. _persist       before, after, AND the CompactionSummary                         [durable]
 ```
@@ -239,7 +240,7 @@ survives into context; "All user messages" folds into intent):
 
 ```python
 class FileRef(BaseModel):
-    path: str            # workspace path — a .tool-output/<id>.txt or a read source
+    path: str            # workspace source or $UFO_HOME/runs/<id>/tool-output/<call>.txt
     why: str             # one line: what it is / why it mattered
 
 class CompactionSummary(BaseModel):
@@ -267,19 +268,19 @@ is gone.
 |---|---|---|
 | Recent **kept rounds** (tail, whole API rounds) | verbatim | recency + intact tool_use/result pairs; today's `keep_messages` tail, expressed as rounds |
 | **Last image / screenshot** block in the tail | verbatim | vision context is lossy to summarize; keep the freshest |
-| **`.tool-output/<id>.txt` references** for recent offloaded results | **reference, not content** | the file is already durable in the workspace (`engine.py:526`); a path costs ~1 line, the model re-reads on demand (workspace-is-truth, `spec.md`) |
+| **Runtime references** for recent offloaded results | **reference, not content** | the file is already durable under `$UFO_HOME/runs/<id>/tool-output` (`engine.py`); a path costs ~1 line, and the model re-reads it on demand |
 | Recently **read file paths** | reference | same — re-read beats re-inline; cheaper than Claude Code's 50k re-inject budget |
 | **Head rounds** (everything older) | summarized into `CompactionSummary` | the whole point |
 | **Images in the head** | dropped to `[image]` markers in summarizer input | they carry no text; already dropped by `_text` — make it explicit |
 
 This is the one deliberate divergence from Claude Code: where CC **re-inlines** up to 5 files / 50k
-tokens of content, selfhost **re-references** the durable workspace files. It is cheaper and fits
-workspace-is-truth; the cost is one extra read round if the model needs the body. (§5 open decision.)
+tokens of content, selfhost **re-references** durable workspace and runtime files. It is cheaper;
+the cost is one extra read round if the model needs the body. (§5 open decision.)
 
 ### Composition with what exists
 
 - **Tool-result offload (`engine.py:525-530`).** The pipeline does not re-offload — it *harvests*
-  the already-written `.tool-output/<id>.txt` paths for the reference block. The offload's preview +
+  the already-written runtime paths for the reference block. The offload's preview +
   path line already in the tail rides through verbatim.
 - **before/after records (`compaction.py:137-146`).** Unchanged contract; `_persist` additionally
   writes `CompactionSummary` (a third blob or a field on the `after` record) so an eval /
@@ -297,7 +298,7 @@ workspace-is-truth; the cost is one extra read round if the model needs the body
 | Phase | Delivers | Risk |
 |---|---|---|
 | **1** | `CompactionSummary` schema + sectioned prompt (replaces `compaction.md:1`); `_summarize` returns the typed object; `_reconstruct` renders it; `_persist` stores it. Trigger/selection unchanged. Proof: a forced compaction yields a validated `CompactionSummary` with populated intent/next_step; before/after + summary round-trip through `read_record`. | Low — swaps the prompt + adds a typed parse; call sites untouched |
-| **2** | Group-aware `_select` (assistant-id round boundaries) + `_prepare` (structured render, image markers) + `_references` (harvest recent `.tool-output` + read paths into the reference block). Proof: a window with a mid-round tail keeps whole rounds; an offloaded output stays re-readable by path after compaction. | Medium — touches selection; assert no tool_use/result split |
+| **2** | Group-aware `_select` (assistant-id round boundaries) + `_prepare` (structured render, image markers) + `_references` (harvest recent runtime + read paths into the reference block). Proof: a window with a mid-round tail keeps whole rounds; an offloaded output stays re-readable by path after compaction. | Medium — touches selection; assert no tool_use/result split |
 | **3** | Per-model threshold with summary reserve (replaces flat `120_000`); bounded `_recover_ptl` head-group-drop on summarize overflow; circuit-breaker so a repeatedly-failing compaction fails the turn loud. Proof: a summarize request forced to overflow drops oldest rounds and completes; an unshrinkable window fails loud, not silently. | Medium — must preserve the `force` no-op guard and metering |
 | **4** *(optional)* | Micro tier: before a full summarize, clear old offloaded tool-result previews in place to their reference line (selfhost's `microCompact.ts` analogue, pressure-driven). Only if phase 1–3 leaves a real gap. | Low value if offload already covers it — gate on evidence |
 
@@ -323,7 +324,7 @@ workspace-is-truth; the cost is one extra read round if the model needs the body
   loud turn failure, never a silent loop.
 - **Both ends or neither.** `CompactionSummary` ships producer (`_summarize`) and consumer
   (`_reconstruct` render + `read_record` for eval) in the same change; the reference block ships its
-  writer (`_references`) and its reader (the model re-reading `.tool-output` via the file tools,
+  writer (`_references`) and its reader (the model re-reading the runtime path via the file tools,
   already wired).
 - **Stays in the loop, not new core surface.** Everything lives in `loop/compaction.py` (already
   core — it *is* the turn loop). No new manifest point, no extension seam, no config knob beyond the

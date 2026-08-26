@@ -35,7 +35,6 @@ from ufo.loop.compaction import Compaction
 from ufo.loop.engine import (
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
-    TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
     TurnEngine,
 )
@@ -573,7 +572,7 @@ async def test_share_file_packs_a_directory_into_a_tarball(
     with tarfile.open(fileobj=BytesIO(whole), mode="r:gz") as tar:
         names = tar.getnames()
         assert "workspace/reports/summary.txt" in names
-        assert not any(".tool-output" in name for name in names)
+        assert not any("tool-output" in name for name in names)
 
 
 async def test_share_file_packs_a_workspace_a_carrier_serves_under_another_name(
@@ -602,7 +601,7 @@ async def test_share_file_packs_a_workspace_a_carrier_serves_under_another_name(
         "mkdir -p /workspace/reports && printf 'summary' > /workspace/reports/summary.txt"
     )
     await local.sandbox.ensure_tool_output_dir()
-    await local.sandbox.write_file(".tool-output/scratch.txt", b"engine scratch")
+    await local.sandbox.write_runtime_file("tool-output/scratch.txt", b"engine scratch")
 
     root = await _share(local, file_path="/workspace")
 
@@ -612,7 +611,7 @@ async def test_share_file_packs_a_workspace_a_carrier_serves_under_another_name(
     with tarfile.open(fileobj=BytesIO(whole), mode="r:gz") as tar:
         names = tar.getnames()
         assert f"{conversation}/reports/summary.txt" in names
-        assert not any(".tool-output" in name for name in names)
+        assert not any("tool-output" in name for name in names)
 
 
 async def test_share_file_delivers_a_list_in_share_order(
@@ -986,14 +985,16 @@ async def test_a_connector_sized_result_offloads_to_a_file_the_sandbox_can_filte
     engine = _dispatch_engine(ctx, ToolRegistry((_fixed_result_tool("search_code", payload),)))
 
     block = await _dispatch(engine, ctx, ToolUseBlock(id="call1", name="search_code", input={}))
-    path = f"{TOOL_OUTPUT_DIR}/call1.txt"
+    path = await ctx.sandbox.runtime_display_path("tool-output/call1.txt")
+    stored = await ctx.sandbox.runtime_path("tool-output/call1.txt")
     assert not block.is_error
     assert isinstance(block.content, str)
     assert path in block.content
     assert len(block.content) <= TOOL_RESULT_PREVIEW_CHARS + len(
         OFFLOAD_NOTICE.format(total=len(payload), path=path)
     )
-    assert (workspace / ".tool-output" / "call1.txt").read_text() == payload
+    assert b"".join([chunk async for chunk in ctx.sandbox.read_file(stored)]).decode() == payload
+    assert not (workspace / ".tool-output").exists()
 
     filtered = await _run(
         "bash", ctx, command=f"jq -r '.items[] | \"\\(.path)\\t\\(.html_url)\"' {path}"
@@ -1003,7 +1004,7 @@ async def test_a_connector_sized_result_offloads_to_a_file_the_sandbox_can_filte
     assert lines[0].startswith("src/transport/stream_000.rs\thttps://github.com/owner-000/")
     assert len(filtered.content[0].text) < TOOL_RESULT_PREVIEW_CHARS
 
-    windowed = await _run("read", ctx, file_path=".tool-output/call1.txt", offset=1, limit=1)
+    windowed = await _run("read", ctx, file_path=path, offset=1, limit=1)
     assert '"total_count":15800' in windowed.content[0].text
 
 
@@ -1050,12 +1051,17 @@ async def test_the_offload_fires_only_past_the_cap(
 
     inline = await _dispatch(engine, ctx, ToolUseBlock(id="call3", name="at_cap", input={}))
     assert inline.content == at_cap
-    assert not (workspace / ".tool-output" / "call3.txt").exists()
+    assert not await ctx.sandbox.runtime_file_exists("tool-output/call3.txt")
 
     offloaded = await _dispatch(engine, ctx, ToolUseBlock(id="call5", name="over_cap", input={}))
     assert isinstance(offloaded.content, str)
-    assert f"{TOOL_OUTPUT_DIR}/call5.txt" in offloaded.content
-    assert (workspace / ".tool-output" / "call5.txt").read_text() == at_cap + "y"
+    path = await ctx.sandbox.runtime_display_path("tool-output/call5.txt")
+    stored = await ctx.sandbox.runtime_path("tool-output/call5.txt")
+    assert path in offloaded.content
+    assert (
+        b"".join([chunk async for chunk in ctx.sandbox.read_file(stored)]).decode() == at_cap + "y"
+    )
+    assert not (workspace / ".tool-output").exists()
 
 
 async def test_a_read_over_the_cap_offloads_without_losing_the_file_it_read(
@@ -1079,10 +1085,13 @@ async def test_a_read_over_the_cap_offloads_without_losing_the_file_it_read(
         ),
     )
     assert isinstance(block.content, str)
-    assert f"{TOOL_OUTPUT_DIR}/call4.txt" in block.content
-    offloaded = (workspace / ".tool-output" / "call4.txt").read_text()
+    path = await ctx.sandbox.runtime_display_path("tool-output/call4.txt")
+    stored = await ctx.sandbox.runtime_path("tool-output/call4.txt")
+    assert path in block.content
+    offloaded = b"".join([chunk async for chunk in ctx.sandbox.read_file(stored)]).decode()
     assert len(offloaded) > MAX_TOOL_RESULT_CHARS
     assert lines[-1] in offloaded
+    assert not (workspace / ".tool-output").exists()
 
     windowed = await _run("read", ctx, file_path="wide.log", offset=1_400, limit=1)
     assert lines[-1] in windowed.content[0].text

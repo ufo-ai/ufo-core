@@ -38,7 +38,7 @@ pub struct OpRuntime {
 pub fn run_op(rt: &OpRuntime, session: &Session, op: &OpRequest) -> Result<Vec<u8>, String> {
     match op.kind.as_str() {
         OP_EXEC => exec::run_at_home(&op.params, &rt.workdir, &rt.cwd, &rt.home, op.timeout_s),
-        OP_WRITE => landed(session, op)
+        OP_WRITE => landed(session, op, &rt.home)
             .map(|_| Vec::new())
             .map_err(|_| format!("EIO: could not write {}", op.arg)),
         OP_READ => {
@@ -94,8 +94,9 @@ fn expand_ufo_path(path: &str, home: &Home) -> String {
     )
 }
 
-fn landed(session: &Session, op: &OpRequest) -> Result<(), String> {
-    let target = Path::new(&op.arg);
+fn landed(session: &Session, op: &OpRequest, home: &Home) -> Result<(), String> {
+    let expanded = expand_ufo_path(&op.arg, home);
+    let target = Path::new(&expanded);
     let parent = match target.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("/"),

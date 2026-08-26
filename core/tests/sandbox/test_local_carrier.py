@@ -859,26 +859,25 @@ async def test_ensure_tool_output_dir_creates_the_directory_when_absent(tmp_path
     reclaimed = await session.ensure_tool_output_dir()
 
     assert reclaimed is False
-    assert (workspace / ".tool-output").is_dir()
+    assert (Path(handle.runtime_root) / "tool-output").is_dir()
+    assert not (workspace / ".tool-output").exists()
 
 
 async def test_ensure_tool_output_dir_reclaims_a_file_squatting_the_name(tmp_path: Path) -> None:
-    """The poison-pill case: a member write left a regular file where the engine's offload
-    directory must be, so a bare `mkdir -p` would fail `File exists` on every later offload. The
-    ensure reclaims it to a directory and reports the reclaim."""
+    """A regular file occupying the engine's offload directory is reclaimed."""
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(workspace))
     session = SandboxSession(carrier=carrier, handle=handle)
-    await session.write_file(".tool-output", b"squatter")
-    assert (workspace / ".tool-output").is_file()
+    await session.write_runtime_file("tool-output", b"squatter")
+    output = Path(handle.runtime_root) / "tool-output"
+    assert output.is_file()
 
     reclaimed = await session.ensure_tool_output_dir()
 
     assert reclaimed is True
-    assert (workspace / ".tool-output").is_dir()
-    await session.write_file(".tool-output/call.txt", b"offloaded")
-    assert (workspace / ".tool-output" / "call.txt").read_text() == "offloaded"
+    assert output.is_dir()
+    assert not (workspace / ".tool-output").exists()
 
 
 async def test_ensure_tool_output_dir_leaves_an_existing_directory_and_its_contents(
@@ -888,12 +887,13 @@ async def test_ensure_tool_output_dir_leaves_an_existing_directory_and_its_conte
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(workspace))
     session = SandboxSession(carrier=carrier, handle=handle)
-    await session.write_file(".tool-output/kept.txt", b"keep me")
+    await session.write_runtime_file("tool-output/kept.txt", b"keep me")
 
     reclaimed = await session.ensure_tool_output_dir()
 
     assert reclaimed is False
-    assert (workspace / ".tool-output" / "kept.txt").read_text() == "keep me"
+    assert (Path(handle.runtime_root) / "tool-output" / "kept.txt").read_text() == "keep me"
+    assert not (workspace / ".tool-output").exists()
 
 
 async def test_exec_env_rides_the_handle_not_the_conversation(tmp_path: Path) -> None:

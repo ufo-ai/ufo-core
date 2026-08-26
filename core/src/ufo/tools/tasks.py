@@ -4,9 +4,9 @@ handles it is reached by. `bash` and the REPLs run through it, so a foreground b
 thing in each — how long the caller waits, never how long the work may take — and a command that
 outgrew it is reported the same way whichever tool asked.
 
-The journal is the workspace files a task is named by (`.tasks/<id>.log`, `.pid`, `.exit`): the
-wrapper writes them, so the result of a launch survives the exec that made it and a dispatch step
-re-running after a crash reads the first run's outcome instead of repeating the command."""
+The journal lives under the conversation's `$UFO_HOME/runs/<id>/tasks`: the wrapper writes it, so
+the result of a launch survives the exec that made it and a dispatch step re-running after a crash
+reads the first run's outcome instead of repeating the command."""
 
 import asyncio
 import hashlib
@@ -15,14 +15,14 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from ufo.o11y import log, turn_profile
-from ufo.sandbox.session import WORKSPACE_DIR, ExecResult
+from ufo.sandbox.session import ExecResult
 from ufo.tools.context import ToolContext
 
 MAX_COMMAND_TIMEOUT_MS = 600_000
 EXEC_TIMEOUT_VITALS_SECONDS = 5
 EXEC_TIMEOUT_COMMAND_MAX_CHARS = 200
 EXEC_TIMEOUT_VITALS_CMD = "cat /proc/loadavg; free -m | tail -2; df -P /workspace | tail -1"
-BACKGROUND_TASKS_DIR = ".tasks"
+BACKGROUND_TASKS_DIR = "tasks"
 TASK_SWEEP_MINUTES = 60
 TASK_PROBE_TIMEOUT_SECONDS = 5
 DETACHED_LEAD = "The command runs detached."
@@ -112,6 +112,7 @@ class TaskRun:
     result: ExecResult
     requested_s: int | None
     pid: str | None
+    display_base: str
 
 
 async def run_task(ctx: ToolContext, command: str, timeout_ms: int | None) -> TaskRun:
@@ -130,21 +131,35 @@ async def run_task(ctx: ToolContext, command: str, timeout_ms: int | None) -> Ta
     requested_s = None if timeout_ms is None else int(timeout_ms / 1000)
     timeout_s = int(min(timeout_ms, MAX_COMMAND_TIMEOUT_MS) / 1000) if timeout_ms else None
     task = task_id(ctx)
+    base = await ctx.sandbox.runtime_path(f"{BACKGROUND_TASKS_DIR}/{task}")
+    display_base = await ctx.sandbox.runtime_display_path(f"{BACKGROUND_TASKS_DIR}/{task}")
     result = await ctx.sandbox.sh(
         TASK_BASH,
         TASK_LAUNCH + TASK_WAIT,
         TASK_WRAPPER,
-        task_base(task),
+        base,
         command,
         timeout_s=timeout_s,
     )
     if result.timed_out_after_s is None:
-        return TaskRun(task_id=task, result=result, requested_s=requested_s, pid=None)
-    probe = await ctx.sandbox.sh(TASK_PROBE, task_base(task), timeout_s=TASK_PROBE_TIMEOUT_SECONDS)
+        return TaskRun(
+            task_id=task,
+            result=result,
+            requested_s=requested_s,
+            pid=None,
+            display_base=display_base,
+        )
+    probe = await ctx.sandbox.sh(TASK_PROBE, base, timeout_s=TASK_PROBE_TIMEOUT_SECONDS)
     pid = probe.stdout.strip() if probe.exit_code == 0 else ""
     if not pid:
         await _record_exec_timeout(ctx, command, result.timed_out_after_s, requested_s)
-    return TaskRun(task_id=task, result=result, requested_s=requested_s, pid=pid or None)
+    return TaskRun(
+        task_id=task,
+        result=result,
+        requested_s=requested_s,
+        pid=pid or None,
+        display_base=display_base,
+    )
 
 
 def task_id(ctx: ToolContext) -> str:
@@ -157,14 +172,9 @@ def task_id(ctx: ToolContext) -> str:
     return hashlib.sha256(ctx.idempotency_key.encode()).hexdigest()[:8]
 
 
-def task_base(task: str) -> str:
-    """Every path the launcher and the result name is absolute: an exec's working directory is
-    carrier-dependent (Docker sets none), and the workspace root is the one anchor every carrier
-    shares."""
-    return f"{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}/{task}"
-
-
-def task_handles(task: str, pid: str, applied_s: int | None = None, note: str = "") -> str:
+def task_handles(
+    task: str, pid: str, display_base: str, applied_s: int | None = None, note: str = ""
+) -> str:
     """The handles a detached command is reached by, whichever way it got there — one text for a
     command detached on request and one that outgrew its wait, so the two can never drift apart.
     `applied_s` is the wait that expired, naming the seconds that actually applied; unset is a
@@ -174,14 +184,13 @@ def task_handles(task: str, pid: str, applied_s: int | None = None, note: str = 
     The pid is the wrapper's, so the advertised stop ends the work AND still writes the exit file —
     the completion signal fires exactly once whether the command finished or was stopped."""
     lead = DETACHED_LEAD if applied_s is None else MOVED_LEAD.format(applied_s=applied_s)
-    base = task_base(task)
     payload = {
         "task": task,
         "pid": pid,
-        "log": f"{base}.log",
-        "exit_file": f"{base}.exit",
-        "watch": f'cat "{base}.exit" || true',
-        "stop": f'kill "$(cat "{base}.pid")"',
+        "log": f"{display_base}.log",
+        "exit_file": f"{display_base}.exit",
+        "watch": f'cat "{display_base}.exit" || true',
+        "stop": f'kill "$(cat "{display_base}.pid")"',
     }
     said = " ".join(part for part in (lead, note, BACKGROUND_DIRECTIVE) if part)
     return f"{said}\n{json.dumps(payload)}"

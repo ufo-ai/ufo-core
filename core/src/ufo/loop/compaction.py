@@ -5,7 +5,7 @@ structured summary and the recent tail is kept verbatim. The pipeline is determi
 bounded external summarization attempts: group into API rounds, render the head (images become
 markers, verbatim-repeated runs fold to one copy plus a count marker), summarize into a typed
 `CompactionSummary` (retrying with fewer rounds if the summarize request itself overflows), harvest
-the durable `.tool-output` references the head offloaded, reconstruct the window, verify the
+the durable runtime references the head offloaded, reconstruct the window, verify the
 reconstruction against the head it replaces, and persist. The whole pre-compaction window
 (`before`), the window that replaces it (`after`), and the typed summary — carrying the
 verification the swap passed — persist above the live transcript at
@@ -42,7 +42,7 @@ from ufo.models.interface import (
 )
 from ufo.models.spec import ReasoningSupport
 from ufo.o11y import emit_metric, log, warn
-from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
+from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME, UFO_HOME_ENV
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.skills.runtime import LoadedSkills
 from ufo.turns.transcript import (
@@ -96,7 +96,9 @@ REPEATED_RUN_RE = re.compile(
     rf"(?:\s\1){{{REPEATED_RUN_MIN_OCCURRENCES - 1},}}"
 )
 REPEATED_RUN_MARKER = "[repeated {count} times]"
-TOOL_OUTPUT_PATH_RE = re.compile(rf"/\S*{re.escape(TOOL_OUTPUT_DIRNAME)}/\S+\.txt")
+TOOL_OUTPUT_PATH_RE = re.compile(
+    rf"(?:\${UFO_HOME_ENV})?/\S*{re.escape(TOOL_OUTPUT_DIRNAME)}/\S+\.txt"
+)
 CONTEXT_OVERFLOW_MARKERS = ("too long", "context length", "maximum context", "prompt is too large")
 
 
@@ -113,7 +115,7 @@ def harvest_anchors(
     head_text: str, loaded_skills: tuple[str, ...], active_requests: tuple[str, ...]
 ) -> tuple[Anchor, ...]:
     """The anchor set a replacement window is graded against: what the head demonstrably held and a
-    later round cannot reconstruct from anywhere else — the `.tool-output` paths the engine
+    later round cannot reconstruct from anywhere else — the runtime paths the engine
     offloaded large results to, the skill workflows the boundary drops, the refs of the member
     requests still open, and the error classes the head named. Each is harvested by pattern from the
     head's own text or from the pipeline's trackers, never from the summary, so the grade cannot be
@@ -509,10 +511,10 @@ class Compaction:
     def _references(
         self, head_rounds: tuple[tuple[Message, ...], ...], tail: tuple[Message, ...]
     ) -> tuple[str, ...]:
-        """The durable workspace references to carry past the boundary: the `.tool-output/<id>.txt`
+        """The durable runtime references to carry past the boundary: the `tool-output/<id>.txt`
         files the engine offloaded large tool results to that fall in the summarized head. They are
         already durable, so the pipeline re-references the path — one line the model re-reads on
-        demand — rather than re-inlining the content (workspace-is-truth). A path still visible in
+        demand — rather than re-inlining the content. A path still visible in
         the kept tail is skipped, and the block is bounded to the most recent paths."""
         visible = {
             path for message in tail for path in TOOL_OUTPUT_PATH_RE.findall(self._text(message))

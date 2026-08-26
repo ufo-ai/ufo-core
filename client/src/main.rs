@@ -155,7 +155,7 @@ fn main() {
     update_resume(&session, tty && !json);
     config::sweep_retired(&home);
     let scratch = workdir.clone();
-    let stash_cwd = launch_dir.clone();
+    let stash_home = home.root.clone();
     let runtime = OpRuntime {
         workdir,
         cwd: launch_dir,
@@ -169,7 +169,7 @@ fn main() {
         run_plain(session, runtime, home, message)
     };
     let _ = std::fs::remove_dir_all(&scratch);
-    clipboard::sweep_stash(&stash_cwd);
+    clipboard::sweep_stash(&stash_home);
     process::exit(code);
 }
 
@@ -844,8 +844,8 @@ struct Gate {
     exit: Option<i32>,
 }
 
-fn attach_dropped(app: &mut App, source: &std::path::Path, cwd: &std::path::Path) {
-    match clipboard::stash_copy(source, cwd) {
+fn attach_dropped(app: &mut App, source: &std::path::Path, home: &std::path::Path, channel: &str) {
+    match clipboard::stash_copy(source, home, channel) {
         Ok(path) => app.paste_image(&path),
         Err(error) => app.note(&error),
     }
@@ -863,7 +863,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
         .to_string();
     let channel_name = session.channel.clone();
     let cwd = runtime.cwd.clone();
-    let stash_cwd = runtime.cwd.clone();
+    let stash_home = home.root.clone();
     let pr_cwd = runtime.cwd.clone();
     let workspace_url = session.workspace_url.clone();
 
@@ -945,7 +945,9 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             LoopEvent::Term(TermEvent::Key(key)) if key.kind != KeyEventKind::Release => {
                 match app.on_key(key) {
                     Reply::None => {}
-                    Reply::Attach(source) => attach_dropped(&mut app, &source, &stash_cwd),
+                    Reply::Attach(source) => {
+                        attach_dropped(&mut app, &source, &stash_home, &latest_channel)
+                    }
                     Reply::Clipboard(entry) => {
                         if !clip_pending {
                             clip_pending = true;
@@ -1053,7 +1055,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
             }
             LoopEvent::Term(TermEvent::Paste(text)) => {
                 if let Reply::Attach(source) = app.on_paste(text) {
-                    attach_dropped(&mut app, &source, &stash_cwd);
+                    attach_dropped(&mut app, &source, &stash_home, &latest_channel);
                 }
                 app.paint();
             }
@@ -1068,7 +1070,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     }
                     Ok(Clip::Image(bytes)) => {
                         if entry == ClipEntry::Compose {
-                            match clipboard::stash_image(&bytes, &stash_cwd) {
+                            match clipboard::stash_image(&bytes, &stash_home, &latest_channel) {
                                 Ok(path) => app.paste_image(&path),
                                 Err(error) => app.note(&error),
                             }
@@ -1078,7 +1080,7 @@ fn run_tty(session: Session, runtime: OpRuntime, home: config::Home, first: Stri
                     }
                     Ok(Clip::Text(text)) => {
                         if let Reply::Attach(source) = app.on_paste(text) {
-                            attach_dropped(&mut app, &source, &stash_cwd);
+                            attach_dropped(&mut app, &source, &stash_home, &latest_channel);
                         }
                     }
                     Ok(Clip::Empty) => app.note("The clipboard holds nothing to paste."),

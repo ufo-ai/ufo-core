@@ -43,8 +43,7 @@ from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import (
     SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
-    TOOL_OUTPUT_DIR,
-    WORKSPACE_DIR,
+    shell_path,
 )
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sites.store import HostedSites
@@ -74,6 +73,7 @@ LOGO_WIDTH = 296
 LOGO_HEIGHT = 74
 """The lockup at its own proportions — the file draws 196x49 — big enough to read at 400px wide."""
 
+TOOL_OUTPUT_DIR = "tool-output"
 CARD_SHOT = f"{TOOL_OUTPUT_DIR}/share-card-shot-{{site}}.png"
 CARD_PAGE = f"{TOOL_OUTPUT_DIR}/share-card-{{site}}.html"
 CARD_DRAWN = f"{TOOL_OUTPUT_DIR}/share-card-{{site}}.png"
@@ -526,9 +526,9 @@ def shot_command(*, url: str, width: int, height: int, scale: int, shot: str, ro
         scale=scale,
         width=width,
         height=height,
-        shot=shlex.quote(shot),
+        shot=shell_path(shot),
         url=shlex.quote(url),
-        root=shlex.quote(root),
+        root=shell_path(root),
         driver=SANDBOX_MODULE_BOOTSTRAP
         + SHOT_PROG.format(
             flags=SHOT_FLAGS,
@@ -549,7 +549,7 @@ async def draw_from_page(
     Runs in the deploy that just published that page, beside the shot the row's picture comes from:
     the site answers on loopback here and the browser is in the same container, so the card is
     photographed where no view token, no ingress and no cookie are involved."""
-    shot = CARD_SHOT.format(site=name)
+    shot = await ctx.sandbox.runtime_path(CARD_SHOT.format(site=name))
     if await _shoot(
         ctx,
         name,
@@ -571,9 +571,9 @@ async def draw_from_stored_shot(
     The picture goes back into a container to be composed, because composing is a browser's job and
     the browser is in the sandbox. What it draws is the site's own front page, and it is drawn on
     the act that publishes that page to anyone holding the link."""
-    stored = STORED_SHOT.format(site=name)
+    stored = await ctx.sandbox.runtime_path(STORED_SHOT.format(site=name))
     try:
-        await ctx.sandbox.write_file(stored, await ctx.blob.get(blob_key))
+        await ctx.sandbox.write_runtime_path(stored, await ctx.blob.get(blob_key))
     except OSError as refused:
         _undrawn(name, refused)
         return
@@ -591,7 +591,7 @@ async def _shoot(
     the same one this site's last deploy drew into — a run that refuses what the page drew leaves it
     empty, and the site keeps the picture it had."""
     try:
-        await ctx.sandbox.write_file(shot, b"")
+        await ctx.sandbox.write_runtime_path(shot, b"")
     except OSError as refused:
         _undrawn(name, refused)
         return False
@@ -602,7 +602,7 @@ async def _shoot(
             height=height,
             scale=scale,
             shot=shot,
-            root=WORKSPACE_DIR,
+            root=await ctx.sandbox.runtime_path(TOOL_OUTPUT_DIR),
         ),
         timeout_s=CARD_TIMEOUT_SECONDS,
     )
@@ -626,9 +626,9 @@ async def _compose(
     as a `data:` URI, so the browser that lays the card out is what scales the shot, and no step
     pastes anything over the site's own pixels. The row is written last, so a card that never
     encoded or never stored leaves the site with the one it had."""
-    page = CARD_PAGE.format(site=name)
+    page = await ctx.sandbox.runtime_path(CARD_PAGE.format(site=name))
     try:
-        await ctx.sandbox.write_file(page, card_page(name, drawn).encode())
+        await ctx.sandbox.write_runtime_path(page, card_page(name, drawn).encode())
     except OSError as refused:
         _undrawn(name, refused)
         return
@@ -636,23 +636,23 @@ async def _compose(
         PAGE_PROG.format(limit=SHOT_BYTES_MAX, token=SHOT_TOKEN),
         page,
         shot,
-        WORKSPACE_DIR,
+        await ctx.sandbox.runtime_path(TOOL_OUTPUT_DIR),
         timeout_s=CARD_TIMEOUT_SECONDS,
     )
     if placed.exit_code != 0:
         _undrawn(name, placed.stderr.strip() or placed.stdout.strip())
         return
-    drawn_card = CARD_DRAWN.format(site=name)
+    drawn_card = await ctx.sandbox.runtime_path(CARD_DRAWN.format(site=name))
     if not await _shoot(
         ctx, name, drawn_card, url=page, width=CARD_WIDTH, height=CARD_HEIGHT, scale=1
     ):
         return
-    card = CARD_FILE.format(site=name)
+    card = await ctx.sandbox.runtime_path(CARD_FILE.format(site=name))
     encoded = await ctx.sandbox.python(
         ENCODE_PROG.format(quality=CARD_QUALITY),
         drawn_card,
         card,
-        WORKSPACE_DIR,
+        await ctx.sandbox.runtime_path(TOOL_OUTPUT_DIR),
         timeout_s=CARD_TIMEOUT_SECONDS,
     )
     digest = encoded.stdout.strip()

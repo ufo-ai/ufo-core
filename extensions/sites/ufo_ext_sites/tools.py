@@ -4,8 +4,8 @@ probe, and host the served port at a permanent link.
 Every path argument these tools take — a project directory, a dist directory, a log file — goes
 through `workspace_path` before it reaches a command, so a model-named path is scoped to the
 workspace rather than merely quoted into `cd`/`>` (under the local carrier those are host paths in a
-host subprocess). The log files default under `.tool-output`, the engine's own offload directory,
-rather than the workspace root: a server log is scaffolding, and the workspace listing is the
+host subprocess). The log files default under the run's `tool-output` directory rather than the
+workspace root: a server log is scaffolding, and the workspace listing is the
 member's own file list. A predictable path in a directory the agent can write is still where a
 planted link would sit, so each log's name is emptied through the containment guard and the `>`
 redirect runs under `set -C`, which creates it `O_CREAT|O_EXCL` rather than truncating through a
@@ -48,12 +48,12 @@ unless the same turn deployed the site, the seed's deploy-and-bind shape."""
 import json
 import shlex
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
 
-from ufo.sdk.sandbox import TOOL_OUTPUT_DIR, WORKSPACE_DIR, serve_port, workspace_path
+from ufo.sdk.sandbox import WORKSPACE_DIR, serve_port, shell_path, workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
@@ -200,6 +200,7 @@ LOG_TAIL_LINES = 20
 LOG_TAIL_TIMEOUT_SECONDS = 15
 """Reading the tail of one log inside the sandbox, on the failure path of a start that already ended
 — so the wait is short and stated rather than the 120s default."""
+TOOL_OUTPUT_DIR = "tool-output"
 SERVER_LOG = f"{TOOL_OUTPUT_DIR}/server-{{port}}.log"
 DEPLOY_LOG = f"{TOOL_OUTPUT_DIR}/deploy-{{port}}.log"
 PUBLISH_LOG = f"{TOOL_OUTPUT_DIR}/publish-{{port}}.log"
@@ -433,14 +434,18 @@ async def _free_log(ctx: ToolContext, log_path: str) -> None:
     model chooses or predicts in a directory the agent writes. Creating the file here and
     redirecting onto it afterwards only narrows that — the two are separate commands, and a link
     replanted between them is what the `>` then opens. So the name is emptied instead, through the
-    guard's own `O_NOFOLLOW` descent, which also makes `.tool-output` on the way; `set -C` then
+    guard's own `O_NOFOLLOW` descent, which also makes `tool-output` on the way; `set -C` then
     makes the redirect an `O_CREAT|O_EXCL` create, so a replant fails the start rather than steers
     it. A log an earlier run on this port left behind is this call's to clear.
 
     Noclobber covers the redirect alone. The port cleanup writes to `/dev/null` and `command` is the
     model's own, free to redirect where it likes; the background job keeps the setting it was forked
     with, so restoring it in the parent cannot reach the redirect already made."""
-    result = await ctx.sandbox.python(LOG_CLEAR_PROG, log_path, WORKSPACE_DIR)
+    runtime_root = PurePosixPath(await ctx.sandbox.runtime_path(TOOL_OUTPUT_DIR)).parent
+    root = (
+        str(runtime_root) if PurePosixPath(log_path).is_relative_to(runtime_root) else WORKSPACE_DIR
+    )
+    result = await ctx.sandbox.python(LOG_CLEAR_PROG, log_path, root)
     if result.exit_code != 0:
         raise RuntimeError(result.stderr.strip() or f"cannot clear {log_path}")
 
@@ -482,14 +487,14 @@ async def _serve(
     result = await ctx.sandbox.bash(
         f"cd {shlex.quote(project)}\n"
         f"set -C\n"
-        f"nohup env PORT={port} {command} >{shlex.quote(log_path)} 2>&1 &\n"
+        f"nohup env PORT={port} {command} >{shell_path(log_path)} 2>&1 &\n"
         f"set +C\n"
         f"{readiness_probe}",
         timeout_s=READINESS_TIMEOUT_SECONDS + 5,
     )
     if result.exit_code != 0:
         tail = await ctx.sandbox.bash(
-            f"tail -n {LOG_TAIL_LINES} {shlex.quote(log_path)} 2>/dev/null || true",
+            f"tail -n {LOG_TAIL_LINES} {shell_path(log_path)} 2>/dev/null || true",
             timeout_s=LOG_TAIL_TIMEOUT_SECONDS,
         )
         if tail.stdout:
@@ -714,7 +719,11 @@ async def start_server(ctx: ToolContext, args: StartServerInput) -> ToolResult:
         )
     if application_builder and args.command is not None:
         raise RuntimeError("ufo application preview does not accept a command")
-    log_path = workspace_path(args.log_file or SERVER_LOG.format(port=port))
+    log_path = (
+        workspace_path(args.log_file)
+        if args.log_file
+        else await ctx.sandbox.runtime_path(SERVER_LOG.format(port=port))
+    )
     command = args.command or f"python3 -m http.server {port} --bind 0.0.0.0"
     served = await _serve(ctx, command, project, port, log_path)
     if application_builder:
@@ -754,7 +763,8 @@ async def _audit_builder_application(
     attempts = await _application_audit_attempts(ctx)
     if attempts >= APPLICATION_AUDIT_MAX_ATTEMPTS:
         raise RuntimeError("Application audit stopped after two failed product audits.")
-    root = f"{TOOL_OUTPUT_DIR}/application-audit/{ctx.turn.id}"
+    relative_root = f"{TOOL_OUTPUT_DIR}/application-audit/{ctx.turn.id}"
+    root = await ctx.sandbox.runtime_path(relative_root)
     script_path = f"{root}.cjs"
     report_path = f"{root}.json"
     light_path = f"{root}-light.png"
@@ -762,12 +772,12 @@ async def _audit_builder_application(
     interactive_path = f"{root}-interactive.html"
     static_path = f"{root}-static.html"
     server_path = f"{root}-server.py"
-    await ctx.sandbox.write_file(script_path, APPLICATION_AUDIT_SCRIPT)
-    await ctx.sandbox.write_file(server_path, APPLICATION_AUDIT_SERVER)
+    await ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
+    await ctx.sandbox.write_runtime_file(f"{relative_root}-server.py", APPLICATION_AUDIT_SERVER)
     port = (
         APPLICATION_AUDIT_PORT_FLOOR + ctx.sandbox.conversation_id.int % APPLICATION_AUDIT_PORT_SPAN
     )
-    command = f"python3 {shlex.quote(server_path)} {shlex.quote(project)} {port}"
+    command = f"python3 {shell_path(server_path)} {shlex.quote(project)} {port}"
     await _serve(ctx, command, project, port, f"{root}.log")
     try:
         run = await ctx.sandbox.sh(
@@ -948,7 +958,8 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
     project, listing = await _served_directory(ctx, source_project)
     manifest = await _promote_source(ctx, project, conversation, name, listing)
     command = f"python3 -m http.server {port} --bind 0.0.0.0"
-    served = await _serve(ctx, command, project, port, DEPLOY_LOG.format(port=port))
+    deploy_log = await ctx.sandbox.runtime_path(DEPLOY_LOG.format(port=port))
+    served = await _serve(ctx, command, project, port, deploy_log)
     hosted = await _host(ctx, name, port, args.visibility, manifest)
     await _illustrate(ctx, name, port, conversation)
     return _json_result({**served, **hosted, "entry_point": args.entry_point})
@@ -1040,7 +1051,8 @@ async def _redeploy_homepage(
     project, listing = await _served_directory(ctx, source_project)
     manifest = await _promote_source(ctx, project, bound.conversation_id, bound.name, listing)
     command = f"python3 -m http.server {scratch_port} --bind 0.0.0.0"
-    served = await _serve(ctx, command, project, scratch_port, DEPLOY_LOG.format(port=scratch_port))
+    deploy_log = await ctx.sandbox.runtime_path(DEPLOY_LOG.format(port=scratch_port))
+    served = await _serve(ctx, command, project, scratch_port, deploy_log)
     updated = await sites.redeploy(bound.conversation_id, bound.name, manifest)
     if updated is None:
         raise RuntimeError("the homepage was unhosted while it was being redeployed")
@@ -1079,7 +1091,7 @@ async def publish_website(ctx: ToolContext, args: PublishWebsiteInput) -> ToolRe
             raise RuntimeError(install.stderr or install.stdout)
     command = args.run_command or f"python3 -m http.server {port} --bind 0.0.0.0"
     project = workspace_path(args.project_path if args.run_command else args.dist_path)
-    publish_log = PUBLISH_LOG.format(port=port)
+    publish_log = await ctx.sandbox.runtime_path(PUBLISH_LOG.format(port=port))
     served = await _serve(ctx, command, project, port, publish_log)
     hosted = await _host(ctx, name, port, args.visibility, None)
     await _illustrate(ctx, name, port, conversation)

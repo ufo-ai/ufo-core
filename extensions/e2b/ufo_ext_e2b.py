@@ -70,6 +70,7 @@ from ufo.sdk.sandbox import (
     SandboxSpec,
     SandboxUnreachable,
     egress_proxy_env,
+    sandbox_runtime_root,
     ufo_fs_file_op,
 )
 
@@ -368,6 +369,7 @@ class E2BCarrier:
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
             run_token=spec.run_token,
+            runtime_root=sandbox_runtime_root(spec.conversation_id),
             egress_env={**egress_env, **spec.env},
             turn_id=spec.turn_id,
         )
@@ -395,6 +397,7 @@ class E2BCarrier:
             conversation_id=spec.conversation_id,
             container_id=sandbox.sandbox_id,
             run_token=spec.run_token,
+            runtime_root=sandbox_runtime_root(spec.conversation_id),
             turn_id=spec.turn_id,
         )
 

@@ -34,6 +34,7 @@ from ufo_ext_ufo.surface import (
     history_directives,
     resolve_workspace,
     stream_directives,
+    terminal_runtime_id,
 )
 from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
@@ -113,6 +114,10 @@ def test_directive_escapes_tabs_newlines_and_backslashes() -> None:
     assert directive("txt", "a\tb\nc\\d\r") == b"txt\ta\\tb\\nc\\\\d\n"
     assert directive("ask", PROMPT) == b"ask\t>\n"
     assert directive("poll", "1") == b"poll\t1\n"
+
+
+def test_terminal_runtime_id_matches_the_client() -> None:
+    assert terminal_runtime_id("conversation") == "8b34dbc2c05eb4d7e25d48efeace8245"
 
 
 def test_frame_map_covers_every_live_frame() -> None:

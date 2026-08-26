@@ -19,7 +19,8 @@ from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.loop.engine import OFFLOAD_NOTICE, TOOL_OUTPUT_DIR
+from ufo.loop.engine import OFFLOAD_NOTICE
+from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
 from ufo.schema import tables
 from ufo.sdk.context import ScopedStore
 from ufo.workspace import ws
@@ -28,7 +29,7 @@ FLEET_LICENSE = connector_refs.token("LIC", connector_refs.FLEET)
 LEGACY_LICENSE = connector_refs.token("LIC", connector_refs.LEGACY)
 NARROWED = ToolInvocation(
     "bash",
-    {"command": f"jq '.items[26]' {TOOL_OUTPUT_DIR}/call-1.txt"},
+    {"command": f"jq '.items[26]' {TOOL_OUTPUT_DIRNAME}/call-1.txt"},
     "{}",
     has_result=True,
 )
@@ -46,7 +47,7 @@ def _result(query: str, pointers: bool = True, offloaded: bool = False) -> str:
     )
     if not offloaded:
         return body
-    return body + OFFLOAD_NOTICE.format(total=99_999, path=f"{TOOL_OUTPUT_DIR}/call-1.txt")
+    return body + OFFLOAD_NOTICE.format(total=99_999, path=f"{TOOL_OUTPUT_DIRNAME}/call-1.txt")
 
 
 def _search(
@@ -206,7 +207,7 @@ async def test_the_reference_grader_rejects_an_offloaded_answer_that_read_no_fil
     grader = connector_refs._graded_reference("widget-lease", FLEET_LICENSE, offloaded=True)
     verdict = await grader(_output("widget-lease", FLEET_LICENSE, offloaded=True))
     assert not verdict.passed
-    assert TOOL_OUTPUT_DIR in verdict.reason
+    assert TOOL_OUTPUT_DIRNAME in verdict.reason
 
 
 async def test_the_reference_grader_rejects_a_pointer_handed_back_as_the_value() -> None:
@@ -242,7 +243,7 @@ async def test_only_a_narrowing_tool_counts_as_reading_the_offload_file() -> Non
     grader = connector_refs._graded_reference("widget-lease", FLEET_LICENSE, offloaded=True)
     wrote = ToolInvocation(
         "write",
-        {"path": f"{TOOL_OUTPUT_DIR}/notes.txt", "content": "x"},
+        {"path": f"{TOOL_OUTPUT_DIRNAME}/notes.txt", "content": "x"},
         "ok",
         has_result=True,
     )
@@ -250,7 +251,7 @@ async def test_only_a_narrowing_tool_counts_as_reading_the_offload_file() -> Non
         _answered(FLEET_LICENSE, (_search("widget-lease", offloaded=True), wrote))
     )
     assert not verdict.passed
-    assert TOOL_OUTPUT_DIR in verdict.reason
+    assert TOOL_OUTPUT_DIRNAME in verdict.reason
 
 
 async def test_the_cost_arms_grader_requires_every_fact_and_its_own_arm() -> None:

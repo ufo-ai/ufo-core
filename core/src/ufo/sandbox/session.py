@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -24,6 +25,7 @@ from uuid import UUID, uuid4
 
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.auth.token_signing import SignedTokenError, sign_token, verify_token
+from ufo.sandbox.containment import ContainmentError, contained_relative
 
 WORKSPACE_DIR = "/workspace"
 WORKSPACE_WRITE_MODE = 0o644
@@ -61,10 +63,9 @@ redirect: `> "$1"` truncates through a planted link and `mkdir -p` follows a sym
 while this builds each directory as the descent reaches it and renames a staged inode onto the
 target. The mode repeats `WORKSPACE_WRITE_MODE` because a `-c` program inside the sandbox cannot
 import it."""
-TOOL_OUTPUT_DIRNAME = ".tool-output"
-TOOL_OUTPUT_DIR = f"{WORKSPACE_DIR}/{TOOL_OUTPUT_DIRNAME}"
-SKILL_LOAD_STAGING_PREFIX = f"{WORKSPACE_DIR}/.ufo-skill-load-"
-SYSTEM_SKILL_SYNC_STAGING_PREFIX = f"{WORKSPACE_DIR}/.ufo-system-skills-"
+RUNTIME_DIRNAME = "runs"
+TOOL_OUTPUT_DIRNAME = "tool-output"
+SKILL_STAGING_DIRNAME = "staging"
 SKILL_LOAD_PROG = """
 import base64
 import hashlib
@@ -578,6 +579,7 @@ class SandboxHandle:
     run_token: str | None = None
     egress_env: Mapping[str, str] = field(default_factory=dict)
     turn_id: UUID | None = None
+    runtime_root: str = ""
 
 
 SANDBOX_HANDLE_SEP = ":"
@@ -814,6 +816,47 @@ def workspace_path(path: str) -> str:
     return str(resolved)
 
 
+def runtime_relative(path: str) -> PurePosixPath:
+    """A runtime-internal name below one conversation's `$UFO_HOME/runs/<id>` root."""
+    root = "/runtime"
+    try:
+        resolved = contained_relative(path, root)
+    except ContainmentError:
+        raise ValueError(f"invalid runtime path: {path!r}") from None
+    relative = PurePosixPath(resolved).relative_to(root)
+    if str(relative) != path:
+        raise ValueError(f"invalid runtime path: {path!r}")
+    return relative
+
+
+def sandbox_runtime_root(conversation_id: UUID) -> str:
+    """The per-conversation runtime root inside an isolated sandbox."""
+    return f"{SANDBOX_UFO_HOME}/{RUNTIME_DIRNAME}/{conversation_id.hex}"
+
+
+def shell_path(path: str) -> str:
+    """Quote a sandbox path for a shell while expanding a terminal's `$UFO_HOME`."""
+    prefix = f"${UFO_HOME_ENV}/"
+    if path.startswith(prefix):
+        return f'"${UFO_HOME_ENV}"/' + shlex.quote(path.removeprefix(prefix))
+    return shlex.quote(path)
+
+
+def _runtime_root(handle: SandboxHandle) -> str:
+    return handle.runtime_root or sandbox_runtime_root(handle.conversation_id)
+
+
+def _runtime_path(handle: SandboxHandle, relative: str) -> str:
+    return str(PurePosixPath(_runtime_root(handle)) / runtime_relative(relative))
+
+
+def _runtime_display_path(handle: SandboxHandle, relative: str) -> str:
+    run_id = PurePosixPath(_runtime_root(handle)).name
+    return str(
+        PurePosixPath(f"${UFO_HOME_ENV}") / RUNTIME_DIRNAME / run_id / runtime_relative(relative)
+    )
+
+
 def rooted_path(path: str, root: str) -> str:
     """Normalize a path under `root` with the workspace guard and preserve its root spelling."""
     normalized = workspace_path(f"{WORKSPACE_DIR}{path.removeprefix(root)}")
@@ -864,6 +907,47 @@ class Sandbox:
 
     async def _bound(self) -> "SandboxSession":
         raise NotImplementedError
+
+    async def runtime_path(self, relative: str) -> str:
+        """Resolve one internal file below this conversation's runtime root."""
+        return _runtime_path((await self._bound()).handle, relative)
+
+    async def runtime_display_path(self, relative: str) -> str:
+        """Name one internal file through the `$UFO_HOME` path the agent can reuse."""
+        return _runtime_display_path((await self._bound()).handle, relative)
+
+    async def write_runtime_file(self, relative: str, content: bytes) -> None:
+        """Write one runtime-owned file outside the member workspace."""
+        bound = await self._bound()
+        await bound.carrier.write(bound.handle, _runtime_path(bound.handle, relative), content)
+
+    async def write_runtime_path(self, path: str, content: bytes) -> None:
+        """Write an already-resolved path inside this conversation's runtime root."""
+        bound = await self._bound()
+        root = PurePosixPath(_runtime_root(bound.handle))
+        candidate = PurePosixPath(path)
+        if not candidate.is_relative_to(root) or candidate == root:
+            raise ValueError(f"path {path!r} escapes the runtime root")
+        relative = str(candidate.relative_to(root))
+        await bound.carrier.write(bound.handle, _runtime_path(bound.handle, relative), content)
+
+    async def runtime_file_exists(self, relative: str) -> bool:
+        """Whether one regular runtime-owned file exists."""
+        bound = await self._bound()
+        target = _runtime_path(bound.handle, relative)
+        result = await bound.carrier.exec(
+            bound.handle, ("sh", "-c", 'test -f "$1"', "sh", target), timeout_s=30
+        )
+        return result.exit_code == 0
+
+    def read_runtime_file(self, relative: str) -> AsyncIterator[bytes]:
+        """Stream one runtime-owned file."""
+        return self._read_runtime_file(relative)
+
+    async def _read_runtime_file(self, relative: str) -> AsyncIterator[bytes]:
+        bound = await self._bound()
+        async for chunk in bound.carrier.read(bound.handle, _runtime_path(bound.handle, relative)):
+            yield chunk
 
     async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
         bound = await self._bound()
@@ -960,7 +1044,7 @@ class Sandbox:
     async def _run_staged_skill_load(
         self, bound: "SandboxSession", payload: Mapping[str, object]
     ) -> ExecResult:
-        staged = f"{SKILL_LOAD_STAGING_PREFIX}{uuid4()}.json"
+        staged = _runtime_path(bound.handle, f"{SKILL_STAGING_DIRNAME}/skill-load-{uuid4()}.json")
         content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         await bound.carrier.write(
             bound.handle,
@@ -976,13 +1060,13 @@ class Sandbox:
                 f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
                 staged,
                 SYSTEM_SKILLS_ROOT,
-                WORKSPACE_DIR,
+                _runtime_root(bound.handle),
                 hashlib.sha256(content).hexdigest(),
             ),
         )
 
     async def _sync_system_skills(self, bound: "SandboxSession") -> None:
-        staged = f"{SYSTEM_SKILL_SYNC_STAGING_PREFIX}{uuid4()}.zip"
+        staged = _runtime_path(bound.handle, f"{SKILL_STAGING_DIRNAME}/system-skills-{uuid4()}.zip")
         await bound.carrier.write(bound.handle, staged, bound.system_skill_archive)
         result = await self._exec_skill(
             bound,
@@ -993,7 +1077,7 @@ class Sandbox:
                 f"{SANDBOX_MODULE_BOOTSTRAP}{SYSTEM_SKILL_SYNC_PROG}",
                 staged,
                 SYSTEM_SKILLS_ROOT,
-                WORKSPACE_DIR,
+                _runtime_root(bound.handle),
                 hashlib.sha256(bound.system_skill_archive).hexdigest(),
             ),
         )
@@ -1008,13 +1092,14 @@ class Sandbox:
         )
 
     async def ensure_tool_output_dir(self) -> bool:
-        """Guarantee the engine's private `.tool-output` offload dir exists, reclaiming a
+        """Guarantee the engine's private runtime offload dir exists, reclaiming a
         non-directory squatting the name — a bare `mkdir -p` fails `File exists` when a file or
         broken symlink already occupies it, so a member write to that name would otherwise poison
         every later offload. The target is fixed to `TOOL_OUTPUT_DIR`, never a caller-supplied path,
         so this destructive reclaim can only ever touch the engine's own namespace, never member
         data. Returns whether a squatter was reclaimed."""
         bound = await self._bound()
+        target = _runtime_path(bound.handle, TOOL_OUTPUT_DIRNAME)
         result = await bound.carrier.exec(
             bound.handle,
             (
@@ -1024,12 +1109,12 @@ class Sandbox:
                 'if [ -e "$1" ] || [ -L "$1" ]; then rm -f "$1" && printf r; fi; '
                 'mkdir -p "$1"',
                 "sh",
-                TOOL_OUTPUT_DIR,
+                target,
             ),
             timeout_s=30,
         )
         if result.exit_code != 0:
-            raise OSError(result.stderr.strip() or f"cannot ensure {TOOL_OUTPUT_DIR}")
+            raise OSError(result.stderr.strip() or f"cannot ensure {target}")
         return result.stdout == "r"
 
     async def file_exists(self, path: str) -> bool:
@@ -1042,12 +1127,31 @@ class Sandbox:
 
     async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
         """Run one in-sandbox file op through the carrier and return its parsed JSON. A `path` arg
-        is workspace-scoped except for reads, globs, and greps under `$UFO_HOME/skills`."""
+        is workspace-scoped except for reads, globs, and greps under this run or the skill tree."""
         params = dict(args)
         raw_path = params.get("path")
         root = WORKSPACE_DIR
+        bound = await self._bound()
         if isinstance(raw_path, str):
-            if raw_path == "$UFO_HOME/skills" or raw_path.startswith("$UFO_HOME/skills/"):
+            runtime_root = _runtime_root(bound.handle)
+            runtime_display = str(
+                PurePosixPath(f"${UFO_HOME_ENV}")
+                / RUNTIME_DIRNAME
+                / PurePosixPath(runtime_root).name
+            )
+            if raw_path == runtime_display or raw_path.startswith(f"{runtime_display}/"):
+                if op not in {"read", "glob", "grep"}:
+                    raise ValueError(f"path {raw_path!r} escapes {WORKSPACE_DIR}")
+                params["path"] = rooted_path(raw_path, runtime_display).replace(
+                    runtime_display, runtime_root, 1
+                )
+                root = runtime_root
+            elif raw_path == runtime_root or raw_path.startswith(f"{runtime_root}/"):
+                if op not in {"read", "glob", "grep"}:
+                    raise ValueError(f"path {raw_path!r} escapes {WORKSPACE_DIR}")
+                params["path"] = rooted_path(raw_path, runtime_root)
+                root = runtime_root
+            elif raw_path == "$UFO_HOME/skills" or raw_path.startswith("$UFO_HOME/skills/"):
                 if op not in {"read", "glob", "grep"}:
                     raise ValueError(f"path {raw_path!r} escapes {WORKSPACE_DIR}")
                 params["path"] = rooted_path(raw_path, "$UFO_HOME/skills")
@@ -1062,15 +1166,26 @@ class Sandbox:
             else:
                 params["path"] = workspace_path(raw_path)
         params["workspace"] = root
-        bound = await self._bound()
         return await bound.carrier.file_op(bound.handle, op, params)
 
     def read_file(self, path: str) -> AsyncIterator[bytes]:
-        """The workspace file's bytes in bounded chunks — how a produced file leaves the container
-        without the host process ever holding it whole. The path is scoped before the stream is
-        handed back, so a path that escapes the workspace is refused here rather than at the first
-        chunk."""
-        return self._read_file(workspace_path(path))
+        """A workspace or current-runtime file's bytes in bounded chunks."""
+        return self._read_scoped_file(path)
+
+    async def _read_scoped_file(self, path: str) -> AsyncIterator[bytes]:
+        bound = await self._bound()
+        runtime_root = _runtime_root(bound.handle)
+        runtime_display = str(
+            PurePosixPath(f"${UFO_HOME_ENV}") / RUNTIME_DIRNAME / PurePosixPath(runtime_root).name
+        )
+        if path == runtime_display or path.startswith(f"{runtime_display}/"):
+            target = rooted_path(path, runtime_display).replace(runtime_display, runtime_root, 1)
+        elif path == runtime_root or path.startswith(f"{runtime_root}/"):
+            target = rooted_path(path, runtime_root)
+        else:
+            target = workspace_path(path)
+        async for chunk in bound.carrier.read(bound.handle, target):
+            yield chunk
 
     async def _read_file(self, target: str) -> AsyncIterator[bytes]:
         bound = await self._bound()
@@ -1130,6 +1245,7 @@ class SandboxSession(Sandbox):
                 run_token=run_token,
                 egress_env={**authorized, **env},
                 turn_id=self.handle.turn_id,
+                runtime_root=self.handle.runtime_root,
             ),
             system_skill_archive=self.system_skill_archive,
         )

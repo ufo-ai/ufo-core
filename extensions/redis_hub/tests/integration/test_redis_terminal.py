@@ -500,7 +500,9 @@ async def test_attach_finds_a_binding_a_peer_pod_holds(
             resume_id="/proj",
         )
     )
-    assert handle is not None and handle.workspace_host_path == "/proj"
+    assert handle is not None
+    assert handle.workspace_host_path == "/proj"
+    assert handle.runtime_root == f"$UFO_HOME/runs/{conversation_id.hex}"
     conn.disconnect(conversation_id)
 
 

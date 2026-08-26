@@ -171,6 +171,7 @@ from ufo.tools.context import SpawnResult, ToolContext
 from ufo.workspace import ws
 
 TOOL_NARRATION = "building the site"
+RUNTIME_ROOT = "/home/user/.ufo/runs/test"
 HOUSE_STYLE = "ufo-style"
 HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
@@ -223,6 +224,8 @@ class FakeSandbox:
     programs: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     shells: list[tuple[str, tuple[str, ...], int | None]] = field(default_factory=list)
     writes: dict[str, bytes] = field(default_factory=dict)
+    runtime_writes: list[str] = field(default_factory=list)
+    workspace_writes: list[str] = field(default_factory=list)
     claim: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
     shell: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
     handle: SandboxHandle = field(
@@ -258,6 +261,22 @@ class FakeSandbox:
         return self.shell
 
     async def write_file(self, path: str, content: bytes) -> None:
+        self.workspace_writes.append(path)
+        self.writes[path] = content
+
+    async def runtime_path(self, relative: str) -> str:
+        return f"{RUNTIME_ROOT}/{relative}"
+
+    async def runtime_display_path(self, relative: str) -> str:
+        return f"$UFO_HOME/runs/test/{relative}"
+
+    async def write_runtime_file(self, relative: str, content: bytes) -> None:
+        path = await self.runtime_path(relative)
+        self.runtime_writes.append(path)
+        self.writes[path] = content
+
+    async def write_runtime_path(self, path: str, content: bytes) -> None:
+        self.runtime_writes.append(path)
         self.writes[path] = content
 
 
@@ -598,7 +617,7 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
     report = await _audit_builder_application(ctx, "/workspace/ufo-app")
     assert isinstance(report, ApplicationAuditReport)
     assert len(sandbox.shells) == 2
-    server_path = f"/workspace/.tool-output/application-audit/{ctx.turn.id}-server.py"
+    server_path = f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-server.py"
     assert sandbox.writes[server_path] == APPLICATION_AUDIT_SERVER
     launches = [command for command in sandbox.commands if "nohup" in command]
     assert launches and all(server_path in command for command in launches)
@@ -1971,7 +1990,7 @@ async def test_application_source_requires_this_build_turns_svg_design(tmp_path:
     second = replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
     design_path = "/workspace/application/application-design.svg"
     second_claim = (
-        "/workspace/.tool-output/application-builder/"
+        f"{RUNTIME_ROOT}/tool-output/application-builder/"
         f"{sha256(design_path.encode()).hexdigest()}.{second.turn.id}.claimed"
     )
     sandbox.scripted_paths[second_claim] = ExecResult("", "", 17)
@@ -1987,7 +2006,10 @@ async def test_application_source_requires_this_build_turns_svg_design(tmp_path:
             ),
         )
 
-    assert (APPLICATION_SOURCE_REQUIRE_CLAIM, (second_claim,)) in sandbox.programs
+    assert (
+        APPLICATION_SOURCE_REQUIRE_CLAIM,
+        (second_claim, RUNTIME_ROOT),
+    ) in sandbox.programs
 
 
 async def test_application_builder_write_tool_writes_only_the_contract_source(
@@ -2030,6 +2052,10 @@ async def test_application_builder_write_tool_writes_only_the_contract_source(
     assert [content for path, content in sandbox.writes.items() if path.endswith(".accepted")] == [
         sha256(source.encode()).hexdigest().encode()
     ]
+    check_root = f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}/project"
+    assert f"{check_root}/vite.config.ts" in sandbox.runtime_writes
+    assert f"{check_root}/sdk.tar.gz" in sandbox.runtime_writes
+    assert not any(path.startswith(RUNTIME_ROOT) for path in sandbox.workspace_writes)
     assert len(sandbox.shells) == 2
     assert all(script == 'cd "$1" && vite build' for script, _, _ in sandbox.shells)
     assert json.loads(result.content[0].text) == {
@@ -2196,7 +2222,7 @@ async def test_application_builder_write_tool_rejects_a_second_initial_build(
         ),
     )
     source_claim = (
-        "/workspace/.tool-output/application-builder/"
+        f"{RUNTIME_ROOT}/tool-output/application-builder/"
         f"{sha256(task.source_path.encode()).hexdigest()}.{ctx.turn.id}.claimed"
     )
     sandbox.scripted_paths[source_claim] = ExecResult("", "", 17)
@@ -2930,11 +2956,7 @@ async def test_a_model_named_path_is_scoped_to_the_workspace(tmp_path: Path) -> 
     assert sandbox.commands == []
 
 
-async def test_a_server_log_defaults_into_the_engines_own_offload_dir(tmp_path: Path) -> None:
-    """A log path defaulted into a shared directory is a predictable name in a place the agent can
-    write, which is the setup for a swap rather than merely untidy. The default is `.tool-output`,
-    the engine's own directory under the workspace the tool already serves from — a server log is
-    scaffolding, and the workspace listing is the member's own file list. The tool reports it."""
+async def test_a_server_log_defaults_into_the_runs_own_offload_dir(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     ctx = _context(sandbox, tmp_path)
     result = await start_server(
@@ -2946,18 +2968,15 @@ async def test_a_server_log_defaults_into_the_engines_own_offload_dir(tmp_path: 
         ),
     )
     payload = json.loads(result.content[0].text)
-    assert payload["log"] == "/workspace/.tool-output/server-5173.log"
+    log = f"{RUNTIME_ROOT}/tool-output/server-5173.log"
+    assert payload["log"] == log
     assert payload["project_path"] == "/workspace/site"
     assert sandbox.programs == [
-        (LOG_CLEAR_PROG, ("/workspace/.tool-output/server-5173.log", "/workspace")),
+        (LOG_CLEAR_PROG, (log, RUNTIME_ROOT)),
         (PORT_STOP_PROG, ("5173",)),
     ]
-    launch = next(
-        command
-        for command in sandbox.commands
-        if ">/workspace/.tool-output/server-5173.log" in command
-    )
-    redirect = launch.index(">/workspace/.tool-output/server-5173.log")
+    launch = next(command for command in sandbox.commands if f">{log}" in command)
+    redirect = launch.index(f">{log}")
     assert "set -C\n" in launch[:redirect], "the redirect must create the log, never truncate it"
     assert "set +C\n" in launch[redirect:], "noclobber must not outlive the log's own redirect"
 
@@ -3062,7 +3081,7 @@ def test_the_shot_is_drawn_by_the_sandbox_browser_under_its_own_wall() -> None:
     The unattended flags ride in every run for the same reason: a runner has no keyring, no keychain
     and no crash server, and a browser that waits on one of those spends the whole wall and draws
     nothing."""
-    shot = "/workspace/.tool-output/share-card-shot-marketing.png"
+    shot = f"{RUNTIME_ROOT}/tool-output/share-card-shot-marketing.png"
     command = shot_command(
         url="http://127.0.0.1:8000",
         width=SHOT_WIDTH,
@@ -3103,7 +3122,7 @@ def test_the_shot_is_driven_to_a_settle_point_inside_its_wall() -> None:
     together sit inside the kill wall, so a page that never goes idle is photographed rather than
     waited on — the failure `--virtual-time-budget` had, which is why it is asserted absent
     above."""
-    shot = "/workspace/.tool-output/preview-8000.png"
+    shot = f"{RUNTIME_ROOT}/tool-output/preview-8000.png"
     command = shot_command(
         url="http://127.0.0.1:8000",
         width=PREVIEW_WIDTH,

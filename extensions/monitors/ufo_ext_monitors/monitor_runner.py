@@ -36,7 +36,7 @@ from ufo_ext_monitors.monitors import (
 
 CLAIM_LEASE_SECONDS = 300
 FAILURE_THRESHOLD = 3
-SPILL_DIR = ".monitors"
+SPILL_DIR = "monitors"
 CHANGED = "changed"
 FAILED = "failed"
 DEADLINE = "deadline"
@@ -177,6 +177,6 @@ class MonitorRunner:
         if self.ctx.files is None:
             raise RuntimeError("a monitor fire over the output cap requires conversation files")
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        return await self.ctx.files.write(
-            row.conversation_id, f"{SPILL_DIR}/{row.name}-{stamp}.txt", output.encode()
+        return await self.ctx.files.write_runtime(
+            row.conversation_id, SPILL_DIR, f"{row.name}-{stamp}.txt", output.encode()
         )

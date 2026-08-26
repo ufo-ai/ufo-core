@@ -21,7 +21,6 @@ so: a blind retry replays the same starting point. Each call emits into a file o
 survivor still writing images cannot hand them to the call after it."""
 
 import json
-import shlex
 from pathlib import Path
 from uuid import uuid4
 
@@ -29,6 +28,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ufo.sdk.manifest import Manifest, SkillSpec
 from ufo.sdk.o11y import emit_metric, turn_profile
+from ufo.sdk.sandbox import shell_path
 from ufo.sdk.tools import (
     MAX_COMMAND_TIMEOUT_MS,
     ImageContent,
@@ -55,14 +55,11 @@ SKILL_NAMES = (
     "data-visualization",
 )
 
-WORKSPACE_DIR = "/workspace"
-REPL_STATE_DIR = f"{WORKSPACE_DIR}/.repl"
+REPL_STATE_DIR = "repl"
 JS_REPL_PATH = f"{REPL_STATE_DIR}/js-repl.js"
 JS_RUN_PATH = f"{REPL_STATE_DIR}/js-run.mjs"
-JS_EMIT_RELATIVE_DIR = ".repl"
 XLSX_REPL_PATH = f"{REPL_STATE_DIR}/xlsx-repl.py"
 XLSX_RUN_PATH = f"{REPL_STATE_DIR}/xlsx-run.py"
-GLOBAL_MODULES_DIR = f"{REPL_STATE_DIR}/node_modules"
 GLOBAL_MODULE_ROOTS = (
     '"$(npm root -g)"',
     '"$NODE_PATH"',
@@ -90,22 +87,23 @@ def _meter_run(ctx: ToolContext, tool: str, exit_code: int) -> None:
     )
 
 
-def global_modules_link(roots: tuple[str, ...] = GLOBAL_MODULE_ROOTS) -> str:
+def global_modules_link(directory: str, roots: tuple[str, ...] = GLOBAL_MODULE_ROOTS) -> str:
     """The command merging every global root's packages into the run file's resolution path:
-    per-package symlinks into `.repl/node_modules`, first root wins, a stale whole-dir symlink
-    replaced. ESM ignores NODE_PATH by design, so the carrier env only names the image's module
-    root — these links are what make bare imports resolve. An already-linked package is skipped
+    per-package symlinks into the run's `repl/node_modules`, first root wins, a stale whole-dir
+    symlink replaced. ESM ignores NODE_PATH by design, so the carrier env only names the image's
+    module root — these links make bare imports resolve. An already-linked package is skipped
     by the existence guard; anything else that fails (permissions, read-only mount) exits nonzero
     under `set -e` with stderr intact."""
+    modules = f"{directory}/node_modules"
     return (
         "set -e; "
-        f"if [ -L {GLOBAL_MODULES_DIR} ]; then rm {GLOBAL_MODULES_DIR}; fi; "
-        f"mkdir -p {GLOBAL_MODULES_DIR}; "
+        f"if [ -L {shell_path(modules)} ]; then rm {shell_path(modules)}; fi; "
+        f"mkdir -p {shell_path(modules)}; "
         f"for root in {' '.join(roots)}; do "
         '[ -d "$root" ] || continue; '
         'for pkg in "$root"/*; do '
         '[ -e "$pkg" ] || continue; '
-        f'dst="{GLOBAL_MODULES_DIR}/$(basename "$pkg")"; '
+        f'dst="{modules}/$(basename "$pkg")"; '
         'if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then ln -s "$pkg" "$dst"; fi; '
         "done; done"
     )
@@ -123,7 +121,7 @@ def js_emit_relative(call: str) -> str:
     Per call because an expired cell keeps running: the process that outgrew its budget holds the
     path it started with, so a write it makes after the result was discarded lands in its own file
     rather than replacing what the next call emitted."""
-    return f"{JS_EMIT_RELATIVE_DIR}/js-emit-{call}.jsonl"
+    return f"{REPL_STATE_DIR}/js-emit-{call}.jsonl"
 
 
 def js_emit_prelude(emit_relative: str) -> str:
@@ -231,12 +229,14 @@ class XlsxReplInput(BaseModel):
     )
 
 
-async def _candidate_source(ctx: ToolContext, path: str, code: str, reset: bool) -> str:
+async def _candidate_source(
+    ctx: ToolContext, relative: str, path: str, code: str, reset: bool
+) -> str:
     if reset:
-        await ctx.sandbox.bash(f"rm -f {shlex.quote(path)}")
-    if reset or not await ctx.sandbox.file_exists(path):
+        await ctx.sandbox.bash(f"rm -f {shell_path(path)}")
+    if reset or not await ctx.sandbox.runtime_file_exists(relative):
         return code + "\n"
-    existing = await ctx.sandbox.bash(f"cat {shlex.quote(path)}")
+    existing = await ctx.sandbox.bash(f"cat {shell_path(path)}")
     return existing.stdout + code + "\n"
 
 
@@ -264,7 +264,13 @@ def _expired_result(run: TaskRun, applied_s: int) -> ToolResult:
     if run.pid is None:
         notice = f"{timeout_notice(applied_s, run.requested_s)} {STATE_UNCHANGED}"
         return ToolResult(content=(TextContent(text=notice),), is_error=True)
-    handles = task_handles(run.task_id, run.pid, applied_s=applied_s, note=STATE_UNCHANGED)
+    handles = task_handles(
+        run.task_id,
+        run.pid,
+        run.display_base,
+        applied_s=applied_s,
+        note=STATE_UNCHANGED,
+    )
     return ToolResult(content=(TextContent(text=handles),))
 
 
@@ -273,11 +279,13 @@ class EmittedImage(BaseModel):
     data: str
 
 
-async def _emitted_images(ctx: ToolContext, emit_path: str) -> tuple[ImageContent, ...]:
-    if not await ctx.sandbox.file_exists(emit_path):
+async def _emitted_images(
+    ctx: ToolContext, emit_relative: str, emit_path: str
+) -> tuple[ImageContent, ...]:
+    if not await ctx.sandbox.runtime_file_exists(emit_relative):
         return ()
-    emitted = await ctx.sandbox.bash(f"cat {shlex.quote(emit_path)}")
-    await ctx.sandbox.bash(f"rm -f {shlex.quote(emit_path)}")
+    emitted = await ctx.sandbox.bash(f"cat {shell_path(emit_path)}")
+    await ctx.sandbox.bash(f"rm -f {shell_path(emit_path)}")
     images = []
     for line in [line for line in emitted.stdout.splitlines() if line][-EMIT_IMAGE_LIMIT:]:
         try:
@@ -289,37 +297,47 @@ async def _emitted_images(ctx: ToolContext, emit_path: str) -> tuple[ImageConten
 
 
 async def js_repl(ctx: ToolContext, args: JsReplInput) -> ToolResult:
-    candidate = await _candidate_source(ctx, JS_REPL_PATH, args.code, bool(args.reset))
+    state_path = await ctx.sandbox.runtime_path(JS_REPL_PATH)
+    run_path = await ctx.sandbox.runtime_path(JS_RUN_PATH)
+    state_dir = await ctx.sandbox.runtime_path(REPL_STATE_DIR)
+    candidate = await _candidate_source(ctx, JS_REPL_PATH, state_path, args.code, bool(args.reset))
     emit_relative = js_emit_relative(uuid4().hex[:8])
-    await ctx.sandbox.write_file(
-        JS_RUN_PATH, js_emit_prelude(emit_relative).encode() + candidate.encode()
+    emit_path = await ctx.sandbox.runtime_path(emit_relative)
+    await ctx.sandbox.write_runtime_file(
+        JS_RUN_PATH, js_emit_prelude(emit_path).encode() + candidate.encode()
     )
-    linked = await ctx.sandbox.bash(global_modules_link())
+    linked = await ctx.sandbox.bash(global_modules_link(state_dir))
     if linked.exit_code != 0:
         raise OSError(linked.stderr.strip() or "linking global node_modules failed")
-    run = await run_task(ctx, f"node {shlex.quote(JS_RUN_PATH)}", args.timeout)
+    run = await run_task(ctx, f"node {shell_path(run_path)}", args.timeout)
     _meter_run(ctx, JS_REPL_TOOL, run.result.exit_code)
     if (applied_s := run.result.timed_out_after_s) is not None:
         return _expired_result(run, applied_s)
     if run.result.exit_code == 0:
-        await ctx.sandbox.write_file(JS_REPL_PATH, candidate.encode())
+        await ctx.sandbox.write_runtime_file(JS_REPL_PATH, candidate.encode())
     return _repl_result(
         run.result.stdout,
         run.result.stderr,
         run.result.exit_code,
-        await _emitted_images(ctx, f"{WORKSPACE_DIR}/{emit_relative}"),
+        await _emitted_images(ctx, emit_relative, emit_path),
     )
 
 
 async def xlsx_repl(ctx: ToolContext, args: XlsxReplInput) -> ToolResult:
-    candidate = await _candidate_source(ctx, XLSX_REPL_PATH, args.code, bool(args.reset))
-    await ctx.sandbox.write_file(XLSX_RUN_PATH, candidate.encode() + XLSX_RESULT_FOOTER.encode())
-    run = await run_task(ctx, f"python3 {shlex.quote(XLSX_RUN_PATH)}", args.timeout)
+    state_path = await ctx.sandbox.runtime_path(XLSX_REPL_PATH)
+    run_path = await ctx.sandbox.runtime_path(XLSX_RUN_PATH)
+    candidate = await _candidate_source(
+        ctx, XLSX_REPL_PATH, state_path, args.code, bool(args.reset)
+    )
+    await ctx.sandbox.write_runtime_file(
+        XLSX_RUN_PATH, candidate.encode() + XLSX_RESULT_FOOTER.encode()
+    )
+    run = await run_task(ctx, f"python3 {shell_path(run_path)}", args.timeout)
     _meter_run(ctx, XLSX_REPL_TOOL, run.result.exit_code)
     if (applied_s := run.result.timed_out_after_s) is not None:
         return _expired_result(run, applied_s)
     if run.result.exit_code == 0:
-        await ctx.sandbox.write_file(XLSX_REPL_PATH, candidate.encode())
+        await ctx.sandbox.write_runtime_file(XLSX_REPL_PATH, candidate.encode())
     return _repl_result(run.result.stdout, run.result.stderr, run.result.exit_code)
 
 

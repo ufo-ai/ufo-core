@@ -91,7 +91,7 @@ SUMMARY_MAX = 120
 MAX_BACKFILL_DAYS = 36500
 ALERT_NAMED_MAX = 5
 ALERT_LABEL_CHARS = 60
-CHANGE_LOG_DIR = ".sources"
+CHANGE_LOG_DIR = "sources"
 DISPOSITIONS = ("added", "updated", "removed")
 DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 TENANT_URL_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str], str]] = {
@@ -1073,7 +1073,7 @@ async def _write_change_log(
     raises leaves the cursor unadvanced for the next tick to retry."""
     if ext.files is None:
         return None
-    directory = f"{CHANGE_LOG_DIR}/{binding.name}"
+    directory = binding.name
     body = "".join(
         json.dumps(
             {
@@ -1088,8 +1088,10 @@ async def _write_change_log(
         + "\n"
         for change in changes
     )
-    path = await ext.files.write(conversation_id, f"{directory}/{latest}.jsonl", body.encode())
-    await ext.files.prune(conversation_id, directory)
+    path = await ext.files.write_runtime(
+        conversation_id, CHANGE_LOG_DIR, f"{directory}/{latest}.jsonl", body.encode()
+    )
+    await ext.files.prune_runtime(conversation_id, CHANGE_LOG_DIR, directory)
     return path
 
 

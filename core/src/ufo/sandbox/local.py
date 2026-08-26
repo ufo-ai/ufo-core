@@ -46,6 +46,7 @@ from ufo.sandbox.containment import (
 )
 from ufo.sandbox.session import (
     NO_PROXY_HOSTS,
+    RUNTIME_DIRNAME,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     WORKSPACE_WRITE_MODE,
@@ -247,6 +248,8 @@ class LocalCarrier:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         root = Path(spec.workspace_host_path)
         await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
+        runtime_root = self.ufo_home / RUNTIME_DIRNAME / spec.conversation_id.hex
+        await asyncio.to_thread(runtime_root.mkdir, parents=True, exist_ok=True)
         ca_path = self._scratch / CA_FILENAME
         await asyncio.to_thread(ca_path.write_bytes, spec.proxy.ca_cert.encode())
         proxy_url = f"http://{spec.run_token}:@{LOCAL_PROXY_HOST}:{spec.proxy.port}"
@@ -255,6 +258,7 @@ class LocalCarrier:
             container_id=LOCAL_CONTAINER_ID,
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
+            runtime_root=str(runtime_root),
             egress_env={
                 **self._base_env(),
                 "HTTP_PROXY": proxy_url,
@@ -314,6 +318,7 @@ class LocalCarrier:
             container_id=LOCAL_CONTAINER_ID,
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
+            runtime_root=str(self.ufo_home / RUNTIME_DIRNAME / spec.conversation_id.hex),
             egress_env=self._base_env(),
         )
 
@@ -394,7 +399,8 @@ class LocalCarrier:
         await asyncio.to_thread(self._write_contained, handle, path, content)
 
     def _write_contained(self, handle: SandboxHandle, path: str, content: bytes) -> None:
-        with contained_file(_workspace_name(path), _root(handle), create_parent=True) as target:
+        name, root = _contained_name(handle, path)
+        with contained_file(name, root, create_parent=True) as target:
             target.replace_bytes(content, target.mode(WORKSPACE_WRITE_MODE))
 
     async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
@@ -414,7 +420,8 @@ class LocalCarrier:
         """The pinned parent is released once the file's own fd is open, so the stream that outlives
         this call names no path a later swap could redirect."""
         try:
-            with contained_file(_workspace_name(path), _root(handle)) as target:
+            name, root = _contained_name(handle, path)
+            with contained_file(name, root) as target:
                 if target.lstat() is None:
                     raise FileNotFoundError(str(target.path))
                 return target.open_bytes()
@@ -451,8 +458,10 @@ def _root(handle: SandboxHandle) -> Path:
     return Path(handle.workspace_host_path)
 
 
-def _workspace_name(path: str) -> PurePosixPath:
-    """The name a logical `/workspace` path carries under the host workspace directory. Only the
-    mapping — every containment check is the guard's, run against the real filesystem the name lands
-    on rather than against the string."""
-    return PurePosixPath(path).relative_to(WORKSPACE_DIR)
+def _contained_name(handle: SandboxHandle, path: str) -> tuple[PurePosixPath, Path]:
+    candidate = PurePosixPath(path)
+    if candidate.is_relative_to(WORKSPACE_DIR):
+        return candidate.relative_to(WORKSPACE_DIR), _root(handle)
+    if handle.runtime_root and candidate.is_relative_to(handle.runtime_root):
+        return candidate.relative_to(handle.runtime_root), Path(handle.runtime_root)
+    raise ValueError(f"path {path!r} is outside the sandbox roots")

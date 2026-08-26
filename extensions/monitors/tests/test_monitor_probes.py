@@ -395,11 +395,11 @@ async def test_three_consecutive_failures_fire_and_a_success_resets_the_streak(
     assert "quiet_ticks: 0" in body
 
 
-async def test_over_cap_output_spills_to_the_workspace_and_the_body_names_the_path(
+async def test_over_cap_output_spills_to_the_run_and_the_body_names_the_path(
     db: None, tmp_path: Path
 ) -> None:
-    """Signal pushed, payload pulled: the fire carries the bounded output and names a workspace path
-    holding the whole of it, so the agent reads the rest only if it cares."""
+    """Signal pushed, payload pulled: the fire carries the bounded output and names its runtime
+    path, so the agent reads the rest only if it cares."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     dbos = StubDbos()
     ext = _probing_ctx(_invoker(workspace_id, dbos), tmp_path)
@@ -418,9 +418,8 @@ async def test_over_cap_output_spills_to_the_workspace_and_the_body_names_the_pa
     body = turn["inbound"]
     named = next(line for line in body.splitlines() if line.startswith("full_output: "))
     spilled = named.removeprefix("full_output: ")
-    assert spilled.startswith("/workspace/.monitors/ci-run-")
-    landed = tmp_path / str(conversation_id) / spilled.removeprefix("/workspace/")
-    assert landed.read_text() == "x" * 20000 + "\n"
+    assert spilled.startswith(f"$UFO_HOME/runs/{conversation_id.hex}/monitors/ci-run-")
+    assert not any((tmp_path / str(conversation_id)).iterdir())
     assert "bytes omitted" in body
     assert len(body) < 20000
 

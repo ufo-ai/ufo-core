@@ -37,6 +37,8 @@ from ufo.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     EGRESS_CA_CERT_ENV,
     NO_PROXY_HOSTS,
+    RUNTIME_DIRNAME,
+    UFO_HOME_ENV,
     WORKSPACE_DIR,
     DialTarget,
     ExecResult,
@@ -200,6 +202,7 @@ class _Slot:
 
     cwd: str
     member_id: UUID | None
+    runtime_id: str
     connections: int = 0
     busy: bool = False
     op: TerminalOp | None = None
@@ -218,6 +221,7 @@ class TerminalWorkspace:
 
     cwd: str
     member_id: UUID | None
+    runtime_id: str
 
 
 class TerminalTransport(Protocol):
@@ -238,7 +242,13 @@ class TerminalTransport(Protocol):
     leaves it ungated (the direct-drive tests), and the surface always passes the connected
     member."""
 
-    def connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None: ...
+    def connect(
+        self,
+        conversation_id: UUID,
+        cwd: str,
+        member_id: UUID | None,
+        runtime_id: str | None = None,
+    ) -> None: ...
 
     def disconnect(self, conversation_id: UUID) -> None: ...
 
@@ -302,15 +312,24 @@ class Terminals:
     _arrivals: dict[UUID, list[_Waiter]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None:
+    def connect(
+        self,
+        conversation_id: UUID,
+        cwd: str,
+        member_id: UUID | None,
+        runtime_id: str | None = None,
+    ) -> None:
         """One client connection arrived. The slot is per conversation and shared across
         connections, so an op sent while no stream was open is delivered by the next one; only the
         last connection leaving tears the slot down, and a fresh connection standing somewhere else
         replaces an idle slot rather than reviving a stale address."""
         with self._lock:
             slot = self.slots.get(conversation_id)
-            if slot is None or (slot.reply is None and slot.cwd != cwd):
-                slot = _Slot(cwd=cwd, member_id=member_id)
+            resolved_runtime_id = runtime_id or conversation_id.hex
+            if slot is None or (
+                slot.reply is None and (slot.cwd != cwd or slot.runtime_id != resolved_runtime_id)
+            ):
+                slot = _Slot(cwd=cwd, member_id=member_id, runtime_id=resolved_runtime_id)
                 self.slots[conversation_id] = slot
             slot.connections += 1
             waiting = self._arrivals.pop(conversation_id, [])
@@ -331,7 +350,9 @@ class Terminals:
             slot = self.slots.get(conversation_id)
             if slot is None:
                 return None
-            return TerminalWorkspace(cwd=slot.cwd, member_id=slot.member_id)
+            return TerminalWorkspace(
+                cwd=slot.cwd, member_id=slot.member_id, runtime_id=slot.runtime_id
+            )
 
     async def arrived(self, conversation_id: UUID, grace_s: float) -> TerminalWorkspace | None:
         """The bound terminal, waiting up to `grace_s` for one to connect. The client's stream ends
@@ -345,7 +366,9 @@ class Terminals:
             with self._lock:
                 slot = self.slots.get(conversation_id)
                 if slot is not None:
-                    return TerminalWorkspace(cwd=slot.cwd, member_id=slot.member_id)
+                    return TerminalWorkspace(
+                        cwd=slot.cwd, member_id=slot.member_id, runtime_id=slot.runtime_id
+                    )
                 self._arrivals.setdefault(conversation_id, []).append((waiter, loop))
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -599,6 +622,7 @@ class TerminalCarrier:
             container_id=spec.workspace_host_path,
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
+            runtime_root=f"${UFO_HOME_ENV}/{RUNTIME_DIRNAME}/{bound.runtime_id}",
             egress_env={
                 "HTTP_PROXY": proxy_url,
                 "HTTPS_PROXY": proxy_url,
@@ -624,6 +648,7 @@ class TerminalCarrier:
             container_id=bound.cwd,
             workspace_host_path=bound.cwd,
             run_token=spec.run_token,
+            runtime_root=f"${UFO_HOME_ENV}/{RUNTIME_DIRNAME}/{bound.runtime_id}",
         )
 
     async def exec(

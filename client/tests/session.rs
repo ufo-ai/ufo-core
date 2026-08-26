@@ -1433,7 +1433,11 @@ fn a_pasted_image_marks_the_entry_and_sends_its_path() {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let relative = format!(".ufo/images/image-{}-1.png", session.child.id());
+    let relative = format!(
+        "runs/cfbba3e008cb2e6ce10c7bb658c9de1c/images/image-{}-1.png",
+        session.child.id()
+    );
+    let named = format!("$UFO_HOME/{relative}");
     let stashed = home.join(&relative);
     assert_eq!(
         std::fs::read(&stashed).expect("the image is stashed under the workspace"),
@@ -1445,12 +1449,12 @@ fn a_pasted_image_marks_the_entry_and_sends_its_path() {
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert_eq!(
         requests[1].body,
-        format!("[Image #1: {relative}]"),
-        "the send names the workspace-relative path"
+        format!("[Image #1: {named}]"),
+        "the send names the runtime path"
     );
     assert!(!stashed.exists(), "the client sweeps its images on exit");
     assert!(
-        !home.join(".ufo").exists(),
+        !home.join("runs").exists(),
         "an emptied stash directory leaves nothing behind"
     );
     let _ = std::fs::remove_dir_all(&home);
@@ -1599,7 +1603,11 @@ fn a_dropped_image_path_attaches_as_an_image() {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    let relative = format!(".ufo/images/image-{}-1.png", session.child.id());
+    let relative = format!(
+        "runs/cfbba3e008cb2e6ce10c7bb658c9de1c/images/image-{}-1.png",
+        session.child.id()
+    );
+    let named = format!("$UFO_HOME/{relative}");
     assert_eq!(
         std::fs::read(home.join(&relative)).expect("the dropped image is copied into the stash"),
         png
@@ -1610,7 +1618,7 @@ fn a_dropped_image_path_attaches_as_an_image() {
     assert_eq!(requests.len(), 2, "{requests:?}");
     assert_eq!(
         requests[1].body,
-        format!("[Image #1: {relative}]"),
+        format!("[Image #1: {named}]"),
         "the send names the stashed copy, never the dropped path"
     );
     assert!(
@@ -1670,7 +1678,11 @@ fn ctrl_v_with_a_copied_image_file_attaches_it() {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    let relative = format!(".ufo/images/image-{}-1.png", session.child.id());
+    let relative = format!(
+        "runs/cfbba3e008cb2e6ce10c7bb658c9de1c/images/image-{}-1.png",
+        session.child.id()
+    );
+    let named = format!("$UFO_HOME/{relative}");
     assert_eq!(
         std::fs::read(home.join(&relative)).expect("the copied file lands in the stash"),
         png
@@ -1680,7 +1692,7 @@ fn ctrl_v_with_a_copied_image_file_attaches_it() {
     session.reaped();
     assert_eq!(
         requests[1].body,
-        format!("[Image #1: {relative}]"),
+        format!("[Image #1: {named}]"),
         "{requests:?}"
     );
     let _ = std::fs::remove_dir_all(&home);

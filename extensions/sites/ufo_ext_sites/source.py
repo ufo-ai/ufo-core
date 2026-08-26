@@ -199,15 +199,22 @@ async def materialize_source(
     return dest, paths
 
 
-async def unpack_page_kit(ctx: ToolContext, dest: str) -> None:
+async def unpack_page_kit(ctx: ToolContext, dest: str, runtime_root: str | None = None) -> None:
     """Write the deploy's kit under `<dest>/sdk/`, the sibling an app page project's `./sdk/kit.js`
     alias resolves through, so a page builds against components as current as the pod that deployed
     it rather than the ones its first build froze. One write and one unpack, which also unlinks the
     archive: a stray 2.3 MB file in the directory the build carries would ride onto the site."""
     archive = f"{dest}/{KIT_ARCHIVE}"
-    await ctx.sandbox.write_file(archive, PAGE_KIT_ARCHIVE)
+    if runtime_root is None:
+        await ctx.sandbox.write_file(archive, PAGE_KIT_ARCHIVE)
+    else:
+        await ctx.sandbox.write_runtime_path(archive, PAGE_KIT_ARCHIVE)
     unpacked = await ctx.sandbox.python(
-        UNPACK_KIT_PROG, WORKSPACE_DIR, archive, dest, timeout_s=UNPACK_TIMEOUT_SECONDS
+        UNPACK_KIT_PROG,
+        runtime_root or WORKSPACE_DIR,
+        archive,
+        dest,
+        timeout_s=UNPACK_TIMEOUT_SECONDS,
     )
     if unpacked.exit_code != 0:
         raise RuntimeError(unpacked.stderr.strip() or f"unpacking the kit under {dest} failed")

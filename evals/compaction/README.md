@@ -23,9 +23,9 @@ retrieval.
 | `compaction.buried` | 1 | recall of 40 operative values stated only inside tool-result text, against 40 matched spoken decisions — the channel gap | buried recall ≥ 20% |
 | `compaction.supersession` | 1 | corrected values recalled, superseded values absent | correction recall ≥ 60%, stale rate ≤ 20% |
 | `compaction.chain` | 1 | survival of critical (weight ≥ 4) facts across three compaction generations, the window refilled between each | gen-3 critical survival ≥ 25% |
-| `compaction.reference` | 1 | 9 load-bearing offloaded `.tool-output` files against the `MAX_REFERENCE_PATHS = 5` harvester cap, heaviest planted earliest — recency keeps the wrong five, so coverage above the mechanical floor requires the summary's own `files` field to carry the early heavy paths | weighted coverage ≥ 50% |
+| `compaction.reference` | 1 | 9 load-bearing offloaded runtime files against the `MAX_REFERENCE_PATHS = 5` harvester cap, heaviest planted earliest — recency keeps the wrong five, so coverage above the mechanical floor requires the summary's own `files` field to carry the early heavy paths | weighted coverage ≥ 50% |
 | `compaction.image` | 1 | a fact whose only home is an inline image in the head | fact survives the boundary |
-| `compaction.behavior` | 2×4 probes | live probe turns on a materialized full-scale conversation: recall, supersession, re-read of an offloaded `.tool-output` file, and a verbatim-tail control | per probe |
+| `compaction.behavior` | 2×4 probes | live probe turns on a materialized full-scale conversation: recall, supersession, re-read of an offloaded runtime file, and a verbatim-tail control | per probe |
 | `compaction.real` | 3×4–5 probes | real agent transcripts composed into full-scale windows with spliced graded exchanges: a plan revised twice ending in a reversal-by-reference, seven versions of one deliverable whose keeper pointer flips twice, and a confident mid-run recap that two later corrections poison | sanity: the window compacts; survival recorded as metrics |
 
 Reference evidence splits every surviving path into `harvested` (kept by the pipeline's

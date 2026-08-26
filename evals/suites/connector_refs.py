@@ -48,7 +48,7 @@ from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
-from ufo.loop.engine import TOOL_OUTPUT_DIR
+from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME
 from ufo.schema import tables
 from ufo.sdk.context import ScopedStore
 
@@ -328,7 +328,7 @@ def _narrowings(output: CapabilityOutput) -> tuple[ToolInvocation, ...]:
     return tuple(
         call
         for call in output.calls
-        if call.name in NARROWING_TOOLS and TOOL_OUTPUT_DIR in json.dumps(call.input)
+        if call.name in NARROWING_TOOLS and TOOL_OUTPUT_DIRNAME in json.dumps(call.input)
     )
 
 
@@ -360,8 +360,8 @@ def _graded_reference(
             return CapabilityVerdict(
                 False, f"the {query!r} fixture was condensed; its records stopped being distinct"
             )
-        if offloaded != (TOOL_OUTPUT_DIR in result):
-            landed = "inline" if TOOL_OUTPUT_DIR not in result else "offloaded"
+        if offloaded != (TOOL_OUTPUT_DIRNAME in result):
+            landed = "inline" if TOOL_OUTPUT_DIRNAME not in result else "offloaded"
             return CapabilityVerdict(
                 False, f"the {query!r} result landed {landed}, not what the case measures"
             )
@@ -377,7 +377,7 @@ def _graded_reference(
             return CapabilityVerdict(False, f"handed back the pointer, not the value: {answer!r}")
         if offloaded and not _narrowings(output):
             return CapabilityVerdict(
-                False, f"reported {expected!r} without ever reading {TOOL_OUTPUT_DIR}"
+                False, f"reported {expected!r} without ever reading {TOOL_OUTPUT_DIRNAME}"
             )
         return CapabilityVerdict(
             True,
@@ -392,7 +392,7 @@ def _graded_reference(
     if decoys:
         statement += f" and none of {', '.join(decoys)}"
     if offloaded:
-        statement += f", with {TOOL_OUTPUT_DIR} narrowed in the trajectory"
+        statement += f", with {TOOL_OUTPUT_DIRNAME} narrowed in the trajectory"
     return DescribedGrader(statement, grade)
 
 
@@ -408,7 +408,7 @@ def _graded_facts(query: str, expected: tuple[str, ...], offloaded: bool, pointe
         result = searches[-1].result
         if pointers != (POINTER in result):
             return CapabilityVerdict(False, f"the {query!r} fixture no longer matches its arm")
-        if offloaded != (TOOL_OUTPUT_DIR in result):
+        if offloaded != (TOOL_OUTPUT_DIRNAME in result):
             return CapabilityVerdict(False, f"the {query!r} result landed on the wrong side")
         answer = answer_text(output.response)
         missing = [value for value in expected if value.lower() not in answer]

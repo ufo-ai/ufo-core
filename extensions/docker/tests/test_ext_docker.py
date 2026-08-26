@@ -29,6 +29,7 @@ from ufo.sdk.sandbox import (
     ProxyEndpoint,
     SandboxHandle,
     SandboxSpec,
+    sandbox_runtime_root,
 )
 from ufo.workspace import ws
 
@@ -95,6 +96,14 @@ async def test_exec_carries_the_turn_env_and_run_bakes_none(
     assert run_argv[run_argv.index("-v") + 1] == f"/tmp/ws:{WORKSPACE_DIR}"
     assert run_argv[run_argv.index("--network") + 1] == (f"ufo-sandbox-{spec.conversation_id.hex}")
     assert run_argv[run_argv.index("--cap-drop") + 1] == "NET_RAW"
+    runtime_call = next(argv for argv in calls if "mkdir" in argv)
+    assert runtime_call == (
+        "exec",
+        "cid1",
+        "mkdir",
+        "-p",
+        sandbox_runtime_root(spec.conversation_id),
+    )
 
     await carrier.exec(handle, ("bash", "-lc", "gh api user"), 30)
 

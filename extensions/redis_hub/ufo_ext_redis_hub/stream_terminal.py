@@ -65,10 +65,12 @@ def _pairs(flat: object) -> _StreamFields:
     return {items[i]: items[i + 1] for i in range(0, len(items) - 1, 2)}
 
 
-def _bind_payload(cwd: str, member_id: UUID | None) -> str:
+def _bind_payload(cwd: str, member_id: UUID | None, runtime_id: str) -> str:
     """The binding a held connection or an in-flight op publishes: where the terminal stands and
     whose it is, the one shape both the liveness key and the inflight pin carry."""
-    return json.dumps({"cwd": cwd, "member_id": member_id.hex if member_id else None})
+    return json.dumps(
+        {"cwd": cwd, "member_id": member_id.hex if member_id else None, "runtime_id": runtime_id}
+    )
 
 
 BIND_TTL_SECONDS = 60
@@ -163,6 +165,7 @@ class _Hold:
 
     cwd: str
     member_id: UUID | None
+    runtime_id: str
     connections: int = 0
     task: asyncio.Task[None] | None = None
 
@@ -224,7 +227,13 @@ class RedisTerminals:
     def _reply_blob(self, op_id: str) -> str:
         return f"term/reply/{op_id}"
 
-    def connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None:
+    def connect(
+        self,
+        conversation_id: UUID,
+        cwd: str,
+        member_id: UUID | None,
+        runtime_id: str | None = None,
+    ) -> None:
         """Publish this pod's held connection as the conversation's binding, refreshed under a TTL
         by a background heartbeat for the connection's life. Called from the held stream on serve's
         loop, so the heartbeat runs there and `disconnect` cancels it; the key expires on its own
@@ -233,9 +242,12 @@ class RedisTerminals:
         loop = asyncio.get_running_loop()
         with self._lock:
             hold = self._holds.get(conversation_id)
+            resolved_runtime_id = runtime_id or conversation_id.hex
             if hold is None:
-                hold = _Hold(cwd=cwd, member_id=member_id)
-                hold.task = loop.create_task(self._heartbeat(conversation_id, cwd, member_id))
+                hold = _Hold(cwd=cwd, member_id=member_id, runtime_id=resolved_runtime_id)
+                hold.task = loop.create_task(
+                    self._heartbeat(conversation_id, cwd, member_id, resolved_runtime_id)
+                )
                 self._holds[conversation_id] = hold
             hold.connections += 1
 
@@ -250,14 +262,16 @@ class RedisTerminals:
                     hold.task.cancel()
                 del self._holds[conversation_id]
 
-    async def _heartbeat(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None:
+    async def _heartbeat(
+        self, conversation_id: UUID, cwd: str, member_id: UUID | None, runtime_id: str
+    ) -> None:
         """Refresh the binding key under its TTL while this pod holds the connection. On
         `disconnect` this task is cancelled and simply stops refreshing — it never deletes the key.
         A delete here would race the next pod's publish: the client reconnects on a ~1s poll and its
         new pod republishes the binding, and this pod's cancel could land after that, blanking a
         live terminal's binding for a whole refresh interval. Letting the TTL carry it means a
         binding no pod holds expires on its own, and one a peer holds is never disturbed."""
-        payload = _bind_payload(cwd, member_id)
+        payload = _bind_payload(cwd, member_id, runtime_id)
         key = self._bind_key(conversation_id)
         while True:
             with suppress(RedisError):
@@ -272,7 +286,11 @@ class RedisTerminals:
         with self._lock:
             hold = self._holds.get(conversation_id)
             return (
-                None if hold is None else TerminalWorkspace(cwd=hold.cwd, member_id=hold.member_id)
+                None
+                if hold is None
+                else TerminalWorkspace(
+                    cwd=hold.cwd, member_id=hold.member_id, runtime_id=hold.runtime_id
+                )
             )
 
     async def arrived(self, conversation_id: UUID, grace_s: float) -> TerminalWorkspace | None:
@@ -304,7 +322,11 @@ class RedisTerminals:
             return None
         data = json.loads(_text(raw))
         member = data.get("member_id")
-        return TerminalWorkspace(cwd=data["cwd"], member_id=UUID(member) if member else None)
+        return TerminalWorkspace(
+            cwd=data["cwd"],
+            member_id=UUID(member) if member else None,
+            runtime_id=data.get("runtime_id", conversation_id.hex),
+        )
 
     async def send(
         self,
@@ -392,7 +414,7 @@ class RedisTerminals:
             await client.set(self._opmeta_key(op.op_id), meta, ex=window)
             await client.set(
                 self._inflight_key(conversation_id),
-                _bind_payload(bound.cwd, bound.member_id),
+                _bind_payload(bound.cwd, bound.member_id, bound.runtime_id),
                 ex=window,
             )
             if body is not None:

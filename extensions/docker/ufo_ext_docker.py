@@ -22,6 +22,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from uuid import UUID
 
 from ufo.sdk.manifest import Manifest
@@ -38,6 +39,7 @@ from ufo.sdk.sandbox import (
     SandboxHandle,
     SandboxSpec,
     SandboxUnreachable,
+    sandbox_runtime_root,
     ufo_fs_file_op,
 )
 
@@ -45,6 +47,7 @@ CARRIER_NAME = "docker"
 CONTAINER_NAME_PREFIX = "ufo-sbx-"
 CREATE_TIMEOUT_SECONDS = 120
 WRITE_TIMEOUT_SECONDS = 30
+RUNTIME_ROOT_TIMEOUT_SECONDS = 30
 READ_CHUNK_BYTES = 1024 * 1024
 IDLE_RECLAIM_SECONDS = 1800
 NAME_CONFLICT_MARKER = "is already in use"
@@ -133,21 +136,25 @@ class DockerCarrier:
         running = await self._running_id(name)
         if running is not None:
             await self._install_ca(running, spec.proxy.ca_cert)
+            await self._ensure_runtime_root(running, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=running,
                 workspace_host_path=spec.workspace_host_path,
                 run_token=spec.run_token,
+                runtime_root=sandbox_runtime_root(spec.conversation_id),
                 egress_env=egress_env,
             )
         stopped = await self._stopped_id(name)
         if stopped is not None and await self._revive(spec.conversation_id, stopped):
             await self._install_ca(stopped, spec.proxy.ca_cert)
+            await self._ensure_runtime_root(stopped, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=stopped,
                 workspace_host_path=spec.workspace_host_path,
                 run_token=spec.run_token,
+                runtime_root=sandbox_runtime_root(spec.conversation_id),
                 egress_env=egress_env,
             )
         if stopped is not None:
@@ -179,21 +186,25 @@ class DockerCarrier:
                     winner = await self._running_id(name)
                     if winner is not None:
                         await self._install_ca(winner, spec.proxy.ca_cert)
+                        await self._ensure_runtime_root(winner, spec.conversation_id)
                         return SandboxHandle(
                             conversation_id=spec.conversation_id,
                             container_id=winner,
                             workspace_host_path=spec.workspace_host_path,
                             run_token=spec.run_token,
+                            runtime_root=sandbox_runtime_root(spec.conversation_id),
                             egress_env=egress_env,
                         )
                 raise RuntimeError(f"docker run failed: {detail}")
             container_id = stdout.decode().strip()
             await self._install_ca(container_id, spec.proxy.ca_cert)
+            await self._ensure_runtime_root(container_id, spec.conversation_id)
             return SandboxHandle(
                 conversation_id=spec.conversation_id,
                 container_id=container_id,
                 workspace_host_path=spec.workspace_host_path,
                 run_token=spec.run_token,
+                runtime_root=sandbox_runtime_root(spec.conversation_id),
                 egress_env=egress_env,
             )
         except BaseException:
@@ -221,11 +232,16 @@ class DockerCarrier:
             if not revived:
                 return None
             running = stopped
+        try:
+            await self._ensure_runtime_root(running, spec.conversation_id)
+        except RuntimeError:
+            return None
         return SandboxHandle(
             conversation_id=spec.conversation_id,
             container_id=running,
             workspace_host_path=spec.workspace_host_path,
             run_token=spec.run_token,
+            runtime_root=sandbox_runtime_root(spec.conversation_id),
         )
 
     async def _reclaim_idle(self, opening: UUID) -> None:
@@ -380,6 +396,11 @@ class DockerCarrier:
     async def _write_started(
         self, handle: SandboxHandle, path: str, content: bytes
     ) -> tuple[int, bytes]:
+        root = (
+            handle.runtime_root
+            if handle.runtime_root and PurePosixPath(path).is_relative_to(handle.runtime_root)
+            else WORKSPACE_DIR
+        )
         code, _, stderr = await _docker(
             "exec",
             "-i",
@@ -389,7 +410,7 @@ class DockerCarrier:
             "-c",
             f"{SANDBOX_MODULE_BOOTSTRAP}{COPY_IN_PROG}",
             path,
-            WORKSPACE_DIR,
+            root,
             stdin=content,
             timeout_s=WRITE_TIMEOUT_SECONDS,
         )
@@ -614,6 +635,18 @@ class DockerCarrier:
         )
         if write[0] != 0:
             raise RuntimeError(f"CA install failed: {write[2].decode().strip()}")
+
+    async def _ensure_runtime_root(self, container_id: str, conversation_id: UUID) -> None:
+        code, _, stderr = await _docker(
+            "exec",
+            container_id,
+            "mkdir",
+            "-p",
+            sandbox_runtime_root(conversation_id),
+            timeout_s=RUNTIME_ROOT_TIMEOUT_SECONDS,
+        )
+        if code != 0:
+            raise RuntimeError(f"runtime root creation failed: {stderr.decode().strip()}")
 
 
 def manifest() -> Manifest:

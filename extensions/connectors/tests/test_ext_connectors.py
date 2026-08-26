@@ -1813,8 +1813,8 @@ async def test_a_repeated_parent_object_crosses_once_and_expands_to_the_original
 async def test_a_single_repo_search_lands_inside_the_engine_inline_budget(tmp_path: Path) -> None:
     """What condensing buys the member, composed with the cap the engine applies after the handler
     returns: a 30-hit search scoped to one repository is far past `MAX_TOOL_RESULT_CHARS`, so the
-    engine would write it to a `.tool-output` file and leave the model a preview plus a path to
-    filter. Condensed, the same result fits the inline budget and stays whole in context — the same
+    engine would write it to a runtime `tool-output` file and leave the model a preview plus a path
+    to filter. Condensed, the result fits the inline budget and stays whole in context — the same
     facts, no file round-trip. The order is what makes this hold: the handler condenses, then
     dispatch measures what the handler returned."""
     workspace = tmp_path / "workspace"

@@ -51,8 +51,8 @@ def decode(body: bytes) -> Conversation:
 
 
 class FileRef(BaseModel):
-    """A workspace file the head touched — a read source or a `.tool-output/<id>.txt` offload — and
-    one line on why it mattered, so the model can re-read it by path after the boundary."""
+    """A file the head touched — a workspace source or a runtime `tool-output/<id>.txt`
+    offload — and one line on why it mattered, so the model can re-read it after the boundary."""
 
     path: str
     why: str

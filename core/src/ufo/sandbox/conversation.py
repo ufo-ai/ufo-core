@@ -258,6 +258,20 @@ class ConversationSandbox:
         await session.write_file(rel, content)
         return workspace_path(rel)
 
+    async def write_runtime(
+        self, conversation_id: UUID, category: str, rel: str, content: bytes
+    ) -> str:
+        """Land bounded internal output below one named runtime category."""
+        if len(content) > WORKSPACE_WRITE_MAX_BYTES:
+            raise ValueError(
+                f"{rel} is {len(content)} bytes, over the {WORKSPACE_WRITE_MAX_BYTES}-byte limit "
+                "for a runtime write"
+            )
+        session = await self.open(conversation_id, None, UNSIGNED_RUN_TOKEN, {})
+        relative = f"{category}/{rel}"
+        await session.write_runtime_file(relative, content)
+        return await session.runtime_display_path(relative)
+
     async def prune(self, conversation_id: UUID, rel_prefix: str, keep: int) -> None:
         """Keep only the newest `keep` files directly under `rel_prefix`, deleting the rest —
         the bound on an off-turn writer that appends unattended. Runs in the container, so the
@@ -268,6 +282,20 @@ class ConversationSandbox:
         result = await session.python(
             PRUNE_PROG, workspace_path(rel_prefix), WORKSPACE_DIR, str(keep)
         )
+        if result.exit_code != 0:
+            raise OSError(result.stderr.strip() or f"cannot prune {rel_prefix}")
+
+    async def prune_runtime(
+        self, conversation_id: UUID, category: str, rel_prefix: str, keep: int
+    ) -> None:
+        """Keep only the newest files below one internal runtime directory."""
+        session = await self.existing(conversation_id)
+        if session is None:
+            return
+        relative = f"{category}/{rel_prefix}"
+        target = await session.runtime_path(relative)
+        root = await session.runtime_path(category)
+        result = await session.python(PRUNE_PROG, target, root, str(keep))
         if result.exit_code != 0:
             raise OSError(result.stderr.strip() or f"cannot prune {rel_prefix}")
 

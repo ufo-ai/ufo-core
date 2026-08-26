@@ -455,6 +455,22 @@ class ConversationFiles:
         sorts chronologically."""
         await self._sandboxes.prune(conversation_id, rel_prefix, keep)
 
+    async def write_runtime(
+        self, conversation_id: UUID, category: str, rel: str, content: bytes
+    ) -> str:
+        """Land internal output under one conversation runtime category."""
+        return await self._sandboxes.write_runtime(conversation_id, category, rel, content)
+
+    async def prune_runtime(
+        self,
+        conversation_id: UUID,
+        category: str,
+        rel_prefix: str,
+        keep: int = CONVERSATION_FILES_KEEP,
+    ) -> None:
+        """Bound the files under one conversation runtime directory."""
+        await self._sandboxes.prune_runtime(conversation_id, category, rel_prefix, keep)
+
 
 async def conversation_agent_id(workspace_id: UUID, conversation_id: UUID) -> UUID | None:
     """The agent a conversation is permanently bound to, or None when the id names no conversation

@@ -65,7 +65,7 @@ from ufo.sandbox import terminal
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import SENTINEL_MODEL_KEY, ProbeTokenCodec, ProxyEndpoint
+from ufo.sandbox.session import RUNTIME_DIRNAME, SENTINEL_MODEL_KEY, ProbeTokenCodec, ProxyEndpoint
 from ufo.sandbox.terminal import TerminalGone
 from ufo.schema import tables
 from ufo.schema.records import Usage
@@ -1288,11 +1288,39 @@ async def test_conversation_files_write_lands_in_the_conversation_workspace(
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
         path = await _files(_sandboxes(root)).write(
-            conversation_id, ".sources/acme/now.jsonl", b"{}\n"
+            conversation_id, "exports/acme/now.jsonl", b"{}\n"
         )
 
-    assert path == "/workspace/.sources/acme/now.jsonl"
-    assert (root / str(conversation_id) / ".sources/acme/now.jsonl").read_bytes() == b"{}\n"
+    assert path == "/workspace/exports/acme/now.jsonl"
+    assert (root / str(conversation_id) / "exports/acme/now.jsonl").read_bytes() == b"{}\n"
+
+
+async def test_conversation_files_runtime_is_separate_and_pruned(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    root = tmp_path / "workspaces"
+    sandboxes = _sandboxes(root)
+    carrier = sandboxes.carrier
+    assert isinstance(carrier, LocalCarrier)
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        files = _files(sandboxes)
+        first = await files.write_runtime(
+            conversation_id, "sources", "acme/20260826T000000Z.jsonl", b"one\n"
+        )
+        latest = await files.write_runtime(
+            conversation_id, "sources", "acme/20260826T000001Z.jsonl", b"two\n"
+        )
+        await files.prune_runtime(conversation_id, "sources", "acme", keep=1)
+
+    runtime = carrier.ufo_home / RUNTIME_DIRNAME / conversation_id.hex / "sources" / "acme"
+    assert first == (
+        f"$UFO_HOME/{RUNTIME_DIRNAME}/{conversation_id.hex}/sources/acme/20260826T000000Z.jsonl"
+    )
+    assert latest == (
+        f"$UFO_HOME/{RUNTIME_DIRNAME}/{conversation_id.hex}/sources/acme/20260826T000001Z.jsonl"
+    )
+    assert [entry.name for entry in runtime.iterdir()] == ["20260826T000001Z.jsonl"]
+    assert not (root / str(conversation_id) / "sources").exists()
 
 
 async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: Path) -> None:

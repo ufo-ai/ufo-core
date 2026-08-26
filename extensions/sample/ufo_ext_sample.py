@@ -1105,6 +1105,7 @@ class SampleCarrier:
             conversation_id=spec.conversation_id,
             container_id=CARRIER_CONTAINER,
             run_token=spec.run_token,
+            runtime_root=f"/home/user/.ufo/runs/{spec.conversation_id.hex}",
         )
 
     async def attach(self, spec: SandboxSpec) -> SandboxHandle | None:
@@ -1114,6 +1115,7 @@ class SampleCarrier:
             conversation_id=spec.conversation_id,
             container_id=spec.resume_id,
             run_token=spec.run_token,
+            runtime_root=f"/home/user/.ufo/runs/{spec.conversation_id.hex}",
         )
 
     async def exec(

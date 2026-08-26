@@ -30,7 +30,7 @@ test for the extension API — every entry must be expressible without touching 
 | Durable execution | DBOS on the same database as the schema (SQLite dev / Postgres deploys): a turn is a durable workflow, a subagent a child workflow; queues, async cancel, crash recovery. Shutdown stops admission, gives requests `[serve].request_shutdown_seconds`, waits `[serve].graceful_shutdown_seconds` for active workflows (the standalone `ufo-egress` proxy drains its own live tunnels for that same window on its own SIGTERM), then retires the executor heartbeat only if no workflow remains active — a workflow that outlives the drain keeps the seat, so no peer re-dispatches work this process still executes; the seat ages out with the process. The supervisor's termination budget exceeds the sequential drains. DBOS-on-SQLite is verified in U1 — fail loud, never silently fall back to requiring Postgres. Dequeue poll interval and system-DB retention are configured from day one. |
 | Streaming | Durable terminal frames in Postgres; live token deltas through a hub interface — in-process in the single-process default, a Redis hub extension for multi-instance deploys. A lost delta costs a redrawn token, never correctness. |
 | Topology | `ufoctl serve` is one process on one event loop: surfaces + DBOS workers + jobs. Everything is async-native — a blocking call stalls the whole deploy, so blocking-in-async fails lint. Scale-out = more instances plus a shared hub. |
-| Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — file-tool arguments are confined to the workspace plus read-only `$UFO_HOME/skills`), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. A conversation opened from a connected CLI terminal takes the `client` carrier instead — its workspace is the member's own `$PWD`, its ops the member's own subprocesses — same trust posture as local, offered only to a terminal the member connected. |
+| Sandbox | A local temp-dir carrier is the core default: no kernel isolation (a raw shell reaches the host FS — file-tool arguments are confined to the workspace, the current read-only `$UFO_HOME/runs/<id>`, and read-only `$UFO_HOME/skills`), and egress is proxy-scoped/metered only for clients that honor the proxy env, not kernel-enforced (model keys still stay fail-closed via the sentinel). It is the development / trusted-input default; use Docker or E2B (carrier extensions on the `carriers` point) for untrusted input, isolation, or multi-tenant deploys. A conversation opened from a connected CLI terminal takes the `client` carrier instead — its workspace is the member's own `$PWD`, its ops the member's own subprocesses — same trust posture as local, offered only to a terminal the member connected. |
 | Models | Model providers are an extension point; core ships Anthropic + OpenAI direct clients behind one `ModelClient` interface. Bedrock Mantle and OpenRouter ship as extensions. |
 | Observability | OpenTelemetry APIs only in product code; the OTLP export target (Datadog, …) is deploy config. No vendor SDK in core. The portal's browser bundle carries the one vendor SDK in the tree (`@datadog/browser-rum`): a session recording is a stream of DOM changes made in the member's browser, which no OTel signal carries and no server can reconstruct. It stays in `extensions/web`, records only where the deploy names a RUM application, and masks every field a member types into. A workspace condition no turn can repair — a connection that stopped authenticating, an empty credential slot, a task that faults every run — reaches the operators the same way: the debugger extension's `report_problem` emits one record carrying the symptom, the object, the error's class, the next action, and a link into that surface scoped to the reporting turn, and the turns dashboard counts and lists them. Nothing pages: a report is read, not alerted on. An error's text never crosses — a message echoes the environment the failing command ran under, and the transcript the link opens holds it. One call is one event, and how long a condition lasts is read off the reports standing in that list. |
 | Kubernetes | Absent from core by construction. The enterprise offering later wraps core with k8s (principle 3); nothing in core may assume or import it. |
@@ -160,7 +160,7 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   `compactions/<cid>/{before,after,summary}` records in the blob store; a deterministic pipeline
   groups the over-window head into API rounds, compresses it into a validated structured
   `CompactionSummary` (one metered model call, bounded prompt-too-long retry), re-references the
-  durable `.tool-output` files it offloaded, and keeps the recent tail verbatim. The summary's
+  durable `$UFO_HOME/runs/<id>/tool-output` files it offloaded, and keeps the recent tail verbatim. The summary's
   `loaded_skills` is the one field the pipeline fills rather than the model: it drains the turn's
   skill-load tracker, which knows what the head held. Draining empties the tracker, so a compaction
   that may be followed by another `load_skill` re-derives it from the window it just wrote — the kept
@@ -314,11 +314,17 @@ manifests — sandbox internet, a credential slot, a connector, or a model provi
 scoping, injection, and metering rules. Declare, don't open. The enterprise k8s layer later ships
 its apiserver-rewrite / token-mint module through this same rewriter seam.
 
-`/workspace` is the carrier's own storage and the only copy of a conversation's files: a host
+`/workspace` is the carrier's own storage and the only copy of a conversation's member files: a host
 directory an in-cluster carrier bind-mounts (local, Docker), the sandbox's own disk off-cluster
 (E2B, whose provider suspends an idle sandbox and keeps it indefinitely), the member's own `$PWD`
-for the `client` carrier. A tool reaches only
-`/workspace`; transcripts, compaction records, and artifacts live in the blob store, which the
+for the `client` carrier. ufo-owned task journals, offloaded results, REPL state, monitor output,
+source change logs, clipboard images, and staging files live under
+`$UFO_HOME/runs/<id>/{tasks,tool-output,repl,monitors,sources,images,staging}`. The id is the
+conversation UUID in a managed sandbox and the first 32 hex characters of the terminal channel's
+SHA-256 digest in the client carrier, so a terminal reconnect and its server-side handle name the
+same directory while concurrent conversations never mix their files. File reads, globs, and greps
+admit the current run; member-directed writes and edits remain confined to `/workspace`.
+Transcripts, compaction records, and artifacts live in the blob store, which the
 sandbox holds no credential for — sharing a file is the sandbox PUTting it to a single-key
 presigned URL serve mints, bound to the size and sha256 an in-container preflight measured, so S3
 itself refuses any other body. Everything that touches workspace files goes through the carrier —
@@ -850,10 +856,11 @@ the body by — a chunked body, whose length no header can state, is refused rat
 only then does the parse buffer each part within that length (in memory up to the parser's spool
 threshold, a temp file past it); a plain text body is instead bounded by the bytes actually read,
 and the workspace write accumulates one size-capped body per file before the turn runs. A terminal
-paste never uploads: the client saves the clipboard image under the workspace's `.ufo/images` —
+paste never uploads: the client saves the clipboard image under its conversation's
+`$UFO_HOME/runs/<id>/images` —
 capped at the image read's own bound, swept by the client at exit — and the message names the
-workspace-relative path as `[Image #N: path]`, so the bytes cross only when the agent reads that
-path through the workspace-scoped image read. A dropped image file arrives as its pasted path and
+`$UFO_HOME` path as `[Image #N: path]`, so the bytes cross only when the agent reads that
+path through the current-run image read. A dropped image file arrives as its pasted path and
 is copied into the same stash. The read runs off the client's loop and lands only
 in the entry whose Ctrl+V asked for it. Outbound, the portal renders `artifact_link` downloads instead of
 an upload. The portal renders agent replies as markdown through one sanitizing chokepoint: raw

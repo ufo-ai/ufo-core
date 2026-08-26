@@ -53,7 +53,7 @@ from ufo.media.site_previewer import SitePreviewer
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.spec import ModelSpec
 from ufo.o11y import log
-from ufo.sandbox.session import Sandbox
+from ufo.sandbox.session import Sandbox, shell_path
 from ufo.schema import tables
 from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
 from ufo.search import SearchProvider
@@ -346,7 +346,7 @@ class ToolContext:
         A picture is decoration, so an unreadable render is reported and answered with None rather
         than raised: the caller's own work has already succeeded by the time it renders one."""
         sized = await self.sandbox.bash(
-            f"wc -c < {shlex.quote(sandbox_path)}", timeout_s=PREVIEW_SIZE_TIMEOUT_SECONDS
+            f"wc -c < {shell_path(sandbox_path)}", timeout_s=PREVIEW_SIZE_TIMEOUT_SECONDS
         )
         measured = sized.stdout.strip()
         if sized.exit_code != 0 or not measured.isdigit():
@@ -361,7 +361,7 @@ class ToolContext:
             case S3BlobStore():
                 put_url = await self.blob.presigned_put_unmeasured(key, PREVIEW_PUT_TTL_SECONDS)
                 put = await self.sandbox.bash(
-                    f"curl -sS --fail-with-body -T {shlex.quote(sandbox_path)} "
+                    f"curl -sS --fail-with-body -T {shell_path(sandbox_path)} "
                     f"--url {shlex.quote(put_url)}",
                     timeout_s=PREVIEW_PUT_TIMEOUT_SECONDS,
                 )

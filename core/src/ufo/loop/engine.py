@@ -113,7 +113,7 @@ from ufo.o11y import (
     turn_profile,
 )
 from ufo.object_name import ObjectRef
-from ufo.sandbox.session import TOOL_OUTPUT_DIR, Sandbox
+from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME, Sandbox
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
@@ -2521,7 +2521,7 @@ class TurnEngine:
         )
 
     async def _offload(self, name: str, content: str) -> str | None:
-        """Write `content` into the turn's private `.tool-output` dir and return its path, ensuring
+        """Write `content` into the turn's private runtime output dir and return its path, ensuring
         the directory exists first. A member write (or bash) can leave a file squatting the name,
         which the bare `mkdir -p` in the write step cannot reclaim — left unhandled it fails
         `File exists` and poisons every later offload and salvage in the workspace.
@@ -2530,12 +2530,12 @@ class TurnEngine:
         plumbing: a turn that reached this point has already done its work. Loud, because what
         degrades is invisible to the model — it silently loses either a result's tail or its own
         salvaged partial."""
-        path = f"{TOOL_OUTPUT_DIR}/{name}"
+        relative = f"{TOOL_OUTPUT_DIRNAME}/{name}"
         try:
             if await self.sandbox.ensure_tool_output_dir():
                 emit_metric("sandbox_tool_output_dir_reclaimed_total", profile=self.profile)
                 log("sandbox.tool_output_dir_reclaimed", turn_id=str(self.turn.id))
-            await self.sandbox.write_file(path, content.encode())
+            await self.sandbox.write_runtime_file(relative, content.encode())
         except Exception as error:
             emit_metric("tool_offload_failed_total", profile=self.profile)
             log(
@@ -2545,7 +2545,7 @@ class TurnEngine:
                 chars=len(content),
             )
             return None
-        return path
+        return await self.sandbox.runtime_display_path(relative)
 
     def _start_activity(self, call: ToolUseBlock, goal: str) -> None:
         self._activity.sequence += 1
@@ -2583,7 +2583,7 @@ class TurnEngine:
         pre_tool_use may Deny
         (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
         with the folded args (a raising handler is an is_error result). A non-error result over
-        MAX_TOOL_RESULT_CHARS is offloaded — its full text written to a workspace `.tool-output`
+        MAX_TOOL_RESULT_CHARS is offloaded — its full text written to the run's `tool-output`
         file and only a TOOL_RESULT_PREVIEW_CHARS preview plus that path kept in context, so no
         single result is re-ingested whole on every later round of the turn. The cap is a context
         budget, not a per-producer allowance: a tool's own limit caps a field, and the JSON its

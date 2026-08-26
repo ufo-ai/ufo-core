@@ -242,6 +242,7 @@ async def test_create_binds_the_directory_and_the_metered_proxy() -> None:
         _spec(conversation_id, "/Users/member/proj", public_url="https://proxy.example.com")
     )
     assert handle.container_id == "/Users/member/proj"
+    assert handle.runtime_root == f"$UFO_HOME/runs/{conversation_id.hex}"
     assert handle.egress_env["HTTPS_PROXY"] == "https://run-token:@proxy.example.com"
     assert handle.egress_env["UFO_EGRESS_CA_CERT"] == "ca-pem"
     assert handle.egress_env["UFO_CONVERSATION_ID"] == str(conversation_id)

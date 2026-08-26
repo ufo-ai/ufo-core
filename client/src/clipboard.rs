@@ -6,9 +6,13 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
+
 use crate::ops::fileops::fs_read::{IMAGE_MAX_BYTES, IMAGE_MEDIA_TYPES};
 
-const STASH_DIR: &str = ".ufo/images";
+const RUNS_DIR: &str = "runs";
+const IMAGES_DIR: &str = "images";
+const RUNTIME_ID_HEX_CHARS: usize = 32;
 const TOOL_DEADLINE: Duration = Duration::from_secs(5);
 
 /// What the clipboard held.
@@ -33,14 +37,14 @@ pub fn read() -> Result<Clip, String> {
     Ok(Clip::Text(text))
 }
 
-/// Save pasted image bytes under the workspace's stash directory, where the agent's
-/// workspace-scoped read reaches them; answers the workspace-relative path the message names.
-pub fn stash_image(bytes: &[u8], cwd: &Path) -> Result<String, String> {
-    stash(bytes, "png", cwd)
+/// Save pasted image bytes under this conversation's runtime directory; answers the
+/// `$UFO_HOME` path the message names.
+pub fn stash_image(bytes: &[u8], home: &Path, channel: &str) -> Result<String, String> {
+    stash(bytes, "png", home, channel)
 }
 
-/// Copy a dropped image file into the stash; answers the workspace-relative path.
-pub fn stash_copy(source: &Path, cwd: &Path) -> Result<String, String> {
+/// Copy a dropped image file into the runtime directory; answers its `$UFO_HOME` path.
+pub fn stash_copy(source: &Path, home: &Path, channel: &str) -> Result<String, String> {
     let bytes = std::fs::read(source)
         .map_err(|error| format!("could not read {}: {error}", source.display()))?;
     let extension = source
@@ -48,7 +52,7 @@ pub fn stash_copy(source: &Path, cwd: &Path) -> Result<String, String> {
         .and_then(|extension| extension.to_str())
         .expect("a dropped image path carries its extension")
         .to_ascii_lowercase();
-    stash(&bytes, &extension, cwd)
+    stash(&bytes, &extension, home, channel)
 }
 
 /// The image file a paste names, when the pasted text is exactly one existing image path —
@@ -87,7 +91,12 @@ pub fn dropped_image(text: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-fn stash(bytes: &[u8], extension: &str, cwd: &Path) -> Result<String, String> {
+fn runtime_id(channel: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(channel.as_bytes()));
+    digest[..RUNTIME_ID_HEX_CHARS].to_string()
+}
+
+fn stash(bytes: &[u8], extension: &str, home: &Path, channel: &str) -> Result<String, String> {
     static STASHED: AtomicUsize = AtomicUsize::new(1);
     if bytes.len() > IMAGE_MAX_BYTES {
         return Err(format!(
@@ -97,29 +106,40 @@ fn stash(bytes: &[u8], extension: &str, cwd: &Path) -> Result<String, String> {
         ));
     }
     let at = STASHED.fetch_add(1, Ordering::Relaxed);
-    let relative = format!("{STASH_DIR}/image-{}-{at}.{extension}", std::process::id());
-    let path = cwd.join(&relative);
+    let run_id = runtime_id(channel);
+    let relative = format!(
+        "{RUNS_DIR}/{run_id}/{IMAGES_DIR}/image-{}-{at}.{extension}",
+        std::process::id()
+    );
+    let path = home.join(&relative);
     let parent = path.parent().expect("the stash path names a directory");
     std::fs::create_dir_all(parent)
         .and_then(|()| std::fs::write(&path, bytes))
         .map_err(|error| format!("could not save the pasted image: {error}"))?;
-    Ok(relative)
+    Ok(format!("$UFO_HOME/{relative}"))
 }
 
 /// Remove this session's stashed images, and the stash directories once nothing else is in them.
-pub fn sweep_stash(cwd: &Path) {
-    let dir = cwd.join(STASH_DIR);
+pub fn sweep_stash(home: &Path) {
     let own = format!("image-{}-", std::process::id());
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    let runs = home.join(RUNS_DIR);
+    let Ok(entries) = std::fs::read_dir(&runs) else {
         return;
     };
-    for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&own) {
-            let _ = std::fs::remove_file(entry.path());
+    for run in entries.flatten() {
+        let dir = run.path().join(IMAGES_DIR);
+        let Ok(images) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for image in images.flatten() {
+            if image.file_name().to_string_lossy().starts_with(&own) {
+                let _ = std::fs::remove_file(image.path());
+            }
         }
+        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir(run.path());
     }
-    let _ = std::fs::remove_dir(&dir);
-    let _ = std::fs::remove_dir(dir.parent().expect("the stash sits inside .ufo"));
+    let _ = std::fs::remove_dir(&runs);
 }
 
 fn run(name: &str, args: &[&str]) -> Result<Output, String> {
@@ -375,19 +395,28 @@ mod tests {
     }
 
     #[test]
-    fn stash_answers_a_workspace_relative_path_and_sweep_clears_it() {
-        let cwd = std::env::temp_dir().join(format!("ufo-stash-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&cwd);
-        std::fs::create_dir_all(&cwd).unwrap();
-        let relative = stash_image(&[1, 2, 3], &cwd).unwrap();
+    fn stash_answers_a_run_path_and_sweep_clears_it() {
+        let home = std::env::temp_dir().join(format!("ufo-stash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let relative = stash_image(&[1, 2, 3], &home, "conversation").unwrap();
         assert!(
-            relative.starts_with(".ufo/images/image-") && relative.ends_with(".png"),
+            relative.starts_with("$UFO_HOME/runs/") && relative.ends_with(".png"),
             "{relative}"
         );
-        assert_eq!(std::fs::read(cwd.join(&relative)).unwrap(), [1, 2, 3]);
-        sweep_stash(&cwd);
-        assert!(!cwd.join(".ufo").exists());
-        let _ = std::fs::remove_dir_all(&cwd);
+        let path = home.join(relative.trim_start_matches("$UFO_HOME/"));
+        assert_eq!(std::fs::read(path).unwrap(), [1, 2, 3]);
+        sweep_stash(&home);
+        assert!(!home.join(RUNS_DIR).exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn runtime_id_matches_the_terminal_surface() {
+        assert_eq!(
+            runtime_id("conversation"),
+            "8b34dbc2c05eb4d7e25d48efeace8245"
+        );
     }
 
     #[test]
@@ -424,9 +453,12 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let source = cwd.join("shot.JPG");
         std::fs::write(&source, [1, 2, 3]).unwrap();
-        let relative = stash_copy(&source, &cwd).unwrap();
+        let relative = stash_copy(&source, &cwd, "conversation").unwrap();
         assert!(relative.ends_with(".jpg"), "{relative}");
-        assert_eq!(std::fs::read(cwd.join(&relative)).unwrap(), [1, 2, 3]);
+        assert_eq!(
+            std::fs::read(cwd.join(relative.trim_start_matches("$UFO_HOME/"))).unwrap(),
+            [1, 2, 3]
+        );
         assert!(source.exists());
         let _ = std::fs::remove_dir_all(&cwd);
     }
@@ -448,9 +480,10 @@ mod tests {
         let cwd = std::env::temp_dir().join(format!("ufo-stash-cap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&cwd);
         std::fs::create_dir_all(&cwd).unwrap();
-        let refused = stash_image(&vec![0u8; IMAGE_MAX_BYTES + 1], &cwd).unwrap_err();
+        let refused =
+            stash_image(&vec![0u8; IMAGE_MAX_BYTES + 1], &cwd, "conversation").unwrap_err();
         assert_eq!(refused, "The pasted image is 5.0 MB, over the 5 MB cap.");
-        assert!(!cwd.join(".ufo").exists());
+        assert!(!cwd.join(RUNS_DIR).exists());
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }

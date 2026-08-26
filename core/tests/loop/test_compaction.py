@@ -504,13 +504,13 @@ async def test_repetition_below_the_fold_threshold_reaches_the_summarizer_verbat
 async def test_offloaded_tool_output_paths_are_re_referenced_after_compaction(
     tmp_path: Path,
 ) -> None:
-    """Phase 2: a large tool result the engine offloaded to `.tool-output/<id>.txt` in the head is
+    """Phase 2: a large tool result the engine offloaded to the run's `tool-output` in the head is
     re-referenced by path (not re-inlined) after the boundary, so the model can re-read it; a path
     still visible in the kept tail is not duplicated. The harvested reference must be the path
     exactly: `TOOL_OUTPUT_PATH_RE` ends the match at whitespace, so any wording that puts a
     character straight after `{path}` in the notice harvests a path that opens nothing."""
-    head_path = "/workspace/.tool-output/head-call.txt"
-    tail_path = "/workspace/.tool-output/tail-call.txt"
+    head_path = "$UFO_HOME/runs/test/tool-output/head-call.txt"
+    tail_path = "$UFO_HOME/runs/test/tool-output/tail-call.txt"
     compaction = _compaction(tmp_path, trigger_tokens=1, keep_messages=2)
     messages = (
         Message(role="user", content="run the big command " + "x" * 40),
@@ -537,7 +537,7 @@ def test_anchors_are_harvested_by_kind_from_the_head_and_the_pipeline_trackers()
     """The anchor definition the runtime gate and the eval bars share: paths and error classes come
     out of the head's own text by pattern, skills out of the load tracker, and a member request
     contributes its ref — the authority line — rather than its prose."""
-    path = "/workspace/.tool-output/call-1.txt"
+    path = "$UFO_HOME/runs/test/tool-output/call-1.txt"
     ref = UUID("33333333-3333-3333-3333-333333333333")
     head = f"read {path}, the write raised ValidationError, retried once"
     request = f"<context>\nmessage_ref: {ref}\nsender: Alice\n</context>\napprove access"
@@ -554,7 +554,8 @@ def test_anchors_are_harvested_by_kind_from_the_head_and_the_pipeline_trackers()
 
 def test_anchor_harvest_keeps_the_most_recent_of_a_kind() -> None:
     paths = [
-        f"/workspace/.tool-output/call-{index}.txt" for index in range(MAX_ANCHORS_PER_KIND + 3)
+        f"$UFO_HOME/runs/test/tool-output/call-{index}.txt"
+        for index in range(MAX_ANCHORS_PER_KIND + 3)
     ]
     anchors = harvest_anchors(" ".join(paths), (), ())
     assert [anchor.literal for anchor in anchors] == paths[3:]
@@ -576,7 +577,7 @@ async def test_a_dropped_anchor_is_retried_once_then_recorded_as_a_lossy_compact
     only cross the boundary in the summary's own files field. A summary that carries neither buys
     exactly one re-summarize naming the misses, and a second summary that still drops them is
     accepted — recorded lossy in the compaction record and in one log record, never a dead turn."""
-    paths = tuple(f"/workspace/.tool-output/call-{index}.txt" for index in range(7))
+    paths = tuple(f"$UFO_HOME/runs/test/tool-output/call-{index}.txt" for index in range(7))
     model = CountingSummaryModel(summary=PLAIN_SUMMARY)
     compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
 
@@ -611,7 +612,7 @@ async def test_a_retry_that_carries_the_named_anchors_records_a_clean_compaction
 ) -> None:
     """The retry is worth its call: the second summary cites the paths the instruction named, they
     render under the files heading, and the recorded verification carries no miss."""
-    paths = tuple(f"/workspace/.tool-output/call-{index}.txt" for index in range(7))
+    paths = tuple(f"$UFO_HOME/runs/test/tool-output/call-{index}.txt" for index in range(7))
     dropped = paths[: len(paths) - MAX_REFERENCE_PATHS]
     model = RecoveringSummaryModel(paths=dropped)
     compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
@@ -634,7 +635,7 @@ async def test_a_retry_that_carries_the_named_anchors_records_a_clean_compaction
 async def test_a_failed_anchor_retry_installs_the_verified_first_summary(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    paths = tuple(f"/workspace/.tool-output/call-{index}.txt" for index in range(7))
+    paths = tuple(f"$UFO_HOME/runs/test/tool-output/call-{index}.txt" for index in range(7))
     model = FailingAnchorRetryModel()
     compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
 

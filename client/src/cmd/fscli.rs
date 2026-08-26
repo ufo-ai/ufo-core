@@ -294,8 +294,8 @@ mod tests {
     #[test]
     fn write_lands_bytes_and_refuses_a_planted_symlink() {
         let (root, outside) = workspace("write");
-        std::fs::create_dir(root.join(".tool-output")).unwrap();
-        let staged = root.join(".tool-output/write.stage");
+        std::fs::create_dir(root.join("staging")).unwrap();
+        let staged = root.join("staging/write.stage");
         std::fs::write(&staged, "landed\n").unwrap();
         let landed = called(
             "write",
@@ -339,8 +339,8 @@ mod tests {
     #[test]
     fn write_refuses_an_unread_overwrite() {
         let (root, _outside) = workspace("unread");
-        std::fs::create_dir(root.join(".tool-output")).unwrap();
-        let staged = root.join(".tool-output/write.stage");
+        std::fs::create_dir(root.join("staging")).unwrap();
+        let staged = root.join("staging/write.stage");
         std::fs::write(&staged, "new\n").unwrap();
         let outcome = called(
             "write",
@@ -367,8 +367,8 @@ mod tests {
     #[test]
     fn write_refuses_a_traversal_path() {
         let (root, outside) = workspace("writeup");
-        std::fs::create_dir(root.join(".tool-output")).unwrap();
-        let staged = root.join(".tool-output/write.stage");
+        std::fs::create_dir(root.join("staging")).unwrap();
+        let staged = root.join("staging/write.stage");
         std::fs::write(&staged, "planted\n").unwrap();
         let outcome = called(
             "write",
@@ -394,8 +394,8 @@ mod tests {
         let (root, _outside) = workspace("inroot");
         std::fs::create_dir(root.join("real")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("dir")).unwrap();
-        std::fs::create_dir(root.join(".tool-output")).unwrap();
-        let staged = root.join(".tool-output/write.stage");
+        std::fs::create_dir(root.join("staging")).unwrap();
+        let staged = root.join("staging/write.stage");
         std::fs::write(&staged, "landed\n").unwrap();
         let outcome = called(
             "write",

@@ -22,13 +22,13 @@ from ufo.media.artifact_url import (
     verify_artifact_url,
 )
 from ufo.media.image_previews import IMAGE_PREVIEW_MAX_BYTES, ImagePreviewGrant
-from ufo.sandbox.session import ExecResult
+from ufo.sandbox.session import SANDBOX_UFO_HOME, ExecResult
 from ufo.schema.records import Agent, Turn
 from ufo.tools.context import SpawnResult, ToolContext
 from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
 
-SHOT_PATH = "/workspace/.tool-output/preview-8000.png"
+SHOT_PATH = f"{SANDBOX_UFO_HOME}/runs/test/tool-output/preview-8000.png"
 PUBLIC_BASE_URL = "https://ufo.example.test"
 SECRET = "stored-preview-secret"
 

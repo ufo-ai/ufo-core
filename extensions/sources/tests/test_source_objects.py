@@ -49,7 +49,7 @@ from ufo.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.objects import UnknownObject
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
-from ufo.sandbox.session import ProxyEndpoint
+from ufo.sandbox.session import RUNTIME_DIRNAME, ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
@@ -2688,8 +2688,7 @@ async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
 
 
 def _sandboxes(tmp_path) -> ConversationSandbox:
-    """The real workspace seam under the change log: a `ConversationSandbox` over the local
-    carrier, so the log lands as bytes at `tmp_path/workspaces/<conversation>/<rel>`."""
+    """The real runtime seam under the change log."""
     return ConversationSandbox(
         carrier=LocalCarrier(),
         backend="local",
@@ -2703,9 +2702,10 @@ def _sandboxes(tmp_path) -> ConversationSandbox:
 async def _change_log(
     sandboxes: ConversationSandbox, conversation_id: UUID, name: str
 ) -> list[dict]:
-    """Every line of the one change log written for this binding, read back off the host directory
-    the carrier serves as `/workspace`."""
-    log_dir = sandboxes.workspace_root / str(conversation_id) / CHANGE_LOG_DIR / name
+    """Every line of the one change log written for this binding."""
+    carrier = sandboxes.carrier
+    assert isinstance(carrier, LocalCarrier)
+    log_dir = carrier.ufo_home / RUNTIME_DIRNAME / conversation_id.hex / CHANGE_LOG_DIR / name
     (entry,) = sorted(log_dir.iterdir())
     return [json.loads(line) for line in entry.read_text().splitlines()]
 
@@ -2748,7 +2748,10 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
         assert not any(str(change.page_id) in turn["inbound"] for change in changes)
 
         logged = await _change_log(sandboxes, state.conversation_id, name)
-        assert f"/workspace/{CHANGE_LOG_DIR}/{name}/" in turn["inbound"]
+        assert (
+            f"$UFO_HOME/{RUNTIME_DIRNAME}/{state.conversation_id.hex}/{CHANGE_LOG_DIR}/{name}/"
+            in turn["inbound"]
+        )
         assert {entry["page"] for entry in logged} == {
             f"{PAGE_KIND}/{change.page_id}" for change in changes
         }

@@ -31,7 +31,6 @@ from ufo.sandbox.session import SANDBOX_TMPDIR as SANDBOX_TMPDIR
 from ufo.sandbox.session import SENTINEL_MODEL_KEY as SENTINEL_MODEL_KEY
 from ufo.sandbox.session import SYSTEM_CA_BUNDLE as SYSTEM_CA_BUNDLE
 from ufo.sandbox.session import SYSTEM_SKILLS_ROOT as SYSTEM_SKILLS_ROOT
-from ufo.sandbox.session import TOOL_OUTPUT_DIR as TOOL_OUTPUT_DIR
 from ufo.sandbox.session import WORKSPACE_DIR as WORKSPACE_DIR
 from ufo.sandbox.session import Carrier as Carrier
 from ufo.sandbox.session import CommandStopping as CommandStopping
@@ -45,5 +44,7 @@ from ufo.sandbox.session import SandboxSpec as SandboxSpec
 from ufo.sandbox.session import SandboxUnreachable as SandboxUnreachable
 from ufo.sandbox.session import SkillExecuting as SkillExecuting
 from ufo.sandbox.session import egress_proxy_env as egress_proxy_env
+from ufo.sandbox.session import sandbox_runtime_root as sandbox_runtime_root
+from ufo.sandbox.session import shell_path as shell_path
 from ufo.sandbox.session import ufo_fs_file_op as ufo_fs_file_op
 from ufo.sandbox.session import workspace_path as workspace_path

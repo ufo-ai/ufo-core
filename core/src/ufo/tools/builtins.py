@@ -62,7 +62,7 @@ from ufo.media.artifact_url import (
 )
 from ufo.o11y import log
 from ufo.sandbox.preview import PREVIEW_HOST
-from ufo.sandbox.session import TOOL_OUTPUT_DIR, WORKSPACE_DIR, workspace_path
+from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME, WORKSPACE_DIR, shell_path, workspace_path
 from ufo.schema import tables
 from ufo.schema.records import AskUserInput, ConnectRequest, CredentialPrompt, CredentialRequest
 from ufo.skills.runtime import load_skills, loaded_context
@@ -78,12 +78,12 @@ from ufo.tools.context import (
 from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 from ufo.tools.registry import ToolDef
 from ufo.tools.tasks import (
+    BACKGROUND_TASKS_DIR,
     TASK_BASH,
     TASK_DETACH,
     TASK_LAUNCH,
     TASK_WRAPPER,
     run_task,
-    task_base,
     task_handles,
     task_id,
     timeout_notice,
@@ -147,9 +147,8 @@ class BashInput(BaseModel):
     background: bool = Field(
         default=False,
         description="Run the command detached and return at once with its task id, log path, and "
-        "pid instead of waiting for it. Its output streams to .tasks/<id>.log, its pid sits in "
-        ".tasks/<id>.pid, and its exit code lands in .tasks/<id>.exit when it finishes — list "
-        "every task with ls /workspace/.tasks. The command's network egress ends with this turn, "
+        "pid instead of waiting for it. The result names its log, pid, and exit files under "
+        "`$UFO_HOME/runs/<id>/tasks`. The command's network egress ends with this turn, "
         "and a sandbox that suspends between turns advances it only while awake — use background "
         "for compute that needs no network past this turn: builds, test runs, data processing.",
     )
@@ -363,7 +362,7 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
         if run.pid is None:
             notice = timeout_notice(applied_s, run.requested_s)
             return ToolResult(content=(TextContent(text=notice),), is_error=True)
-        handles = task_handles(run.task_id, run.pid, applied_s=applied_s)
+        handles = task_handles(run.task_id, run.pid, run.display_base, applied_s=applied_s)
         return ToolResult(content=(TextContent(text=handles),))
     output = run.result.stdout + run.result.stderr
     if run.result.exit_code == 0:
@@ -379,15 +378,19 @@ async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
     """Detach the command and hand back its handles without ever waiting on it — the same launch a
     foreground command rides, stopping at the pid."""
     task = task_id(ctx)
+    base = await ctx.sandbox.runtime_path(f"{BACKGROUND_TASKS_DIR}/{task}")
+    display_base = await ctx.sandbox.runtime_display_path(f"{BACKGROUND_TASKS_DIR}/{task}")
     started = await ctx.sandbox.sh(
-        TASK_BASH, TASK_LAUNCH + TASK_DETACH, TASK_WRAPPER, task_base(task), command
+        TASK_BASH, TASK_LAUNCH + TASK_DETACH, TASK_WRAPPER, base, command
     )
     if started.exit_code != 0 or not started.stdout.strip():
         return ToolResult(
             content=(TextContent(text=started.stderr or "the command did not detach"),),
             is_error=True,
         )
-    return ToolResult(content=(TextContent(text=task_handles(task, started.stdout.strip())),))
+    return ToolResult(
+        content=(TextContent(text=task_handles(task, started.stdout.strip(), display_base)),)
+    )
 
 
 def _require_str(value: object, field: str) -> str:
@@ -484,8 +487,7 @@ async def read_handler(ctx: ToolContext, args: ReadInput) -> ToolResult:
 
 async def write_handler(ctx: ToolContext, args: WriteInput) -> ToolResult:
     data = args.content.encode()
-    await ctx.sandbox.ensure_tool_output_dir()
-    staged = f"{TOOL_OUTPUT_DIR}/{uuid4().hex}.stage"
+    staged = f"{WORKSPACE_DIR}/ufo-write-{uuid4().hex}.stage"
     await ctx.sandbox.write_file(staged, data)
     result = await ctx.sandbox.run_ufo_fs(
         "write",
@@ -596,7 +598,7 @@ async def _store_artifact(
             checksum = b64encode(bytes.fromhex(digest.removeprefix(SHA256_DIGEST_PREFIX))).decode()
             url = await ctx.blob.presigned_put(key, size_bytes, checksum, ARTIFACT_PUT_TTL_SECONDS)
             put = await ctx.sandbox.bash(
-                f"curl -sS --fail-with-body -T {shlex.quote(scoped)} "
+                f"curl -sS --fail-with-body -T {shell_path(scoped)} "
                 f"-H {shlex.quote(f'x-amz-checksum-sha256: {checksum}')} "
                 f"--url {shlex.quote(url)}",
                 timeout_s=ARTIFACT_PUT_TIMEOUT_SECONDS,
@@ -651,7 +653,7 @@ async def _shared_preview(ctx: ToolContext, scoped: str, safe_name: str) -> Arti
     render = await ctx.sandbox.bash(
         "curl -sS --fail-with-body "
         f"-F {shlex.quote('request=' + request_json)} "
-        f"-F {shlex.quote('file=@' + scoped)} "
+        f"-F file=@{shell_path(scoped)} "
         f"--url {shlex.quote(f'https://{PREVIEW_HOST}/render')}",
         timeout_s=ARTIFACT_PREVIEW_TIMEOUT_SECONDS,
     )
@@ -710,15 +712,11 @@ async def _packed_directory(ctx: ToolContext, scoped: str) -> str | None:
     if probe.exit_code != 0:
         return None
     await ctx.sandbox.ensure_tool_output_dir()
-    packed = f"{TOOL_OUTPUT_DIR}/share-{uuid4().hex}.tar.gz"
-    root = scoped.rstrip("/")
+    packed = await ctx.sandbox.runtime_path(f"{TOOL_OUTPUT_DIRNAME}/share-{uuid4().hex}.tar.gz")
     exclude = ""
-    if TOOL_OUTPUT_DIR.startswith(f"{root}/"):
-        offload = TOOL_OUTPUT_DIR.removeprefix(f"{root}/")
-        exclude = f'--exclude="$name/{offload}"'
     pack = await ctx.sandbox.bash(
         SHARE_PACK_CMD.format(
-            path=shlex.quote(scoped), archive=shlex.quote(packed), exclude=exclude
+            path=shlex.quote(scoped), archive=shell_path(packed), exclude=exclude
         ),
         timeout_s=SHARE_PACK_TIMEOUT_SECONDS,
     )
@@ -742,7 +740,7 @@ async def _staged_share(ctx: ToolContext, spec: SharedFileSpec) -> _StagedShare:
     default_name = normalized if packed is None else f"{PurePosixPath(normalized).name}.tar.gz"
     source_suffix = PurePosixPath(normalized).suffix if packed is None else ".tar.gz"
     preflight = await ctx.sandbox.bash(
-        SHARE_PREFLIGHT_CMD.format(path=shlex.quote(source)),
+        SHARE_PREFLIGHT_CMD.format(path=shell_path(source)),
         timeout_s=SHARE_PREFLIGHT_TIMEOUT_SECONDS,
     )
     if preflight.exit_code != 0:

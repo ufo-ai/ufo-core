@@ -83,7 +83,6 @@ from ufo.loop.engine import (
     ROUND_BUDGET_INCOMPLETE,
     TOOL_IMAGE_BLOB_DIR,
     TOOL_IMAGE_EDGE_LIMIT,
-    TOOL_OUTPUT_DIR,
     TOOL_RESULT_PREVIEW_CHARS,
     TRUNCATION_FEEDBACK,
     TRUNCATION_SALVAGE_NOTICE,
@@ -135,6 +134,10 @@ from ufo.models.spec import ReasoningSupport
 from ufo.object_name import ObjectRef
 from ufo.objects import BoundKind, ObjectKind, ObjectVerbs, object_registry
 from ufo.sandbox.session import (
+    RUNTIME_DIRNAME,
+    SANDBOX_UFO_HOME,
+    TOOL_OUTPUT_DIRNAME,
+    UFO_HOME_ENV,
     ExecResult,
     ProxyEndpoint,
     SandboxHandle,
@@ -199,6 +202,16 @@ from ufo.turns.workspace_changes import (
 from ufo.workspace import init_workspace_credentials, ws
 
 HISTORY_PAD = "y" * 600
+
+
+def _tool_output_display(turn: Turn, name: str = "") -> str:
+    root = f"${UFO_HOME_ENV}/{RUNTIME_DIRNAME}/{turn.conversation_id.hex}/{TOOL_OUTPUT_DIRNAME}"
+    return f"{root}/{name}" if name else root
+
+
+def _tool_output_actual(turn: Turn, name: str = "") -> str:
+    root = f"{SANDBOX_UFO_HOME}/{RUNTIME_DIRNAME}/{turn.conversation_id.hex}/{TOOL_OUTPUT_DIRNAME}"
+    return f"{root}/{name}" if name else root
 
 
 class _ActivityModel:
@@ -3669,7 +3682,7 @@ async def test_a_load_whose_result_was_offloaded_injects_the_workflow_again(
 
     assert frame is not None and frame.status == "done"
     first, second = model.results
-    assert TOOL_OUTPUT_DIR in first
+    assert _tool_output_display(turn) in first
     assert "# Skill: huge\n\nHUGE BODY" in first
     assert "# Skill: huge\n\nHUGE BODY" in second
     assert "Already in context" not in second
@@ -3715,7 +3728,7 @@ async def test_the_skill_tracker_seeds_only_from_intact_load_skill_results() -> 
         "s1",
         "sandbox",
         body[:TOOL_RESULT_PREVIEW_CHARS]
-        + OFFLOAD_NOTICE.format(total=len(body), path="/workspace/.tool-output/s1.txt"),
+        + OFFLOAD_NOTICE.format(total=len(body), path="$UFO_HOME/runs/test/tool-output/s1.txt"),
     )
     tracker.reseed(_loaded_skill_closures(offloaded, CORE_SKILL_REGISTRY))
     assert tracker.in_context == set()
@@ -5412,7 +5425,8 @@ async def test_a_truncation_salvages_the_partial_to_a_workspace_file_and_feeds_t
     assert frame.status == "done"
     assert frame.text == "recovered"
     assert model.calls == 2
-    path = f"{TOOL_OUTPUT_DIR}/truncated-{turn.id}-0.txt"
+    path = _tool_output_display(turn, f"truncated-{turn.id}-0.txt")
+    actual = _tool_output_actual(turn, f"truncated-{turn.id}-0.txt")
     feedback = TRUNCATION_FEEDBACK + TRUNCATION_SALVAGE_NOTICE.format(path=path)
     assert Message(role="user", content=feedback) in model.answered_with
     stored = await engine.transcript.read()
@@ -5420,7 +5434,7 @@ async def test_a_truncation_salvages_the_partial_to_a_workspace_file_and_feeds_t
     assert Message(role="user", content=feedback) in stored.messages
     assert stored.messages[-1] == Message(role="assistant", content="recovered")
     salvaged = 'Writing the report now.\n\n[tool call: write_report]\n{"content": "chapter one'
-    assert carrier.writes == [(path, salvaged.encode())]
+    assert carrier.writes == [(actual, salvaged.encode())]
 
 
 async def test_a_truncation_recovers_when_the_salvage_write_fails(
@@ -5443,7 +5457,7 @@ async def test_a_truncation_recovers_when_the_salvage_write_fails(
     assert frame.text == "recovered"
     assert model.calls == 2
     assert Message(role="user", content=TRUNCATION_FEEDBACK) in model.answered_with
-    assert not any(TOOL_OUTPUT_DIR in message.content for message in model.answered_with)
+    assert not any(_tool_output_display(turn) in message.content for message in model.answered_with)
     failed = [r.ufo for r in caplog.records if r.getMessage() == "tool.offload_failed"]
     assert len(failed) == 1
     assert failed[0]["error_class"] == "OSError"
@@ -5461,7 +5475,9 @@ async def test_a_salvage_ensures_the_offload_directory_before_it_writes(
     carrier = RecordingCarrier()
     frame = await _engine(turn, model, tmp_path, carrier=carrier).run()
     assert frame.status == "done"
-    ensures = [i for i, op in enumerate(carrier.operations) if op == f"exec:{TOOL_OUTPUT_DIR}"]
+    ensures = [
+        i for i, op in enumerate(carrier.operations) if op == f"exec:{_tool_output_actual(turn)}"
+    ]
     writes = [i for i, op in enumerate(carrier.operations) if op.startswith("write:")]
     assert ensures and writes and ensures[0] < writes[0]
 
@@ -6389,12 +6405,13 @@ async def test_dispatch_offloads_an_oversize_nonerror_result_and_keeps_a_preview
     )
     block = await _dispatch(engine, context, ToolUseBlock(id="c1", name="big", input={}), {})
     assert not block.is_error
-    path = f"{TOOL_OUTPUT_DIR}/c1.txt"
+    path = _tool_output_display(turn, "c1.txt")
+    actual = _tool_output_actual(turn, "c1.txt")
     assert block.content == full[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(
         total=total, path=path
     )
     assert full not in block.content
-    assert carrier.writes == [(path, full.encode())]
+    assert carrier.writes == [(actual, full.encode())]
 
 
 async def test_dispatch_bounds_the_result_when_the_offload_write_fails(
@@ -6446,7 +6463,7 @@ async def test_dispatch_bounds_the_result_when_the_offload_directory_cannot_be_r
     total = MAX_TOOL_RESULT_CHARS + 500
     full = "a" * total
     carrier = RecordingCarrier(
-        result=ExecResult(stdout="", stderr="cannot reclaim .tool-output", exit_code=1)
+        result=ExecResult(stdout="", stderr="cannot reclaim tool-output", exit_code=1)
     )
     engine = replace(
         _engine(turn, EchoModel(), tmp_path, carrier=carrier),
@@ -6503,7 +6520,7 @@ async def test_dispatch_offload_preview_is_walled_for_an_untrusted_tool(
         {},
     )
     assert not block.is_error
-    path = f"{TOOL_OUTPUT_DIR}/c1.txt"
+    path = _tool_output_display(turn, "c1.txt")
     preview = full[:TOOL_RESULT_PREVIEW_CHARS] + OFFLOAD_NOTICE.format(total=total, path=path)
     assert block.content == (
         UNTRUSTED_NOTICE.format(source="big_untrusted")
@@ -6547,7 +6564,7 @@ async def test_dispatch_offloads_on_the_handler_text_not_the_walled_result(
         + UNTRUSTED_CLOSE
     )
     assert len(block.content) > MAX_TOOL_RESULT_CHARS, "the wall must carry the block past the cap"
-    assert TOOL_OUTPUT_DIR not in block.content
+    assert _tool_output_display(turn) not in block.content
 
 
 async def test_dispatch_walls_a_result_marked_untrusted_by_its_handler(

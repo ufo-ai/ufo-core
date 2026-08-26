@@ -26,9 +26,8 @@ from ufo.sandbox.session import (
     SANDBOX_PYTHON_FLAG,
     SENTINEL_MODEL_KEY,
     SKILL_LOAD_PROG,
-    SKILL_LOAD_STAGING_PREFIX,
+    SKILL_STAGING_DIRNAME,
     SYSTEM_SKILL_SYNC_PROG,
-    SYSTEM_SKILL_SYNC_STAGING_PREFIX,
     SYSTEM_SKILLS_ROOT,
     WORKSPACE_DIR,
     ExecResult,
@@ -42,6 +41,8 @@ from ufo.sandbox.session import (
     SandboxSpec,
     egress_proxy_env,
     host_argv,
+    runtime_relative,
+    shell_path,
     ufo_fs_file_op,
 )
 from ufo.schema.records import Agent, Turn
@@ -62,6 +63,13 @@ RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
 PROBE_TOKENS = ProbeTokenCodec(b"run-token-test-secret")
 LARGE_SKILL_BYTES = 1_000_000
 LINUX_MAX_ARG_STRLEN = 131_072
+
+
+def test_shell_path_expands_only_the_runtime_home_prefix() -> None:
+    assert shell_path("$UFO_HOME/runs/abc/repl/run file.mjs") == (
+        "\"$UFO_HOME\"/'runs/abc/repl/run file.mjs'"
+    )
+    assert shell_path("/workspace/run file.mjs") == "'/workspace/run file.mjs'"
 
 
 def test_egress_proxy_env_embeds_run_token_and_sentinels() -> None:
@@ -341,14 +349,18 @@ def _bash_ctx(carrier: _RecordingCarrier, tmp_path: Path) -> ToolContext:
     return _tool_ctx(session, tmp_path)
 
 
-async def _live_ctx(tmp_path: Path, idempotency_key: str | None = None) -> ToolContext:
+async def _live_ctx(
+    tmp_path: Path,
+    idempotency_key: str | None = None,
+    conversation_id: UUID | None = None,
+) -> ToolContext:
     """A live local sandbox whose workspace root holds a space, so every shell string a
     background task builds is exercised against the rewrite the terminal carrier performs on a
     member's real directory."""
     carrier = LocalCarrier()
     handle = await carrier.create(
         SandboxSpec(
-            conversation_id=uuid4(),
+            conversation_id=conversation_id or uuid4(),
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(tmp_path / "my ws"),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
@@ -428,7 +440,8 @@ async def test_skills_load_from_one_staged_container_payload() -> None:
 
     assert roots == {"sandbox": "/home/user/.ufo/skills/sandbox"}
     [(staged, content)] = carrier.writes
-    assert staged.startswith(SKILL_LOAD_STAGING_PREFIX)
+    runtime_root = f"/home/user/.ufo/runs/{session.handle.conversation_id.hex}"
+    assert staged.startswith(f"{runtime_root}/{SKILL_STAGING_DIRNAME}/skill-load-")
     assert staged.endswith(".json")
     assert json.loads(content) == {
         "system": {"sandbox": "sha256:aaa", "ufo-style": "sha256:bbb"},
@@ -442,7 +455,7 @@ async def test_skills_load_from_one_staged_container_payload() -> None:
             f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
             staged,
             SYSTEM_SKILLS_ROOT,
-            WORKSPACE_DIR,
+            runtime_root,
             hashlib.sha256(content).hexdigest(),
         )
     ]
@@ -528,10 +541,11 @@ async def test_a_stale_sandbox_refreshes_before_loading_the_requested_system_ski
     assert carrier.argvs[1][3] == f"{SANDBOX_MODULE_BOOTSTRAP}{SYSTEM_SKILL_SYNC_PROG}"
     assert carrier.argvs[2][3] == f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}"
     assert all(argv[0] == "python3" for argv in carrier.argvs)
-    assert carrier.writes[0][0].startswith(SKILL_LOAD_STAGING_PREFIX)
-    assert carrier.writes[1][0].startswith(SYSTEM_SKILL_SYNC_STAGING_PREFIX)
+    runtime_root = f"/home/user/.ufo/runs/{session.handle.conversation_id.hex}"
+    assert carrier.writes[0][0].startswith(f"{runtime_root}/{SKILL_STAGING_DIRNAME}/skill-load-")
+    assert carrier.writes[1][0].startswith(f"{runtime_root}/{SKILL_STAGING_DIRNAME}/system-skills-")
     assert carrier.writes[1][1] == b"current bundle"
-    assert carrier.writes[2][0].startswith(SKILL_LOAD_STAGING_PREFIX)
+    assert carrier.writes[2][0].startswith(f"{runtime_root}/{SKILL_STAGING_DIRNAME}/skill-load-")
 
 
 def test_current_loader_refreshes_a_stale_bundle_and_installs_an_inactive_user_skill(
@@ -802,6 +816,51 @@ async def test_read_glob_and_grep_accept_skill_paths_outside_the_workspace() -> 
     ]
 
 
+async def test_file_reads_accept_only_the_current_runtime_namespace() -> None:
+    class _FileCarrier(_RecordingCarrier):
+        def __init__(self) -> None:
+            super().__init__()
+            self.file_ops: list[tuple[str, dict[str, object]]] = []
+
+        async def file_op(
+            self, handle: SandboxHandle, op: str, params: dict[str, object]
+        ) -> dict[str, object]:
+            self.file_ops.append((op, params))
+            return {}
+
+    carrier = _FileCarrier()
+    session = SandboxSession(
+        carrier=carrier,
+        handle=SandboxHandle(
+            conversation_id=uuid4(),
+            container_id="c",
+            runtime_root="/home/user/.ufo/runs/current",
+        ),
+    )
+
+    await session.run_ufo_fs("read", {"path": "$UFO_HOME/runs/current/tool-output/call.txt"})
+
+    assert carrier.file_ops == [
+        (
+            "read",
+            {
+                "path": "/home/user/.ufo/runs/current/tool-output/call.txt",
+                "workspace": "/home/user/.ufo/runs/current",
+            },
+        )
+    ]
+    with pytest.raises(ValueError, match="escapes"):
+        await session.run_ufo_fs("read", {"path": "$UFO_HOME/runs/another/tool-output/call.txt"})
+    with pytest.raises(ValueError, match="escapes"):
+        await session.run_ufo_fs("write", {"path": "$UFO_HOME/runs/current/tool-output/call.txt"})
+
+
+@pytest.mark.parametrize("path", ("", "../escape", "tasks/../escape", "/absolute"))
+def test_runtime_relative_refuses_an_escape(path: str) -> None:
+    with pytest.raises(ValueError, match="invalid runtime path"):
+        runtime_relative(path)
+
+
 @pytest.mark.parametrize(
     ("op", "path"),
     (
@@ -1009,7 +1068,7 @@ async def test_a_finished_task_is_swept_a_window_after_it_ended(tmp_path: Path) 
     replay a fresh launch instead. The sweep window outlives any recovery, and the next launch is
     where old completed tasks go — while a task still running keeps its files whatever its age."""
     ctx = await _live_ctx(tmp_path)
-    tasks_dir = f"{WORKSPACE_DIR}/{BACKGROUND_TASKS_DIR}"
+    tasks_dir = await ctx.sandbox.runtime_path(BACKGROUND_TASKS_DIR)
     await bash_handler(ctx, BashInput(command="echo done"))
     finished = (await ctx.sandbox.bash(f'ls "{tasks_dir}"')).stdout.split()
     assert len(finished) == 3
@@ -1032,14 +1091,15 @@ async def test_a_replayed_call_reattaches_and_reads_the_first_run(tmp_path: Path
     and the re-run answers with the first run's output — the command itself ran once, so a
     non-idempotent command (a migration, a send) is never repeated by the crash."""
     key = f"{uuid4()}/bash/call_1"
+    conversation_id = uuid4()
     runs = f"{WORKSPACE_DIR}/runs.txt"
     command = f'echo ran >> "{runs}"; cat "{runs}"'
     first = await bash_handler(
-        await _live_ctx(tmp_path, idempotency_key=key),
+        await _live_ctx(tmp_path, idempotency_key=key, conversation_id=conversation_id),
         BashInput(command=command),
     )
     replayed = await bash_handler(
-        await _live_ctx(tmp_path, idempotency_key=key),
+        await _live_ctx(tmp_path, idempotency_key=key, conversation_id=conversation_id),
         BashInput(command=command),
     )
     assert first.content[0].text == "ran\n"
@@ -1051,13 +1111,14 @@ async def test_a_replayed_call_picks_up_a_command_still_running(tmp_path: Path) 
     cannot `wait` on it as a child — it watches for the exit file instead, and still answers as the
     command: the results land with the recovered turn, not lost with the process that asked."""
     key = f"{uuid4()}/bash/call_2"
+    conversation_id = uuid4()
     command = "sleep 1; echo finished"
     await bash_handler(
-        await _live_ctx(tmp_path, idempotency_key=key),
+        await _live_ctx(tmp_path, idempotency_key=key, conversation_id=conversation_id),
         BashInput(command=command, background=True),
     )
     picked = await bash_handler(
-        await _live_ctx(tmp_path, idempotency_key=key),
+        await _live_ctx(tmp_path, idempotency_key=key, conversation_id=conversation_id),
         BashInput(command=command),
     )
     assert not picked.is_error

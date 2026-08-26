@@ -73,6 +73,12 @@ class FakeSandbox:
     async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         return self.bash_result
 
+    async def runtime_path(self, relative: str) -> str:
+        return f"/runtime/{relative}"
+
+    async def runtime_display_path(self, relative: str) -> str:
+        return f"$UFO_HOME/runs/test/{relative}"
+
     async def run_ufo_fs(self, op: str, args: dict[str, object]) -> dict[str, object]:
         raise AssertionError(f"run_ufo_fs({op}) must not run once a guard has rejected the call")
 

@@ -267,10 +267,9 @@ class TaskEnvironment:
         Upstream's verifier reads `/workdir` and the services' `/data` snapshots, so after this the
         container holds exactly the end state the turn produced.
 
-        Only the conversation's visible entries cross over. The sandbox's own scaffolding
-        (`.tool-output`, `.repl`) is not workspace content, and upstream's rubrics
-        resolve files by `glob('**/name')` — a scaffolding copy of a spreadsheet could otherwise
-        be the one a rubric grades."""
+        Only the conversation's visible entries cross over. ufo-owned runtime files live outside
+        the workspace, and upstream's rubrics resolve files by `glob('**/name')` — a runtime copy
+        of a spreadsheet could otherwise be the one a rubric grades."""
         entries = await asyncio.to_thread(self._visible_entries, workspace_dir)
         if not entries:
             raise DockerError(f"conversation workspace {workspace_dir} holds no files to grade")

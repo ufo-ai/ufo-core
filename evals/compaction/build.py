@@ -409,7 +409,7 @@ class SnapshotBuild:
                 body = ""
                 weight = 1 + (ordinal % 5)
                 if kind == "reference":
-                    path = f"/workspace/.tool-output/ref-{spec.id}-{ordinal}.txt"
+                    path = f"/workspace/tool-output/ref-{spec.id}-{ordinal}.txt"
                     body = (
                         f"Load test report for the {subject}.\n"
                         f"The measured {subject} peaked at {literal} {unit} during the soak "

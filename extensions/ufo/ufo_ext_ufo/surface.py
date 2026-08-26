@@ -30,6 +30,7 @@ still runs — admission speed rather than the held stream's next boundary — a
 reach them down the stream they are already holding."""
 
 import asyncio
+import hashlib
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, suppress
@@ -96,12 +97,18 @@ SCRIPT_HEADER = "x-ufo-script"
 TIMEZONE_HEADER = "x-ufo-timezone"
 CLIENT_VERSION_ENV = "UFO_CLIENT_VERSION"
 QUEUE_KEY_SEPARATOR = ":"
+RUNTIME_ID_HEX_CHARS = 32
 TURN_FAILED_MESSAGE = "The agent could not complete the request. Try again."
 STALE_CLIENT_MESSAGE = "Updated ufo. Run ufo again."
 
 # Hold a live stream open just under the shell's `curl --max-time 90`, so a turn that outruns the
 # hold ends on `poll` (the shell reconnects) rather than the client's own timeout truncating it.
 HOLD_SECONDS = 85.0
+
+
+def terminal_runtime_id(channel: str) -> str:
+    """The stable local runtime namespace for one terminal conversation."""
+    return hashlib.sha256(channel.encode()).hexdigest()[:RUNTIME_ID_HEX_CHARS]
 
 
 def directive(verb: str, *fields: str) -> bytes:
@@ -700,7 +707,8 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
 
     async def bound() -> AsyncIterator[bytes]:
         if cwd:
-            ctx.terminal_connect(conversation_id, cwd, member_id)
+            run_id = terminal_runtime_id(request.path_params["channel"])
+            ctx.terminal_connect(conversation_id, cwd, member_id, run_id)
         try:
             if sent is not None:
                 yield sent

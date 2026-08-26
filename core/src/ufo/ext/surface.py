@@ -4038,11 +4038,13 @@ class SurfaceContext:
             return None
         return await self._sandboxes.read(conversation_id, rel)
 
-    def terminal_connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None:
+    def terminal_connect(
+        self, conversation_id: UUID, cwd: str, member_id: UUID | None, runtime_id: str
+    ) -> None:
         """Publish the terminal this surface's held connection stands for, so the conversation's
         sandbox can be that terminal. Paired with `terminal_disconnect` around the connection's
         life; the rendezvous survives the reconnects a held stream's cap makes routine."""
-        self._sandboxes.terminals.connect(conversation_id, cwd, member_id)
+        self._sandboxes.terminals.connect(conversation_id, cwd, member_id, runtime_id)
 
     def terminal_disconnect(self, conversation_id: UUID) -> None:
         self._sandboxes.terminals.disconnect(conversation_id)

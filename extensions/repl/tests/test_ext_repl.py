@@ -58,6 +58,19 @@ class FakeSandbox:
         default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0)
     )
     commands: list[str] = field(default_factory=list)
+    runtime_root: str = ""
+
+    async def runtime_path(self, relative: str) -> str:
+        return f"{self.runtime_root}/{relative}" if self.runtime_root else relative
+
+    async def runtime_display_path(self, relative: str) -> str:
+        return f"$UFO_HOME/runs/test/{relative}"
+
+    async def runtime_file_exists(self, relative: str) -> bool:
+        return relative in self.files
+
+    async def write_runtime_file(self, relative: str, content: bytes) -> None:
+        self.files[relative] = content
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         self.commands.append(command)
@@ -89,16 +102,9 @@ class FakeSandbox:
         self.timeouts.append(timeout_s)
         return await self.bash(args[-1])
 
-    async def file_exists(self, path: str) -> bool:
-        return path in self.files
-
-    async def write_file(self, path: str, content: bytes) -> None:
-        self.files[path] = content
-
     def _emit_path(self) -> str:
         run_file = self.files[repl.JS_RUN_PATH].decode()
-        relative = json.loads(run_file.split("__ufoEmitResolve(", 1)[1].split(")", 1)[0])
-        return f"{repl.WORKSPACE_DIR}/{relative}"
+        return json.loads(run_file.split("__ufoEmitResolve(", 1)[1].split(")", 1)[0])
 
 
 async def _unavailable_spawn(profile: str, payload: dict, background: bool = False) -> SpawnResult:
@@ -273,6 +279,21 @@ async def test_js_repl_first_call_writes_fresh_and_runs_node(tmp_path: Path) -> 
     assert result.is_error is False
 
 
+async def test_repl_runtime_commands_expand_terminal_ufo_home(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(runtime_root="$UFO_HOME/runs/test")
+    ctx = _context(sandbox, tmp_path)
+
+    await repl.js_repl(ctx, JsReplInput(code="1"))
+    await repl.xlsx_repl(ctx, XlsxReplInput(code="result = 1"))
+
+    assert 'node "$UFO_HOME"/runs/test/repl/js-run.mjs' in sandbox.commands
+    assert 'python3 "$UFO_HOME"/runs/test/repl/xlsx-run.py' in sandbox.commands
+    assert any(
+        'mkdir -p "$UFO_HOME"/runs/test/repl/node_modules' in command
+        for command in sandbox.commands
+    )
+
+
 async def test_js_repl_meters_the_exit_code_and_folds_an_unlisted_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -357,8 +378,9 @@ async def test_js_repl_composes_prelude_and_accumulated_code_into_the_run_file(
     await repl.js_repl(ctx, JsReplInput(code="let x = 1"))
     await repl.js_repl(ctx, JsReplInput(code="console.log(x)"))
     run_file = sandbox.files[repl.JS_RUN_PATH].decode()
-    emit_relative = sandbox.emit_paths[-1].removeprefix(f"{repl.WORKSPACE_DIR}/")
-    assert run_file == repl.js_emit_prelude(emit_relative) + "let x = 1\nconsole.log(x)\n"
+    assert run_file == (
+        repl.js_emit_prelude(sandbox.emit_paths[-1]) + "let x = 1\nconsole.log(x)\n"
+    )
     assert any(command == f"node {repl.JS_RUN_PATH}" for command in sandbox.commands)
 
 
@@ -401,7 +423,7 @@ async def test_js_repl_drops_a_torn_emit_line(tmp_path: Path) -> None:
 async def test_js_repl_leaves_an_earlier_calls_emits_out_of_a_text_only_result(
     tmp_path: Path,
 ) -> None:
-    stale_path = f"{repl.WORKSPACE_DIR}/{repl.js_emit_relative('0ldca11')}"
+    stale_path = repl.js_emit_relative("0ldca11")
     stale = b'{"media_type": "image/png", "data": "old"}\n'
     sandbox = FakeSandbox(files={stale_path: stale})
     ctx = _context(sandbox, tmp_path)
@@ -466,7 +488,7 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
         )
     )
     ctx = _context(SandboxSession(carrier=carrier, handle=handle), tmp_path)
-    state_dir = tmp_path / "workspace" / ".repl"
+    state_dir = Path(handle.runtime_root) / repl.REPL_STATE_DIR
     state_dir.mkdir(parents=True)
     (state_dir / "node_modules").symlink_to("/nonexistent")
     code = (
@@ -480,7 +502,7 @@ async def test_js_repl_emits_images_through_the_real_local_carrier(tmp_path: Pat
     assert [(image.media_type, image.data) for image in result.content[1:]] == [
         ("image/jpeg", "AQID")
     ]
-    assert (tmp_path / "workspace" / ".repl" / "node_modules" / "npm").is_symlink()
+    assert (state_dir / "node_modules" / "npm").is_symlink()
     resolved = await repl.js_repl(
         ctx,
         JsReplInput(code="console.log(import.meta.resolve('npm'));"),
@@ -508,6 +530,7 @@ async def test_a_js_cell_over_its_budget_survives_in_the_real_local_carrier(
     )
     session = SandboxSession(carrier=carrier, handle=handle)
     ctx = _context(session, tmp_path)
+    state_dir = Path(handle.runtime_root) / repl.REPL_STATE_DIR
     code = (
         "for (let tick = 1; tick <= 8; tick++) {\n"
         "  console.log(`tick ${tick}`);\n"
@@ -530,7 +553,7 @@ async def test_a_js_cell_over_its_budget_survives_in_the_real_local_carrier(
     after = await session.bash(f'cat "{task["log"]}"')
     assert after.stdout != at_return.stdout
     assert "tick 8" in after.stdout
-    assert not (tmp_path / "workspace" / ".repl" / "js-repl.js").exists()
+    assert not (state_dir / "js-repl.js").exists()
 
 
 async def test_an_expired_cell_emitting_on_leaves_the_next_calls_images_alone(
@@ -594,7 +617,8 @@ async def test_global_modules_link_resolves_a_package_only_in_a_secondary_root(
     (secondary / "solo").mkdir()
     (secondary / "solo" / "package.json").write_text('{"name": "solo", "main": "index.js"}')
     (secondary / "solo" / "index.js").write_text("module.exports = 'from-solo';")
-    await session.bash(repl.global_modules_link((str(primary), str(secondary))))
+    state_dir = await session.runtime_path(repl.REPL_STATE_DIR)
+    await session.bash(repl.global_modules_link(state_dir, (str(primary), str(secondary))))
     ctx = _context(session, tmp_path)
     code = (
         "const solo = await import('solo');\n"

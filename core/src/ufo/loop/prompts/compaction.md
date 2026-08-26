@@ -6,7 +6,7 @@ Respond with a SINGLE JSON object and nothing else — no prose, no markdown fen
 - `current_work` (string): Precisely what was being worked on immediately before this summary.
 - `next_step` (string): The single next action, directly in line with the user's most recent explicit request. Empty string if there is none.
 - `concepts` (array of strings): Key technical concepts, technologies, and frameworks in play.
-- `files` (array of `{"path": string, "why": string}`): Every workspace path later work may need to re-read — files examined, created, or changed, offloaded `.tool-output/<id>.txt` files, versioned deliverables — each with one line on why it mattered, naming which version is authoritative if one was designated.
+- `files` (array of `{"path": string, "why": string}`): Every path later work may need to re-read — workspace files examined, created, or changed, offloaded `$UFO_HOME/runs/<id>/tool-output/<call>.txt` files, versioned deliverables — each with one line on why it mattered, naming which version is authoritative if one was designated.
 - `errors` (array of strings): Errors hit and how each was fixed, with any specific user feedback.
 - `decisions` (array of strings): Decisions made and problems solved.
 - `pending` (array of strings): Pending tasks the user explicitly asked for.

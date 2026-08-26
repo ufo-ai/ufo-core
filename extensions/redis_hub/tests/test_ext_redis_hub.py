@@ -9,6 +9,7 @@ import json
 import os
 import socket
 import threading
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -22,7 +23,9 @@ from ufo_ext_redis_hub.stream_hub import (
     frame_from_payload,
     frame_payload,
 )
+from ufo_ext_redis_hub.stream_terminal import RedisTerminals
 
+from ufo.blob import FilesystemBlobStore
 from ufo.hub import (
     Absorbed,
     Activity,
@@ -109,6 +112,26 @@ def test_build_constructs_a_hub_without_connecting() -> None:
     hub = ext._build_hub("redis://localhost:6379/0")
     assert isinstance(hub, RedisStreamHub)
     assert hub.url == "redis://localhost:6379/0"
+
+
+async def test_terminal_binding_without_runtime_id_uses_the_conversation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conversation_id = uuid4()
+
+    class BindingClient:
+        async def get(self, _key: str) -> str:
+            return json.dumps({"cwd": "/workspace", "member_id": None})
+
+    monkeypatch.setattr(RedisTerminals, "_client", lambda _self: BindingClient())
+    terminals = RedisTerminals(
+        url="redis://localhost:6379/0", blob=FilesystemBlobStore(root=tmp_path)
+    )
+
+    binding = await terminals._read_binding(conversation_id)
+
+    assert binding is not None
+    assert binding.runtime_id == conversation_id.hex
 
 
 @needs_redis

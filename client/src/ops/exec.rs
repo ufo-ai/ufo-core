@@ -77,10 +77,20 @@ pub fn run_at_home(
 ) -> Result<Vec<u8>, String> {
     let parsed: Params =
         serde_json::from_str(params).map_err(|error| format!("bad exec params: {error}"))?;
-    let Some(program) = parsed.argv.first() else {
+    let argv: Vec<String> = parsed
+        .argv
+        .iter()
+        .map(|value| {
+            value.strip_prefix("$UFO_HOME/").map_or_else(
+                || value.clone(),
+                |relative| home.root.join(relative).to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let Some(program) = argv.first() else {
         return Err("exec argv is empty".into());
     };
-    let gh = invokes_gh(&parsed.argv)
+    let gh = invokes_gh(&argv)
         .then(|| materialize_gh(workdir))
         .transpose()?;
     let executable = if is_gh(program) {
@@ -92,7 +102,7 @@ pub fn run_at_home(
     let err_path = workdir.join("run.err");
     let mut command = Command::new(executable);
     command
-        .args(&parsed.argv[1..])
+        .args(&argv[1..])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(sink(&out_path)?))
