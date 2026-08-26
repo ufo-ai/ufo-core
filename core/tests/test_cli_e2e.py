@@ -408,7 +408,12 @@ def test_credential_list_reports_set_and_unset_without_values(cli_home: CliRunne
 
 def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:
     _init(cli_home)
-    result = cli_home.invoke(cli.main, ["bundle", "--out", "bundle"])
+    client = Path("ufo-sandbox-client")
+    client.write_bytes(b"client")
+    result = cli_home.invoke(
+        cli.main,
+        ["bundle", "--out", "bundle", "--client-binary", str(client)],
+    )
     assert result.exit_code == 0, result.output
     assert "extension(s) pinned" in result.output
     out = Path("bundle")
@@ -417,23 +422,16 @@ def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:
     assert 'ENTRYPOINT ["ufoctl"]' in dockerfile
     assert 'CMD ["serve"]' in dockerfile
     assert (out / "ufo.toml").read_text()
+    assert (out / "ufo-sandbox-client").read_bytes() == b"client"
     lockfile = (out / "ufo.lock").read_text()
     assert "ufo_version" in lockfile
     assert "memory" in lockfile
 
 
-def test_bundle_accepts_a_sandbox_client(cli_home: CliRunner) -> None:
-    _init(cli_home)
-    client = Path("ufo-sandbox-client")
-    client.write_bytes(b"client")
-    result = cli_home.invoke(
-        cli.main,
-        ["bundle", "--out", "bundle", "--client-binary", str(client)],
-    )
-    assert result.exit_code == 0, result.output
-    assert Path("bundle/ufo-sandbox-client").read_bytes() == b"client"
-    dockerfile = Path("bundle/Dockerfile").read_text()
-    assert "ENV UFO_CLIENT_BINARY=/usr/local/bin/ufo-sandbox-client" in dockerfile
+def test_bundle_requires_a_sandbox_client(cli_home: CliRunner) -> None:
+    result = cli_home.invoke(cli.main, ["bundle", "--out", "bundle"])
+    assert result.exit_code == 2
+    assert "Missing option '--client-binary'" in result.output
 
 
 def test_ext_search_lists_the_catalog(cli_home: CliRunner) -> None:

@@ -1023,13 +1023,20 @@ def test_plans_run_only_for_selected_deployment_inputs() -> None:
     assert client["needs"] == "changes"
     assert client["if"] == "needs.changes.outputs.client_build == 'true'"
 
-    for image_job in ("bundle", "images"):
-        job = jobs[image_job]
-        assert isinstance(job, dict)
-        assert job["needs"] == "changes"
-        assert job["if"] == (
-            "needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request'"
-        )
+    images = jobs["images"]
+    assert isinstance(images, dict)
+    assert images["needs"] == "changes"
+    assert images["if"] == (
+        "needs.changes.outputs.deploy == 'true' && github.event_name != 'pull_request'"
+    )
+    bundle = jobs["bundle"]
+    assert isinstance(bundle, dict)
+    assert bundle["needs"] == ["changes", "client"]
+    assert bundle["if"] == (
+        "${{ !cancelled() && needs.changes.outputs.deploy == 'true' && "
+        "github.event_name != 'pull_request' && "
+        "(needs.client.result == 'success' || needs.client.result == 'skipped') }}"
+    )
     gateway = jobs["gateway"]
     assert isinstance(gateway, dict)
     assert gateway["needs"] == ["changes", "client"]
@@ -3566,6 +3573,34 @@ def test_runtime_rollout_gates_the_direct_gateway_origin(
         assert failed.returncode != 0, overrides
 
 
+def test_runtime_bundle_consumes_the_sandbox_client_artifact() -> None:
+    build = _step("bundle", "Build + push bundle image")
+    run = build["run"]
+    assert isinstance(run, str)
+    assert '--client-binary "$SANDBOX_CLIENT_BINARY"' in run
+    workflow = _workflow(WORKFLOWS / "deploy.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    bundle = jobs["bundle"]
+    assert bundle["needs"] == ["changes", "client"]
+    steps = bundle["steps"]
+    assert isinstance(steps, list)
+    download = next(step for step in steps if step.get("uses") == "actions/download-artifact@v4")
+    assert download["if"] == "needs.client.result == 'success'"
+    assert download["with"] == {
+        "name": "clientbin-x86_64-unknown-linux-musl",
+        "path": "servers/control/clientbin",
+    }
+    reuse = _step("bundle", "Reuse the pushed client binaries")
+    assert reuse["if"] == "needs.client.result == 'skipped'"
+    assert (
+        "docker cp clientbin:/clientbin/x86_64-unknown-linux-musl "
+        "servers/control/clientbin/" in reuse["run"]
+    )
+    assert steps.index(build) > steps.index(download)
+    assert steps.index(build) > steps.index(reuse)
+
+
 def test_portal_source_maps_upload_under_the_service_and_version_the_page_records_with() -> None:
     """A fault Datadog reports against a recorded session reads as source only where the upload's
     service and version are the pair the page recorded under — so the upload names the image tag
@@ -3585,22 +3620,8 @@ def test_portal_source_maps_upload_under_the_service_and_version_the_page_record
     assert "rm -f extensions/web/ufo_ext_web/static/assets/*.map" in run
     assert run.index("sourcemaps upload") < run.index("ufoctl bundle")
     assert run.index("ufoctl bundle") < run.index("docker build")
-    assert '--client-binary "$SANDBOX_CLIENT_BINARY"' in run
     assert 'load_manifests("assistant_hosted")' in run
     assert run.index("load_manifests") < run.index("docker push")
-
-    workflow = _workflow(WORKFLOWS / "deploy.yml")
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    bundle = jobs["bundle"]
-    assert bundle["needs"] == ["changes", "client"]
-    steps = bundle["steps"]
-    assert isinstance(steps, list)
-    build = _step("bundle", "Build + push bundle image")
-    assert steps.index(build) > steps.index(
-        next(step for step in steps if step.get("uses") == "actions/download-artifact@v4")
-    )
-    assert steps.index(build) > steps.index(_step("bundle", "Reuse the pushed client binaries"))
 
     template = (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text()
     assert '- {name: UFO_WEB_RUM_VERSION, value: "${image_tag}"}' in template

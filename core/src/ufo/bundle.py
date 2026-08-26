@@ -1,14 +1,14 @@
-"""`ufoctl bundle`: freeze a deploy into a runnable artifact — OCI image recipe, pinned config,
-lockfile.
+"""`ufoctl bundle`: freeze a deploy into a runnable artifact — OCI image recipe, sandbox client,
+pinned config, lockfile.
 
 The bundle pins every extension the deploy already runs (the current lockfile, or every discovered
 extension when none is pinned yet) plus every catalog entry marked bundle-only — those disabled in
 the store install here, at bundle time, and never at runtime. Each pin hashes the built wheel, so
 the lock names the bytes the image installs even when the local environment holds older source.
 The output directory is a `docker build` context: the Dockerfile installs the one `ufo`
-distribution (core and every first-party extension and pack ship in it) and copies the pinned
-config and lockfile, whose pins narrow the active set and verify each digest at boot — so the same
-artifact boots identically on any machine."""
+distribution (core and every first-party extension and pack ship in it), installs the sandbox
+client, and copies the pinned config and lockfile, whose pins narrow the active set and verify each
+digest at boot — so the same artifact boots identically on any machine."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,7 +44,7 @@ class BundleResult:
     dockerfile: Path
     config: Path
     lockfile: Path
-    client_binary: Path | None
+    client_binary: Path
     pins: tuple[ExtensionPin, ...]
 
 
@@ -57,7 +57,7 @@ class Bundle:
     catalog: Catalog | None
     out: Path
     wheel: Path
-    client_binary: Path | None = None
+    client_binary: Path
 
     def build(self) -> BundleResult:
         pins = self._pins()
@@ -68,10 +68,8 @@ class Bundle:
         lockfile.write_text(
             Lockfile(ufo_version=ufo_version(), extensions=pins).model_dump_json(indent=2) + "\n"
         )
-        bundled_client = None
-        if self.client_binary is not None:
-            bundled_client = self.out / BUNDLE_CLIENT_BINARY_NAME
-            bundled_client.write_bytes(self.client_binary.read_bytes())
+        bundled_client = self.out / BUNDLE_CLIENT_BINARY_NAME
+        bundled_client.write_bytes(self.client_binary.read_bytes())
         dockerfile = self.out / BUNDLE_DOCKERFILE_NAME
         dockerfile.write_text(self._dockerfile())
         return BundleResult(
@@ -130,14 +128,6 @@ class Bundle:
         return tuple(pins)
 
     def _dockerfile(self) -> str:
-        sandbox_client = (
-            (
-                f"COPY --chmod=0555 {BUNDLE_CLIENT_BINARY_NAME} {BUNDLE_CLIENT_INSTALL_PATH}",
-                f"ENV UFO_CLIENT_BINARY={BUNDLE_CLIENT_INSTALL_PATH}",
-            )
-            if self.client_binary is not None
-            else ()
-        )
         return "\n".join(
             (
                 f"FROM {DOCKERFILE_BASE}",
@@ -147,7 +137,8 @@ class Bundle:
                 f"COPY {wheel_name()} /tmp/{wheel_name()}",
                 f"RUN pip install --no-cache-dir /tmp/{wheel_name()} && rm /tmp/{wheel_name()}",
                 f"COPY {BUNDLE_CONFIG_NAME} {BUNDLE_LOCKFILE_NAME} /app/",
-                *sandbox_client,
+                f"COPY --chmod=0555 {BUNDLE_CLIENT_BINARY_NAME} {BUNDLE_CLIENT_INSTALL_PATH}",
+                f"ENV UFO_CLIENT_BINARY={BUNDLE_CLIENT_INSTALL_PATH}",
                 'ENTRYPOINT ["ufoctl"]',
                 'CMD ["serve"]',
                 "",

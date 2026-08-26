@@ -57,6 +57,12 @@ def _sample_wheel(tmp_path: Path) -> Path:
     return wheel
 
 
+def _sample_client(tmp_path: Path) -> Path:
+    client = tmp_path / "ufo"
+    client.write_bytes(b"sandbox-client")
+    return client
+
+
 async def _workspace() -> UUID:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -226,6 +232,7 @@ def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
         catalog=_catalog(disabled=True),
         out=out,
         wheel=_sample_wheel(tmp_path),
+        client_binary=_sample_client(tmp_path),
     ).build()
     assert [pin.name for pin in result.pins] == [sample.NAME]
     assert result.config.read_text() == CONFIG_TOML
@@ -247,16 +254,13 @@ def test_bundle_carries_the_sandbox_client_named_by_the_runtime(
     write_lockfile(tmp_path / "ufo.lock", Lockfile(ufo_version="0.1.0"))
     config_path = tmp_path / "ufo.toml"
     config_path.write_text(CONFIG_TOML)
-    client = tmp_path / "ufo"
-    client.write_bytes(b"sandbox-client")
     result = Bundle(
         config_path=config_path,
         catalog=_catalog(disabled=True),
         out=tmp_path / "out",
         wheel=_sample_wheel(tmp_path),
-        client_binary=client,
+        client_binary=_sample_client(tmp_path),
     ).build()
-    assert result.client_binary is not None
     assert result.client_binary.read_bytes() == b"sandbox-client"
     dockerfile = result.dockerfile.read_text()
     assert "COPY --chmod=0555 ufo-sandbox-client /usr/local/bin/ufo-sandbox-client" in dockerfile
@@ -278,6 +282,7 @@ def test_bundle_pins_the_wheel_instead_of_the_installed_tree(
         catalog=_catalog(disabled=True),
         out=tmp_path / "out",
         wheel=wheel,
+        client_binary=_sample_client(tmp_path),
     ).build()
     entry = discovered()[sample.NAME][1]
     assert result.pins[0].digest != extension_digest(entry)
@@ -295,6 +300,7 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
         catalog=_catalog(disabled=True),
         out=tmp_path / "out",
         wheel=_sample_wheel(tmp_path),
+        client_binary=_sample_client(tmp_path),
     )
     result = bundle.build()
     monkeypatch.setenv(LOCKFILE_PATH_ENV, str(result.lockfile))
