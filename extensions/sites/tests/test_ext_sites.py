@@ -16,28 +16,33 @@ import pytest
 import sqlalchemy as sa
 from PIL import Image
 from pydantic import ValidationError
-from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL, JsReplInput
+from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 from ufo_ext_sites import manifest as sites_manifest
 from ufo_ext_sites import share_card
+from ufo_ext_sites import tools as sites_tools
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    MAX_PRODUCT_QA_CONTROLS,
     ApplicationAuditContract,
     ApplicationAuditFact,
+    ApplicationAuditFeedback,
     ApplicationAuditReport,
+    ApplicationQaProof,
     audit_application,
 )
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION_TOOL,
     APPLICATION_BUILDER_DEPLOY_GUARD_REASON,
+    APPLICATION_BUILDER_DEPLOY_TOOL,
+    APPLICATION_BUILDER_DESIGN_TOOL,
     APPLICATION_BUILDER_EDIT_TOOL,
     APPLICATION_BUILDER_MODEL,
     APPLICATION_BUILDER_NAME,
     APPLICATION_BUILDER_PROFILE,
-    APPLICATION_BUILDER_QA_LIMIT,
-    APPLICATION_BUILDER_QA_LIMIT_REASON,
+    APPLICATION_BUILDER_QA_PROOF_KEY,
     APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_READ_TOOL,
     APPLICATION_BUILDER_REASONING,
@@ -54,6 +59,7 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_SCAFFOLD_PATH,
     APPLICATION_SOURCE_CLAIM,
     APPLICATION_SOURCE_READ,
+    APPLICATION_SOURCE_REQUIRE_CLAIM,
     ApplicationBuildAcceptance,
     ApplicationBuilderResult,
     ApplicationBuilderTask,
@@ -63,15 +69,15 @@ from ufo_ext_sites.application_builder import (
     EditApplicationSourceInput,
     ReadApplicationSourceInput,
     RenderApplicationPreviewInput,
+    WriteApplicationDesignInput,
     WriteApplicationSourceInput,
     build_ufo_application,
     edit_application_source,
-    limit_application_builder_qa,
     limit_application_builder_repair_reads,
     read_application_source,
-    record_application_builder_qa,
     render_application_preview,
     require_application_builder_qa,
+    write_application_design,
     write_application_source,
 )
 from ufo_ext_sites.delegation import BuildWebsiteInput, _build_website
@@ -113,6 +119,7 @@ from ufo_ext_sites.store import (
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE, WebsiteBuildingResult
 from ufo_ext_sites.tools import (
     APPLICATION_AUDIT_MAX_ATTEMPTS,
+    APPLICATION_AUDIT_SCRIPT,
     LOG_CLEAR_PROG,
     LOG_TAIL_TIMEOUT_SECONDS,
     PORT_STOP_PROG,
@@ -120,12 +127,18 @@ from ufo_ext_sites.tools import (
     PREVIEW_WIDTH,
     READINESS_TIMEOUT_SECONDS,
     SITES_TOOL_NAMES,
+    SITES_TOOLS,
+    DeployUfoApplicationInput,
     DeployWebsiteInput,
+    QaUfoApplicationInput,
     StartServerInput,
     WebsiteInput,
     _audit_builder_application,
     _redeploy_homepage,
+    _require_current_application_qa,
+    deploy_ufo_application,
     deploy_website,
+    qa_ufo_application,
     start_server,
     website,
 )
@@ -145,7 +158,8 @@ from ufo.sandbox.session import (
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
-from ufo.sdk.manifest import Deny, HookContext, ModifyInput, PostToolUse, PreToolUse
+from ufo.sdk.manifest import Deny, HookContext, PreToolUse
+from ufo.sdk.tools import TextContent, ToolResult
 from ufo.skills.runtime import mount_skill
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext
@@ -156,6 +170,7 @@ HOUSE_STYLE = "ufo-style"
 HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
 APPLICATION_QA_GUIDANCE = "shared/13-ufo-application-qa.md"
+APPLICATION_DESIGN = '<svg viewBox="0 0 1440 900"><rect width="1440" height="900" /></svg>'
 JS_CELL = re.compile(r"```javascript\n(.*?)```", re.S)
 
 
@@ -273,18 +288,27 @@ def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
     )
 
 
+def _seed_application_design(
+    sandbox: FakeSandbox, scaffold_path: str = "/workspace/application"
+) -> None:
+    sandbox.writes[f"{scaffold_path}/application-design.svg"] = APPLICATION_DESIGN.encode()
+
+
 def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     manifest = sites_manifest.manifest()
     assert {tool.name for tool in manifest.tools} == {
         "website",
         "start_server",
         "deploy_website",
+        APPLICATION_BUILDER_DEPLOY_TOOL,
         "publish_website",
         "set_homepage",
         "build_website",
         APPLICATION_BUILDER_DELEGATION_TOOL,
+        APPLICATION_BUILDER_DESIGN_TOOL,
         APPLICATION_BUILDER_EDIT_TOOL,
         APPLICATION_BUILDER_READ_TOOL,
+        APPLICATION_BUILDER_QA_TOOL,
         APPLICATION_BUILDER_WRITE_TOOL,
         APPLICATION_PREVIEW_TOOL,
     }
@@ -309,13 +333,11 @@ def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
     assert "publish_website" not in profile.tool_names
     assert "this conversation's sandbox" in build.description
     assert [(hook.event, hook.tools) for hook in manifest.hooks] == [
-        ("pre_tool_use", (APPLICATION_BUILDER_QA_TOOL,)),
-        ("post_tool_use", (APPLICATION_BUILDER_QA_TOOL,)),
         (
             "pre_tool_use",
             (APPLICATION_BUILDER_READ_TOOL, APPLICATION_BUILDER_EDIT_TOOL),
         ),
-        ("pre_tool_use", ("deploy_website",)),
+        ("pre_tool_use", (APPLICATION_BUILDER_DEPLOY_TOOL,)),
     ]
     (section,) = manifest.prompt_sections
     assert section.name == "sites" and "<sites>" in section.body
@@ -363,6 +385,15 @@ def test_application_audit_accepts_measured_interactive_facts() -> None:
     )
 
     assert audit_application(report, contract).issues == ()
+
+
+def test_application_audit_runs_views_in_parallel_in_declared_order() -> None:
+    source = APPLICATION_AUDIT_SCRIPT.decode()
+
+    assert "await Promise.all(VIEWS.map(async (view) => {" in source
+    assert "views.push(" not in source
+    assert "finally {\n        await context.close();" in source
+    assert "finally {\n    await browser.close();" in source
 
 
 def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
@@ -492,13 +523,16 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
         ext=cast(ExtensionContext, FakeHookExt(store)),
     )
 
-    with pytest.raises(RuntimeError, match='"code":"contrast"'):
-        await _audit_builder_application(ctx, "/workspace/ufo-app")
+    feedback = await _audit_builder_application(ctx, "/workspace/ufo-app")
 
     key = APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id)
+    assert isinstance(feedback, ApplicationAuditFeedback)
+    assert feedback.status == "repair_required"
+    assert {issue.code for issue in feedback.issues} == {"contrast"}
     assert store.values[key] == 1
     sandbox.scripted_paths["/application-audit/"] = ExecResult(_report(False), "", 0)
-    await _audit_builder_application(ctx, "/workspace/ufo-app")
+    report = await _audit_builder_application(ctx, "/workspace/ufo-app")
+    assert isinstance(report, ApplicationAuditReport)
     assert len(sandbox.shells) == 2
     port_stops = [program for program, _args in sandbox.programs if program == PORT_STOP_PROG]
     assert len(port_stops) == 4
@@ -524,7 +558,7 @@ async def test_application_builder_audit_stops_after_two_failed_attempts(
     key = APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id)
     store.values[key] = APPLICATION_AUDIT_MAX_ATTEMPTS
 
-    with pytest.raises(RuntimeError, match="stopped after two failed deployment attempts"):
+    with pytest.raises(RuntimeError, match="stopped after two failed product audits"):
         await _audit_builder_application(ctx, "/workspace/ufo-app")
 
     assert sandbox.commands == []
@@ -554,6 +588,47 @@ async def test_application_builder_deploy_requires_the_scaffold_root(tmp_path: P
 
     assert sandbox.commands == []
     assert sandbox.programs == []
+
+
+async def test_application_deploy_tool_owns_the_fixed_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[DeployWebsiteInput] = []
+    returned = ToolResult(content=(TextContent(text="deployed"),))
+
+    async def _deploy(_ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
+        captured.append(args)
+        return returned
+
+    monkeypatch.setattr(sites_tools, "deploy_website", _deploy)
+    base = _context(FakeSandbox(), tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
+    )
+    args = DeployUfoApplicationInput(
+        site_name="meeting-tasks",
+        user_description="Deploying the meeting tasks application",
+    )
+
+    assert await deploy_ufo_application(ctx, args) is returned
+    assert captured == [
+        DeployWebsiteInput(
+            project_path="/workspace/ufo-app",
+            site_name="meeting-tasks",
+            entry_point="index.html",
+            user_description="Deploying the meeting tasks application",
+        )
+    ]
+    tool = next(
+        tool
+        for tool in sites_manifest.manifest().tools
+        if tool.name == APPLICATION_BUILDER_DEPLOY_TOOL
+    )
+    assert set(tool.input_model.model_json_schema()["properties"]) == {
+        "site_name",
+        "user_description",
+    }
 
 
 def test_website_profile_receives_the_complete_per_turn_skill_index() -> None:
@@ -682,7 +757,7 @@ async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Pa
             ),
             "scaffold_path": "/workspace/ufo-app",
             "source_path": "/workspace/ufo-app/app.tsx",
-            "preload_skills": ("website-building",),
+            "preload_skills": ("ufo-style",),
         },
         "dedup_key": "turn-1/build_ufo_application/call-2",
     }
@@ -968,8 +1043,8 @@ async def test_application_build_acceptance_binds_only_verified_worker_output(
     with ws(workspace_id):
         ext = context_for("sites", frozenset())
         await ext.store.put(
-            f"application-builder/qa-success/{child_turn_id}",
-            2,
+            APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=child_turn_id),
+            ApplicationQaProof(source_sha256="a" * 64, browser_batches=2).model_dump(),
         )
         sandbox = FakeSandbox(
             scripted_paths={
@@ -1062,7 +1137,7 @@ async def test_application_build_acceptance_blocks_missing_qa(tmp_path: Path) ->
 
     assert accepted.status == "blocked"
     assert accepted.browser_batches == 0
-    assert accepted.blocker == "The worker completed fewer than two browser QA batches."
+    assert accepted.blocker == "The worker returned no passed product QA proof."
 
 
 async def test_application_preview_is_one_fixed_product_render(
@@ -1307,19 +1382,19 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
         "search_connector_tools",
         "call_external_tool",
         "read",
-        "start_server",
-        "js_repl",
+        APPLICATION_BUILDER_DESIGN_TOOL,
+        APPLICATION_BUILDER_QA_TOOL,
         APPLICATION_BUILDER_EDIT_TOOL,
         APPLICATION_BUILDER_READ_TOOL,
         APPLICATION_BUILDER_WRITE_TOOL,
-        "deploy_website",
+        APPLICATION_BUILDER_DEPLOY_TOOL,
     }
     assert profile.untrusted_output is True
     assert profile.input_model is ApplicationBuilderTask
     assert profile.output_model is ApplicationBuilderResult
     assert "Inspect the needed connected sources" in profile.prompt
-    assert "run two to four browser batches" in " ".join(profile.prompt.split())
-    assert "Deploy only after browser QA passes" in profile.prompt
+    assert "Call `qa_ufo_application`" in profile.prompt
+    assert "Deploy only after product QA passes" in profile.prompt
     assert "Your result is evidence, not a verdict" in profile.prompt
     edit_tool = next(tool for tool in manifest.tools if tool.name == APPLICATION_BUILDER_EDIT_TOOL)
     edit_schema = edit_tool.input_model.model_json_schema()
@@ -1391,6 +1466,7 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
         source_path="/workspace/application/app.tsx",
     )
     assert task.objective == "Build the queue"
+    assert APPLICATION_BUILDER_SKILL == "ufo-style"
     assert task.preload_skills == (APPLICATION_BUILDER_SKILL,)
     assert set(ApplicationBuilderTask.model_fields) == {
         "objective",
@@ -1421,34 +1497,219 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
         )
 
 
-async def test_application_builder_qa_gate_refuses_a_fifth_batch(tmp_path: Path) -> None:
-    ctx = _context(FakeSandbox(), tmp_path)
-    turn = ctx.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME})
-    store = FakeHookStore()
-    hook = HookContext(
-        ext=cast(ExtensionContext, FakeHookExt(store)),
-        payload=PreToolUse(
-            tool_name=APPLICATION_BUILDER_QA_TOOL,
-            tool_input=JsReplInput(
-                code="console.log('checked')",
-                reset=False,
-                user_description="Checking the application",
-            ),
+async def test_application_product_qa_owns_the_fixed_root_and_records_passed_proof(
+    tmp_path: Path,
+) -> None:
+    report = json.dumps(
+        {
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 8,
+                    "text": [],
+                    "documentWidth": width,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "#2042",
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {
+                "controls": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "successes": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "states": [["#2042"]],
+                "console": [],
+            },
+        }
+    )
+    source = "import { mountApp } from 'ufo/kit';\n"
+    sandbox = FakeSandbox(scripted_paths={"/application-audit/": ExecResult(report, "", 0)})
+    sandbox.writes["/workspace/ufo-app/app.tsx"] = source.encode()
+    parent_turn_id = uuid4()
+    store = FakeHookStore(
+        values={
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(
+                turn_id=parent_turn_id
+            ): ApplicationAuditContract(
+                facts=(ApplicationAuditFact(label="issue", alternatives=("#2042",)),)
+            ).model_dump()
+        }
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "parent_turn_id": parent_turn_id,
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
         ),
-        turn=turn,
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    result = await qa_ufo_application(
+        ctx,
+        QaUfoApplicationInput(user_description="Checking the application"),
     )
 
-    for _ in range(APPLICATION_BUILDER_QA_LIMIT):
-        modified = await limit_application_builder_qa(hook)
-        assert isinstance(modified, ModifyInput)
-        assert modified.tool_input.reset is True
-    refused = await limit_application_builder_qa(hook)
+    payload = json.loads(result.content[0].text)
+    assert payload == {
+        "status": "passed",
+        "views_checked": ["light 1440px", "dark 1440px", "light 390px", "dark 390px"],
+        "controls_checked": ["First", "Second"],
+        "interactions_verified": ["First", "Second"],
+    }
+    proof = ApplicationQaProof.model_validate(
+        store.values[APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id)]
+    )
+    assert proof == ApplicationQaProof(
+        source_sha256=sha256(source.encode()).hexdigest(),
+        browser_batches=1,
+    )
+    qa_tool = next(
+        tool for tool in sites_manifest.manifest().tools if tool.name == APPLICATION_BUILDER_QA_TOOL
+    )
+    assert set(qa_tool.input_model.model_json_schema()["properties"]) == {"user_description"}
+    await qa_ufo_application(
+        ctx,
+        QaUfoApplicationInput(user_description="Checking the application again"),
+    )
+    await qa_ufo_application(
+        ctx,
+        QaUfoApplicationInput(user_description="Checking the reworked application"),
+    )
+    proof = ApplicationQaProof.model_validate(
+        store.values[APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id)]
+    )
+    assert proof.browser_batches == 3
+    with pytest.raises(RuntimeError, match="stopped after 3 product audits"):
+        await qa_ufo_application(
+            ctx,
+            QaUfoApplicationInput(user_description="Checking the application a fourth time"),
+        )
 
-    assert isinstance(refused, Deny)
-    assert refused.reason == APPLICATION_BUILDER_QA_LIMIT_REASON
+
+async def test_application_product_qa_bounds_dense_control_evidence_before_proof(
+    tmp_path: Path,
+) -> None:
+    controls = [
+        {"selector": f"#control-{index}", "name": f"Control {index}"}
+        for index in range(MAX_PRODUCT_QA_CONTROLS + 20)
+    ]
+    report = json.dumps(
+        {
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 8,
+                    "text": [],
+                    "documentWidth": width,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Dense controls",
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {
+                "controls": controls,
+                "successes": controls,
+                "states": [["Dense controls"]],
+                "console": [],
+            },
+        }
+    )
+    source = "import { mountApp } from 'ufo/kit';\n"
+    sandbox = FakeSandbox(scripted_paths={"/application-audit/": ExecResult(report, "", 0)})
+    sandbox.writes["/workspace/ufo-app/app.tsx"] = source.encode()
+    parent_turn_id = uuid4()
+    store = FakeHookStore(
+        values={
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(
+                turn_id=parent_turn_id
+            ): ApplicationAuditContract().model_dump()
+        }
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "parent_turn_id": parent_turn_id,
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+
+    result = await qa_ufo_application(
+        ctx,
+        QaUfoApplicationInput(user_description="Checking the dense application"),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert len(payload["controls_checked"]) == MAX_PRODUCT_QA_CONTROLS
+    assert len(payload["interactions_verified"]) == MAX_PRODUCT_QA_CONTROLS
+    assert APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id) in store.values
 
 
-async def test_application_builder_deployment_requires_two_successful_qa_batches(
+async def test_application_product_qa_does_not_record_its_failed_audit(
+    tmp_path: Path,
+) -> None:
+    report = json.dumps(
+        {
+            "views": [],
+            "interaction": {
+                "controls": [],
+                "successes": [],
+                "states": [],
+                "console": [],
+            },
+        }
+    )
+    sandbox = FakeSandbox(scripted_paths={"/application-audit/": ExecResult(report, "", 0)})
+    parent_turn_id = uuid4()
+    store = FakeHookStore(
+        values={
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(
+                turn_id=parent_turn_id
+            ): ApplicationAuditContract().model_dump()
+        }
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "parent_turn_id": parent_turn_id,
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+
+    result = await qa_ufo_application(
+        ctx,
+        QaUfoApplicationInput(user_description="Checking the application"),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["status"] == "repair_required"
+    assert payload["attempt"] == 1
+    assert payload["attempts_remaining"] == 1
+    assert APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id) not in store.values
+    assert store.values[APPLICATION_AUDIT_ATTEMPT_KEY.format(turn_id=ctx.turn.id)] == 1
+
+
+async def test_application_builder_deployment_requires_passed_product_qa(
     tmp_path: Path,
 ) -> None:
     ctx = _context(FakeSandbox(), tmp_path)
@@ -1458,28 +1719,46 @@ async def test_application_builder_deployment_requires_two_successful_qa_batches
     deployment = HookContext(
         ext=ext,
         payload=PreToolUse(
-            tool_name="deploy_website",
-            tool_input=ReadApplicationSourceInput(user_description=TOOL_NARRATION),
+            tool_name=APPLICATION_BUILDER_DEPLOY_TOOL,
+            tool_input=DeployUfoApplicationInput(
+                site_name="meeting-tasks",
+                user_description=TOOL_NARRATION,
+            ),
         ),
         turn=turn,
     )
-    completed = HookContext(
-        ext=ext,
-        payload=PostToolUse(
-            tool_name=APPLICATION_BUILDER_QA_TOOL,
-            tool_input=ReadApplicationSourceInput(user_description=TOOL_NARRATION),
-            output="checked",
-        ),
-        turn=turn,
-    )
-
     refused = await require_application_builder_qa(deployment)
     assert isinstance(refused, Deny)
     assert refused.reason == APPLICATION_BUILDER_DEPLOY_GUARD_REASON
-    await record_application_builder_qa(completed)
-    assert isinstance(await require_application_builder_qa(deployment), Deny)
-    await record_application_builder_qa(completed)
+    store.values[APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=turn.id)] = ApplicationQaProof(
+        source_sha256="a" * 64, browser_batches=1
+    ).model_dump()
     assert await require_application_builder_qa(deployment) is None
+
+
+async def test_application_deploy_accepts_only_the_exact_qa_source(tmp_path: Path) -> None:
+    source = "import { mountApp } from 'ufo/kit';\n"
+    sandbox = FakeSandbox()
+    sandbox.writes["/workspace/ufo-app/app.tsx"] = source.encode()
+    store = FakeHookStore()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    key = APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id)
+    store.values[key] = ApplicationQaProof(
+        source_sha256=sha256(source.encode()).hexdigest(),
+        browser_batches=1,
+    ).model_dump()
+
+    await _require_current_application_qa(ctx)
+
+    sandbox.writes["/workspace/ufo-app/app.tsx"] = b"changed"
+    with pytest.raises(RuntimeError, match="changed after product QA passed"):
+        await _require_current_application_qa(ctx)
+    assert sandbox.shells == []
 
 
 async def test_application_builder_limits_consecutive_source_reads_after_audit(
@@ -1516,6 +1795,182 @@ async def test_application_builder_limits_consecutive_source_reads_after_audit(
         assert await limit_application_builder_repair_reads(read) is None
 
 
+async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    result = await write_application_design(
+        ctx,
+        WriteApplicationDesignInput(
+            user_description=TOOL_NARRATION,
+            content=APPLICATION_DESIGN,
+        ),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert payload == {
+        "path": "/workspace/application/application-design.svg",
+        "design_digest": sha256(APPLICATION_DESIGN.encode()).hexdigest(),
+        "size_bytes": len(APPLICATION_DESIGN.encode()),
+    }
+    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+    with pytest.raises(ValueError, match="SVG drawing elements only"):
+        await write_application_design(
+            ctx,
+            WriteApplicationDesignInput(
+                user_description=TOOL_NARRATION,
+                content='<svg viewBox="0 0 1 1"><script>fetch("https://bad")</script></svg>',
+            ),
+        )
+    for invalid in (
+        '<svg viewBox="0 0 0 0"><rect width="1" height="1" /></svg>',
+        '<svg viewBox="not-a-box"><rect width="1" height="1" /></svg>',
+        '<svg viewBox="0 0 1280 800"><metadata>no screen</metadata></svg>',
+        '<svg viewBox="0 0 1280 800"><rect /></svg>',
+        '<svg viewBox="0 0 1280 800"><path /></svg>',
+        '<svg viewBox="0 0 1280 800"><text /></svg>',
+        '<svg viewBox="0 0 1280 800"><use /></svg>',
+    ):
+        with pytest.raises(ValueError):
+            await write_application_design(
+                replace(ctx, turn=ctx.turn.model_copy(update={"id": uuid4()})),
+                WriteApplicationDesignInput(
+                    user_description=TOOL_NARRATION,
+                    content=invalid,
+                ),
+            )
+
+
+async def test_application_builder_design_is_isolated_per_build_turn(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    first = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+    second = replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
+
+    await write_application_design(
+        first,
+        WriteApplicationDesignInput(
+            user_description=TOOL_NARRATION,
+            content=APPLICATION_DESIGN,
+        ),
+    )
+    await write_application_design(
+        second,
+        WriteApplicationDesignInput(
+            user_description=TOOL_NARRATION,
+            content=APPLICATION_DESIGN.replace("900", "800"),
+        ),
+    )
+
+    claims = [args[0] for program, args in sandbox.programs if program == APPLICATION_SOURCE_CLAIM]
+    assert len(set(claims)) == 2
+    assert b"800" in sandbox.writes["/workspace/application/application-design.svg"]
+
+
+async def test_application_source_requires_the_svg_design(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    base = _context(FakeSandbox(), tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="write_application_design must complete"):
+        await write_application_source(
+            ctx,
+            WriteApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                content=(
+                    'import { mountApp } from "ufo/kit";\n'
+                    'mountApp(document.getElementById("root")!, () => <main />);'
+                ),
+            ),
+        )
+
+
+async def test_application_source_requires_this_build_turns_svg_design(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    first = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+    await write_application_design(
+        first,
+        WriteApplicationDesignInput(
+            user_description=TOOL_NARRATION,
+            content=APPLICATION_DESIGN,
+        ),
+    )
+    second = replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
+    design_path = "/workspace/application/application-design.svg"
+    second_claim = (
+        "/workspace/.tool-output/application-builder/"
+        f"{sha256(design_path.encode()).hexdigest()}.{second.turn.id}.claimed"
+    )
+    sandbox.scripted_paths[second_claim] = ExecResult("", "", 17)
+
+    with pytest.raises(ValueError, match="write_application_design must complete"):
+        await write_application_source(
+            second,
+            WriteApplicationSourceInput(
+                user_description=TOOL_NARRATION,
+                content=(
+                    'import { mountApp } from "ufo/kit";\n'
+                    'mountApp(document.getElementById("root")!, () => <main />);'
+                ),
+            ),
+        )
+
+    assert (APPLICATION_SOURCE_REQUIRE_CLAIM, (second_claim,)) in sandbox.programs
+
+
 async def test_application_builder_write_tool_writes_only_the_contract_source(
     tmp_path: Path,
 ) -> None:
@@ -1525,6 +1980,7 @@ async def test_application_builder_write_tool_writes_only_the_contract_source(
         source_path="/workspace/application/app.tsx",
     )
     sandbox = FakeSandbox()
+    _seed_application_design(sandbox)
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
@@ -1567,6 +2023,7 @@ async def test_application_builder_write_tool_rejects_another_module(tmp_path: P
         source_path="/workspace/application/app.tsx",
     )
     sandbox = FakeSandbox()
+    _seed_application_design(sandbox)
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
@@ -1604,6 +2061,7 @@ async def test_application_builder_write_tool_allows_apostrophes_in_jsx_text(
         source_path="/workspace/application/app.tsx",
     )
     sandbox = FakeSandbox()
+    _seed_application_design(sandbox)
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
@@ -1637,6 +2095,7 @@ async def test_application_builder_write_tool_rejects_the_old_runtime_global(
         source_path="/workspace/application/app.tsx",
     )
     sandbox = FakeSandbox()
+    _seed_application_design(sandbox)
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
@@ -1672,6 +2131,7 @@ async def test_application_builder_write_tool_rejects_an_invalid_mount(tmp_path:
         source_path="/workspace/application/app.tsx",
     )
     sandbox = FakeSandbox()
+    _seed_application_design(sandbox)
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
@@ -1704,7 +2164,8 @@ async def test_application_builder_write_tool_rejects_a_second_initial_build(
         scaffold_path="/workspace/application",
         source_path="/workspace/application/app.tsx",
     )
-    sandbox = FakeSandbox(claim=ExecResult(stdout="", stderr="", exit_code=17))
+    sandbox = FakeSandbox()
+    _seed_application_design(sandbox)
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
@@ -1715,6 +2176,11 @@ async def test_application_builder_write_tool_rejects_a_second_initial_build(
             }
         ),
     )
+    source_claim = (
+        "/workspace/.tool-output/application-builder/"
+        f"{sha256(task.source_path.encode()).hexdigest()}.{ctx.turn.id}.claimed"
+    )
+    sandbox.scripted_paths[source_claim] = ExecResult("", "", 17)
 
     with pytest.raises(ValueError, match=r"initial app\.tsx candidate already exists"):
         await write_application_source(
@@ -1729,7 +2195,9 @@ async def test_application_builder_write_tool_rejects_a_second_initial_build(
         )
 
     assert "/workspace/application/app.tsx" not in sandbox.writes
-    assert sandbox.writes == {}
+    assert sandbox.writes == {
+        "/workspace/application/application-design.svg": APPLICATION_DESIGN.encode()
+    }
 
 
 async def test_application_builder_read_tool_returns_bounded_repair_excerpts(
@@ -2003,6 +2471,7 @@ async def test_application_builder_rejects_source_the_product_compiler_rejects(
         source_path="/workspace/application/app.tsx",
     )
     sandbox = FakeSandbox(shell=ExecResult("", "Unexpected token at 12:4", 1))
+    _seed_application_design(sandbox)
     ctx = _context(sandbox, tmp_path)
     ctx = replace(
         ctx,
@@ -2028,7 +2497,11 @@ async def test_application_builder_rejects_source_the_product_compiler_rejects(
 
     assert "/workspace/application/app.tsx" not in sandbox.writes
     assert [path for path in sandbox.writes if path.endswith(".candidate.tsx")]
-    assert sandbox.programs[0][0] == APPLICATION_SOURCE_CLAIM
+    assert [program for program, _ in sandbox.programs[:3]] == [
+        APPLICATION_SOURCE_REQUIRE_CLAIM,
+        APPLICATION_SOURCE_READ,
+        APPLICATION_SOURCE_CLAIM,
+    ]
 
 
 async def test_application_builder_read_tool_rejects_an_initial_build(tmp_path: Path) -> None:
@@ -2196,6 +2669,7 @@ def test_the_website_building_profile_names_only_meaningful_tools() -> None:
     # and the two REPLs are what the child drives a page and a workbook with.
     assert {JS_REPL_TOOL, XLSX_REPL_TOOL} <= names
     assert {"website", "start_server", "write", "js_repl", "deploy_website"} <= names
+    assert {tool.name for tool in SITES_TOOLS if tool.profile_only}.isdisjoint(names)
     assert "share_file" not in names
     assert WEBSITE_BUILDING_PROFILE.input_model.model_validate(
         {"user_description": TOOL_NARRATION, "objective": "build a landing page"}

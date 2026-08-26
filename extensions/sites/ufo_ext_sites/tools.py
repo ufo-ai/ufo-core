@@ -47,8 +47,8 @@ unless the same turn deployed the site, the seed's deploy-and-bind shape."""
 
 import json
 import shlex
+from hashlib import sha256
 from pathlib import Path
-from typing import Never
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -58,16 +58,27 @@ from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    MAX_PRODUCT_QA_CONTROLS,
     ApplicationAuditContract,
     ApplicationAuditFeedback,
     ApplicationAuditIssue,
     ApplicationAuditReport,
+    ApplicationProductQaResult,
+    ApplicationQaProof,
     audit_application,
 )
 from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_DEPLOY_GUARD_REASON,
+    APPLICATION_BUILDER_DEPLOY_TOOL,
     APPLICATION_BUILDER_NAME,
+    APPLICATION_BUILDER_QA_CALL_KEY,
+    APPLICATION_BUILDER_QA_MAX_CALLS,
+    APPLICATION_BUILDER_QA_PROOF_KEY,
+    APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_REDEPLOY_KEY,
     APPLICATION_SCAFFOLD_PATH,
+    APPLICATION_SOURCE_PATH,
+    APPLICATION_SOURCE_READ,
 )
 from ufo_ext_sites.objects import effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page
@@ -392,6 +403,21 @@ class DeployWebsiteInput(BaseModel):
     visibility: Visibility | None = Field(default=None, description=VISIBILITY_DESCRIPTION)
     user_description: str = Field(
         description="Which site you are putting online, in plain language for the activity "
+        "timeline."
+    )
+
+
+class DeployUfoApplicationInput(BaseModel):
+    site_name: str = Field(description="A name for the application; it names the hosted link.")
+    user_description: str = Field(
+        description="Which application you are putting online, in plain language for the "
+        "activity timeline."
+    )
+
+
+class QaUfoApplicationInput(BaseModel):
+    user_description: str = Field(
+        description="The application checks you are running, in plain language for the activity "
         "timeline."
     )
 
@@ -730,9 +756,9 @@ async def _application_audit_attempts(ctx: ToolContext) -> int:
     return stored
 
 
-async def _return_application_audit_feedback(
+async def _application_audit_feedback(
     ctx: ToolContext, issues: tuple[ApplicationAuditIssue, ...], attempts: int
-) -> Never:
+) -> ApplicationAuditFeedback:
     if ctx.ext is None:
         raise RuntimeError("the application audit dispatched without its extension context")
     used = attempts + 1
@@ -742,13 +768,15 @@ async def _return_application_audit_feedback(
         attempts_remaining=APPLICATION_AUDIT_MAX_ATTEMPTS - used,
         issues=issues,
     )
-    raise RuntimeError(f"Application audit requires repair: {feedback.model_dump_json()}")
+    return feedback
 
 
-async def _audit_builder_application(ctx: ToolContext, project: str) -> None:
+async def _audit_builder_application(
+    ctx: ToolContext, project: str
+) -> ApplicationAuditReport | ApplicationAuditFeedback:
     attempts = await _application_audit_attempts(ctx)
     if attempts >= APPLICATION_AUDIT_MAX_ATTEMPTS:
-        raise RuntimeError("Application audit stopped after two failed deployment attempts.")
+        raise RuntimeError("Application audit stopped after two failed product audits.")
     root = f"{TOOL_OUTPUT_DIR}/application-audit/{ctx.turn.id}"
     script_path = f"{root}.cjs"
     report_path = f"{root}.json"
@@ -776,7 +804,7 @@ async def _audit_builder_application(ctx: ToolContext, project: str) -> None:
         )
         if run.exit_code != 0:
             detail = (run.stderr or run.stdout or "audit returned no error").strip()[:400]
-            await _return_application_audit_feedback(
+            return await _application_audit_feedback(
                 ctx,
                 (
                     ApplicationAuditIssue(
@@ -795,7 +823,7 @@ async def _audit_builder_application(ctx: ToolContext, project: str) -> None:
             detail = (report_read.stderr or report_read.stdout or "audit report is absent").strip()[
                 :400
             ]
-            await _return_application_audit_feedback(
+            return await _application_audit_feedback(
                 ctx,
                 (
                     ApplicationAuditIssue(
@@ -816,7 +844,7 @@ async def _audit_builder_application(ctx: ToolContext, project: str) -> None:
             )
             contract = ApplicationAuditContract.model_validate(stored_contract or {})
         except ValueError as error:
-            await _return_application_audit_feedback(
+            return await _application_audit_feedback(
                 ctx,
                 (
                     ApplicationAuditIssue(
@@ -828,9 +856,91 @@ async def _audit_builder_application(ctx: ToolContext, project: str) -> None:
             )
         verdict = audit_application(report, contract)
         if not verdict.passed:
-            await _return_application_audit_feedback(ctx, verdict.issues, attempts)
+            return await _application_audit_feedback(ctx, verdict.issues, attempts)
+        return report
     finally:
         await _stop_server(ctx, port)
+
+
+async def _application_source_sha256(ctx: ToolContext) -> str:
+    source = await ctx.sandbox.python(APPLICATION_SOURCE_READ, APPLICATION_SOURCE_PATH)
+    if source.exit_code != 0:
+        raise RuntimeError(source.stderr or "app.tsx could not be read")
+    return sha256(source.stdout.encode()).hexdigest()
+
+
+async def _require_current_application_qa(ctx: ToolContext) -> ApplicationQaProof:
+    if ctx.ext is None:
+        raise RuntimeError("product QA dispatched without its extension context")
+    stored = await ctx.ext.store.get(APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id))
+    if stored is None:
+        raise RuntimeError(APPLICATION_BUILDER_DEPLOY_GUARD_REASON)
+    try:
+        proof = ApplicationQaProof.model_validate(stored)
+    except ValueError as error:
+        raise RuntimeError("application builder QA proof is invalid") from error
+    if await _application_source_sha256(ctx) != proof.source_sha256:
+        raise RuntimeError("app.tsx changed after product QA passed")
+    return proof
+
+
+async def qa_ufo_application(ctx: ToolContext, args: QaUfoApplicationInput) -> ToolResult:
+    if ctx.turn.subagent_profile != APPLICATION_BUILDER_NAME:
+        raise RuntimeError("product QA is available only to the ufo application builder")
+    if ctx.ext is None:
+        raise RuntimeError("product QA dispatched without its extension context")
+    call_key = APPLICATION_BUILDER_QA_CALL_KEY.format(turn_id=ctx.turn.id)
+    stored_calls = await ctx.ext.store.get(call_key)
+    if stored_calls is None:
+        calls = 0
+    elif type(stored_calls) is int:
+        calls = stored_calls
+    else:
+        raise RuntimeError("application product QA call count is not an integer")
+    if calls >= APPLICATION_BUILDER_QA_MAX_CALLS:
+        raise RuntimeError(
+            f"Application audit stopped after {APPLICATION_BUILDER_QA_MAX_CALLS} product audits."
+        )
+    calls += 1
+    await ctx.ext.store.put(call_key, calls)
+    audit = await _audit_builder_application(ctx, APPLICATION_SCAFFOLD_PATH)
+    match audit:
+        case ApplicationAuditFeedback():
+            return _json_result(audit.model_dump())
+        case ApplicationAuditReport():
+            report = audit
+    result = ApplicationProductQaResult(
+        views_checked=tuple(f"{view.scheme} {view.width}px" for view in report.views),
+        controls_checked=tuple(control.name for control in report.interaction.controls)[
+            :MAX_PRODUCT_QA_CONTROLS
+        ],
+        interactions_verified=tuple(control.name for control in report.interaction.successes)[
+            :MAX_PRODUCT_QA_CONTROLS
+        ],
+    )
+    source_sha256 = await _application_source_sha256(ctx)
+    await ctx.ext.store.put(
+        APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id),
+        ApplicationQaProof(
+            source_sha256=source_sha256,
+            browser_batches=calls,
+        ).model_dump(),
+    )
+    return _json_result(result.model_dump())
+
+
+async def deploy_ufo_application(ctx: ToolContext, args: DeployUfoApplicationInput) -> ToolResult:
+    if ctx.turn.subagent_profile != APPLICATION_BUILDER_NAME:
+        raise RuntimeError("application deploy is available only to the ufo application builder")
+    return await deploy_website(
+        ctx,
+        DeployWebsiteInput(
+            project_path=APPLICATION_SCAFFOLD_PATH,
+            site_name=args.site_name,
+            entry_point="index.html",
+            user_description=args.user_description,
+        ),
+    )
 
 
 async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResult:
@@ -843,6 +953,8 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
             f"ufo application deploy project_path must be {APPLICATION_SCAFFOLD_PATH}, "
             f"not {source_project}"
         )
+    if ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME:
+        await _require_current_application_qa(ctx)
     conversation = ctx.sandbox.conversation_id
     port = serve_port(conversation)
     bound = await _agent_homepage(ctx)
@@ -856,8 +968,6 @@ async def deploy_website(ctx: ToolContext, args: DeployWebsiteInput) -> ToolResu
         return await _redeploy_homepage(ctx, args, bound, port)
     name, _displaced = await _refuse_before_serving(ctx, args.site_name, port, args.visibility)
     project, listing = await _served_directory(ctx, source_project)
-    if ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME:
-        await _audit_builder_application(ctx, source_project)
     manifest = await _promote_source(ctx, project, conversation, name, listing)
     command = f"python3 -m http.server {port} --bind 0.0.0.0"
     served = await _serve(ctx, command, project, port, DEPLOY_LOG.format(port=port))
@@ -950,8 +1060,6 @@ async def _redeploy_homepage(
     )
     source_project = workspace_path(args.project_path)
     project, listing = await _served_directory(ctx, source_project)
-    if ctx.turn.subagent_profile == APPLICATION_BUILDER_NAME:
-        await _audit_builder_application(ctx, source_project)
     manifest = await _promote_source(ctx, project, bound.conversation_id, bound.name, listing)
     command = f"python3 -m http.server {scratch_port} --bind 0.0.0.0"
     served = await _serve(ctx, command, project, scratch_port, DEPLOY_LOG.format(port=scratch_port))
@@ -1058,6 +1166,29 @@ SITES_TOOLS: tuple[ToolDef, ...] = (
         description=START_SERVER_DESCRIPTION,
         input_model=StartServerInput,
         handler=start_server,
+    ),
+    ToolDef(
+        name=APPLICATION_BUILDER_QA_TOOL,
+        description=(
+            "Run the complete deterministic ufo application product audit against the fixed "
+            "scaffold. It checks the framed app in four views, accessible controls, visible state "
+            "changes, contrast, fit, clipping, console errors, required facts, and first-screen "
+            "placement. It returns passed evidence or one bounded repair batch."
+        ),
+        input_model=QaUfoApplicationInput,
+        handler=qa_ufo_application,
+        profile_only=True,
+    ),
+    ToolDef(
+        name=APPLICATION_BUILDER_DEPLOY_TOOL,
+        description=(
+            "Build the fixed ufo application scaffold and host it at a permanent link after "
+            "product QA passes."
+        ),
+        input_model=DeployUfoApplicationInput,
+        handler=deploy_ufo_application,
+        side_effecting=True,
+        profile_only=True,
     ),
     ToolDef(
         name=DEPLOY_WEBSITE_TOOL,

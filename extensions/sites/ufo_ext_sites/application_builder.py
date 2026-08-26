@@ -7,9 +7,11 @@ import textwrap
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
+from math import isfinite
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 from uuid import UUID
+from xml.etree import ElementTree
 
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -17,8 +19,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from ufo.sdk.manifest import (
     Deny,
     HookContext,
-    ModifyInput,
-    PostToolUse,
     PreToolUse,
     SubagentProfile,
 )
@@ -28,6 +28,7 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    ApplicationQaProof,
 )
 from ufo_ext_sites.source import (
     PROJECT_CONFIG,
@@ -38,29 +39,28 @@ from ufo_ext_sites.store import HostedSites, SourceManifest
 from ufo_ext_sites.surface import site_url
 
 APPLICATION_BUILDER_NAME = "ufo_application_builder"
-APPLICATION_BUILDER_SKILL: Literal["website-building"] = "website-building"
+APPLICATION_BUILDER_SKILL: Literal["ufo-style"] = "ufo-style"
 APPLICATION_BUILDER_MODEL = "google/gemini-3.7-flash"
 APPLICATION_BUILDER_REASONING: Literal["medium"] = "medium"
 APPLICATION_BUILDER_MAX_ROUNDS = 35
 APPLICATION_BUILDER_DELEGATION_TOOL = "build_ufo_application"
 APPLICATION_PREVIEW_TOOL = "render_application_preview"
+APPLICATION_BUILDER_DESIGN_TOOL = "write_application_design"
 APPLICATION_BUILDER_EDIT_TOOL = "edit_application_source"
 APPLICATION_BUILDER_READ_TOOL = "read_application_source"
 APPLICATION_BUILDER_WRITE_TOOL = "write_application_source"
-APPLICATION_BUILDER_QA_TOOL = "js_repl"
-APPLICATION_BUILDER_QA_LIMIT = 4
-APPLICATION_BUILDER_QA_KEY = "application-builder/qa/{turn_id}"
-APPLICATION_BUILDER_QA_SUCCESS_KEY = "application-builder/qa-success/{turn_id}"
+APPLICATION_BUILDER_QA_TOOL = "qa_ufo_application"
+APPLICATION_BUILDER_DEPLOY_TOOL = "deploy_ufo_application"
+APPLICATION_BUILDER_QA_CALL_KEY = "application-builder/qa-call/{turn_id}"
+APPLICATION_BUILDER_QA_MAX_CALLS = 3
+APPLICATION_BUILDER_QA_PROOF_KEY = "application-builder/qa-proof/{turn_id}"
 APPLICATION_BUILDER_REDEPLOY_KEY = "application-builder/redeploy/{turn_id}"
-APPLICATION_BUILDER_QA_LIMIT_REASON = "The four application browser QA batches are complete."
 APPLICATION_BUILDER_REPAIR_READ_LIMIT = 3
 APPLICATION_BUILDER_REPAIR_READ_KEY = "application-builder/repair-read/{turn_id}"
 APPLICATION_BUILDER_REPAIR_READ_REASON = (
-    "Three repair source reads are complete. Edit the source, run browser QA, and deploy again."
+    "Three repair source reads are complete. Edit the source, run product QA, and deploy again."
 )
-APPLICATION_BUILDER_DEPLOY_GUARD_REASON = (
-    "Run at least two successful application browser QA batches before deployment."
-)
+APPLICATION_BUILDER_DEPLOY_GUARD_REASON = "Run and pass product QA before deployment."
 APPLICATION_SCAFFOLD_PATH = "/workspace/ufo-app"
 APPLICATION_SOURCE_PATH = f"{APPLICATION_SCAFFOLD_PATH}/app.tsx"
 APPLICATION_PREVIEW_FILENAME: Literal["application-preview.png"] = "application-preview.png"
@@ -81,8 +81,12 @@ APPLICATION_BUILDER_PROMPT = (
 ).read_text()
 APPLICATION_BUILD_TIMEOUT_SECONDS = 600
 APPLICATION_BUILD_ERROR_MAX_CHARS = 2_000
+APPLICATION_DESIGN_MAX_CHARS = 128_000
 APPLICATION_SOURCE_MAX_CHARS = 256_000
 APPLICATION_SOURCE_EXCERPT_MAX_CHARS = 5_000
+SVG_DRAWING_ELEMENTS = frozenset(
+    {"circle", "ellipse", "image", "line", "path", "polygon", "polyline", "rect", "text", "use"}
+)
 APPLICATION_INDEX = b"""<!doctype html>
 <html lang="en">
 <head>
@@ -223,7 +227,7 @@ class ApplicationBuilderTask(BaseModel):
     objective: str = Field(min_length=1, max_length=20_000)
     scaffold_path: str
     source_path: str
-    preload_skills: tuple[Literal["website-building"]] = (APPLICATION_BUILDER_SKILL,)
+    preload_skills: tuple[Literal["ufo-style"]] = (APPLICATION_BUILDER_SKILL,)
 
     @model_validator(mode="after")
     def source_is_the_scaffolds_app_tsx(self) -> "ApplicationBuilderTask":
@@ -304,22 +308,19 @@ class ApplicationBuildAcceptance:
             raise RuntimeError("the application builder dispatched without its extension context")
         if result.source_path != APPLICATION_SOURCE_PATH:
             return self._blocked(result, "The worker returned the wrong source path.", 0)
-        key = APPLICATION_BUILDER_QA_SUCCESS_KEY.format(turn_id=self.child_turn_id)
-        browser_batches = await self.ctx.ext.store.get(key)
-        if browser_batches is None:
+        key = APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=self.child_turn_id)
+        stored_proof = await self.ctx.ext.store.get(key)
+        if stored_proof is None:
             return self._blocked(
                 result,
-                "The worker completed fewer than two browser QA batches.",
+                "The worker returned no passed product QA proof.",
                 0,
             )
-        if type(browser_batches) is not int:
-            raise RuntimeError("successful application builder QA count is not an integer")
-        if browser_batches < 2:
-            return self._blocked(
-                result,
-                "The worker completed fewer than two browser QA batches.",
-                browser_batches,
-            )
+        try:
+            proof = ApplicationQaProof.model_validate(stored_proof)
+        except ValueError as error:
+            raise RuntimeError("application builder QA proof is invalid") from error
+        browser_batches = proof.browser_batches
         if result.observed_errors:
             return self._blocked(
                 result,
@@ -356,6 +357,12 @@ class ApplicationBuildAcceptance:
             return self._blocked(
                 result,
                 "The deployed site retained no app.tsx.",
+                browser_batches,
+            )
+        if deployed_source.sha256 != proof.source_sha256:
+            return self._blocked(
+                result,
+                "The deployed app.tsx does not match the product QA proof.",
                 browser_batches,
             )
         task = ApplicationBuilderTask(
@@ -415,6 +422,13 @@ class WriteApplicationSourceInput(BaseModel):
 
     user_description: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=APPLICATION_SOURCE_MAX_CHARS)
+
+
+class WriteApplicationDesignInput(BaseModel):
+    """One SVG visual contract for the application first screen."""
+
+    user_description: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=APPLICATION_DESIGN_MAX_CHARS)
 
 
 class ReadApplicationSourceInput(BaseModel):
@@ -478,6 +492,75 @@ def _validate_application_source(source: str) -> None:
         raise ValueError("mountApp must receive the root element and a render callback")
 
 
+def _validate_application_design(source: str) -> None:
+    if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
+        raise ValueError("application design must not declare XML entities")
+    try:
+        root = ElementTree.fromstring(source)
+    except ElementTree.ParseError as error:
+        raise ValueError("application design must be valid SVG") from error
+    if root.tag.rsplit("}", 1)[-1] != "svg":
+        raise ValueError("application design root must be svg")
+    try:
+        view_box = tuple(
+            float(value) for value in re.split(r"[ ,]+", root.attrib["viewBox"].strip())
+        )
+    except (KeyError, ValueError) as error:
+        raise ValueError("application design svg requires a viewBox") from error
+    if (
+        len(view_box) != 4
+        or not all(isfinite(value) for value in view_box)
+        or view_box[2] <= 0
+        or view_box[3] <= 0
+    ):
+        raise ValueError("application design svg requires a viewBox")
+    drawing_elements = 0
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1]
+        attributes = {
+            name.rsplit("}", 1)[-1]: value.strip() for name, value in element.attrib.items()
+        }
+        match tag:
+            case "circle":
+                visible = attributes.get("r", "") not in {"", "0", "0.0"}
+            case "ellipse":
+                visible = all(
+                    attributes.get(name, "") not in {"", "0", "0.0"} for name in ("rx", "ry")
+                )
+            case "image" | "rect":
+                visible = all(
+                    attributes.get(name, "") not in {"", "0", "0.0"} for name in ("width", "height")
+                )
+            case "line":
+                visible = (
+                    attributes.get("x1", "") != attributes.get("x2", "")
+                    or attributes.get("y1", "") != attributes.get("y2", "")
+                ) and attributes.get("stroke", "").casefold() not in {"", "none", "transparent"}
+            case "path":
+                visible = bool(attributes.get("d"))
+            case "polygon" | "polyline":
+                visible = bool(attributes.get("points"))
+            case "text":
+                visible = bool("".join(element.itertext()).strip())
+            case "use":
+                visible = attributes.get("href", "").startswith("#")
+            case _:
+                visible = False
+        if tag in SVG_DRAWING_ELEMENTS and visible:
+            drawing_elements += 1
+        if tag in {"script", "foreignObject"}:
+            raise ValueError("application design must contain SVG drawing elements only")
+        for name, value in element.attrib.items():
+            attribute = name.rsplit("}", 1)[-1].casefold()
+            lowered = value.casefold()
+            if attribute.startswith("on") or any(
+                scheme in lowered for scheme in ("javascript:", "data:", "http:", "https:")
+            ):
+                raise ValueError("application design must not contain active or external content")
+    if drawing_elements == 0:
+        raise ValueError("application design must contain SVG drawing elements only")
+
+
 async def _build_application_project(ctx: ToolContext, project: str) -> None:
     await ctx.sandbox.write_file(f"{project}/{PROJECT_CONFIG}", PROJECT_CONFIG_BYTES)
     await unpack_page_kit(ctx, project)
@@ -508,6 +591,17 @@ def _source_claim_path(task: ApplicationBuilderTask, turn_id: UUID) -> str:
     )
 
 
+def _design_path(task: ApplicationBuilderTask) -> str:
+    return f"{task.scaffold_path}/application-design.svg"
+
+
+def _design_claim_path(task: ApplicationBuilderTask, turn_id: UUID) -> str:
+    return (
+        "/workspace/.tool-output/application-builder/"
+        f"{sha256(_design_path(task).encode()).hexdigest()}.{turn_id}.claimed"
+    )
+
+
 def _source_candidate_path(task: ApplicationBuilderTask, turn_id: UUID) -> str:
     return (
         "/workspace/.tool-output/application-builder/"
@@ -530,6 +624,53 @@ async def _require_application_source(ctx: ToolContext, task: ApplicationBuilder
         raise ValueError("write_application_source must complete before source repair")
     if claim.exit_code != 0:
         raise RuntimeError(claim.stderr or "application source claim could not be read")
+
+
+async def _require_application_design(ctx: ToolContext, task: ApplicationBuilderTask) -> None:
+    claim = await ctx.sandbox.python(
+        APPLICATION_SOURCE_REQUIRE_CLAIM, _design_claim_path(task, ctx.turn.id)
+    )
+    if claim.exit_code == 17:
+        raise ValueError("write_application_design must complete before write_application_source")
+    if claim.exit_code != 0:
+        raise RuntimeError(claim.stderr or "application design claim could not be read")
+    result = await ctx.sandbox.python(APPLICATION_SOURCE_READ, _design_path(task))
+    if result.exit_code != 0 or not result.stdout:
+        raise ValueError("write_application_design must complete before write_application_source")
+    _validate_application_design(result.stdout)
+
+
+async def write_application_design(
+    ctx: ToolContext, args: WriteApplicationDesignInput
+) -> ToolResult:
+    """Write one SVG visual contract before application source work starts."""
+
+    task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
+    _validate_application_design(args.content)
+    design_path = _design_path(task)
+    claim = await ctx.sandbox.python(
+        APPLICATION_SOURCE_CLAIM,
+        _design_claim_path(task, ctx.turn.id),
+    )
+    if claim.exit_code == 17:
+        raise ValueError("the application design is already fixed for this build")
+    if claim.exit_code != 0:
+        raise RuntimeError(claim.stderr or "application design ownership could not be claimed")
+    content = args.content.encode()
+    await ctx.sandbox.write_file(design_path, content)
+    return ToolResult(
+        content=(
+            TextContent(
+                text=json.dumps(
+                    {
+                        "path": design_path,
+                        "design_digest": sha256(content).hexdigest(),
+                        "size_bytes": len(content),
+                    }
+                )
+            ),
+        )
+    )
 
 
 async def read_application_source(ctx: ToolContext, args: ReadApplicationSourceInput) -> ToolResult:
@@ -641,6 +782,7 @@ async def write_application_source(
     """Write only the `app.tsx` path admitted in this child turn's typed input."""
 
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
+    await _require_application_design(ctx, task)
     claim = await ctx.sandbox.python(
         APPLICATION_SOURCE_CLAIM, _source_claim_path(task, ctx.turn.id)
     )
@@ -929,51 +1071,6 @@ async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInpu
     return ToolResult(content=(TextContent(text=accepted.model_dump_json()),))
 
 
-async def limit_application_builder_qa(ctx: HookContext) -> Deny | ModifyInput | None:
-    """Limit the application worker to the four-call browser protocol."""
-
-    if ctx.turn is None or ctx.turn.subagent_profile != APPLICATION_BUILDER_NAME:
-        return None
-    match ctx.payload:
-        case PreToolUse():
-            pass
-        case _:
-            return None
-    key = APPLICATION_BUILDER_QA_KEY.format(turn_id=ctx.turn.id)
-    stored = await ctx.ext.store.get(key)
-    if stored is None:
-        used = 0
-    elif type(stored) is int:
-        used = stored
-    else:
-        raise RuntimeError("application builder QA count is not an integer")
-    if used >= APPLICATION_BUILDER_QA_LIMIT:
-        return Deny(reason=APPLICATION_BUILDER_QA_LIMIT_REASON)
-    await ctx.ext.store.put(key, used + 1)
-    return ModifyInput(tool_input=ctx.payload.tool_input.model_copy(update={"reset": True}))
-
-
-async def record_application_builder_qa(ctx: HookContext) -> None:
-    """Record each successful application browser batch for the deployment gate."""
-
-    if ctx.turn is None or ctx.turn.subagent_profile != APPLICATION_BUILDER_NAME:
-        return None
-    match ctx.payload:
-        case PostToolUse():
-            pass
-        case _:
-            return None
-    key = APPLICATION_BUILDER_QA_SUCCESS_KEY.format(turn_id=ctx.turn.id)
-    stored = await ctx.ext.store.get(key)
-    if stored is None:
-        succeeded = 0
-    elif type(stored) is int:
-        succeeded = stored
-    else:
-        raise RuntimeError("successful application builder QA count is not an integer")
-    await ctx.ext.store.put(key, succeeded + 1)
-
-
 async def limit_application_builder_repair_reads(ctx: HookContext) -> Deny | None:
     """Limit consecutive source reads after the product audit returns repair work."""
 
@@ -1013,17 +1110,19 @@ async def limit_application_builder_repair_reads(ctx: HookContext) -> Deny | Non
 
 
 async def require_application_builder_qa(ctx: HookContext) -> Deny | None:
-    """Refuse application deployment until two browser batches have succeeded."""
+    """Refuse application deployment until deterministic product QA passes."""
 
     if ctx.turn is None or ctx.turn.subagent_profile != APPLICATION_BUILDER_NAME:
         return None
-    key = APPLICATION_BUILDER_QA_SUCCESS_KEY.format(turn_id=ctx.turn.id)
-    succeeded = await ctx.ext.store.get(key)
-    if type(succeeded) is int and succeeded >= 2:
-        return None
-    if succeeded is not None and type(succeeded) is not int:
-        raise RuntimeError("successful application builder QA count is not an integer")
-    return Deny(reason=APPLICATION_BUILDER_DEPLOY_GUARD_REASON)
+    key = APPLICATION_BUILDER_QA_PROOF_KEY.format(turn_id=ctx.turn.id)
+    stored_proof = await ctx.ext.store.get(key)
+    if stored_proof is None:
+        return Deny(reason=APPLICATION_BUILDER_DEPLOY_GUARD_REASON)
+    try:
+        ApplicationQaProof.model_validate(stored_proof)
+    except ValueError as error:
+        raise RuntimeError("application builder QA proof is invalid") from error
+    return None
 
 
 APPLICATION_BUILDER_DELEGATION = ToolDef(
@@ -1050,6 +1149,19 @@ APPLICATION_PREVIEW = ToolDef(
     input_model=RenderApplicationPreviewInput,
     handler=render_application_preview,
     side_effecting=True,
+)
+
+
+APPLICATION_BUILDER_DESIGN = ToolDef(
+    name=APPLICATION_BUILDER_DESIGN_TOOL,
+    description=(
+        "Write one complete SVG visual contract for the first laptop screen before app.tsx. "
+        "The SVG fixes information order, layout, component shapes, labels, and action placement; "
+        "it is not embedded in the application."
+    ),
+    input_model=WriteApplicationDesignInput,
+    handler=write_application_design,
+    profile_only=True,
 )
 
 
@@ -1092,12 +1204,12 @@ APPLICATION_BUILDER_PROFILE = SubagentProfile(
         "search_connector_tools",
         "call_external_tool",
         "read",
-        "start_server",
+        APPLICATION_BUILDER_DESIGN_TOOL,
         APPLICATION_BUILDER_QA_TOOL,
         APPLICATION_BUILDER_READ_TOOL,
         APPLICATION_BUILDER_EDIT_TOOL,
         APPLICATION_BUILDER_WRITE_TOOL,
-        "deploy_website",
+        APPLICATION_BUILDER_DEPLOY_TOOL,
     ),
     input_model=ApplicationBuilderTask,
     output_model=ApplicationBuilderResult,

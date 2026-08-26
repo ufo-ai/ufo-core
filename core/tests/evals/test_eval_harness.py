@@ -30,6 +30,12 @@ from cryptography.fernet import Fernet
 from dbos import DBOSClient
 from dbos import error as dbos_error
 from httpx import AsyncClient
+from ufo_ext_sites.application_builder import (
+    APPLICATION_BUILDER_DEPLOY_TOOL,
+    APPLICATION_BUILDER_DESIGN_TOOL,
+    APPLICATION_BUILDER_QA_TOOL,
+    APPLICATION_BUILDER_WRITE_TOOL,
+)
 
 import evals.harness.capability as harness_capability
 import evals.harness.mounts as mounts
@@ -160,6 +166,8 @@ from evals.suites.document_visual import WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUA
 from evals.suites.first_run import FIRST_RUN_PACKS, FIRST_RUN_SKILL
 from evals.suites.new_application import (
     _accepted_contract_failure,
+    _application_repair_tool_failure,
+    _application_worker_tool_failure,
     _guided_design_failure,
     _interviews,
     _sync_active_application_workspace,
@@ -503,6 +511,39 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
         ),
     )
     assert "used a model worker" in str(_guided_design_failure(delegated, 1))
+
+
+def test_application_journey_graders_require_the_fixed_worker_tools() -> None:
+    worker_calls = tuple(
+        ToolInvocation(name, {}, has_result=True)
+        for name in (
+            APPLICATION_BUILDER_DESIGN_TOOL,
+            APPLICATION_BUILDER_WRITE_TOOL,
+            APPLICATION_BUILDER_QA_TOOL,
+            APPLICATION_BUILDER_DEPLOY_TOOL,
+        )
+    )
+    assert _application_worker_tool_failure(worker_calls) is None
+    old_worker_calls = tuple(
+        ToolInvocation(name, {}, has_result=True)
+        for name in (
+            APPLICATION_BUILDER_WRITE_TOOL,
+            "start_server",
+            "js_repl",
+            "deploy_website",
+        )
+    )
+    assert APPLICATION_BUILDER_DESIGN_TOOL in str(
+        _application_worker_tool_failure(old_worker_calls)
+    )
+
+    failed = CapabilityOutput("", (worker_calls[1],))
+    repaired = CapabilityOutput("", (worker_calls[-1],))
+    assert _application_repair_tool_failure(failed, repaired) is None
+    old_repair = CapabilityOutput("", (ToolInvocation("deploy_website", {}, has_result=True),))
+    assert _application_repair_tool_failure(failed, old_repair) == (
+        "the repair attempt deployed no site"
+    )
 
 
 def test_the_accepted_preview_contract_must_reach_the_application_prompt() -> None:

@@ -473,12 +473,13 @@ async function interactiveDocument(frame) {
   }
   const shots = { light: lightShot, dark: darkShot };
   const browser = await chromium.launch();
-  const views = [];
-  for (const view of VIEWS) {
-    const context = await browser.newContext({
-      viewport: { width: view.width, height: view.height },
-      colorScheme: view.scheme,
-    });
+  try {
+    const views = await Promise.all(VIEWS.map(async (view) => {
+      const context = await browser.newContext({
+        viewport: { width: view.width, height: view.height },
+        colorScheme: view.scheme,
+      });
+      try {
     const page = await context.newPage();
     const problems = [];
     page.on('console', (message) => {
@@ -536,26 +537,30 @@ async function interactiveDocument(frame) {
       });
       fs.writeFileSync(staticPath, await frame.content());
     }
-    views.push({ scheme: view.scheme, width: view.width, shot, console: problems, ...measured });
-    await context.close();
-  }
-  const interaction = await interactionAudit(browser, url);
-  await browser.close();
-  const report = { url, floor: AA_FLOOR, views, interaction };
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
-  for (const view of views) {
-    console.log(
-      `${view.scheme} ${view.width}: ${view.textUnderFloor} text under ${AA_FLOOR}:1 ` +
-        '(3:1 is enough only at 24px, or at 18.66px bold), ' +
-        `document ${view.documentWidth}x${view.documentHeight}px in ` +
-        `${view.viewportWidth}x${view.viewportHeight}px, ` +
-        `${view.clipped.length} clipped, ${view.console.length} console error(s)`
-    );
-    for (const item of view.text) {
-      console.log(`   ${item.ratio}:1 ${item.px}px w${item.weight} ${item.selector} — "${item.text}"`);
+        return { scheme: view.scheme, width: view.width, shot, console: problems, ...measured };
+      } finally {
+        await context.close();
+      }
+    }));
+    const interaction = await interactionAudit(browser, url);
+    const report = { url, floor: AA_FLOOR, views, interaction };
+    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+    for (const view of views) {
+      console.log(
+        `${view.scheme} ${view.width}: ${view.textUnderFloor} text under ${AA_FLOOR}:1 ` +
+          '(3:1 is enough only at 24px, or at 18.66px bold), ' +
+          `document ${view.documentWidth}x${view.documentHeight}px in ` +
+          `${view.viewportWidth}x${view.viewportHeight}px, ` +
+          `${view.clipped.length} clipped, ${view.console.length} console error(s)`
+      );
+      for (const item of view.text) {
+        console.log(`   ${item.ratio}:1 ${item.px}px w${item.weight} ${item.selector} — "${item.text}"`);
+      }
     }
+    console.log(
+      `${interaction.successes.length}/${interaction.controls.length} controls changed visible state`
+    );
+  } finally {
+    await browser.close();
   }
-  console.log(
-    `${interaction.successes.length}/${interaction.controls.length} controls changed visible state`
-  );
 })();

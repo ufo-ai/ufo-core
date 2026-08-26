@@ -22,7 +22,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION_TOOL,
+    APPLICATION_BUILDER_DEPLOY_TOOL,
+    APPLICATION_BUILDER_DESIGN_TOOL,
     APPLICATION_BUILDER_NAME,
+    APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_WRITE_TOOL,
     APPLICATION_SOURCE_PATH,
     ApplicationBuilderResult,
@@ -31,7 +34,12 @@ from ufo_ext_sites.application_builder import (
 from ufo_ext_sites.store import hosted_site
 from ufo_ext_web.surface import SEED_PROMPT
 
-from evals.harness.capability import CapabilityOutput, CapabilityVerdict, DescribedGrader
+from evals.harness.capability import (
+    CapabilityOutput,
+    CapabilityVerdict,
+    DescribedGrader,
+    ToolInvocation,
+)
 from evals.harness.memory_fence import forget_workspace_memory
 from evals.harness.scenario import EvalSeed, ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.harness.target import CapabilityTarget
@@ -562,6 +570,24 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
     return first, second
 
 
+def _application_worker_tool_failure(calls: tuple[ToolInvocation, ...]) -> str | None:
+    completed = frozenset(call.name for call in calls if call.succeeded)
+    required = {
+        APPLICATION_BUILDER_DEPLOY_TOOL,
+        APPLICATION_BUILDER_DESIGN_TOOL,
+        APPLICATION_BUILDER_QA_TOOL,
+    }
+    if missing := sorted(required - completed):
+        return f"the Gemini worker did not complete: {', '.join(missing)}"
+    if not any(call.name == APPLICATION_BUILDER_WRITE_TOOL for call in calls):
+        return f"the Gemini worker did not call {APPLICATION_BUILDER_WRITE_TOOL}"
+    if not any(call.name == APPLICATION_BUILDER_QA_TOOL and call.succeeded for call in calls):
+        return "the Gemini worker completed no product QA batch"
+    if any(call.name == "set_homepage" for call in calls):
+        return "the Gemini worker tried to certify its own homepage"
+    return None
+
+
 async def _homepage_journey_failure(outcome: ScenarioOutcome) -> str | None:
     followup = outcome.followup
     if followup is None:
@@ -600,20 +626,8 @@ async def _homepage_journey_failure(outcome: ScenarioOutcome) -> str | None:
     parent_work = tuple(call.name for call in followup.own_calls if call.name in forbidden)
     if parent_work:
         return f"the Opus application parent entered the build loop: {', '.join(parent_work)}"
-    completed = frozenset(call.name for call in followup.calls if call.succeeded)
-    required = {
-        "start_server",
-        "js_repl",
-        "deploy_website",
-    }
-    if missing := sorted(required - completed):
-        return f"the Gemini worker did not complete: {', '.join(missing)}"
-    if not any(call.name == APPLICATION_BUILDER_WRITE_TOOL for call in followup.calls):
-        return f"the Gemini worker did not call {APPLICATION_BUILDER_WRITE_TOOL}"
-    if sum(1 for call in followup.calls if call.name == "js_repl" and call.succeeded) < 2:
-        return "the Gemini worker completed fewer than two browser QA batches"
-    if any(call.name == "set_homepage" for call in followup.calls):
-        return "the Gemini worker tried to certify its own homepage"
+    if failure := _application_worker_tool_failure(followup.calls):
+        return failure
     name = _agent_applies(outcome.output)[0][1]
     async with workspace_tx() as connection:
         application = (
@@ -800,6 +814,20 @@ async def _graded_guided_revision_journey(outcome: ScenarioOutcome) -> Capabilit
     )
 
 
+def _application_repair_tool_failure(
+    first: CapabilityOutput, second: CapabilityOutput
+) -> str | None:
+    if not any(call.name == APPLICATION_BUILDER_WRITE_TOOL for call in first.calls):
+        return "the failed attempt made no initial source write"
+    if any(call.name == APPLICATION_BUILDER_DEPLOY_TOOL and call.succeeded for call in first.calls):
+        return "the failed attempt deployed a site"
+    if not any(
+        call.name == APPLICATION_BUILDER_DEPLOY_TOOL and call.succeeded for call in second.calls
+    ):
+        return "the repair attempt deployed no site"
+    return None
+
+
 async def _graded_repair_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
@@ -830,12 +858,8 @@ async def _graded_repair_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
     if any(call.name == "set_homepage" for call in outcome.output.calls):
         return CapabilityVerdict(False, "a Gemini worker tried to certify its own homepage")
     first, second = outcome.followups
-    if not any(call.name == APPLICATION_BUILDER_WRITE_TOOL for call in first.calls):
-        return CapabilityVerdict(False, "the failed attempt made no initial source write")
-    if any(call.name == "deploy_website" and call.succeeded for call in first.calls):
-        return CapabilityVerdict(False, "the failed attempt deployed a site")
-    if not any(call.name == "deploy_website" and call.succeeded for call in second.calls):
-        return CapabilityVerdict(False, "the repair attempt deployed no site")
+    if repair_failure := _application_repair_tool_failure(first, second):
+        return CapabilityVerdict(False, repair_failure)
     name = _agent_applies(outcome.output)[0][1]
     async with workspace_tx() as connection:
         application = (

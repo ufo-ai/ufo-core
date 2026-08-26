@@ -18,7 +18,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ufo.sdk.manifest import SubagentProfile
-from ufo_ext_sites.tools import PUBLISH_WEBSITE_TOOL, SITES_TOOL_NAMES
+from ufo_ext_sites.tools import PUBLISH_WEBSITE_TOOL, SITES_TOOLS
 
 WEBSITE_BUILDING_NAME = "website_building"
 WEBSITE_BUILDING_PROMPT = (
@@ -33,7 +33,11 @@ WEBSITE_BUILDING_TOOL_NAMES = (
     "glob",
     "grep",
     "load_skill",
-    *(name for name in SITES_TOOL_NAMES if name != PUBLISH_WEBSITE_TOOL),
+    *(
+        tool.name
+        for tool in SITES_TOOLS
+        if tool.name != PUBLISH_WEBSITE_TOOL and not tool.profile_only
+    ),
     "js_repl",
     "xlsx_repl",
     # Web reference-gathering (source website_building set); resolves if research is installed.

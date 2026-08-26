@@ -240,6 +240,89 @@ contrast, fact, density, and visual thresholds.
 | 4 | Give the application profile fixed-root start and deploy tools with no `project_path` input. | A worker cannot select `dist` or another root. |
 | 5 | Compare Gemini `low` with `medium`. | Test only after deterministic waste is removed. Keep `medium` unless `low` preserves hard passes and improves accepted throughput. |
 
+Step 1 passes its three-case screen. The worker receives one fixed-root `qa_ufo_application` tool
+instead of `start_server` and `js_repl`. The tool enters the application frame and runs the same
+four-view, contrast, fit, clipping, console, fact, first-screen, control, and interaction checks. A
+failed check returns one typed repair result. Only a passed result records the deployment proof.
+Deployment still repeats the audit; step 2 owns that removal.
+
+| Arm | Runs | Hard | Median wall | Worker rounds | Worker tools | Tokens | Cost |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Browser batches | `045f6552`, `5515a7ba` | 0/3 | 350s | 69 | 84 | 1.39M | $0.384 |
+| Product QA | `a7843852`, `d0b0526b` | 2/3 | 315s | 54 | 66 | 1.14M | $0.379 |
+
+Product QA passes `pre-meeting-briefs` and `issue-owner`. `meeting-tasks` passes every deterministic
+product check, all required facts, and 11 interactions. It fails two visual judgments because the
+proposal approval controls sit below the first desktop screen. Keep that failure for the later
+quality campaign. Each product-QA case uses one repair result and one passed result, with no
+free-form browser call.
+
+Step 2 passes its source and deployment gate. A passed product audit stores one typed proof with
+the exact `app.tsx` SHA-256 and the one or two browser QA calls used. Deployment compares the
+current source with that proof before it builds or changes hosting state. It does not run the
+browser audit again. Product acceptance also compares the deployed source with the same proof.
+A focused stale-source test proves that an edit after QA is refused before a build starts.
+
+The unchanged three-case matched screen passes one case in each arm. Four samples stop in product
+QA before the source-proof boundary, so their different app failures measure worker variance.
+Treatment `meeting-tasks` reaches the boundary, deploys, and passes every hard gate. Its valid
+deployment takes 22.1 seconds. The two successful step-1 deployments took 55.3 and 60.3 seconds
+because deployment repeated the browser audit. Total case wall time remains model-dominated.
+
+| Case | Control | Source proof | Boundary result |
+|---|---:|---:|---|
+| `pre-meeting-briefs` | `fed64f1c` 0/1 | `0bb5d88e` 0/1 | Both fail separate app checks. |
+| `issue-owner` | `a1092ae1` 1/1 | `7b0e85b9` 0/1 | Treatment stops in product QA before deployment. |
+| `meeting-tasks` | `ea3fc570` 0/1 | `9651c935` 1/1 | Treatment reuses the exact-source proof and passes. |
+
+Step 3 accepts viewport parallelism. The four independent light, dark, desktop, and phone checks
+run together. `Promise.all` keeps their declared output order. The interaction audit remains
+sequential. In the matched `meeting-tasks` screen, control run `3ecb809e` takes 36.1 and 36.3
+seconds for its two product QA calls. Parallel run `71a32ed4` takes 31.1 and 31.7 seconds. It keeps
+all four views, both screenshots, 14 first-screen facts, ten visible state changes, and all 11
+visual criteria. It deploys and fails only the unchanged source-copy grader.
+
+Step 3 rejects two concurrent interaction contexts. The valid matched controls `b669b6cc` and
+`764167ee` pass 2/2. Treatments `7845d847` and `f94c1129` pass 0/2. Treatment audits keep ordered
+results, nested controls, four to seven visible state changes, all four views, and no console
+errors. Their QA calls are faster, but one app has phone overflow and one omits a required prepared
+assignment label. Keep sequential interaction contexts because the strict product bar regresses.
+The earlier treatment `a28cd6f8` never reaches product QA and does not count.
+
+Step 4 accepts the fixed-root deployment boundary. The application profile now receives
+`deploy_ufo_application`, whose schema contains only `site_name` and `user_description`. The tool
+owns `/workspace/ufo-app` and `index.html`; the generic website profile keeps `deploy_website`.
+A focused tool test proves both fixed values and rejects access outside the application profile.
+
+Matched `meeting-tasks` run `4dccd36d` completes two product QA calls and one deployment with no
+path argument or invalid `dist` call. Control `fcf0a9cc` stops in product QA. Both fail the unchanged
+copy rule, so no strict case moves. The `issue-owner` sentinel (`633eae48` / `3f9dbcda`) also moves no
+case because both workers stop on separate fact-placement failures before deployment. Historical
+control `764167ee` passed only after one rejected `/workspace/ufo-app/dist` call and a corrected
+deployment. That invalid call is now impossible at the schema boundary.
+
+Step 5 rejects Gemini `low`. The matched three-case screen keeps `medium` as the control and changes
+only the application profile reasoning setting. Medium run `18c46712` passes `issue-owner`; low run
+`4a950efe` loses that pass and moves neither failing case. Low uses 1.05 million tokens instead of
+1.56 million and costs $0.36 instead of $0.42, but median wall time rises from 273 to 287 seconds.
+The low change is reverted. Keep `medium` for the SVG-first screen.
+
+Step 6 accepts one SVG before source work. The application profile receives one fixed-root
+`write_application_design` tool. It accepts one safe SVG visual contract, writes
+`/workspace/ufo-app/application-design.svg`, and blocks `app.tsx` until that design exists. The
+worker must implement semantic HTML, CSS, and controls; it cannot embed the SVG as the application.
+
+The matched three-case control run `03e971ed` passes 0/3. SVG-first run `7e73a411` passes
+`issue-owner` and moves no control pass backward. Mean app score rises from 0.809 to 0.916 and mean
+process score rises from 0.333 to 0.778. Median wall time falls from 293 to 256 seconds. Tokens rise
+from 1.19 million to 1.97 million and cost rises from $0.364 to $0.475. Each treatment case writes
+exactly one SVG before its first source write.
+
+Keep the one-SVG boundary for review. Do not hide its remaining waste: `meeting-tasks` takes 543
+seconds and makes three rejected source-edit calls before it repairs and deploys. Test at most two
+design-only SVG revisions next. A later repair must remove invalid edit shapes at the tool boundary
+without lowering the product checks.
+
 Do not test templates in this campaign.
 
 ## Stage A: Production target

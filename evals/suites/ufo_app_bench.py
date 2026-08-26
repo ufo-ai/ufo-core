@@ -64,9 +64,10 @@ from ufo_ext_sites.application_audit import (
 )
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION_TOOL,
+    APPLICATION_BUILDER_DESIGN_TOOL,
     APPLICATION_BUILDER_EDIT_TOOL,
     APPLICATION_BUILDER_NAME,
-    APPLICATION_BUILDER_QA_LIMIT_REASON,
+    APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_READ_TOOL,
     APPLICATION_BUILDER_WRITE_TOOL,
     ApplicationBuilderResult,
@@ -190,7 +191,8 @@ WORKFLOW_WAIT_SECONDS = 900.0
 SUPPORTED_BACKENDS = ("docker",)
 MAX_PREVIEW_SERVER_CALLS = 1
 MAX_BROWSER_QA_CALLS = 4
-DEPLOY_TOOLS = ("deploy_website", "publish_website")
+MAX_PRODUCT_QA_CALLS = 3
+DEPLOY_TOOLS = ("deploy_website", "deploy_ufo_application", "publish_website")
 SOURCE_SENTENCE = re.compile(r"(?<=[.!?])\s+")
 SOURCE_COPY_WINDOW_PARTS = 3
 SOURCE_COPY_MIN_WORDS = 6
@@ -1678,6 +1680,8 @@ def _application_builder_scorer() -> Grader:
             "bash",
             "start_server",
             "js_repl",
+            APPLICATION_BUILDER_DESIGN_TOOL,
+            APPLICATION_BUILDER_QA_TOOL,
             APPLICATION_BUILDER_READ_TOOL,
             APPLICATION_BUILDER_EDIT_TOOL,
             APPLICATION_BUILDER_WRITE_TOOL,
@@ -1695,10 +1699,12 @@ def _application_builder_scorer() -> Grader:
                 failed,
             )
         required_worker_tools = {
-            "start_server",
-            "js_repl",
-            "deploy_website",
+            APPLICATION_BUILDER_DESIGN_TOOL,
+            APPLICATION_BUILDER_QA_TOOL,
+            "deploy_ufo_application",
         }
+        if APPLICATION_BUILDER_QA_TOOL == "js_repl":
+            required_worker_tools.add("start_server")
         completed = frozenset(call.name for call in output.calls if call.succeeded)
         missing = required_worker_tools - completed
         if missing:
@@ -1707,10 +1713,26 @@ def _application_builder_scorer() -> Grader:
                 f"the worker did not complete: {', '.join(sorted(missing))}",
                 failed,
             )
-        if not any(call.name == APPLICATION_BUILDER_WRITE_TOOL for call in output.calls):
+        design_calls = tuple(
+            index
+            for index, call in enumerate(output.calls)
+            if call.name == APPLICATION_BUILDER_DESIGN_TOOL
+        )
+        source_writes = tuple(
+            index
+            for index, call in enumerate(output.calls)
+            if call.name == APPLICATION_BUILDER_WRITE_TOOL
+        )
+        if not source_writes:
             return CapabilityVerdict(
                 False,
                 f"the worker did not call {APPLICATION_BUILDER_WRITE_TOOL}",
+                failed,
+            )
+        if len(design_calls) != 1 or design_calls[0] > source_writes[0]:
+            return CapabilityVerdict(
+                False,
+                "the worker must write one SVG design before app.tsx",
                 failed,
             )
         if any(call.name == "set_homepage" for call in output.calls):
@@ -1719,13 +1741,17 @@ def _application_builder_scorer() -> Grader:
                 "the worker tried to certify its own homepage",
                 failed,
             )
-        browser_batches = sum(
-            1 for call in output.calls if call.name == "js_repl" and call.succeeded
+        successful_qa = sum(
+            1
+            for call in output.calls
+            if call.name == APPLICATION_BUILDER_QA_TOOL and call.succeeded
         )
-        if browser_batches < 2:
+        needed_qa = 2 if APPLICATION_BUILDER_QA_TOOL == "js_repl" else 1
+        if successful_qa < needed_qa:
             return CapabilityVerdict(
                 False,
-                f"the worker completed {browser_batches} browser QA batch(es), expected at least 2",
+                f"the worker completed {successful_qa} successful QA call(s), expected at least "
+                f"{needed_qa}",
                 failed,
             )
         return CapabilityVerdict(
@@ -1818,81 +1844,72 @@ def _delivery_scorer() -> Grader:
 def _qa_efficiency_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         failed = _score_evidence("processQa", 0, 1)
-        starts = tuple(call for call in output.calls if call.name == "start_server")
-        if len(starts) != MAX_PREVIEW_SERVER_CALLS:
-            return CapabilityVerdict(
-                False,
-                f"used start_server {len(starts)} time(s), needs {MAX_PREVIEW_SERVER_CALLS}",
-                failed,
-            )
-        if not starts[0].succeeded:
-            return CapabilityVerdict(False, "the preview server did not start successfully", failed)
-        browser_indexes = tuple(
-            index
-            for index, call in enumerate(output.calls)
-            if call.name == "js_repl" and call.result != APPLICATION_BUILDER_QA_LIMIT_REASON
+        qa_calls = tuple(call for call in output.calls if call.name == APPLICATION_BUILDER_QA_TOOL)
+        if not qa_calls:
+            return CapabilityVerdict(False, "used no application QA call", failed)
+        max_calls = (
+            MAX_BROWSER_QA_CALLS
+            if APPLICATION_BUILDER_QA_TOOL == "js_repl"
+            else MAX_PRODUCT_QA_CALLS
         )
-        if not browser_indexes:
-            return CapabilityVerdict(False, "used no js_repl browser QA batch", failed)
-        if len(browser_indexes) > MAX_BROWSER_QA_CALLS:
+        if len(qa_calls) > max_calls:
             return CapabilityVerdict(
                 False,
-                f"used {len(browser_indexes)} browser QA batches, needs at most "
-                f"{MAX_BROWSER_QA_CALLS}",
+                f"used {len(qa_calls)} QA calls, needs at most {max_calls}",
                 failed,
             )
+        successful = tuple(call for call in qa_calls if call.succeeded)
+        needed = 2 if APPLICATION_BUILDER_QA_TOOL == "js_repl" else 1
+        if len(successful) < needed:
+            return CapabilityVerdict(
+                False,
+                f"used {len(successful)} successful QA call(s), needs at least {needed}",
+                failed,
+            )
+        if not qa_calls[-1].succeeded:
+            return CapabilityVerdict(False, "the final QA call failed", failed)
         deployments = tuple(
             (index, call) for index, call in enumerate(output.calls) if call.name in DEPLOY_TOOLS
         )
         if not deployments:
             return CapabilityVerdict(
                 False,
-                "browser QA must precede the application deployment",
+                "QA must precede the application deployment",
                 failed,
             )
         if not deployments[-1][1].succeeded:
             return CapabilityVerdict(False, "the final application deployment failed", failed)
         names = tuple(call.name for call in output.calls)
-        start_index = names.index("start_server")
-        if not start_index < min(browser_indexes):
-            return CapabilityVerdict(False, "browser QA must run after start_server", failed)
-        successful_deployments = tuple(index for index, call in deployments if call.succeeded)
-        prior_deployment = start_index
-        assigned_browser_indexes: list[int] = []
-        for cycle_index, deployment in enumerate(successful_deployments):
-            cycle = tuple(
-                index for index in browser_indexes if prior_deployment < index < deployment
-            )
-            successful = tuple(index for index in cycle if output.calls[index].succeeded)
-            required = 2 if cycle_index == 0 else 1
-            if len(successful) < required:
+        qa_indexes = tuple(
+            index
+            for index, call in enumerate(output.calls)
+            if call.name == APPLICATION_BUILDER_QA_TOOL
+        )
+        if APPLICATION_BUILDER_QA_TOOL == "js_repl":
+            starts = tuple(call for call in output.calls if call.name == "start_server")
+            if len(starts) != MAX_PREVIEW_SERVER_CALLS:
                 return CapabilityVerdict(
                     False,
-                    f"used {len(successful)} successful browser QA batch(es) before "
-                    f"{output.calls[deployment].name}, needs at least {required}",
+                    f"used start_server {len(starts)} time(s), needs {MAX_PREVIEW_SERVER_CALLS}",
                     failed,
                 )
-            if not output.calls[cycle[-1]].succeeded:
-                return CapabilityVerdict(False, "the final browser QA batch failed", failed)
-            assigned_browser_indexes.extend(cycle)
-            prior_deployment = deployment
-        if tuple(assigned_browser_indexes) != browser_indexes:
-            return CapabilityVerdict(
-                False,
-                f"browser QA must finish before {output.calls[successful_deployments[-1]].name}",
-                failed,
-            )
+            if not starts[0].succeeded:
+                return CapabilityVerdict(
+                    False, "the preview server did not start successfully", failed
+                )
+            if not names.index("start_server") < min(qa_indexes):
+                return CapabilityVerdict(False, "QA must run after start_server", failed)
+        if not any(max(qa_indexes) < index for index, _call in deployments):
+            deployment_name = deployments[0][1].name
+            return CapabilityVerdict(False, f"QA must finish before {deployment_name}", failed)
         return CapabilityVerdict(
             True,
-            f"started one preview server and used {len(browser_indexes)} browser QA batch(es) "
-            f"across {len(successful_deployments)} deployment(s)",
+            f"used {len(qa_calls)} bounded application QA call(s)",
             _score_evidence("processQa", 1, 1),
         )
 
     return DescribedGrader(
-        "one preview start, two to four browser QA batches total, and one affected-batch proof "
-        "before each redeploy",
-        grade,
+        "one bounded application QA protocol ending in success before deployment", grade
     )
 
 
@@ -2023,10 +2040,10 @@ def _scored_task(task: EvalTask) -> EvalTask:
 def _pull_before_redeploy_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         names = tuple(call.name for call in output.calls)
-        deploys = tuple(index for index, name in enumerate(names) if name == "deploy_website")
+        deploys = tuple(index for index, name in enumerate(names) if name in DEPLOY_TOOLS)
         if len(deploys) < 2:
             return CapabilityVerdict(
-                False, f"used deploy_website {len(deploys)} time(s); the rework needs a second"
+                False, f"used deployment {len(deploys)} time(s); the rework needs a second"
             )
         pulls = tuple(
             index
@@ -2076,7 +2093,7 @@ def _screen(
         ),
         judge_on_deterministic_failure=True,
         digest_tag=(
-            f"ufo-app-bench:{name}:interactive-homepage:qa-1x{MAX_BROWSER_QA_CALLS}:"
+            f"ufo-app-bench:{name}:interactive-homepage:qa-bounded-product:"
             f"audit-{AUDIT_DIGEST[:12]}:wait-{WORKFLOW_WAIT_SECONDS:g}{data_digest}"
         ),
         artifact_probe=(

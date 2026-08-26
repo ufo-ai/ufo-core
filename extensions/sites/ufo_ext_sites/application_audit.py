@@ -19,6 +19,7 @@ MIN_CONTROLS = 2
 MIN_INTERACTIONS = 2
 MAX_ISSUES = 8
 MAX_MESSAGE_CHARS = 500
+MAX_PRODUCT_QA_CONTROLS = 100
 APPLICATION_AUDIT_REQUEST_CONTRACT_KEY = (
     "application-builder/audit-contract/request/{request_sha256}"
 )
@@ -155,6 +156,30 @@ class ApplicationAuditFeedback(BaseModel):
     attempt: int = Field(ge=1)
     attempts_remaining: int = Field(ge=0)
     issues: tuple[ApplicationAuditIssue, ...] = Field(min_length=1, max_length=MAX_ISSUES)
+
+
+class ApplicationProductQaResult(BaseModel):
+    """The deterministic product proof returned to the application worker."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["passed"] = "passed"
+    views_checked: tuple[str, ...] = Field(min_length=4, max_length=4)
+    controls_checked: tuple[str, ...] = Field(
+        min_length=MIN_CONTROLS, max_length=MAX_PRODUCT_QA_CONTROLS
+    )
+    interactions_verified: tuple[str, ...] = Field(
+        min_length=MIN_INTERACTIONS, max_length=MAX_PRODUCT_QA_CONTROLS
+    )
+
+
+class ApplicationQaProof(BaseModel):
+    """The exact application source accepted by deterministic product QA."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    browser_batches: int = Field(ge=1, le=3)
 
 
 def _needed_ratio(px: float, weight: int) -> float:

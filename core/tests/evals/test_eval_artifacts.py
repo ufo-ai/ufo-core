@@ -32,7 +32,9 @@ from ufo_ext_sites.application_audit import (
 )
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION_TOOL,
-    APPLICATION_BUILDER_QA_LIMIT_REASON,
+    APPLICATION_BUILDER_DEPLOY_TOOL,
+    APPLICATION_BUILDER_DESIGN_TOOL,
+    APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_WRITE_TOOL,
     ApplicationBuilderResult,
 )
@@ -92,7 +94,7 @@ from evals.suites.ufo_app_bench import (
     INTERACTION_MIN_CONTROLS,
     INTERACTION_MIN_SUCCESSES,
     MAX_BROWSER_QA_CALLS,
-    MAX_PREVIEW_SERVER_CALLS,
+    MAX_PRODUCT_QA_CALLS,
     MEASURED_VIEWS,
     MEMBER_QUERIES,
     NARROW_HEIGHT,
@@ -877,13 +879,23 @@ async def test_interaction_screen_requires_two_accessible_visible_state_changes(
     assert "pageerror: broken" in console.reason
 
 
+def _application_qa_calls() -> tuple[ToolInvocation, ...]:
+    if APPLICATION_BUILDER_QA_TOOL == "js_repl":
+        return (
+            ToolInvocation("start_server", {}, "started", has_result=True),
+            ToolInvocation("js_repl", {}, "checked", has_result=True),
+            ToolInvocation("js_repl", {}, "reviewed", has_result=True),
+        )
+    return (ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "passed", has_result=True),)
+
+
 def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
     result = ApplicationBuilderResult(
         status="deployed",
         source_path="/workspace/ufo-app/app.tsx",
         site_name="built-app",
         site_url="https://ufo.test/built-app",
-        browser_batches=2,
+        browser_batches=2 if APPLICATION_BUILDER_QA_TOOL == "js_repl" else 1,
         controls_checked=("Filter", "Select"),
     ).model_dump_json()
     own_calls = (
@@ -898,15 +910,19 @@ def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
     worker_calls = (
         ToolInvocation("call_external_tool", {}, "facts", has_result=True),
         ToolInvocation(
+            APPLICATION_BUILDER_DESIGN_TOOL,
+            {"content": "<svg viewBox='0 0 1 1' />"},
+            "written",
+            has_result=True,
+        ),
+        ToolInvocation(
             APPLICATION_BUILDER_WRITE_TOOL,
             {"content": "const page = true;"},
             "written",
             has_result=True,
         ),
-        ToolInvocation("start_server", {}, "started", has_result=True),
-        ToolInvocation("js_repl", {}, "checked", has_result=True),
-        ToolInvocation("js_repl", {}, "reviewed", has_result=True),
-        ToolInvocation("deploy_website", {}, "deployed", has_result=True),
+        *_application_qa_calls(),
+        ToolInvocation(APPLICATION_BUILDER_DEPLOY_TOOL, {}, "deployed", has_result=True),
     )
     return CapabilityOutput(
         "Built the app.",
@@ -1101,144 +1117,65 @@ async def test_ufo_app_bench_rejects_a_failed_delegation_before_a_success() -> N
     assert "delegated 2 times" in verdict.reason
 
 
-async def test_ufo_app_bench_bounds_preview_setup_and_browser_batches() -> None:
+async def test_ufo_app_bench_bounds_product_qa_calls() -> None:
     grader = _qa_efficiency_scorer()
     clean = await grader(_built_screen({}))
     assert clean.passed, clean.reason
-
-    capped = replace(
-        _built_screen({}),
-        calls=(
-            *_built_screen({}).calls,
-            ToolInvocation(
-                "js_repl",
-                {},
-                APPLICATION_BUILDER_QA_LIMIT_REASON,
-                has_result=True,
-                is_error=True,
-            ),
-        ),
+    max_calls = (
+        MAX_BROWSER_QA_CALLS if APPLICATION_BUILDER_QA_TOOL == "js_repl" else MAX_PRODUCT_QA_CALLS
     )
-    capped_result = await grader(capped)
-    assert capped_result.passed, capped_result.reason
 
-    repeated_server = replace(
-        _built_screen({}),
-        calls=(
-            *_built_screen({}).calls,
-            ToolInvocation("start_server", {}, "started again", has_result=True),
-        ),
-    )
-    too_many_starts = await grader(repeated_server)
-    assert not too_many_starts.passed
-    assert f"needs {MAX_PREVIEW_SERVER_CALLS}" in too_many_starts.reason
-
-    repeated_browser = replace(
+    repeated_qa = replace(
         _built_screen({}),
         calls=(
             *_built_screen({}).calls[:4],
             *(
-                ToolInvocation("js_repl", {}, "extra check", has_result=True)
-                for _ in range(MAX_BROWSER_QA_CALLS - 1)
+                ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "extra check", has_result=True)
+                for _ in range(max_calls)
             ),
             *_built_screen({}).calls[4:],
         ),
     )
-    too_many_batches = await grader(repeated_browser)
-    assert not too_many_batches.passed
-    assert f"at most {MAX_BROWSER_QA_CALLS}" in too_many_batches.reason
+    too_many_calls = await grader(repeated_qa)
+    assert not too_many_calls.passed
+    assert f"at most {max_calls}" in too_many_calls.reason
 
-    failed_browser = replace(
-        _built_screen({}),
-        calls=(
-            *_built_screen({}).calls[:7],
-            ToolInvocation("js_repl", {}, "timed out", has_result=False),
-            *_built_screen({}).calls[7:],
-        ),
-    )
-    failed_batch = await grader(failed_browser)
-    assert not failed_batch.passed
-    assert "final browser QA batch failed" in failed_batch.reason
-
-    base = _built_screen({})
-    recovered_browser = replace(
-        base,
-        calls=(
-            *base.calls[:5],
-            ToolInvocation("js_repl", {}, "found a defect", has_result=False),
-            ToolInvocation("js_repl", {}, "repair passed", has_result=True),
-            *base.calls[5:],
-        ),
-    )
-    recovered_batch = await grader(recovered_browser)
-    assert recovered_batch.passed, recovered_batch.reason
-
-    browser_after_deploy = replace(
+    failed_qa = replace(
         _built_screen({}),
         calls=(
             *_built_screen({}).calls,
-            ToolInvocation("js_repl", {}, "late check", has_result=True),
+            ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "failed", has_result=False),
         ),
     )
-    wrong_order = await grader(browser_after_deploy)
+    failed_call = await grader(failed_qa)
+    assert not failed_call.passed
+    assert "final QA call failed" in failed_call.reason
+
+    base = _built_screen({})
+    first_qa = next(
+        index for index, call in enumerate(base.calls) if call.name == APPLICATION_BUILDER_QA_TOOL
+    )
+    recovered_qa = replace(
+        base,
+        calls=(
+            *base.calls[:first_qa],
+            ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "found a defect", has_result=False),
+            *base.calls[first_qa:],
+        ),
+    )
+    recovered_call = await grader(recovered_qa)
+    assert recovered_call.passed, recovered_call.reason
+
+    qa_after_deploy = replace(
+        _built_screen({}),
+        calls=(
+            *_built_screen({}).calls,
+            ToolInvocation(APPLICATION_BUILDER_QA_TOOL, {}, "late check", has_result=True),
+        ),
+    )
+    wrong_order = await grader(qa_after_deploy)
     assert not wrong_order.passed
-    assert "before deploy_website" in wrong_order.reason
-
-    under_tested_first_deploy = replace(
-        base,
-        calls=(
-            base.calls[0],
-            base.calls[1],
-            base.calls[4],
-            base.calls[5],
-            base.calls[2],
-            base.calls[3],
-            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
-        ),
-    )
-    missing_initial_qa = await grader(under_tested_first_deploy)
-    assert not missing_initial_qa.passed
-    assert "1 successful browser QA batch(es) before deploy_website" in missing_initial_qa.reason
-
-    failed_redeploy = replace(
-        base,
-        calls=(
-            *base.calls,
-            ToolInvocation("js_repl", {}, "checked repair", has_result=True),
-            ToolInvocation("js_repl", {}, "reviewed repair", has_result=True),
-            ToolInvocation("deploy_website", {}, "failed", has_result=True, is_error=True),
-        ),
-    )
-    deployment_failure = await grader(failed_redeploy)
-    assert not deployment_failure.passed
-    assert "final application deployment failed" in deployment_failure.reason
-
-    repaired_then_reworked = replace(
-        base,
-        calls=(
-            *base.calls[:4],
-            ToolInvocation("js_repl", {}, "found a defect", has_result=False),
-            ToolInvocation("js_repl", {}, "repair passed", has_result=True),
-            *base.calls[4:],
-            ToolInvocation("js_repl", {}, "checked rework", has_result=True),
-            ToolInvocation("js_repl", {}, "reviewed rework", has_result=True),
-            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
-        ),
-    )
-    over_budget = await grader(repaired_then_reworked)
-    assert not over_budget.passed
-    assert f"at most {MAX_BROWSER_QA_CALLS}" in over_budget.reason
-
-    reworked = replace(
-        base,
-        calls=(
-            *base.calls,
-            ToolInvocation("js_repl", {}, "reviewed rework", has_result=True),
-            ToolInvocation("deploy_website", {}, "redeployed", has_result=True),
-        ),
-    )
-    rework_proof = await grader(reworked)
-    assert rework_proof.passed, rework_proof.reason
+    assert f"before {APPLICATION_BUILDER_DEPLOY_TOOL}" in wrong_order.reason
 
 
 async def test_ufo_app_bench_accepts_static_deploy_or_published_application() -> None:
@@ -1247,9 +1184,7 @@ async def test_ufo_app_bench_accepts_static_deploy_or_published_application() ->
         _built_screen({}),
         calls=(
             ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
-            ToolInvocation("start_server", {}, "started", has_result=True),
-            ToolInvocation("js_repl", {}, "checked", has_result=True),
-            ToolInvocation("js_repl", {}, "reviewed", has_result=True),
+            *_application_qa_calls(),
             ToolInvocation("publish_website", {}, "published", has_result=True),
         ),
     )
@@ -1382,7 +1317,7 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
     for case in CONTROL_CASES[:3]:
         assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in case.digest_tag
         assert "interactive-homepage" in case.digest_tag
-        assert f"qa-1x{MAX_BROWSER_QA_CALLS}" in case.digest_tag
+        assert "qa-bounded-product" in case.digest_tag
         assert AUDIT_DIGEST[:12] in case.digest_tag
         shots = {f"{case.name}-{scheme}.png": _png() for scheme in SCHEMES}
         report = {f"{case.name}-audit.json": _measured()}
