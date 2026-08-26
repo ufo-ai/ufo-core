@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import aiosqlite
 import pytest
 import sqlalchemy as sa
+import sqlalchemy.ext.asyncio.engine as sqlalchemy_async_engine
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -1641,6 +1642,41 @@ async def test_a_cancel_inside_the_body_rolls_back_before_the_caller_sees_it(
 
     assert opened[0].closed
     assert await _committed_workspaces(tx_engine) == []
+
+
+async def test_a_cancel_after_checkout_returns_the_connection_before_the_caller_sees_it(
+    tx_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked_out = asyncio.Event()
+    release_checkout = asyncio.Event()
+    real_greenlet_spawn = sqlalchemy_async_engine.greenlet_spawn
+    pause_next_checkout = True
+
+    async def pause_after_checkout(*args: object, **kwargs: object) -> object:
+        nonlocal pause_next_checkout
+        result = await real_greenlet_spawn(*args, **kwargs)
+        if pause_next_checkout:
+            pause_next_checkout = False
+            checked_out.set()
+            await release_checkout.wait()
+        return result
+
+    monkeypatch.setattr(sqlalchemy_async_engine, "greenlet_spawn", pause_after_checkout)
+
+    async def step() -> None:
+        async with _opened(tx_engine, "workspace"):
+            pass
+
+    task = asyncio.create_task(step())
+    await checked_out.wait()
+    assert tx_engine.pool.checkedout() == 1
+    task.cancel()
+    release_checkout.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert tx_engine.pool.checkedout() == 0
 
 
 async def test_a_cancel_landing_inside_the_teardown_finishes_it_first(

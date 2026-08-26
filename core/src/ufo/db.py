@@ -317,8 +317,17 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
 
     stack = AsyncExitStack()
     started = time.monotonic()
+    opening = asyncio.ensure_future(stack.enter_async_context(engine.begin()))
+    cancelled: asyncio.CancelledError | None = None
+    while not opening.done():
+        try:
+            await asyncio.shield(opening)
+        except asyncio.CancelledError as cancel:
+            cancelled = cancel
+        except Exception:
+            break
     try:
-        connection = await stack.enter_async_context(engine.begin())
+        connection = opening.result()
     except Exception as error:
         if isinstance(error, sa.exc.TimeoutError):
             emit_metric("db_pool_exhausted_total", path=path)
@@ -329,17 +338,18 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
     finally:
         elapsed = round((time.monotonic() - started) * 1000)
         emit_histogram("db_tx_acquire_ms", elapsed, path=path)
-    caught: BaseException | None = None
-    try:
-        yield connection
-    except BaseException as error:
-        caught = error
+    caught: BaseException | None = cancelled
+    if caught is None:
+        try:
+            yield connection
+        except BaseException as error:
+            caught = error
     close = asyncio.ensure_future(
         stack.__aexit__(type(caught), caught, caught.__traceback__)
         if caught is not None
         else stack.__aexit__(None, None, None)
     )
-    cancelled: asyncio.CancelledError | None = None
+    cancelled = None
     while not close.done():
         try:
             await asyncio.shield(close)
