@@ -81,6 +81,7 @@ EXPECTED_APT = (
     "git",
     "curl",
     "jq",
+    "bc",
     "ripgrep",
     "media-types",
     "poppler-utils",

@@ -122,17 +122,19 @@ READY_VERIFY_TIMEOUT_SECONDS = 120
 # to source — the drift gate that keeps publishing opt-in without letting a stale template pass.
 BUILD_DIGEST_PATH = f"{UFO_DIR}/template-digest"
 
-# poppler-utils → pdftotext/pdftoppm/pdfimages (pdf + media skills); chromium → the
-# headless browser skills; libreoffice-{writer,calc,impress} → soffice for the office convert/recalc
-# paths; pandoc → docx↔markdown text extraction; qpdf → pdf CLI merge/split/encrypt/repair;
-# tesseract-ocr → the pytesseract OCR path for scanned PDFs; ffmpeg → the video/GIF encoder the
-# media paths shell out to (imageio-ffmpeg wraps the same binary).
+# bc → shell arithmetic in agent timing/build scripts; poppler-utils →
+# pdftotext/pdftoppm/pdfimages (pdf + media skills); chromium → the headless browser skills;
+# libreoffice-{writer,calc,impress} → soffice for the office convert/recalc paths; pandoc →
+# docx↔markdown text extraction; qpdf → pdf CLI merge/split/encrypt/repair; tesseract-ocr → the
+# pytesseract OCR path for scanned PDFs; ffmpeg → the video/GIF encoder the media paths shell out
+# to (imageio-ffmpeg wraps the same binary).
 APT_PACKAGES = (
     "python3",
     "ca-certificates",
     "git",
     "curl",
     "jq",
+    "bc",
     "ripgrep",
     "media-types",
     "poppler-utils",
@@ -237,6 +239,7 @@ command -v pnpm >/dev/null
 command -v ufo >/dev/null
 command -v vite >/dev/null
 command -v rg >/dev/null
+command -v bc >/dev/null
 command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
 command -v soffice >/dev/null
