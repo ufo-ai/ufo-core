@@ -384,6 +384,23 @@ def test_workflow_revalidates_parquet_before_invoking_harness(
         workflow.run()
 
 
+def test_workflow_checks_harness_before_minting_grade_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_value = snapshot(tmp_path / "snapshot")
+    workflow = grading_workflow(tmp_path, snapshot_value)
+    monkeypatch.setattr(grading, "verify_source", lambda _source, _upstream=None: None)
+
+    def missing(_distribution: str) -> str:
+        raise grading.PackageNotFoundError("swebench")
+
+    monkeypatch.setattr(grading, "version", missing)
+
+    with pytest.raises(RuntimeError, match=r"official grading requires swebench==4\.1\.0"):
+        workflow.run()
+    assert not workflow.grade_directory.exists()
+
+
 @pytest.mark.parametrize("failure", ("missing", "error", "omitted"))
 def test_workflow_rejects_missing_error_and_omitted_official_outcomes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str

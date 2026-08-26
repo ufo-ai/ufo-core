@@ -159,6 +159,7 @@ class SWEbenchGrading:
         # Load and validate submissions before minting the grade directory: a rejected submissions
         # root then leaves no half-made directory to collide with a corrected retry.
         patches = None if self.gold else self._load_patches()
+        self._validate_harness()
         grade_directory = self.grade_directory.resolve()
         grade_directory.mkdir(parents=True, exist_ok=False)
         predictions_path = (
@@ -195,6 +196,20 @@ class SWEbenchGrading:
         known_ids = {case.instance_id for case in self.snapshot.cases}
         return load_submission_patches(self.selected_cases, known_ids, self.submissions_root)
 
+    def _validate_harness(self) -> None:
+        try:
+            installed = version(HARNESS_DISTRIBUTION)
+        except PackageNotFoundError as error:
+            raise RuntimeError(
+                f"official grading requires {HARNESS_PIN}; run with "
+                f"`uv run --with {HARNESS_PIN} python -m evals.swebench.grading`"
+            ) from error
+        if installed != HARNESS_VERSION:
+            raise RuntimeError(
+                f"official grading requires {HARNESS_PIN}, found "
+                f"{HARNESS_DISTRIBUTION}=={installed}"
+            )
+
     def _pull_official_image(self, case: SWEbenchCase) -> None:
         subprocess.run(
             (
@@ -215,18 +230,6 @@ class SWEbenchGrading:
         *,
         rewrite_reports: bool,
     ) -> None:
-        try:
-            installed = version(HARNESS_DISTRIBUTION)
-        except PackageNotFoundError as error:
-            raise RuntimeError(
-                f"official grading requires {HARNESS_PIN}; run with "
-                f"`uv run --with {HARNESS_PIN} python -m evals.swebench.grading`"
-            ) from error
-        if installed != HARNESS_VERSION:
-            raise RuntimeError(
-                f"official grading requires {HARNESS_PIN}, found "
-                f"{HARNESS_DISTRIBUTION}=={installed}"
-            )
         command = [
             sys.executable,
             "-m",
