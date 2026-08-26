@@ -919,7 +919,7 @@ fn remote_json_mode_uses_the_workspace_sandbox() {
         let served = serve(vec![Exchange {
             delay_ms: 0,
             status: 200,
-            reply_lines: &["say\tdone", "exit\t0"],
+            reply_lines: &["sent\tturn-1\t1\tarr-1", "say\tdone", "exit\t0"],
         }]);
         let home = scratch_home(if args[0] == "--remote" {
             "remote-json"
@@ -938,6 +938,13 @@ fn remote_json_mode_uses_the_workspace_sandbox() {
                 .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok()),
             "stdout: {stdout}"
         );
+        let sent = stdout
+            .lines()
+            .find(|line| line.contains("\"type\":\"message_sent\""))
+            .expect("the initial message ack is observable");
+        assert!(sent.contains("\"turn_id\":\"turn-1\""), "{sent}");
+        assert!(sent.contains("\"arrival_id\":\"arr-1\""), "{sent}");
+        assert!(sent.contains("\"opened_run\":true"), "{sent}");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

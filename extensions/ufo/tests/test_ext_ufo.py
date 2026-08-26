@@ -1240,6 +1240,11 @@ async def test_message_admits_a_turn_streams_it_and_links_the_member(
     assert "echo:1" in answer
     assert lines[-1][0] in ("ask", "exit", "listen")
     async with workspace_tx() as connection:
+        turn_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
         linked = (
             await connection.execute(
                 sa.select(tables.surface_identity.c.member_id).where(
@@ -1255,6 +1260,7 @@ async def test_message_admits_a_turn_streams_it_and_links_the_member(
                 )
             )
         ).one()
+    assert lines[0] == ["sent", str(turn_id), "1", ""]
     assert linked.member_id == member_id
     assert conversation.member_id == member_id
     assert conversation.queue_key == "owner@example.com:main"

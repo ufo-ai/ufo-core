@@ -174,11 +174,19 @@ impl Driver {
                 prompt,
             } => vec![self.raise_secret(sealed, slot, prompt)],
             Directive::Exit(code) => vec![Event::Exit { code: *code }],
+            Directive::Sent {
+                turn_id,
+                opened,
+                arrival_id,
+            } => vec![Event::MessageSent {
+                turn_id: turn_id.clone(),
+                opened_run: *opened,
+                arrival_id: arrival_id.clone(),
+            }],
             Directive::Absorbed(arrival_ids) => vec![Event::MessageAbsorbed {
                 arrival_ids: arrival_ids.clone(),
             }],
-            Directive::Sent { .. }
-            | Directive::Poll(_)
+            Directive::Poll(_)
             | Directive::Listen(_)
             | Directive::Since(_)
             | Directive::Run(_)

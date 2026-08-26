@@ -606,6 +606,7 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         unsend = request.headers[UNSEND_HEADER].strip()
         return await _unsend(ctx, request, conversation_id, member_id, unsend)
     note: bytes | None = None
+    sent: bytes | None = None
     resumed = False
     update = b""
     marked = bool(request.headers.get(LISTEN_HEADER, "").strip())
@@ -648,14 +649,19 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
                 return PlainTextResponse("message too large", status_code=413)
             if cwd and await ctx.claim_terminal(conversation_id, cwd):
                 note = directive("note", f"Workspace: {cwd}")
-            turn_id = (
-                await ctx.admit(
-                    conversation_id,
-                    body,
-                    context=_turn_context(email, request),
-                    speaker_member_id=member_id,
-                )
-            ).turn_id
+            admitted = await ctx.admit(
+                conversation_id,
+                body,
+                context=_turn_context(email, request),
+                speaker_member_id=member_id,
+            )
+            turn_id = admitted.turn_id
+            sent = directive(
+                "sent",
+                str(turn_id),
+                "1" if admitted.opened_run else "0",
+                "" if admitted.arrival_id is None else str(admitted.arrival_id),
+            )
     connect = None if member_id is None else partial(ctx.connect_url, turn_id, member_id)
     since = _resumed_from(request, turn_id)
     history: tuple[bytes, ...] = ()
@@ -687,6 +693,8 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         try:
             if update:
                 yield update
+            if sent is not None:
+                yield sent
             for line in history:
                 yield line
             if note is not None:
