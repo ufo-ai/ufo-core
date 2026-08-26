@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
+from importlib.resources import files
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -104,14 +105,13 @@ from ufo.workspace import ws
 
 HOUSE_STYLE_SKILL = "ufo-style"
 SITE_SKILL = "website-building"
-REPO_ROOT = Path(__file__).parents[2]
-AUDIT_CONTENT = (
-    REPO_ROOT / "extensions/sites/ufo_ext_sites/scripts/audit_application.cjs"
-).read_bytes()
+AUDIT_CONTENT = files("ufo_ext_sites").joinpath("scripts/audit_application.cjs").read_bytes()
 COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read_bytes()
 AUDIT_DIGEST = sha256(AUDIT_CONTENT).hexdigest()
 COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()
-APP_SCAFFOLD_ROOT = REPO_ROOT / "extensions/app_tasks/ufo_ext_app_tasks/skills/app-tasks-home"
+APP_INDEX_CONTENT = (
+    files("ufo_ext_app_tasks").joinpath("skills/app-tasks-home/index.html").read_bytes()
+)
 APP_WORKSPACE_ROOT = "/workspace/ufo-app"
 APP_PREVIEW = rb"""<!doctype html>
 <html lang="en">
@@ -175,7 +175,7 @@ APP_PLACEHOLDER = b"""import { mountApp } from "ufo/kit";
 mountApp(document.getElementById("root")!, () => <main>Application source is not built.</main>);
 """
 APP_WORKSPACE_FILES = (
-    WorkspaceFile("ufo-app/index.html", (APP_SCAFFOLD_ROOT / "index.html").read_bytes()),
+    WorkspaceFile("ufo-app/index.html", APP_INDEX_CONTENT),
     WorkspaceFile("ufo-app/app.tsx", APP_PLACEHOLDER),
     WorkspaceFile("ufo-app/preview.html", APP_PREVIEW),
 )

@@ -205,6 +205,8 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 # a data file) map into a package directory so the runtime's `_package_dir` / `Path(__file__).parent`
 # resolve that data uniquely per extension; the dataless ones map to a flat top-level module.
 [tool.hatch.build.targets.wheel.force-include]
+"servers/preview/tests/fixtures/fixture-layout.docx" = "servers/preview/tests/fixtures/fixture-layout.docx"
+"servers/preview/tests/fixtures/fixture-print-layout.xlsx" = "servers/preview/tests/fixtures/fixture-print-layout.xlsx"
 "extensions/bedrock/ufo_ext_bedrock.py" = "ufo_ext_bedrock.py"
 "extensions/browserbase/ufo_ext_browserbase.py" = "ufo_ext_browserbase.py"
 "extensions/docker/ufo_ext_docker.py" = "ufo_ext_docker.py"
