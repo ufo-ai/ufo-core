@@ -1843,7 +1843,7 @@ async def test_a_childs_activity_mirrors_onto_the_parents_stream(surface: Turns)
     assert [frame.status for frame in runs] == ["", "", "done"]
     started, worked, _done = runs
     assert started.activity == ""
-    assert worked.activity == "Running a check."
+    assert worked.activity == "Running a check"
     assert {frame.turn_id for frame in runs} == {child.id}
     assert {frame.parent_turn_id for frame in runs} == {UUID(parent)}
     assert {frame.conversation_id for frame in runs} == {child.conversation_id}

@@ -56,6 +56,7 @@ from ufo.ext.manifest import (
     Stop,
     UserPromptSubmit,
 )
+from ufo.ext.surface import member_message_text
 from ufo.hub import (
     Absorbed,
     Activity,
@@ -408,6 +409,10 @@ class Arrival(BaseModel):
 class ActiveMessage:
     member_id: UUID | None
     rendered: str
+
+
+def _activity_goal(requesters: Mapping[UUID, ActiveMessage]) -> str:
+    return "\n".join(member_message_text(message.rendered) for message in requesters.values())
 
 
 @dataclass(frozen=True, repr=False)
@@ -1325,7 +1330,10 @@ class TurnEngine:
                 }
             resolved = await self._bind_or_error(context, call, requesters)
             if isinstance(resolved, _ResolvedToolCall):
-                self._start_activity(resolved.call)
+                self._start_activity(
+                    resolved.call,
+                    _activity_goal(requesters),
+                )
                 bound: _DispatchInput = _BoundToolCall(
                     context=resolved.context,
                     call=resolved.call,
@@ -1619,7 +1627,7 @@ class TurnEngine:
                     bound: list[_DispatchInput] = []
                     for item in resolved:
                         if isinstance(item, _ResolvedToolCall):
-                            self._start_activity(item.call)
+                            self._start_activity(item.call, _activity_goal(requesters))
                             bound.append(
                                 _BoundToolCall(
                                     context=item.context,
@@ -2539,15 +2547,15 @@ class TurnEngine:
             return None
         return path
 
-    def _start_activity(self, call: ToolUseBlock) -> None:
+    def _start_activity(self, call: ToolUseBlock, goal: str) -> None:
         self._activity.sequence += 1
         sequence = self._activity.sequence
-        task = asyncio.create_task(self._generate_activity(call, sequence))
+        task = asyncio.create_task(self._generate_activity(call, goal, sequence))
         self._activity.tasks.add(task)
         task.add_done_callback(self._activity.tasks.discard)
 
-    async def _generate_activity(self, call: ToolUseBlock, sequence: int) -> None:
-        activity = await self.activity_summarizer.summarize(call)
+    async def _generate_activity(self, call: ToolUseBlock, goal: str, sequence: int) -> None:
+        activity = await self.activity_summarizer.summarize(call, goal)
         if activity is not None:
             self._activity.labels[call.id] = activity
         async with self._activity.lock:

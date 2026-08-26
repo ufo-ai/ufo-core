@@ -19,7 +19,7 @@ from ufo.models.interface import ModelRequest, TextDelta, ToolUseBlock
 from ufo.schema.records import TerminalFrame
 from ufo.turns.activity import (
     ACTIVITY_ARGUMENT_CHARS,
-    ACTIVITY_LINE_CHARS,
+    ACTIVITY_GOAL_CHARS,
     ActivitySummarizer,
     activity_line,
 )
@@ -52,19 +52,21 @@ class _ActivityModel:
 async def test_activity_summarizer_sends_only_bounded_tool_calls():
     model = _ActivityModel()
     line = await ActivitySummarizer(model).summarize(
-        ToolUseBlock(id="e", name="edit", input={"content": "x" * 1_000})
+        ToolUseBlock(id="e", name="edit", input={"content": "x" * 1_000}),
+        "Update the release notes" * 100,
     )
-    assert line == "Reviewing the notes then updating the heading."
+    assert line == "Reviewing the notes then updating the heading"
     assert model.request is not None
     payload = json.loads(model.request.messages[0].content)
-    assert payload["name"] == "edit"
-    assert len(payload["arguments"]) == ACTIVITY_ARGUMENT_CHARS + 1
+    assert len(payload["goal"]) == ACTIVITY_GOAL_CHARS
+    assert payload["tool_call"]["name"] == "edit"
+    assert len(payload["tool_call"]["arguments"]) == ACTIVITY_ARGUMENT_CHARS + 1
 
 
-def test_activity_line_is_one_bounded_sentence():
-    assert activity_line("") == "Continuing the requested work."
-    assert "\n" not in activity_line("a" * 400)
-    assert len(activity_line("a" * 400)) == ACTIVITY_LINE_CHARS
+def test_activity_line_normalizes_without_truncating():
+    assert activity_line("") is None
+    assert activity_line("Checking the release...\n") == "Checking the release"
+    assert activity_line("a" * 400) == "a" * 400
 
 
 async def test_round_trip_delivers_text_and_terminal():

@@ -3206,7 +3206,7 @@ async def test_tool_call_round_dispatches_in_sandbox_then_answers(db: None, tmp_
     assert isinstance(tool_result, tuple) and isinstance(tool_result[0], ToolResultBlock)
     assert "hi" in tool_result[0].content
     assert tool_result[0].activity
-    assert tool_result[0].activity_text == "Working on the request."
+    assert tool_result[0].activity_text == "Working on the request"
     assert stored.messages[-1] == Message(role="assistant", content="done")
 
 
@@ -3333,11 +3333,14 @@ async def test_multi_tool_round_publishes_one_summary_per_tool(db: None, tmp_pat
 
         def __init__(self) -> None:
             self.names: list[str] = []
+            self.goals: list[str] = []
 
         async def complete(self, request: ModelRequest) -> str:
             payload = json.loads(request.messages[0].content)
-            self.names.append(payload["name"])
-            return f"Preparing the {payload['name']} step"
+            name = payload["tool_call"]["name"]
+            self.names.append(name)
+            self.goals.append(payload["goal"])
+            return f"Preparing the {name} step"
 
     turn = await _seed_turn("queued", None)
     carrier = RecordingCarrier(result=ExecResult(stdout="hi\n", stderr="", exit_code=0))
@@ -3352,10 +3355,11 @@ async def test_multi_tool_round_publishes_one_summary_per_tool(db: None, tmp_pat
     assert frame.status == "done"
     activity = [frame for frame in hub.frames if isinstance(frame, Activity)]
     assert activity == [
-        Activity(text="Preparing the load_skill step."),
-        Activity(text="Preparing the bash step."),
+        Activity(text="Preparing the load_skill step"),
+        Activity(text="Preparing the bash step"),
     ]
     assert activity_model.names == ["load_skill", "bash"]
+    assert activity_model.goals == ["hi", "hi"]
 
 
 @dataclass
@@ -3880,7 +3884,7 @@ async def test_tool_activity_frame_carries_the_generated_summary(db: None, tmp_p
     engine = replace(_engine(turn, NarratedToolModel(), tmp_path, carrier=carrier), hub=hub)
     await engine.run()
     tool_frames = [frame for frame in hub.frames if isinstance(frame, Activity)]
-    assert tool_frames == [Activity(text="Working on the request.")]
+    assert tool_frames == [Activity(text="Working on the request")]
 
 
 async def test_tool_dispatch_does_not_wait_for_activity_generation(

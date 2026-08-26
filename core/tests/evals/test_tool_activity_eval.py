@@ -17,12 +17,16 @@ class _Judge:
         self.systems.append(system)
         content = messages[0].content
         assert isinstance(content, str)
-        tool = json.loads(content)["name"]
+        tool = json.loads(content)["tool_call"]["name"]
         return {
-            "memory_update": "Saving the Monday standup time.",
-            "edit_file": "Updating the release notes heading.",
-            "bash": "Checking the requested text output.",
-            "update_todo_status": "Updating checklist progress.",
+            "memory_update": "Saving the Monday standup time",
+            "edit_file": "Updating the release notes heading",
+            "bash": "Checking the requested text output",
+            "update_todo_status": "Updating checklist progress",
+            "read": "Reading the deployment report",
+            "review_grep": "Finding the Slack activity rendering",
+            "call_external_tool": "Updating the launch checklist issue",
+            "spawn_subagent": "Reviewing the access-control change",
         }[tool]
 
 
