@@ -34,8 +34,12 @@ from ufo_ext_sites.application_audit import (
     ApplicationAuditContract,
     ApplicationAuditFact,
     ApplicationAuditFeedback,
+    ApplicationAuditRegion,
     ApplicationAuditReport,
+    ApplicationDesignFidelity,
     ApplicationQaProof,
+    application_design_fidelity,
+    application_region_relation,
     audit_application,
 )
 from ufo_ext_sites.application_builder import (
@@ -56,6 +60,10 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_REPAIR_READ_REASON,
     APPLICATION_BUILDER_SKILL,
     APPLICATION_BUILDER_WRITE_TOOL,
+    APPLICATION_DESIGN_ACCEPT,
+    APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS,
+    APPLICATION_DESIGN_PATH,
+    APPLICATION_DESIGN_RELEASE_ACCEPTED,
     APPLICATION_INDEX,
     APPLICATION_PLACEHOLDER,
     APPLICATION_PREVIEW_FILENAME,
@@ -64,6 +72,7 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_SCAFFOLD_PATH,
     APPLICATION_SOURCE_CLAIM,
     APPLICATION_SOURCE_READ,
+    APPLICATION_SOURCE_RELEASE_CLAIM,
     APPLICATION_SOURCE_REQUIRE_CLAIM,
     ApplicationBuildAcceptance,
     ApplicationBuilderResult,
@@ -76,6 +85,9 @@ from ufo_ext_sites.application_builder import (
     RenderApplicationPreviewInput,
     WriteApplicationDesignInput,
     WriteApplicationSourceInput,
+    _validate_application_design,
+    _validate_application_source,
+    application_design_acceptance_relative,
     build_ufo_application,
     edit_application_source,
     limit_application_builder_repair_reads,
@@ -176,7 +188,28 @@ HOUSE_STYLE = "ufo-style"
 HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
 APPLICATION_QA_GUIDANCE = "shared/13-ufo-application-qa.md"
-APPLICATION_DESIGN = '<svg viewBox="0 0 1440 900"><rect width="1440" height="900" /></svg>'
+APPLICATION_DESIGN = """<svg viewBox="0 0 1440 900">
+<g data-app-region="queue"><rect width="900" height="900" /></g>
+<g data-app-region="detail"><rect x="900" width="540" height="900" /></g>
+</svg>"""
+AUDIT_DESIGN_REGIONS = (
+    {
+        "name": "queue",
+        "left": 0.0,
+        "top": 0.0,
+        "width": 0.6,
+        "height": 1.0,
+        "aboveFold": True,
+    },
+    {
+        "name": "detail",
+        "left": 0.6,
+        "top": 0.0,
+        "width": 0.4,
+        "height": 1.0,
+        "aboveFold": True,
+    },
+)
 JS_CELL = re.compile(r"```javascript\n(.*?)```", re.S)
 
 
@@ -226,8 +259,18 @@ class FakeSandbox:
     writes: dict[str, bytes] = field(default_factory=dict)
     runtime_writes: list[str] = field(default_factory=list)
     workspace_writes: list[str] = field(default_factory=list)
+    workspace_write_error: OSError | None = None
+    track_design_claim: bool = False
+    design_claimed: bool = False
+    design_audit_barrier: asyncio.Barrier | None = None
+    program_errors: dict[str, BaseException] = field(default_factory=dict)
     claim: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
     shell: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
+    design_audit: ExecResult = field(
+        default_factory=lambda: ExecResult(
+            stdout=json.dumps(AUDIT_DESIGN_REGIONS), stderr="", exit_code=0
+        )
+    )
     handle: SandboxHandle = field(
         default_factory=lambda: SandboxHandle(conversation_id=uuid4(), container_id="sites-test")
     )
@@ -246,6 +289,38 @@ class FakeSandbox:
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         self.programs.append((program, args))
+        if program in self.program_errors:
+            raise self.program_errors[program]
+        if self.track_design_claim and program == APPLICATION_SOURCE_CLAIM:
+            if self.design_claimed:
+                return ExecResult("", "", 17)
+            self.design_claimed = True
+            return ExecResult("", "", 0)
+        if self.track_design_claim and program == APPLICATION_SOURCE_RELEASE_CLAIM:
+            if not self.design_claimed:
+                return ExecResult("", "application claim is absent", 1)
+            self.design_claimed = False
+            return ExecResult("", "", 0)
+        if program == APPLICATION_DESIGN_ACCEPT:
+            source_path, accepted_path, _root, max_chars = args
+            if accepted_path in self.writes:
+                return ExecResult("", "", 17)
+            content = self.writes[source_path]
+            if len(content) > int(max_chars):
+                return ExecResult("", "application design is too large", 1)
+            self.writes[accepted_path] = content
+            return ExecResult("", "", 0)
+        if program == APPLICATION_DESIGN_RELEASE_ACCEPTED:
+            accepted_path, _root, digest, max_chars = args
+            content = self.writes.get(accepted_path)
+            if (
+                content is None
+                or len(content) > int(max_chars)
+                or sha256(content).hexdigest() != digest
+            ):
+                return ExecResult("", "accepted application design is not owned", 1)
+            del self.writes[accepted_path]
+            return ExecResult("", "", 0)
         for needle, result in self.scripted_paths.items():
             if args and needle in args[0]:
                 return result
@@ -258,9 +333,15 @@ class FakeSandbox:
 
     async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         self.shells.append((script, args, timeout_s))
+        if "--design" in script:
+            if self.design_audit_barrier is not None:
+                await self.design_audit_barrier.wait()
+            return self.design_audit
         return self.shell
 
     async def write_file(self, path: str, content: bytes) -> None:
+        if self.workspace_write_error is not None:
+            raise self.workspace_write_error
         self.workspace_writes.append(path)
         self.writes[path] = content
 
@@ -392,6 +473,7 @@ def test_application_audit_accepts_measured_interactive_facts() -> None:
         {
             "url": "http://localhost:3000/preview.html",
             "floor": 4.5,
+            "designRegions": AUDIT_DESIGN_REGIONS,
             "views": [
                 {
                     "scheme": scheme,
@@ -402,6 +484,7 @@ def test_application_audit_accepts_measured_interactive_facts() -> None:
                     "clipped": [],
                     "console": [],
                     "aboveFoldText": "Acme renewal Aug 27 #2042",
+                    "regions": AUDIT_DESIGN_REGIONS,
                 }
                 for width in (1440, 390)
                 for scheme in ("light", "dark")
@@ -429,6 +512,130 @@ def test_application_audit_accepts_measured_interactive_facts() -> None:
     )
 
     assert audit_application(report, contract).issues == ()
+    without_design = report.model_copy(update={"design_regions": ()})
+    assert {issue.code for issue in audit_application(without_design, contract).issues} == {
+        "design"
+    }
+
+
+def test_application_design_fidelity_compares_only_the_separating_axis() -> None:
+    design_regions = (
+        {
+            "name": "overdue-queue",
+            "left": 0.025,
+            "top": 0.1,
+            "width": 0.95,
+            "height": 0.2,
+            "aboveFold": True,
+        },
+        {
+            "name": "watch-list",
+            "left": 0.6,
+            "top": 0.6,
+            "width": 0.3,
+            "height": 0.3,
+            "aboveFold": True,
+        },
+    )
+    app_regions = (
+        {
+            "name": "overdue-queue",
+            "left": 0.01,
+            "top": 0.05,
+            "width": 0.98,
+            "height": 0.2,
+            "aboveFold": True,
+        },
+        {
+            "name": "watch-list",
+            "left": 0.35,
+            "top": 0.6,
+            "width": 0.3,
+            "height": 0.3,
+            "aboveFold": True,
+        },
+    )
+    report = ApplicationAuditReport.model_validate(
+        {
+            "designRegions": design_regions,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 1,
+                    "text": [],
+                    "documentWidth": width,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Queue",
+                    "regions": app_regions,
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {"controls": [], "successes": [], "console": []},
+        }
+    )
+
+    fidelity = application_design_fidelity(report)
+
+    assert fidelity.failures == ()
+    assert fidelity.passed == fidelity.total
+
+
+def test_application_design_fidelity_rejects_overlapping_regions() -> None:
+    regions = (
+        {
+            "name": "queue",
+            "left": 0.0,
+            "top": 0.0,
+            "width": 1.0,
+            "height": 1.0,
+            "aboveFold": True,
+        },
+        {
+            "name": "detail",
+            "left": 0.0,
+            "top": 0.0,
+            "width": 1.0,
+            "height": 1.0,
+            "aboveFold": True,
+        },
+    )
+    report = ApplicationAuditReport.model_validate(
+        {
+            "designRegions": regions,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 1,
+                    "text": [],
+                    "documentWidth": width,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Queue",
+                    "regions": regions,
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {"controls": [], "successes": [], "console": []},
+        }
+    )
+
+    fidelity = application_design_fidelity(report)
+
+    assert fidelity == ApplicationDesignFidelity(
+        passed=0,
+        total=1,
+        failures=("design regions queue and detail overlap",),
+    )
+    assert {issue.code for issue in audit_application(report).issues} == {
+        "controls",
+        "design",
+        "interaction",
+    }
 
 
 def test_application_audit_runs_views_in_parallel_in_declared_order() -> None:
@@ -445,6 +652,7 @@ def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
         {
             "url": "http://localhost:3000/preview.html",
             "floor": 4.5,
+            "designRegions": AUDIT_DESIGN_REGIONS,
             "views": [
                 {
                     "scheme": scheme,
@@ -463,6 +671,7 @@ def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
                     "clipped": ["td.owner: Alexandra"],
                     "console": ["pageerror: broken"],
                     "aboveFoldText": "Acme renewal",
+                    "regions": AUDIT_DESIGN_REGIONS,
                 }
                 for width in (1440, 390)
                 for scheme in ("light", "dark")
@@ -502,8 +711,16 @@ def test_application_audit_server_maps_root_assets(tmp_path: Path, unused_tcp_po
     asset.write_text("built application")
     server = tmp_path / "application-audit-server.py"
     server.write_bytes(APPLICATION_AUDIT_SERVER)
+    accepted_design = tmp_path / "accepted-design.svg"
+    accepted_design.write_bytes(APPLICATION_DESIGN.encode())
     process = subprocess.Popen(
-        [sys.executable, str(server), str(project), str(unused_tcp_port)],
+        [
+            sys.executable,
+            str(server),
+            str(project),
+            str(unused_tcp_port),
+            str(accepted_design),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -525,6 +742,16 @@ def test_application_audit_server_maps_root_assets(tmp_path: Path, unused_tcp_po
             finally:
                 connection.close()
             break
+        connection = http.client.HTTPConnection("127.0.0.1", unused_tcp_port, timeout=1)
+        connection.request("GET", "/accepted-design.svg")
+        design_response = connection.getresponse()
+        design_body = design_response.read()
+        connection.close()
+        connection = http.client.HTTPConnection("127.0.0.1", unused_tcp_port, timeout=1)
+        connection.request("GET", "/other-design.svg")
+        other_response = connection.getresponse()
+        other_response.read()
+        connection.close()
     finally:
         if process.poll() is None:
             process.terminate()
@@ -532,6 +759,10 @@ def test_application_audit_server_maps_root_assets(tmp_path: Path, unused_tcp_po
 
     assert response.status == 200
     assert body == b"built application"
+    assert design_response.status == 200
+    assert design_response.getheader("Content-Type") == "image/svg+xml"
+    assert design_body == APPLICATION_DESIGN.encode()
+    assert other_response.status == 404
 
 
 async def test_application_builder_audit_returns_feedback_to_the_same_worker(
@@ -548,10 +779,13 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
                         "text": (
                             [
                                 {
+                                    "text": "Needs review",
                                     "selector": "span.muted",
                                     "px": 14,
                                     "weight": 400,
                                     "ratio": 3.2,
+                                    "colour": "rgb(120, 120, 120)",
+                                    "background": "rgb(255, 255, 255)",
                                 }
                             ]
                             if issue
@@ -561,10 +795,12 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
                         "clipped": [],
                         "console": [],
                         "aboveFoldText": "#2042",
+                        "regions": AUDIT_DESIGN_REGIONS,
                     }
                     for width in (1440, 390)
                     for scheme in ("light", "dark")
                 ],
+                "designRegions": AUDIT_DESIGN_REGIONS,
                 "interaction": {
                     "controls": [
                         {"selector": "#first", "name": "First"},
@@ -612,6 +848,15 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
     assert isinstance(feedback, ApplicationAuditFeedback)
     assert feedback.status == "repair_required"
     assert {issue.code for issue in feedback.issues} == {"contrast"}
+    assert feedback.issues[0].message == (
+        'Fix text contrast: light 1440px "Needs review" at span.muted '
+        "rgb(120, 120, 120) on rgb(255, 255, 255) is 3.2:1; needs 4.5:1; "
+        'dark 1440px "Needs review" at span.muted rgb(120, 120, 120) on '
+        'rgb(255, 255, 255) is 3.2:1; needs 4.5:1; light 390px "Needs review" '
+        "at span.muted rgb(120, 120, 120) on rgb(255, 255, 255) is 3.2:1; needs 4.5:1; "
+        'dark 390px "Needs review" at span.muted rgb(120, 120, 120) on '
+        "rgb(255, 255, 255) is 3.2:1; needs 4.5:1."
+    )
     assert store.values[key] == 1
     sandbox.scripted_paths["/application-audit/"] = ExecResult(_report(False), "", 0)
     report = await _audit_builder_application(ctx, "/workspace/ufo-app")
@@ -1557,6 +1802,7 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
 ) -> None:
     report = json.dumps(
         {
+            "designRegions": AUDIT_DESIGN_REGIONS,
             "views": [
                 {
                     "scheme": scheme,
@@ -1567,6 +1813,7 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
                     "clipped": [],
                     "console": [],
                     "aboveFoldText": "#2042",
+                    "regions": AUDIT_DESIGN_REGIONS,
                 }
                 for width in (1440, 390)
                 for scheme in ("light", "dark")
@@ -1654,6 +1901,7 @@ async def test_application_product_qa_bounds_dense_control_evidence_before_proof
     ]
     report = json.dumps(
         {
+            "designRegions": AUDIT_DESIGN_REGIONS,
             "views": [
                 {
                     "scheme": scheme,
@@ -1664,6 +1912,7 @@ async def test_application_product_qa_bounds_dense_control_evidence_before_proof
                     "clipped": [],
                     "console": [],
                     "aboveFoldText": "Dense controls",
+                    "regions": AUDIT_DESIGN_REGIONS,
                 }
                 for width in (1440, 390)
                 for scheme in ("light", "dark")
@@ -1896,6 +2145,349 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
                     content=invalid,
                 ),
             )
+    with pytest.raises(ValueError, match="requires 2 to 6 unique regions"):
+        await write_application_design(
+            ctx,
+            WriteApplicationDesignInput(
+                content='<svg viewBox="0 0 1 1"><rect width="1" height="1" /></svg>',
+            ),
+        )
+
+
+async def test_application_builder_releases_its_claim_after_design_write_fails(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox(
+        workspace_write_error=OSError("write failed"),
+        track_design_claim=True,
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(OSError, match="write failed"):
+        await write_application_design(
+            ctx,
+            WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+        )
+
+    assert not sandbox.design_claimed
+    assert sandbox.workspace_writes == []
+    assert "/workspace/application/application-design.svg" not in sandbox.writes
+    assert [program for program, _ in sandbox.programs[-3:]] == [
+        APPLICATION_DESIGN_ACCEPT,
+        APPLICATION_DESIGN_RELEASE_ACCEPTED,
+        APPLICATION_SOURCE_RELEASE_CLAIM,
+    ]
+    sandbox.workspace_write_error = None
+
+    result = await write_application_design(
+        ctx,
+        WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert sandbox.design_claimed
+    assert sandbox.workspace_writes == ["/workspace/application/application-design.svg"]
+    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+
+
+@pytest.mark.parametrize(
+    "cleanup_error",
+    (OSError("cleanup failed"), asyncio.CancelledError("cleanup cancelled")),
+)
+async def test_application_builder_preserves_write_error_and_finishes_claim_cleanup(
+    tmp_path: Path,
+    cleanup_error: BaseException,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = FakeSandbox(
+        workspace_write_error=OSError("write failed"),
+        track_design_claim=True,
+        program_errors={APPLICATION_DESIGN_RELEASE_ACCEPTED: cleanup_error},
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(OSError, match="write failed") as raised:
+        await write_application_design(
+            ctx,
+            WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+        )
+
+    assert not sandbox.design_claimed
+    assert str(cleanup_error) in getattr(raised.value, "__notes__", ())
+    assert [program for program, _args in sandbox.programs[-2:]] == [
+        APPLICATION_DESIGN_RELEASE_ACCEPTED,
+        APPLICATION_SOURCE_RELEASE_CLAIM,
+    ]
+
+
+async def test_application_builder_rejects_duplicate_design_ids_before_claim(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/ufo-app",
+        source_path="/workspace/ufo-app/app.tsx",
+    )
+    sandbox = FakeSandbox(track_design_claim=True)
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+    duplicate = APPLICATION_DESIGN.replace(
+        '<g data-app-region="queue">',
+        '<g id="panel" data-app-region="queue">',
+    ).replace(
+        '<g data-app-region="detail">',
+        '<g id="panel" data-app-region="detail">',
+    )
+
+    with pytest.raises(ValueError, match="application design SVG ids must be unique"):
+        await write_application_design(ctx, WriteApplicationDesignInput(content=duplicate))
+
+    assert sandbox.runtime_writes == []
+    assert sandbox.workspace_writes == []
+    assert sandbox.programs == []
+    assert not sandbox.design_claimed
+
+    result = await write_application_design(
+        ctx,
+        WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert sandbox.design_claimed
+    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+
+
+async def test_application_builder_rejects_overlap_before_fixing_design(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/ufo-app",
+        source_path="/workspace/ufo-app/app.tsx",
+    )
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+    overlap = APPLICATION_DESIGN.replace('x="900"', 'x="800"')
+    corrected = APPLICATION_DESIGN
+    sandbox.design_audit = ExecResult(
+        json.dumps(
+            (
+                AUDIT_DESIGN_REGIONS[0],
+                {**AUDIT_DESIGN_REGIONS[1], "left": 0.5},
+            )
+        ),
+        "",
+        0,
+    )
+
+    with pytest.raises(ValueError, match="design regions queue and detail overlap"):
+        await write_application_design(ctx, WriteApplicationDesignInput(content=overlap))
+
+    assert not sandbox.programs
+    assert sandbox.workspace_writes == []
+    sandbox.design_audit = ExecResult(json.dumps(AUDIT_DESIGN_REGIONS), "", 0)
+    result = await write_application_design(
+        ctx,
+        WriteApplicationDesignInput(content=corrected),
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert payload["design_digest"] == sha256(corrected.encode()).hexdigest()
+    assert sandbox.writes[payload["path"]] == corrected.encode()
+
+    report = json.dumps(
+        {
+            "designRegions": AUDIT_DESIGN_REGIONS,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 2,
+                    "text": [],
+                    "documentWidth": width,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Queue",
+                    "regions": AUDIT_DESIGN_REGIONS,
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {
+                "controls": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "successes": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "states": [["Queue"]],
+                "console": [],
+            },
+        }
+    )
+    source = "import { mountApp } from 'ufo/kit';\n"
+    sandbox.writes[task.source_path] = source.encode()
+    sandbox.scripted_paths["/application-audit/"] = ExecResult(report, "", 0)
+    parent_turn_id = uuid4()
+    store = FakeHookStore(
+        values={
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(
+                turn_id=parent_turn_id
+            ): ApplicationAuditContract().model_dump()
+        }
+    )
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(update={"parent_turn_id": parent_turn_id}),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+
+    qa = await qa_ufo_application(ctx, QaUfoApplicationInput())
+    deployment = HookContext(
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+        payload=PreToolUse(
+            tool_name=APPLICATION_BUILDER_DEPLOY_TOOL,
+            tool_input=DeployUfoApplicationInput(site_name="queue"),
+        ),
+        turn=ctx.turn,
+    )
+
+    assert json.loads(qa.content[0].text)["status"] == "passed"
+    assert await require_application_builder_qa(deployment) is None
+
+
+@pytest.mark.parametrize(
+    ("failed_audit", "error_type", "message"),
+    (
+        (
+            ExecResult("", "browser crashed", 1),
+            RuntimeError,
+            "Run the browser audit successfully",
+        ),
+        (
+            ExecResult("", "browser timed out", 124),
+            RuntimeError,
+            "Run the browser audit successfully",
+        ),
+        (
+            ExecResult("{", "", 0),
+            RuntimeError,
+            "application design audit returned malformed output",
+        ),
+        (ExecResult("[]", "", 0), ValueError, "design has 0 unique visible named regions"),
+    ),
+)
+async def test_application_builder_design_audit_failure_leaves_design_repairable(
+    tmp_path: Path,
+    failed_audit: ExecResult,
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/ufo-app",
+        source_path="/workspace/ufo-app/app.tsx",
+    )
+    sandbox = FakeSandbox(design_audit=failed_audit)
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    with pytest.raises(error_type, match=message):
+        await write_application_design(ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN))
+
+    assert sandbox.programs == []
+    assert sandbox.workspace_writes == []
+    assert sandbox.shells[-1][2] == APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS
+    sandbox.design_audit = ExecResult(json.dumps(AUDIT_DESIGN_REGIONS), "", 0)
+
+    result = await write_application_design(
+        ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN)
+    )
+
+    payload = json.loads(result.content[0].text)
+    assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+
+
+def test_application_builder_design_uses_rendered_region_contract() -> None:
+    names = _validate_application_design(
+        '<svg viewBox="0 0 1280 800">'
+        '<g transform="translate(680 0)"><g data-app-region="detail">'
+        '<text y="100">Detail</text></g></g>'
+        '<g data-app-region="queue"><use href="#card" /></g>'
+        '<defs><symbol id="card"><path d="M0 0H600V800H0Z" /></symbol></defs>'
+        "</svg>"
+    )
+    first = ApplicationAuditRegion(name="queue", left=0, top=0, width=0.6, height=1, aboveFold=True)
+    within_slop = ApplicationAuditRegion(
+        name="detail", left=0.59, top=0, width=0.4, height=1, aboveFold=True
+    )
+    beyond_slop = within_slop.model_copy(update={"left": 0.579})
+
+    assert names == ("detail", "queue")
+    assert application_region_relation(first, within_slop) == ("horizontal", -1)
+    assert application_region_relation(first, beyond_slop) is None
+    with pytest.raises(ValueError, match="active or external content"):
+        _validate_application_design(
+            '<svg viewBox="0 0 1280 800">'
+            '<g data-app-region="queue"><image href="https://example.com/a.png" '
+            'width="600" height="800" /></g>'
+            '<g data-app-region="detail"><rect x="680" width="600" height="800" /></g>'
+            "</svg>"
+        )
+    source = APPLICATION_AUDIT_SCRIPT.decode()
+    assert "await context.route(/^https?:/" in source
 
 
 async def test_application_builder_design_is_isolated_per_build_turn(tmp_path: Path) -> None:
@@ -1933,6 +2525,161 @@ async def test_application_builder_design_is_isolated_per_build_turn(tmp_path: P
     claims = [args[0] for program, args in sandbox.programs if program == APPLICATION_SOURCE_CLAIM]
     assert len(set(claims)) == 2
     assert b"800" in sandbox.writes["/workspace/application/application-design.svg"]
+
+
+async def test_application_builder_same_turn_accepts_the_candidate_it_audited(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    first_design = APPLICATION_DESIGN
+    second_design = APPLICATION_DESIGN.replace("900", "800")
+    sandbox = FakeSandbox(
+        track_design_claim=True,
+        design_audit_barrier=asyncio.Barrier(2),
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+    )
+
+    results = await asyncio.gather(
+        write_application_design(
+            ctx,
+            WriteApplicationDesignInput(content=first_design),
+        ),
+        write_application_design(
+            ctx,
+            WriteApplicationDesignInput(content=second_design),
+        ),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(result, ToolResult) for result in results) == 1
+    assert (
+        sum(isinstance(result, ValueError) and "already fixed" in str(result) for result in results)
+        == 1
+    )
+    candidates = {
+        path: sandbox.writes[path]
+        for path in sandbox.runtime_writes
+        if path.endswith(".candidate.svg")
+    }
+    assert len(candidates) == 2
+    assert set(candidates.values()) == {first_design.encode(), second_design.encode()}
+    design_path = "/workspace/application/application-design.svg"
+    accepted_path = (
+        f"{RUNTIME_ROOT}/{application_design_acceptance_relative(design_path, ctx.turn.id)}"
+    )
+    assert sandbox.writes[accepted_path] == sandbox.writes[design_path]
+
+
+async def test_application_audit_uses_the_turns_accepted_design_after_shared_overwrite(
+    tmp_path: Path,
+) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=f"{APPLICATION_SCAFFOLD_PATH}/app.tsx",
+    )
+    first_design = APPLICATION_DESIGN
+    second_design = APPLICATION_DESIGN.replace("900", "800")
+    first_regions = tuple(
+        ApplicationAuditRegion.model_validate(region) for region in AUDIT_DESIGN_REGIONS
+    )
+    report = json.dumps(
+        {
+            "designRegions": AUDIT_DESIGN_REGIONS,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 2,
+                    "text": [],
+                    "documentWidth": width,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Queue",
+                    "regions": AUDIT_DESIGN_REGIONS,
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {
+                "controls": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "successes": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "states": [["Queue"]],
+                "console": [],
+            },
+        }
+    )
+    sandbox = FakeSandbox(scripted_paths={"/application-audit/": ExecResult(report, "", 0)})
+    parent_turn_id = uuid4()
+    store = FakeHookStore(
+        values={
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(
+                turn_id=parent_turn_id
+            ): ApplicationAuditContract().model_dump()
+        }
+    )
+    base = _context(sandbox, tmp_path)
+    first = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "parent_turn_id": parent_turn_id,
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    second = replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
+
+    await write_application_design(
+        first,
+        WriteApplicationDesignInput(content=first_design),
+    )
+    await write_application_design(
+        second,
+        WriteApplicationDesignInput(content=second_design),
+    )
+
+    first_accepted = (
+        f"{RUNTIME_ROOT}/"
+        f"{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, first.turn.id)}"
+    )
+    second_accepted = (
+        f"{RUNTIME_ROOT}/"
+        f"{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, second.turn.id)}"
+    )
+    assert sandbox.writes[first_accepted] == first_design.encode()
+    assert sandbox.writes[second_accepted] == second_design.encode()
+    assert sandbox.writes[APPLICATION_DESIGN_PATH] == second_design.encode()
+
+    audited = await _audit_builder_application(first, APPLICATION_SCAFFOLD_PATH)
+
+    assert isinstance(audited, ApplicationAuditReport)
+    assert audited.design_regions == first_regions
+    launches = [command for command in sandbox.commands if "nohup" in command]
+    assert first_accepted in launches[-1]
+    assert second_accepted not in launches[-1]
+    assert sandbox.shells[-1][1][-1].endswith("/accepted-design.svg")
 
 
 async def test_application_source_requires_the_svg_design(tmp_path: Path) -> None:
@@ -2035,7 +2782,8 @@ async def test_application_builder_write_tool_writes_only_the_contract_source(
 
     source = (
         'import { mountApp } from "ufo/kit";\nmountApp(document.getElementById("root")!, '
-        "() => <main />);"
+        '() => <main style={{ backgroundColor: "var(--color-ink)", '
+        'color: "var(--color-surface)" }} />);'
     )
     assert WriteApplicationSourceInput.model_fields["content"].description == (
         "Complete app.tsx source. Use named ufo/kit imports and no export declarations."
@@ -2131,6 +2879,22 @@ async def test_application_builder_write_tool_allows_apostrophes_in_jsx_text(
     )
 
     assert sandbox.writes["/workspace/application/app.tsx"] == source.encode()
+
+
+def test_application_source_rejects_literal_white_on_scheme_ink() -> None:
+    source = (
+        'import { mountApp } from "ufo/kit";\n'
+        "function App() { return <button style={{\n"
+        '  backgroundColor: active ? "var(--color-ink)" : "var(--color-field)",\n'
+        '  color: active ? "#FFFFFF" : "var(--color-ink)",\n'
+        "}}>Review</button>; }\n"
+        'mountApp(document.getElementById("root")!, () => <App />);'
+    )
+
+    with pytest.raises(ValueError, match="must use --color-surface text"):
+        _validate_application_source(source)
+
+    _validate_application_source(source.replace('"#FFFFFF"', '"var(--color-surface)"'))
 
 
 async def test_application_builder_write_tool_rejects_the_old_runtime_global(

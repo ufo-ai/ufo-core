@@ -14,6 +14,58 @@
   font-display: swap;
 }
 
+@media not all and (min-width: 720px) {
+  [data-ufo-application],
+  [data-ufo-application] > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  [data-ufo-application] header {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    flex-wrap: wrap;
+  }
+
+  [data-ufo-application] header :where(div, nav) {
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
+
+  [data-ufo-application] main,
+  [data-ufo-application] main
+    :where(div, section, article, aside)[style*="display: grid"],
+  [data-ufo-application] [data-app-region] {
+    min-width: 0;
+  }
+
+  [data-ufo-application] main,
+  [data-ufo-application] main
+    :where(div, section, article, aside)[style*="display: grid"],
+  [data-ufo-application] :where(div, main):has(> [data-app-region]) {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  [data-ufo-application] main :where(div, section, article, aside, nav) {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  [data-ufo-application] main :where(button, input, select, table) {
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  [data-ufo-application]
+    main
+    :where(div, section, article, aside, nav)[style*="display: flex"] {
+    flex-wrap: wrap;
+  }
+}
+
 @font-face {
   font-family: "Inter";
   src: url("./assets/fonts/Inter-Italic-VariableFont_wght.woff2") format("woff2-variations");

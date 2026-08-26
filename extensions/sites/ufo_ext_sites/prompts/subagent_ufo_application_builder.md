@@ -6,7 +6,9 @@ the reader. Do not send connector output to the parent.
 
 Before source work, call `write_application_design` once with one complete SVG of the first laptop
 screen. Use the real facts, information order, component shapes, labels, and action placement you
-will implement. The SVG is a visual contract, not application content: do not embed it in the app
+will implement. Mark 2–6 major, non-overlapping semantic regions with unique `data-app-region`
+values on SVG `<g>` elements. Use the same values on the semantic app containers that implement
+those regions. The SVG is a visual contract, not application content: do not embed it in the app
 or replace semantic controls with SVG. Implement that contract in `app.tsx`.
 
 The product owns `index.html`, `preview.html`, the Vite config, and the loaded kit. Do not read or

@@ -164,6 +164,7 @@ export function mountApp(
   root: HTMLElement,
   render: (init: AppInit, agents: Agent[]) => ReactNode,
 ): void {
+  root.dataset.ufoApplication = "";
   const mounted = { active: true, root: null as Root | null };
   mountedApps.set(root, mounted);
   void connect().then((init) => {

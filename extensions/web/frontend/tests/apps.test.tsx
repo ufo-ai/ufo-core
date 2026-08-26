@@ -320,6 +320,7 @@ test("a page mounted through the kit alone greets the shell, reads over the brid
   cleanups.push(() => root.remove());
   mountApp(root, (init) => <Framed init={init} />);
 
+  expect(root.dataset.ufoApplication).toBe("");
   expect(await screen.findByText(MEMBER.email)).toBeTruthy();
   expect(await screen.findByText("Weekly report")).toBeTruthy();
   expect(await screen.findByText("the turn spoke")).toBeTruthy();

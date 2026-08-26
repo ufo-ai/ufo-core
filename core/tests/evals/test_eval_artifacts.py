@@ -29,6 +29,9 @@ from ufo_ext_eval_env.manifest import (
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
     ApplicationAuditContract,
+    ApplicationAuditRegion,
+    ApplicationAuditReport,
+    application_region_relation,
 )
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION_TOOL,
@@ -118,6 +121,7 @@ from evals.suites.ufo_app_bench import (
     _ConnectedAppSeed,
     _copy_scorer,
     _delivery_scorer,
+    _design_region_scorer,
     _interaction_screen,
     _json_contains,
     _measured_screen,
@@ -141,6 +145,24 @@ from ufo.sdk.context import ScopedStore
 from ufo.workspace import ws
 
 REVENUE = (120, 135, 142, 160)
+AUDIT_DESIGN_REGIONS = (
+    {
+        "name": "queue",
+        "left": 0.0,
+        "top": 0.0,
+        "width": 0.6,
+        "height": 1.0,
+        "aboveFold": True,
+    },
+    {
+        "name": "detail",
+        "left": 0.6,
+        "top": 0.0,
+        "width": 0.4,
+        "height": 1.0,
+        "aboveFold": True,
+    },
+)
 TESTING_APP_SOURCES = {
     "pre-meeting-briefs": ("meeting-briefs",),
     "meeting-tasks": ("meeting-scribe-home",),
@@ -292,6 +314,10 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     assert "if (!element) return page;" in source
     assert "await element.contentFrame()" in source
     assert "frame.evaluate(measure, AA_FLOOR)" in source
+    assert "designRegionAudit(browser, acceptedDesignUrl.href)" in source
+    assert "document.querySelectorAll('[data-app-region]')" in source
+    assert "}).slice(0, 20);" in source
+    assert "designRegions, views, interaction" in source
     assert "fs.writeFileSync(staticPath, await frame.content())" in source
     assert "window.__ufoCalls || []" in source
     assert "window.__ufoNavigations || []" in source
@@ -344,7 +370,10 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
           <details><summary>More</summary><p>closed fact</p></details>
           <p class="below">below-fold fact</p>
         </main>
-        """
+        """ + b"".join(
+        f'<section data-app-region="region-{index}">Region {index}</section>'.encode()
+        for index in range(21)
+    )
     subprocess.run(
         ("docker", "exec", "-i", container, "tee", "/workspace/app-audit.cjs"),
         input=AUDIT_CONTENT,
@@ -359,6 +388,18 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
         capture_output=True,
         timeout=120,
     )
+    subprocess.run(
+        ("docker", "exec", "-i", container, "tee", "/workspace/accepted-design.svg"),
+        input=(
+            b'<svg viewBox="0 0 1280 800">'
+            b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+            b'<g data-app-region="detail"><rect x="680" width="600" height="800" /></g>'
+            b"</svg>"
+        ),
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
     command = """
 python3 -m http.server 8765 --bind 127.0.0.1 --directory /workspace >/tmp/audit-http.log 2>&1 &
 server=$!
@@ -368,7 +409,8 @@ for attempt in $(seq 1 50); do
 done
 node /workspace/app-audit.cjs http://127.0.0.1:8765/fixture.html \
   /workspace/report.json /workspace/light.png /workspace/dark.png \
-  /workspace/interactive.html /workspace/static.html
+  /workspace/interactive.html /workspace/static.html \
+  http://127.0.0.1:8765/accepted-design.svg
 """
 
     subprocess.run(
@@ -379,6 +421,8 @@ node /workspace/app-audit.cjs http://127.0.0.1:8765/fixture.html \
         timeout=120,
     )
     report = loads((workspace / "report.json").read_bytes())
+    validated = ApplicationAuditReport.model_validate(report)
+    assert all(len(view.regions) == 20 for view in validated.views)
     view = next(
         item
         for item in report["views"]
@@ -397,6 +441,345 @@ node /workspace/app-audit.cjs http://127.0.0.1:8765/fixture.html \
     assert "off-canvas fact" not in view["aboveFoldText"]
     assert "closed fact" not in view["aboveFoldText"]
     assert "below-fold fact" not in view["aboveFoldText"]
+
+
+@pytest.mark.docker
+def test_app_bench_design_measurement_uses_painted_pixels(
+    sandbox_container: tuple[str, Path],
+) -> None:
+    container, workspace = sandbox_container
+    subprocess.run(
+        ("docker", "exec", "-i", container, "tee", "/workspace/app-audit.cjs"),
+        input=AUDIT_CONTENT,
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+
+    def invoke(svg: bytes) -> subprocess.CompletedProcess[str]:
+        subprocess.run(
+            ("docker", "exec", "-i", container, "tee", "/workspace/application-design.svg"),
+            input=svg,
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        return subprocess.run(
+            (
+                "docker",
+                "exec",
+                container,
+                "node",
+                "/workspace/app-audit.cjs",
+                "--design",
+                "/workspace/application-design.svg",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def native(svg: bytes) -> bytes:
+        return svg.replace(b"<svg ", b'<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+
+    def render(svg: bytes) -> list[dict[str, object]]:
+        result = invoke(native(svg))
+        assert result.returncode == 0, result.stderr
+        value = loads(result.stdout)
+        assert isinstance(value, list)
+        return value
+
+    transformed = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue"><path d="M0 0H600V800H0Z" /></g>'
+        b'<g transform="translate(680 0)"><g data-app-region="detail">'
+        b'<rect width="600px" height="100%" /></g></g></svg>'
+    )
+    assert [region["name"] for region in transformed] == ["queue", "detail"]
+    assert float(transformed[0]["left"]) + float(transformed[0]["width"]) < float(
+        transformed[1]["left"]
+    )
+
+    structural_css = render(
+        b'<svg viewBox="0 0 1280 800"><style>'
+        b"g:nth-of-type(2){transform:translateX(680px)}</style>"
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><rect width="600" height="800" /></g></svg>'
+    )
+    assert [region["name"] for region in structural_css] == ["queue", "detail"]
+    assert float(structural_css[0]["left"]) + float(structural_css[0]["width"]) < float(
+        structural_css[1]["left"]
+    )
+
+    structural_overlap = render(
+        b'<svg viewBox="0 0 1280 800"><style>'
+        b"g:nth-of-type(2){transform:translateX(-680px)}</style>"
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><rect x="680" width="600" height="800" /></g></svg>'
+    )
+    assert [region["name"] for region in structural_overlap] == ["queue", "detail"]
+    assert float(structural_overlap[0]["left"]) < float(structural_overlap[1]["left"]) + float(
+        structural_overlap[1]["width"]
+    )
+    assert float(structural_overlap[1]["left"]) < float(structural_overlap[0]["left"]) + float(
+        structural_overlap[0]["width"]
+    )
+
+    first_child = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><rect width="600" height="800" /></g>'
+        b"<style>g:first-child{transform:translateX(680px)}</style></svg>"
+    )
+    assert float(first_child[1]["left"]) + float(first_child[1]["width"]) < float(
+        first_child[0]["left"]
+    )
+
+    style_attribute_selector = render(
+        b'<svg viewBox="0 0 1280 800"><style>'
+        b"g:has(+ g[style]){transform:translateX(680px)}</style>"
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><rect width="600" height="800" /></g></svg>'
+    )
+    assert float(style_attribute_selector[0]["left"]) == float(style_attribute_selector[1]["left"])
+
+    variables_and_shorthands = render(
+        b'<svg viewBox="0 0 1280 800"><style>'
+        b':root{--detail-x:900px}g[data-app-region="detail"]{'
+        b"transform:translateX(var(--detail-x));font:italic 700 60px/1.2 sans-serif;"
+        b"text-decoration:underline 4px}</style>"
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><text x="0" y="100">Detail</text></g></svg>'
+    )
+    assert float(variables_and_shorthands[1]["left"]) > 0.7
+    assert float(variables_and_shorthands[1]["height"]) > 0.05
+
+    smil_transform = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><animateTransform attributeName="transform" '
+        b'type="translate" from="680 0" to="680 0" dur="1s" />'
+        b'<rect width="600" height="800" /></g></svg>'
+    )
+    assert float(smil_transform[0]["left"]) + float(smil_transform[0]["width"]) < float(
+        smil_transform[1]["left"]
+    )
+
+    smil_overlap = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><animateTransform attributeName="transform" '
+        b'type="translate" from="-680 0" to="-680 0" dur="1s" />'
+        b'<rect x="680" width="600" height="800" /></g></svg>'
+    )
+    assert float(smil_overlap[0]["left"]) == float(smil_overlap[1]["left"])
+
+    smil_opacity = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue" opacity="0">'
+        b'<animate attributeName="opacity" from="0.2" to="0.2" dur="1s" />'
+        b'<rect width="600" height="800" /></g></svg>'
+    )
+    assert [region["name"] for region in smil_opacity] == ["queue"]
+
+    smil_points = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><polygon points="0,0 600,0 600,800 0,800">'
+        b'<animate attributeName="points" '
+        b'values="680,0 1280,0 1280,800 680,800;680,0 1280,0 1280,800 680,800" '
+        b'dur="1s" /></polygon></g></svg>'
+    )
+    assert float(smil_points[0]["left"]) + float(smil_points[0]["width"]) < float(
+        smil_points[1]["left"]
+    )
+
+    smil_view_box = render(
+        b'<svg viewBox="680 0 1280 800">'
+        b'<animate attributeName="viewBox" '
+        b'values="0 0 1280 800;0 0 1280 800" dur="1s" />'
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><rect x="680" width="600" height="800" /></g></svg>'
+    )
+    assert [region["name"] for region in smil_view_box] == ["queue", "detail"]
+
+    smil_path_length = render(
+        b'<svg viewBox="0 0 1280 800"><g data-app-region="queue">'
+        b'<path d="M0 100H600" pathLength="1000" fill="none" stroke="black" '
+        b'stroke-width="20" stroke-dasharray="0.1 2">'
+        b'<animate attributeName="pathLength" from="1" to="1" dur="1s" />'
+        b"</path></g></svg>"
+    )
+    assert [region["name"] for region in smil_path_length] == ["queue"]
+    assert float(smil_path_length[0]["width"]) < 0.1
+
+    low_alpha = render(
+        b'<svg viewBox="0 0 1280 800"><rect width="1280" height="800" fill="white" />'
+        b'<g data-app-region="queue" opacity="0.1">'
+        b'<rect width="600" height="800" /></g></svg>'
+    )
+    assert low_alpha == []
+    visible_alpha = render(
+        b'<svg viewBox="0 0 1280 800"><rect width="1280" height="800" fill="white" />'
+        b'<g data-app-region="queue" opacity="0.2">'
+        b'<rect width="600" height="800" /></g></svg>'
+    )
+    assert [region["name"] for region in visible_alpha] == ["queue"]
+
+    retained_references = render(
+        b'<svg viewBox="0 0 1280 800"><defs>'
+        b'<symbol id="card"><rect width="600" height="800" /></symbol>'
+        b'<clipPath id="clip"><rect width="300" height="800" /></clipPath>'
+        b'<mask id="mask" maskUnits="userSpaceOnUse" x="0" y="0" width="600" height="800">'
+        b'<rect width="300" height="800" fill="white" /></mask></defs>'
+        b'<rect width="1280" height="800" fill="white" />'
+        b'<g data-app-region="queue" opacity="0.2" clip-path="url(#clip)">'
+        b'<use href="#card" /></g>'
+        b'<g data-app-region="detail" opacity="0.2" transform="translate(900 0)" '
+        b'mask="url(#mask)"><use href="#card" /></g></svg>'
+    )
+    assert [region["name"] for region in retained_references] == ["queue", "detail"]
+    assert all(0.2 < float(region["width"]) < 0.25 for region in retained_references)
+
+    visible_reference = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g id="shape" data-app-region="queue"><rect width="200" height="200" /></g>'
+        b'<g data-app-region="detail" transform="translate(900 0)">'
+        b'<use href="#shape" /></g></svg>'
+    )
+    assert float(visible_reference[1]["left"]) > 0.7
+    assert float(visible_reference[1]["width"]) < 0.2
+
+    colour_token = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g id="fff" data-app-region="queue"><rect width="200" height="200" /></g>'
+        b'<g data-app-region="detail"><rect x="900" width="200" height="200" '
+        b'fill="#fff" /></g></svg>'
+    )
+    assert float(colour_token[1]["left"]) > 0.7
+    assert float(colour_token[1]["width"]) < 0.2
+
+    duplicate_ids = invoke(
+        native(
+            b'<svg viewBox="0 0 1280 800">'
+            b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+            b'<g id="shape" transform="translate(-900 0)">'
+            b'<rect width="200" height="200" /></g>'
+            b'<g id="shape" transform="translate(-1800 0)">'
+            b'<rect width="600" height="800" /></g>'
+            b'<g data-app-region="detail" transform="translate(1800 0)">'
+            b'<use href="#shape" /></g></svg>'
+        )
+    )
+    assert duplicate_ids.returncode != 0
+    assert "application design SVG ids must be unique" in duplicate_ids.stderr
+
+    within_slop = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><rect x="575.68" width="600" height="800" /></g></svg>'
+    )
+    beyond_slop = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><rect x="573.12" width="600" height="800" /></g></svg>'
+    )
+    assert application_region_relation(
+        ApplicationAuditRegion.model_validate(within_slop[0]),
+        ApplicationAuditRegion.model_validate(within_slop[1]),
+    ) == ("horizontal", -1)
+    assert (
+        application_region_relation(
+            ApplicationAuditRegion.model_validate(beyond_slop[0]),
+            ApplicationAuditRegion.model_validate(beyond_slop[1]),
+        )
+        is None
+    )
+
+    reset = invoke(
+        native(
+            b'<svg viewBox="0 0 1280 800" style="white-space:pre"><style>'
+            b'g{all:initial}</style><g data-app-region="queue">'
+            b'<text x="0" y="100">A B</text></g></svg>'
+        )
+    )
+    assert reset.returncode != 0
+    assert "application design uses too many style properties" in reset.stderr
+
+    inherited = b"x" * 100_000
+    bounded = invoke(
+        native(
+            b'<svg viewBox="0 0 1280 800"><style>:root{--payload:'
+            + inherited
+            + b'}</style><g data-app-region="queue"><rect width="1" height="1"/></g>'
+            + b"<g/>" * 32
+            + b"</svg>"
+        )
+    )
+    assert bounded.returncode != 0
+    assert "application design rendered form is too large" in bounded.stderr
+
+    non_rect = render(
+        b'<svg viewBox="0 0 1280 800"><defs><symbol id="card">'
+        b'<rect width="200" height="200" /></symbol></defs>'
+        b'<g data-app-region="queue"><text x="20" y="100" font-size="60">Queue</text></g>'
+        b'<g data-app-region="detail"><use href="#card" x="900" y="100" /></g></svg>'
+    )
+    assert [region["name"] for region in non_rect] == ["queue", "detail"]
+
+    hidden = render(
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="visible"><rect width="200" height="200" /></g>'
+        b'<g data-app-region="hidden" style="display:none">'
+        b'<rect width="200" height="200" /></g>'
+        b'<g data-app-region="transparent" opacity="0.1">'
+        b'<rect width="200" height="200" /></g>'
+        b'<g data-app-region="empty"><rect width="0" height="0" /></g></svg>'
+    )
+    assert [region["name"] for region in hidden] == ["visible"]
+
+    definitions = render(
+        b'<svg viewBox="0 0 1280 800"><defs>'
+        b'<clipPath id="clip"><rect width="300" height="800" /></clipPath>'
+        b'<mask id="mask"><rect width="300" height="800" fill="white" /></mask></defs>'
+        b'<g data-app-region="queue"><rect width="600" height="800" clip-path="url(#clip)" /></g>'
+        b'<g data-app-region="detail"><rect x="900" width="380" height="800" '
+        b'mask="url(#mask)" /></g></svg>'
+    )
+    assert [region["name"] for region in definitions] == ["queue"]
+    assert 0.2 < float(definitions[0]["width"]) < 0.25
+
+    subprocess.run(
+        ("docker", "exec", "-i", container, "tee", "/workspace/fixture.html"),
+        input=b"<style>main{display:block}</style><main>Rendered app</main>",
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    command = """
+cp /workspace/application-design.svg /workspace/accepted-design.svg
+python3 -m http.server 8766 --bind 127.0.0.1 --directory /workspace >/tmp/design-http.log 2>&1 &
+server=$!
+trap 'kill "$server"' EXIT
+for attempt in $(seq 1 50); do
+  curl -fsS http://127.0.0.1:8766/fixture.html >/dev/null && break
+done
+node /workspace/app-audit.cjs http://127.0.0.1:8766/fixture.html \
+  /workspace/design-report.json /workspace/design-light.png /workspace/design-dark.png \
+  /workspace/design-interactive.html /workspace/design-static.html \
+  http://127.0.0.1:8766/accepted-design.svg
+"""
+    audit = subprocess.run(
+        ("docker", "exec", container, "bash", "-lc", command),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert audit.returncode == 0, audit.stderr
+    report = loads((workspace / "design-report.json").read_bytes())
+    assert report["designRegions"] == definitions
 
 
 async def test_app_copy_probe_returns_the_browser_rendered_dom_and_text(tmp_path: Path) -> None:
@@ -752,12 +1135,14 @@ def _measured(**overrides: object) -> bytes:
             "pastViewport": [],
             "clipped": [],
             "console": [],
+            "regions": AUDIT_DESIGN_REGIONS,
         }
         for scheme, width in MEASURED_VIEWS
     ]
     views[0].update(overrides)
     return dumps(
         {
+            "designRegions": AUDIT_DESIGN_REGIONS,
             "views": views,
             "interaction": {
                 "controls": [
@@ -803,7 +1188,7 @@ async def test_measured_screen_scorer_recomputes_the_aa_threshold_per_string() -
         )
     )
     assert not body.passed
-    assert "3.03:1 needs 4.5:1" in body.reason
+    assert '"UFO-820" at span.ref is 3.03:1; needs 4.5:1' in body.reason
 
     large = await grader(
         _output(
@@ -1212,6 +1597,8 @@ def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() 
                     "grader": {
                         "appDeliveryPassed": 2,
                         "appDeliveryTotal": 2,
+                        "appDesignPassed": 3,
+                        "appDesignTotal": 4,
                         "appSourcePassed": 7,
                         "appSourceTotal": 10,
                         "appDensityPassed": 8,
@@ -1244,6 +1631,7 @@ def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() 
     assert result.tier == 3
     assert result.evidence["appScoreLayers"] == {
         "delivery": 1.0,
+        "design": 0.75,
         "source": 0.7,
         "density": 0.8,
         "page": 1.0,
@@ -1251,11 +1639,12 @@ def test_ufo_app_bench_report_keeps_binary_verdict_and_adds_continuous_layers() 
         "action": 1.0,
         "visual": 0.5,
     }
-    assert result.evidence["appScore"] == pytest.approx(6 / 7)
+    assert result.evidence["appScore"] == pytest.approx(6.75 / 8)
     assert result.evidence["processScore"] == pytest.approx(2 / 3)
     assert {metric.name: metric.value for metric in scored.metrics} == {
-        "app_score": pytest.approx(6 / 7),
+        "app_score": pytest.approx(6.75 / 8),
         "delivery_score": 1.0,
+        "design_score": 0.75,
         "source_score": 0.7,
         "density_score": 0.8,
         "page_score": 1.0,
@@ -1383,7 +1772,9 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         assert "test -s /workspace/ufo-app/application-design.svg" in probe_command
         assert f'"$capture/{case.name}-design.html"' in probe_command
         assert f'"$capture/{case.name}-design.svg"' in probe_command
+        assert f'"$capture/{case.name}-design.svg" >/tmp/ufo-app-bench-server.log' in probe_command
         assert f"http://localhost:{PROBE_PORT}/preview.html" in probe_command
+        assert f"http://localhost:{PROBE_PORT}/accepted-design.svg" in probe_command
         assert "rglob('*.html')" not in probe_command
         assert f'"$capture/{case.name}-interactive.html"' in probe_command
         assert f'"$capture/{case.name}-static.html"' in probe_command
@@ -1829,6 +2220,59 @@ async def test_connected_app_density_grader_checks_exact_facts_in_both_desktop_v
     assert not failed.passed
     assert f"dark desktop lacks {missing_fact}" in failed.reason
     assert failed.evidence["appDensityPassed"] < failed.evidence["appDensityTotal"]
+
+
+async def test_app_design_region_grader_measures_names_fold_and_relative_order() -> None:
+    report = loads(_measured())
+    report["designRegions"] = [
+        {
+            "name": "queue",
+            "left": 0.05,
+            "top": 0.1,
+            "width": 0.55,
+            "height": 0.8,
+            "aboveFold": True,
+        },
+        {
+            "name": "detail",
+            "left": 0.65,
+            "top": 0.1,
+            "width": 0.3,
+            "height": 0.8,
+            "aboveFold": True,
+        },
+    ]
+    for view in report["views"]:
+        if view["width"] == DESKTOP_WIDTH:
+            view["regions"] = [dict(region) for region in report["designRegions"]]
+    output = CapabilityOutput(
+        "Built app",
+        (),
+        artifacts=(SharedArtifact("queue-audit.json", dumps(report).encode()),),
+    )
+
+    matched = await _design_region_scorer()(output)
+
+    assert matched.passed
+    assert matched.evidence["appDesignPassed"] == matched.evidence["appDesignTotal"]
+
+    dark = next(
+        view
+        for view in report["views"]
+        if view["width"] == DESKTOP_WIDTH and view["scheme"] == "dark"
+    )
+    dark["regions"][0]["left"] = 0.7
+    dark["regions"][1]["left"] = 0.05
+    changed = await _design_region_scorer()(
+        replace(
+            output,
+            artifacts=(SharedArtifact("queue-audit.json", dumps(report).encode()),),
+        )
+    )
+
+    assert not changed.passed
+    assert changed.evidence["appDesignPassed"] < changed.evidence["appDesignTotal"]
+    assert "changes horizontal order" in changed.reason
 
 
 def test_source_copy_proof_catches_a_light_edit_and_allows_a_reader_rewrite() -> None:

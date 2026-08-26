@@ -14,7 +14,14 @@ from uuid import UUID
 from xml.etree import ElementTree
 
 from PIL import Image, ImageDraw, ImageFont
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from ufo.sdk.manifest import (
     Deny,
@@ -22,13 +29,17 @@ from ufo.sdk.manifest import (
     PreToolUse,
     SubagentProfile,
 )
-from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, contained_relative
+from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, ExecResult, contained_relative
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    DESIGN_REGION_MAX,
+    DESIGN_REGION_MIN,
+    ApplicationAuditRegion,
     ApplicationQaProof,
+    application_region_relation,
 )
 from ufo_ext_sites.source import (
     PROJECT_CONFIG,
@@ -63,6 +74,7 @@ APPLICATION_BUILDER_REPAIR_READ_REASON = (
 APPLICATION_BUILDER_DEPLOY_GUARD_REASON = "Run and pass product QA before deployment."
 APPLICATION_SCAFFOLD_PATH = "/workspace/ufo-app"
 APPLICATION_SOURCE_PATH = f"{APPLICATION_SCAFFOLD_PATH}/app.tsx"
+APPLICATION_DESIGN_PATH = f"{APPLICATION_SCAFFOLD_PATH}/application-design.svg"
 APPLICATION_PREVIEW_FILENAME: Literal["application-preview.png"] = "application-preview.png"
 APPLICATION_PREVIEW_WIDTH = 1280
 APPLICATION_PREVIEW_HEIGHT = 800
@@ -81,12 +93,18 @@ APPLICATION_BUILDER_PROMPT = (
 ).read_text()
 APPLICATION_BUILD_TIMEOUT_SECONDS = 600
 APPLICATION_BUILD_ERROR_MAX_CHARS = 2_000
+APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS = 15
+APPLICATION_DESIGN_AUDIT_MAX_CHARS = 4_000
 APPLICATION_DESIGN_MAX_CHARS = 128_000
 APPLICATION_SOURCE_MAX_CHARS = 256_000
 APPLICATION_SOURCE_EXCERPT_MAX_CHARS = 5_000
 SVG_DRAWING_ELEMENTS = frozenset(
     {"circle", "ellipse", "image", "line", "path", "polygon", "polyline", "rect", "text", "use"}
 )
+APPLICATION_AUDIT_SCRIPT = (
+    Path(__file__).parent / "scripts" / "audit_application.cjs"
+).read_bytes()
+APPLICATION_DESIGN_REGIONS = TypeAdapter(tuple[ApplicationAuditRegion, ...])
 APPLICATION_INDEX = b"""<!doctype html>
 <html lang="en">
 <head>
@@ -191,6 +209,72 @@ except FileExistsError:
     raise SystemExit(17)
 except (ContainmentError, OSError) as error:
     raise SystemExit(str(error))"""
+APPLICATION_SOURCE_RELEASE_CLAIM = """import os
+import stat
+from containment import ContainmentError, contained_file
+import sys
+
+try:
+    with contained_file(sys.argv[1], sys.argv[2]) as target:
+        status = target.lstat()
+        if status is None or not stat.S_ISREG(status.st_mode) or status.st_size != 0:
+            raise SystemExit("application claim is not owned")
+        os.unlink(target.name, dir_fd=target.parent_fd)
+except (ContainmentError, OSError) as error:
+    raise SystemExit(str(error))"""
+APPLICATION_DESIGN_ACCEPT = """import os
+from containment import ContainmentError, contained_file
+import sys
+
+staged = None
+try:
+    with contained_file(sys.argv[1], sys.argv[3]) as source:
+        data = source.read_bytes(int(sys.argv[4]) + 1)
+    if len(data) > int(sys.argv[4]):
+        raise SystemExit("application design is too large")
+    with contained_file(sys.argv[2], sys.argv[3], create_parent=True) as target:
+        staged = f".{target.name}.{os.getpid()}.accepted"
+        descriptor = os.open(
+            staged,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=target.parent_fd,
+        )
+        try:
+            os.fchmod(descriptor, 0o400)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+            os.link(
+                staged,
+                target.name,
+                src_dir_fd=target.parent_fd,
+                dst_dir_fd=target.parent_fd,
+                follow_symlinks=False,
+            )
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(staged, dir_fd=target.parent_fd)
+            except FileNotFoundError:
+                pass
+except FileExistsError:
+    raise SystemExit(17)
+except (ContainmentError, OSError) as error:
+    raise SystemExit(str(error))"""
+APPLICATION_DESIGN_RELEASE_ACCEPTED = """import hashlib
+from containment import ContainmentError, contained_file
+import sys
+
+try:
+    with contained_file(sys.argv[1], sys.argv[2]) as target:
+        data = target.read_bytes(int(sys.argv[4]) + 1)
+        if len(data) > int(sys.argv[4]) or hashlib.sha256(data).hexdigest() != sys.argv[3]:
+            raise SystemExit("accepted application design is not owned")
+        target.unlink()
+except (ContainmentError, OSError) as error:
+    raise SystemExit(str(error))"""
 APPLICATION_SOURCE_REQUIRE_CLAIM = """import stat
 from containment import ContainmentError, contained_file
 import sys
@@ -209,6 +293,13 @@ SIDE_EFFECT_IMPORT = re.compile(r"(?m)^[ \t]*import\s*['\"]")
 ROOT_MOUNT = re.compile(
     r"\bmountApp\s*\(\s*document\.getElementById\(\s*['\"]root['\"]\s*\)\s*!?\s*,"
 )
+LITERAL_WHITE_ON_SCHEME_INK = re.compile(
+    r"\bstyle\s*=\s*\{\{"
+    r"(?=(?:(?!\}\}).)*\bbackground(?:Color)?\s*:(?:(?!\}\}).)*var\(--color-ink\))"
+    r"(?=(?:(?!\}\}).)*\bcolor\s*:(?:(?!\}\}).)*['\"](?:#fff(?:fff)?|white)['\"])",
+    re.DOTALL | re.IGNORECASE,
+)
+APPLICATION_DESIGN_REGION = re.compile(r"[a-z][a-z0-9-]{0,79}")
 SOURCE_EDIT_PATCH = re.compile(
     r"\A<<<<<<< SEARCH\n(?P<old>.*?)\n=======\n(?P<new>.*?)\n>>>>>>>(?: REPLACE)?\n?\Z",
     re.DOTALL,
@@ -490,9 +581,13 @@ def _validate_application_source(source: str) -> None:
         raise ValueError("app.tsx must import from ufo/kit instead of using UfoAppKit")
     if ROOT_MOUNT.search(source) is None:
         raise ValueError("mountApp must receive the root element and a render callback")
+    if LITERAL_WHITE_ON_SCHEME_INK.search(source):
+        raise ValueError(
+            "a --color-ink background must use --color-surface text in both colour schemes"
+        )
 
 
-def _validate_application_design(source: str) -> None:
+def _validate_application_design(source: str) -> tuple[str, ...]:
     if "<!DOCTYPE" in source.upper() or "<!ENTITY" in source.upper():
         raise ValueError("application design must not declare XML entities")
     try:
@@ -514,6 +609,8 @@ def _validate_application_design(source: str) -> None:
         or view_box[3] <= 0
     ):
         raise ValueError("application design svg requires a viewBox")
+    regions = []
+    ids = set()
     drawing_elements = 0
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1]
@@ -548,8 +645,20 @@ def _validate_application_design(source: str) -> None:
                 visible = False
         if tag in SVG_DRAWING_ELEMENTS and visible:
             drawing_elements += 1
+        element_id = element.attrib.get("id", "").strip()
+        if element_id:
+            if element_id in ids:
+                raise ValueError("application design SVG ids must be unique")
+            ids.add(element_id)
         if tag in {"script", "foreignObject"}:
             raise ValueError("application design must contain SVG drawing elements only")
+        region = element.attrib.get("data-app-region")
+        if region is not None:
+            if tag != "g" or APPLICATION_DESIGN_REGION.fullmatch(region) is None:
+                raise ValueError(
+                    "application design regions must be lowercase slugs on SVG g elements"
+                )
+            regions.append(element)
         for name, value in element.attrib.items():
             attribute = name.rsplit("}", 1)[-1].casefold()
             lowered = value.casefold()
@@ -559,6 +668,18 @@ def _validate_application_design(source: str) -> None:
                 raise ValueError("application design must not contain active or external content")
     if drawing_elements == 0:
         raise ValueError("application design must contain SVG drawing elements only")
+    names = tuple(element.attrib["data-app-region"] for element in regions)
+    if not DESIGN_REGION_MIN <= len(names) <= DESIGN_REGION_MAX or len(set(names)) != len(names):
+        raise ValueError(
+            f"application design requires {DESIGN_REGION_MIN} to {DESIGN_REGION_MAX} unique regions"
+        )
+    if any(
+        descendant is not region and descendant.attrib.get("data-app-region") is not None
+        for region in regions
+        for descendant in region.iter()
+    ):
+        raise ValueError("application design regions must not be nested")
+    return names
 
 
 async def _build_application_project(
@@ -616,6 +737,15 @@ async def _design_claim_path(ctx: ToolContext, task: ApplicationBuilderTask, tur
     )
 
 
+def application_design_acceptance_relative(design_path: str, turn_id: UUID) -> str:
+    """Return the runtime-owned accepted design path for one builder turn."""
+
+    return (
+        "tool-output/application-builder/"
+        f"{sha256(design_path.encode()).hexdigest()}.{turn_id}.accepted.svg"
+    )
+
+
 async def _source_candidate_path(
     ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID
 ) -> str:
@@ -623,6 +753,43 @@ async def _source_candidate_path(
         "tool-output/application-builder/"
         f"{sha256(task.source_path.encode()).hexdigest()}.{turn_id}.candidate.tsx"
     )
+
+
+async def _render_application_design(
+    ctx: ToolContext, candidate_path: str, names: tuple[str, ...]
+) -> tuple[ApplicationAuditRegion, ...]:
+    script_relative = f"tool-output/application-builder/{ctx.turn.id}/audit-application.cjs"
+    script_path = await ctx.sandbox.runtime_path(script_relative)
+    await ctx.sandbox.write_runtime_file(script_relative, APPLICATION_AUDIT_SCRIPT)
+    rendered = await ctx.sandbox.sh(
+        'node "$1" --design "$2"',
+        script_path,
+        candidate_path,
+        timeout_s=APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS,
+    )
+    if rendered.exit_code != 0:
+        detail = (rendered.stderr or rendered.stdout or "audit returned no error").strip()[:400]
+        if "application design must not contain active or external content" in detail:
+            raise ValueError("application design must not contain active or external content")
+        raise RuntimeError(f"Run the browser audit successfully: {detail}")
+    if len(rendered.stdout) > APPLICATION_DESIGN_AUDIT_MAX_CHARS:
+        raise RuntimeError("application design audit returned malformed output")
+    try:
+        regions = APPLICATION_DESIGN_REGIONS.validate_json(rendered.stdout)
+    except ValidationError as error:
+        raise RuntimeError("application design audit returned malformed output") from error
+    rendered_names = tuple(region.name for region in regions)
+    if (
+        len(regions) > DESIGN_REGION_MAX
+        or rendered_names != names
+        or len(set(rendered_names)) != len(rendered_names)
+    ):
+        raise ValueError(f"design has {len(regions)} unique visible named regions")
+    for first_index, first in enumerate(regions):
+        for second in regions[first_index + 1 :]:
+            if application_region_relation(first, second) is None:
+                raise ValueError(f"design regions {first.name} and {second.name} overlap")
+    return regions
 
 
 async def _source_acceptance_path(
@@ -668,19 +835,80 @@ async def write_application_design(
     """Write one SVG visual contract before application source work starts."""
 
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
-    _validate_application_design(args.content)
+    names = _validate_application_design(args.content)
     design_path = _design_path(task)
+    content = args.content.encode()
+    content_sha256 = sha256(content).hexdigest()
+    candidate_path = await ctx.sandbox.runtime_path(
+        "tool-output/application-builder/"
+        f"{sha256(design_path.encode()).hexdigest()}.{ctx.turn.id}."
+        f"{content_sha256}.candidate.svg"
+    )
+    accepted_path = await ctx.sandbox.runtime_path(
+        application_design_acceptance_relative(design_path, ctx.turn.id)
+    )
+    await ctx.sandbox.write_runtime_path(candidate_path, content)
+    await _render_application_design(ctx, candidate_path, names)
+    claim_path = await _design_claim_path(ctx, task, ctx.turn.id)
+    runtime_root = await _runtime_root(ctx)
     claim = await ctx.sandbox.python(
         APPLICATION_SOURCE_CLAIM,
-        await _design_claim_path(ctx, task, ctx.turn.id),
-        await _runtime_root(ctx),
+        claim_path,
+        runtime_root,
     )
     if claim.exit_code == 17:
         raise ValueError("the application design is already fixed for this build")
     if claim.exit_code != 0:
         raise RuntimeError(claim.stderr or "application design ownership could not be claimed")
-    content = args.content.encode()
-    await ctx.sandbox.write_file(design_path, content)
+    accepted = False
+    try:
+        acceptance = await ctx.sandbox.python(
+            APPLICATION_DESIGN_ACCEPT,
+            candidate_path,
+            accepted_path,
+            runtime_root,
+            str(APPLICATION_DESIGN_MAX_CHARS),
+        )
+        if acceptance.exit_code != 0:
+            raise RuntimeError(
+                acceptance.stderr
+                or acceptance.stdout
+                or "accepted application design could not be written"
+            )
+        accepted = True
+        await ctx.sandbox.write_file(design_path, content)
+    except BaseException as error:
+        cleanup_failures: list[str] = []
+        if accepted:
+            released_design, failures = await _complete_application_design_cleanup(
+                ctx,
+                APPLICATION_DESIGN_RELEASE_ACCEPTED,
+                accepted_path,
+                runtime_root,
+                content_sha256,
+                str(APPLICATION_DESIGN_MAX_CHARS),
+            )
+            cleanup_failures.extend(failures)
+            if released_design is not None and released_design.exit_code != 0:
+                cleanup_failures.append(
+                    released_design.stderr
+                    or released_design.stdout
+                    or "accepted application design could not be released"
+                )
+        released, failures = await _complete_application_design_cleanup(
+            ctx,
+            APPLICATION_SOURCE_RELEASE_CLAIM,
+            claim_path,
+            runtime_root,
+        )
+        cleanup_failures.extend(failures)
+        if released is not None and released.exit_code != 0:
+            cleanup_failures.append(
+                released.stderr or "application design ownership could not be released"
+            )
+        for failure in cleanup_failures:
+            error.add_note(failure)
+        raise
     return ToolResult(
         content=(
             TextContent(
@@ -694,6 +922,25 @@ async def write_application_design(
             ),
         )
     )
+
+
+async def _complete_application_design_cleanup(
+    ctx: ToolContext, program: str, *args: str
+) -> tuple[ExecResult | None, tuple[str, ...]]:
+    task = asyncio.create_task(ctx.sandbox.python(program, *args))
+    failures = []
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            failures.append(str(error) or "application design cleanup was interrupted")
+        except BaseException:
+            pass
+    try:
+        return task.result(), tuple(failures)
+    except BaseException as error:
+        failures.append(str(error) or type(error).__name__)
+        return None, tuple(failures)
 
 
 async def read_application_source(ctx: ToolContext, args: ReadApplicationSourceInput) -> ToolResult:

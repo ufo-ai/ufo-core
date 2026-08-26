@@ -1,5 +1,6 @@
 """Typed deterministic acceptance for an interactive ufo application."""
 
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -17,6 +18,9 @@ LARGE_BOLD_PX = 18.66
 BOLD_WEIGHT = 700
 MIN_CONTROLS = 2
 MIN_INTERACTIONS = 2
+DESIGN_REGION_MIN = 2
+DESIGN_REGION_MAX = 6
+DESIGN_REGION_SEPARATION_SLOP = 0.02
 MAX_ISSUES = 8
 MAX_MESSAGE_CHARS = 500
 MAX_PRODUCT_QA_CONTROLS = 100
@@ -31,8 +35,22 @@ from pathlib import Path
 import sys
 
 os.chdir(Path(sys.argv[1]).resolve())
+accepted_design = Path(sys.argv[3]).resolve(strict=True)
+if not accepted_design.is_file():
+    raise SystemExit("accepted application design is not a file")
 
 class Handler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.partition("?")[0] == "/accepted-design.svg":
+            data = accepted_design.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        super().do_GET()
+
     def translate_path(self, path):
         if path == "/assets" or path.startswith("/assets/"):
             path = "/dist" + path
@@ -48,6 +66,7 @@ AuditIssueCode = Literal[
     "contrast",
     "overflow",
     "clipping",
+    "design",
     "console",
     "controls",
     "interaction",
@@ -78,11 +97,26 @@ class ApplicationAuditText(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    text: str = ""
+    text: str = Field(default="", max_length=48)
     selector: str
     px: float
     weight: int
     ratio: float
+    colour: str = ""
+    background: str = ""
+
+
+class ApplicationAuditRegion(BaseModel):
+    """One visible semantic region measured in a design or application view."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    name: str = Field(min_length=1, max_length=80)
+    left: float = Field(ge=0, le=1)
+    top: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+    above_fold: bool = Field(default=True, alias="aboveFold")
 
 
 class ApplicationAuditView(BaseModel):
@@ -98,6 +132,7 @@ class ApplicationAuditView(BaseModel):
     clipped: tuple[str, ...]
     console: tuple[str, ...]
     above_fold_text: str = Field(alias="aboveFoldText")
+    regions: tuple[ApplicationAuditRegion, ...] = Field(default=(), max_length=20)
 
 
 class ApplicationAuditControl(BaseModel):
@@ -127,6 +162,9 @@ class ApplicationAuditReport(BaseModel):
 
     url: str = ""
     floor: float = AA_BODY
+    design_regions: tuple[ApplicationAuditRegion, ...] = Field(
+        default=(), alias="designRegions", max_length=20
+    )
     views: tuple[ApplicationAuditView, ...]
     interaction: ApplicationAuditInteraction
 
@@ -197,6 +235,15 @@ class ApplicationQaProof(BaseModel):
     browser_batches: int = Field(ge=1, le=3)
 
 
+@dataclass(frozen=True)
+class ApplicationDesignFidelity:
+    """The deterministic score and failures for one accepted SVG implementation."""
+
+    passed: int
+    total: int
+    failures: tuple[str, ...]
+
+
 def _needed_ratio(px: float, weight: int) -> float:
     if px >= LARGE_PX or (px >= LARGE_BOLD_PX and weight >= BOLD_WEIGHT):
         return AA_LARGE
@@ -211,6 +258,100 @@ def _issue(
         message=message[:MAX_MESSAGE_CHARS],
         terms=terms[:10],
     )
+
+
+def application_region_relation(
+    first: ApplicationAuditRegion,
+    second: ApplicationAuditRegion,
+) -> tuple[Literal["horizontal", "vertical"], int] | None:
+    """Return the rendered separation axis and order for two regions."""
+
+    if first.top + first.height <= second.top + DESIGN_REGION_SEPARATION_SLOP:
+        return ("vertical", -1)
+    if second.top + second.height <= first.top + DESIGN_REGION_SEPARATION_SLOP:
+        return ("vertical", 1)
+    if first.left + first.width <= second.left + DESIGN_REGION_SEPARATION_SLOP:
+        return ("horizontal", -1)
+    if second.left + second.width <= first.left + DESIGN_REGION_SEPARATION_SLOP:
+        return ("horizontal", 1)
+    return None
+
+
+def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity:
+    """Measure named region identity, first-screen visibility, and relative desktop order."""
+
+    design = report.design_regions
+    design_names = tuple(region.name for region in design)
+    if not (
+        DESIGN_REGION_MIN <= len(design) <= DESIGN_REGION_MAX
+        and len(set(design_names)) == len(design_names)
+    ):
+        return ApplicationDesignFidelity(
+            passed=0,
+            total=1,
+            failures=(f"design has {len(design)} unique visible named regions",),
+        )
+    passed = 1
+    total = 1
+    failures = []
+    design_by_name = {region.name: region for region in design}
+    for first_index, first_name in enumerate(design_names):
+        for second_name in design_names[first_index + 1 :]:
+            if (
+                application_region_relation(design_by_name[first_name], design_by_name[second_name])
+                is None
+            ):
+                return ApplicationDesignFidelity(
+                    passed=0,
+                    total=1,
+                    failures=(f"design regions {first_name} and {second_name} overlap",),
+                )
+    for scheme in SCHEMES:
+        view = next(
+            (
+                candidate
+                for candidate in report.views
+                if candidate.scheme == scheme and candidate.width == DESKTOP_WIDTH
+            ),
+            None,
+        )
+        total += 1 + len(design)
+        if view is None:
+            failures.append(f"{scheme} desktop has no region measurement")
+            continue
+        app_names = tuple(region.name for region in view.regions)
+        app_by_name = {region.name: region for region in view.regions}
+        if len(app_by_name) == len(view.regions) and set(app_names) == set(design_names):
+            passed += 1
+        else:
+            failures.append(f"{scheme} desktop region names differ")
+        for name in design_names:
+            if (region := app_by_name.get(name)) is not None and region.above_fold:
+                passed += 1
+            else:
+                failures.append(f"{scheme} desktop lacks visible {name}")
+        for first_index, first_name in enumerate(design_names):
+            for second_name in design_names[first_index + 1 :]:
+                expected = application_region_relation(
+                    design_by_name[first_name], design_by_name[second_name]
+                )
+                if expected is None:
+                    continue
+                total += 1
+                first = app_by_name.get(first_name)
+                second = app_by_name.get(second_name)
+                if (
+                    first is not None
+                    and second is not None
+                    and application_region_relation(first, second) == expected
+                ):
+                    passed += 1
+                else:
+                    failures.append(
+                        f"{scheme} desktop changes {expected[0]} order for "
+                        f"{first_name} and {second_name}"
+                    )
+    return ApplicationDesignFidelity(passed=passed, total=total, failures=tuple(failures))
 
 
 def audit_application(
@@ -230,13 +371,19 @@ def audit_application(
     empty = tuple(f"{view.scheme} {view.width}px" for view in measured if view.text_checked == 0)
     if empty:
         issues.append(_issue("empty_view", f"Audit read no text in {', '.join(empty)}."))
-    contrast = tuple(
-        f"{view.scheme} {view.width}px {item.selector} {item.ratio}:1 needs "
-        f"{_needed_ratio(item.px, item.weight)}:1"
-        for view in measured
-        for item in view.text
-        if item.ratio < _needed_ratio(item.px, item.weight)
-    )
+    contrast = []
+    for view in measured:
+        for item in view.text:
+            if item.ratio >= _needed_ratio(item.px, item.weight):
+                continue
+            label = f' "{item.text}"' if item.text else ""
+            colours = (
+                f" {item.colour} on {item.background}" if item.colour and item.background else ""
+            )
+            contrast.append(
+                f"{view.scheme} {view.width}px{label} at {item.selector}{colours} "
+                f"is {item.ratio}:1; needs {_needed_ratio(item.px, item.weight)}:1"
+            )
     if contrast:
         issues.append(_issue("contrast", f"Fix text contrast: {'; '.join(contrast[:4])}."))
     overflow = tuple(
@@ -251,6 +398,14 @@ def audit_application(
     )
     if clipped:
         issues.append(_issue("clipping", f"Fix clipped content: {'; '.join(clipped[:4])}."))
+    fidelity = application_design_fidelity(report)
+    if fidelity.failures:
+        issues.append(
+            _issue(
+                "design",
+                "Match the accepted design regions: " + "; ".join(fidelity.failures[:4]) + ".",
+            )
+        )
     console = tuple(
         dict.fromkeys(
             (

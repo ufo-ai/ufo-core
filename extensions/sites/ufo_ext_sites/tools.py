@@ -77,9 +77,11 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_QA_PROOF_KEY,
     APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_REDEPLOY_KEY,
+    APPLICATION_DESIGN_PATH,
     APPLICATION_SCAFFOLD_PATH,
     APPLICATION_SOURCE_PATH,
     APPLICATION_SOURCE_READ,
+    application_design_acceptance_relative,
 )
 from ufo_ext_sites.objects import effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page
@@ -772,16 +774,22 @@ async def _audit_builder_application(
     interactive_path = f"{root}-interactive.html"
     static_path = f"{root}-static.html"
     server_path = f"{root}-server.py"
+    accepted_design_path = await ctx.sandbox.runtime_path(
+        application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
+    )
     await ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
     await ctx.sandbox.write_runtime_file(f"{relative_root}-server.py", APPLICATION_AUDIT_SERVER)
     port = (
         APPLICATION_AUDIT_PORT_FLOOR + ctx.sandbox.conversation_id.int % APPLICATION_AUDIT_PORT_SPAN
     )
-    command = f"python3 {shell_path(server_path)} {shlex.quote(project)} {port}"
+    command = (
+        f"python3 {shell_path(server_path)} {shlex.quote(project)} {port} "
+        f"{shell_path(accepted_design_path)}"
+    )
     await _serve(ctx, command, project, port, f"{root}.log")
     try:
         run = await ctx.sandbox.sh(
-            'node "$1" "$2" "$3" "$4" "$5" "$6" "$7"',
+            'node "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"',
             script_path,
             f"http://localhost:{port}/preview.html",
             report_path,
@@ -789,6 +797,7 @@ async def _audit_builder_application(
             dark_path,
             interactive_path,
             static_path,
+            f"http://localhost:{port}/accepted-design.svg",
             timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
         )
         if run.exit_code != 0:

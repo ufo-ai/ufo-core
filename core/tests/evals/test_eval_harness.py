@@ -502,6 +502,58 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
         )
         is None
     )
+    retained_revision = replace(
+        revised,
+        input={
+            **contract,
+            "first_screen_priority": "The queue of overdue items waiting on you",
+            "regions": ["Waiting on you", "This week's draft", "Published notes"],
+        },
+    )
+    assert (
+        _guided_design_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, retained_revision, asked, apply)),
+            2,
+        )
+        is None
+    )
+    missing_overdue = replace(
+        retained_revision,
+        input={
+            **retained_revision.input,
+            "first_screen_priority": "Items waiting on you",
+        },
+    )
+    assert "overdue queue first" in str(
+        _guided_design_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, missing_overdue, asked, apply)), 2
+        )
+    )
+    summary_first = replace(
+        retained_revision,
+        input={
+            **retained_revision.input,
+            "regions": ["Waiting on your weekly summary", "Overdue queue", "Published notes"],
+        },
+    )
+    assert "overdue queue first" in str(
+        _guided_design_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, summary_first, asked, apply)), 2
+        )
+    )
+    summary_with_label = replace(
+        retained_revision,
+        input={
+            **retained_revision.input,
+            "regions": ["Weekly summary waiting on you", "Overdue queue", "Published notes"],
+        },
+    )
+    assert "overdue queue first" in str(
+        _guided_design_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, summary_with_label, asked, apply)),
+            2,
+        )
+    )
     one_of_two = CapabilityOutput("", (asked, asked, preview, asked, asked, apply))
     assert "rendered 1 previews" in str(_guided_design_failure(one_of_two, 2))
     assert "has no later design choice" in str(

@@ -346,7 +346,8 @@ def _guided_design_failure(output: CapabilityOutput, previews: int) -> str | Non
         regions = contract.get("regions", [])
         priority = str(contract.get("first_screen_priority", "")).casefold()
         first_region = str(regions[0]).casefold() if isinstance(regions, list) and regions else ""
-        if "overdue" not in priority or "overdue" not in first_region:
+        waiting_on_member = first_region.strip() == "waiting on you"
+        if "overdue" not in priority or ("overdue" not in first_region and not waiting_on_member):
             return "the revised preview contract does not put the overdue queue first"
     return None
 

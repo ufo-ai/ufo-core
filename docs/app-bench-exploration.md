@@ -150,7 +150,7 @@ it blocks the corrected PR run.
 | F. Creation flow | 50 | Can a member approve, preview, revise, publish, and use the selected build? | Four complete member journeys pass without partial publication. All 50 cases are used. |
 | **Planned total** | **239** | | Unused cases move to final confirmation repeats. |
 | **Stage A recovery reserve** | **30** | | All 30 cases are used. |
-| **Stage F exploration reserve** | **30** | | Twenty-nine evaluated cases used; one remains. |
+| **Stage F exploration reserve** | **30** | | All 30 evaluated cases are used. |
 
 ## Current Vite reasoning screen
 
@@ -411,6 +411,51 @@ sandboxed static SVG preview in the HTML report before defining a structural reg
 Run `be872908-919a-4399-8437-0fc3d73402bf` proved the archive path on a failed
 `code-review-queue` case. The report retained the SVG, its static HTML preview, both app previews,
 the audit, and both screenshots.
+
+Named visible regions provide the structural fidelity contract. Screen experiment
+`app-design-regions-screen` compares runs `6234d087-9eff-4f88-9295-a4a645ac5b4a` and
+`d97e0351-5ed5-4b68-8816-088650a995b7`. All three treatment apps use the same 4 to 5 semantic
+region names in SVG groups and app containers. `meeting-tasks` moves from fail to pass.
+Two-repeat confirmation `app-design-regions-confirm` compares control runs
+`ac8da585-5600-45df-915c-aca986d4e818` and `f6bedff5-9986-4b09-a29a-6d9e47f1abaa` with treatment
+runs `4367cb67-61bd-40d8-87a0-a3d45bb3b7d4` and
+`6b484db9-c2a8-42b8-ab26-dd55de9908c9`. Hard passes move from 1/6 to 2/6, below the sample signal
+threshold. Mean product score moves from 0.763 to 0.906 in the same six samples, and every case
+family improves. Mean region fidelity is 0.993. Total wall time falls from 1,748 to 1,584 seconds;
+cost moves from $0.718 to $0.732. Keep the instruction and let product QA enforce 2 to 6 unique
+SVG groups, matching visible app containers, and relative desktop order.
+Exact-commit run `7c90fb9d-8e88-4e69-9415-7130a9c9c795` passes the enforced product audit with
+19/19 region checks, two bounded QA calls, all other deterministic page layers, and all 11 visual
+criteria. Its 0.993 app score fails only because the existing copy grader finds one retained
+transcript filler sentence.
+
+Creation run `062c23a0-faf1-4ac0-aa5e-0a56b5bc0506` proves the bounded member revision. A06 uses
+two ordered previews and carries the accepted overdue-queue change into the application prompt.
+A09 then exposes a false region failure: a full-width queue above a lower watch list changes their
+horizontal centres without changing their order. Region fidelity now compares vertical separation
+first and compares horizontal separation only when vertical ranges overlap. Exact-head run
+`1de258cf-75f0-4c4e-a624-de1fb7cf5b01` keeps one parent builder call, both previews, the accepted
+revision, and the corrected region proof. It stops only on four 4.46:1 light-mode text samples
+after the worker uses both repair rounds. Improve that typed contrast evidence in the next unit;
+do not lower the 4.5:1 threshold.
+
+The contrast audit already captures each failed label and foreground colour, but its typed model
+drops both and returns only a tag such as `div`. Preserve the label and measured foreground and
+background in the repair issue. Run `1fec6df8-bc6b-4dce-b990-1f55208d2e30` shows the worker using
+that exact evidence for one bounded source edit. It still fails on a different app with severe
+dark contrast, phone overflow, and built-page region order. Its preview contract calls the requested
+overdue queue `Waiting on you`; the later retained-contract check classifies that separate label
+failure as a grader defect. The unit improves the deterministic repair input and does not change a
+threshold or claim a hard-pass gain.
+
+That retained source also contains one stable scheme-token error. Three styles use
+`--color-ink` as a background and literal white as text. The pair passes light mode and fails dark
+mode because ink changes with the scheme. The source boundary now requires the product's existing
+`--color-ink` and `--color-surface` pair inside the same JSX style object. It rejects the archived
+initial source before compilation and the first 42-second product audit. A scan of 22 retained Vite
+applications finds only this failed source; valid generated pages already use the required pair.
+The final Stage F reserve case is run `1fec6df8-bc6b-4dce-b990-1f55208d2e30`, so this deterministic
+unit gets focused and archived-source proof without another model call.
 
 Do not test templates in this campaign.
 
@@ -1118,6 +1163,20 @@ Every case received a product audit repair batch. `medium` repaired and deployed
 first failed audit. The two treatment arms cost 21% more. Both lose the two `medium` passes, and
 neither repairs `meeting-tasks`. Keep `medium`. Test a bounded repair-round reserve before the
 ten-plus-four confirmation.
+
+The application kit now owns the narrow layout. At widths below 720 pixels, it limits the app
+shell, wraps horizontal rows, and changes app grids to one column. The unchanged audit replayed two
+retained sources against the rebuilt kit. The older `pre-meeting-briefs` source fell from 699 to 390
+document pixels and changed 9 of 16 tested controls. The latest A09 source fell from 485 to 390
+document pixels and changed 5 of 17 tested controls. Both light and dark views had no console
+errors. No model case, audit threshold, or generated source changed.
+
+The retained A09 revision exposes a grader-only label mismatch. Its accepted contract states
+`The queue of overdue items waiting on you` and puts `Waiting on you` first. The prior check
+accepted only a first region that repeated `overdue`. The exact reader label now counts as the same
+queue while the priority must still state `overdue`. Focused negative cases prove that a missing
+overdue priority and `Waiting on your weekly summary` still fail. No model input, contract, or
+member request changes.
 
 After the three-case screen passes, repeat the unchanged ten connected apps and four controls.
 Only then compare worker models, reasoning settings, and component inputs.

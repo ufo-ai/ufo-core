@@ -137,6 +137,12 @@ test("the SDK stylesheet names its fonts beside itself instead of carrying them"
   const sheet = readFrom(KIT, "kit.css");
   expect(sheet).not.toContain("data:font");
   expect(sheet).toContain("url(./assets/");
+  expect(sheet).toContain("[data-ufo-application]");
+  expect(sheet).toContain(":has(>[data-app-region])");
+  expect(sheet).toContain('[style*="display: grid"]');
+  expect(sheet).toContain("grid-template-columns:minmax(0,1fr)!important");
+  expect(sheet).toContain('[style*="display: flex"]');
+  expect(sheet).toContain("flex-wrap:wrap");
   expect(sheet.length).toBeLessThan(SHEET_CEILING_BYTES);
 });
 

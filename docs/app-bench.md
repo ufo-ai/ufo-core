@@ -12,8 +12,8 @@ creation flow. A phase passes only when its gate has recorded evidence. The stat
 | 2. App bench | Keep three presentation controls, one rework control, and a connected data-backed app set. | Active | Run `357d81f3` records the final ten-app boundary: 0/10 binary, 0.807 product, 0.733 process, and one Google provider failure. Exact source coverage, first-screen density, interaction, visual taste, and process now report separately. |
 | 3. Instructions | Add only skill or tool text that the bench proves useful. | Passed | Run `159d6126` keeps the compact build contract at 0.954 product versus 0.846. The QA sentence and component guidance are rejected. |
 | 4. App agents | Test dedicated profiles and models on matched work. | Passed | Gemini 3.7 Flash at `medium` is the builder. Optional Luna and Fable roles lose to the monolith. Final Luna copy run `7c904a61` passes 3/7 and does not establish a stable copy stage. |
-| 5. Build pipeline | Select a production-shaped target and split work behind explicit artifacts. | Active | [The 200-case exploration campaign](app-bench-exploration.md) tests the app kit, typed contracts, owned compositions, model roles, prepared actions, and the creation flow in dependency order. |
-| 6. Creation flow | Drive intent, approval, build, preview, and publication from chat. | Queued | Realistic request to durable, usable application. |
+| 5. Build pipeline | Build through one worker and accept through deterministic artifacts. | Passed | The production path uses one Gemini delegation, a compiler-approved source digest, an independent product audit, and no routine Opus repair turn. |
+| 6. Creation flow | Drive intent, approval, build, preview, and publication from chat. | Passed | Isolated A07–A10 reports pass 4/4. A10 retains one blocked build, then deploys on one later member-approved attempt without a partial publication. |
 
 Update this table and the phase evidence in the same change that satisfies a gate. A changed case,
 rubric, grader, tool set, model, or time bound changes the comparison identity.
@@ -25,7 +25,7 @@ Every run records these values separately:
 | Measure | Meaning |
 |---|---|
 | Binary success | Every hard product and process gate passes. |
-| Product score | Equal mean of delivery, source, above-fold density, page audit, interaction, and visual taste. |
+| Product score | Equal mean of delivery, design fidelity, source, above-fold density, page audit, interaction, action, and visual taste. |
 | Process score | Equal mean of Skill loading, direct file ownership, and efficient browser QA. |
 | Deterministic success | Files, source facts, density, contrast, viewport fit, clipping, console output, and browser state. |
 | Trajectory success | Required skills and build actions occurred in a valid order. |
@@ -353,7 +353,7 @@ directly comparable with scores after it.
 | Build form | One direct HTML, CSS, and JavaScript owner | Full shadcn, optional specialist roles, and CSS blocks do not beat the monolith. |
 | Skill guidance | One private build contract | It lists exact facts, reader copy, controls, delivery, and homepage binding before files are written. |
 | Hard verdict | All product and process gates | Easy visual quality does not excuse contrast, interaction, source, density, or QA failures. |
-| Product score | Delivery, source, density, page, interaction, visual | A single hard failure no longer hides partial product quality. |
+| Product score | Delivery, design, source, density, page, interaction, action, visual | A single hard failure no longer hides partial product quality. |
 | Process score | Skill, direct ownership, QA efficiency | Process experiments do not change the product score. |
 | Fixtures | Fixed, transformed connector records | GitHub facts remain exact where allowed. No app eval calls a live connector. |
 
@@ -676,38 +676,36 @@ Gate:
 
 ## Phase 5: Build pipeline
 
-Goal: run independent build work in parallel without making integration implicit.
+Goal: separate model work, deterministic acceptance, and publication behind owned artifacts.
 
-This loop tests three early pipeline shapes. Full `website-building/webapp` and shadcn guidance does
-not load its nested Skill and scores below direct builds. A small house CSS block file is read in two
-of three cases and clears contrast in one, but models override its safe colours and total product
-quality falls. Optional Luna and Fable profiles also fail: Gemini calls Luna once, ignores its
-prohibited phrase list, and never calls Fable. None ships.
-
-The next pipeline experiment must put the handoff in the harness or product flow. The data and copy
-stage writes one typed artifact. The builder receives that artifact as required input. The parent
-alone owns files, preview, browser QA, deployment, and homepage binding. A governor can run only
-after a deterministic failure and must return typed repairs. The same ten prompts and graders stay
-fixed for the comparison.
-
-| Stage | Artifact contract |
+| Owner | Work |
 |---|---|
-| Product shape | Screens, states, interaction flows, and acceptance checks. |
-| Data shape | Entities, transitions, API contracts, permissions, and seed data. |
-| Frontend | Components and browser behavior against the data contract. |
-| Backend | Durable behavior against the same data contract. |
-| Integration | One runnable application with producer and consumer connected. |
-| Package and proof | Start command, audit, screenshots, browser run, and shared deliverables. |
+| Opus parent | Make one delegation from the member request and give one final response. |
+| Gemini builder | Inspect connector data, write `app.tsx`, run bounded QA, repair, and deploy. |
+| Deterministic harness | Compile, check the exact source digest, audit interactions and facts, and reject invalid source. |
+| Opus escalation | Run only for an ambiguous request or a deterministic failure class that has no product rule. |
 
-Parallel work starts only for artifacts that do not depend on each other. The integration stage owns
-contract conflicts; it does not ask a later stage to infer missing fields or behavior.
+Gemini does not certify its own result. Product acceptance decides if the exact deployed source can
+bind as the homepage. One failed audit can return one bounded diagnostic batch to the same worker.
+A second failure ends the build as `blocked`. The parent does not read source, browser output, or
+repair diagnostics in the normal path.
+
+The application design is a typed artifact. A fixed renderer produces its preview in milliseconds.
+The accepted contract becomes builder input. The source candidate is the next artifact. The compiler
+and browser audit produce the final proof against its digest. Deployment uses that proof and does
+not repeat the audit.
+
+[The exploration campaign](app-bench-exploration.md) records the rejected multi-model and
+parent-supervised paths. The accepted A07–A10 path passes all four complete journeys. Corrected
+archival process grading passes 13 of 14 presentation paths. The remaining failure is product
+quality, not pipeline ownership.
 
 Gate:
 
-- Every artifact has one producer and one consumer in the same run.
-- The integrated app passes the same case that its monolithic baseline passed.
-- Parallel work reduces wall time or improves quality without increasing unresolved handoffs.
-- Backend and permission cases prove durable state through the browser, not through a fake.
+- One Gemini delegation owns connector inspection, source, QA, repair, and deployment.
+- Acceptance checks the compiler, source digest, facts, interactions, contrast, and viewport fit.
+- A failed build keeps its evidence and creates no partial homepage binding.
+- No routine Opus source or browser repair enters the path.
 
 ## Phase 6: Creation flow
 
@@ -717,11 +715,15 @@ Sequence:
 
 1. The Apps screen admits `Build me a new app.` as a chat turn.
 2. `create-application` opens the fixed phase board and interviews the member.
-3. The agent presents one application specification and waits for approval.
-4. The build runs through the best measured agent and pipeline configuration.
-5. The member sees progress and sandboxed previews while the run continues.
-6. The approved application, homepage, and access rules become durable together.
+3. The parent renders the typed design and waits for approval or a named revision.
+4. One Gemini worker builds the accepted design.
+5. Deterministic acceptance checks the exact deployed source before homepage binding.
+6. The approved application, site, homepage, and access rules become durable together.
 7. The member opens the application and completes its benchmark task.
+
+The guided and revision screens pass. The complete A07–A10 journeys pass 4/4. A10 proves the
+failure path: one build ends as `blocked`, keeps its evidence, and creates no partial publication.
+One later approved attempt deploys through one parent and one Gemini worker.
 
 Gate:
 

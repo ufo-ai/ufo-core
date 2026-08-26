@@ -7,7 +7,8 @@
 // element owed — so the numbers decide the case and this file cannot soften it. A page whose text
 // all clears 4.5:1 reports no text entry at all.
 //
-// Usage: node app-audit.cjs <url> <report.json> <light.png> <dark.png> <interactive.html> <static.html>
+// Usage: node app-audit.cjs <url> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <design-url>
+//        node app-audit.cjs --design <application-design.svg>
 // The sandbox image installs playwright globally under /usr/local and exports NODE_PATH so the bare
 // name resolves; a carrier that starts the sandbox without that env leaves it unresolvable, so fall
 // back to the path the image installs into.
@@ -21,6 +22,28 @@ const { chromium } = (() => {
 const fs = require('fs');
 
 const AA_FLOOR = 4.5;
+const DESIGN_ALPHA_FLOOR = 0.15;
+const DESIGN_REGION_MAX = 6;
+const DESIGN_VIEWPORT = { width: 1280, height: 800 };
+const DESIGN_ELEMENT_MAX = 4096;
+const DESIGN_PROPERTY_MAX = 96;
+const DESIGN_DECLARATION_MAX = DESIGN_ELEMENT_MAX * DESIGN_PROPERTY_MAX;
+const DESIGN_CLONE_BYTE_MAX = 2 * 1024 * 1024;
+const DESIGN_OUTPUT_BYTE_MAX = 2048;
+const DESIGN_ANIMATED_POINT_MAX = 4096;
+const DESIGN_ANIMATED_ATTRIBUTE_BYTE_MAX = 128 * 1024;
+const SVG_PRESENTATION_PROPERTIES = new Set(
+  ('alignment-baseline baseline-shift clip-path clip-rule color color-interpolation ' +
+    'color-interpolation-filters color-rendering cursor cx cy d direction display ' +
+    'dominant-baseline fill fill-opacity fill-rule filter flood-color flood-opacity ' +
+    'font-family font-size font-size-adjust font-stretch font-style font-variant font-weight ' +
+    'glyph-orientation-horizontal glyph-orientation-vertical image-rendering letter-spacing ' +
+    'lighting-color marker marker-end marker-mid marker-start mask opacity overflow paint-order ' +
+    'pointer-events r rx ry shape-rendering stop-color stop-opacity stroke stroke-dasharray ' +
+    'stroke-dashoffset stroke-linecap stroke-linejoin stroke-miterlimit stroke-opacity ' +
+    'stroke-width text-anchor text-decoration text-rendering transform transform-origin ' +
+    'unicode-bidi vector-effect visibility word-spacing writing-mode x y width height').split(' ')
+);
 const VIEWS = [
   { scheme: 'light', width: 1440, height: 900, shoot: true },
   { scheme: 'dark', width: 1440, height: 900, shoot: true },
@@ -140,6 +163,7 @@ function measure(floor) {
       weight: parseInt(style.fontWeight, 10) || 400,
       ratio: rounded,
       colour: style.color,
+      background: `rgb(${Math.round(behind.r)}, ${Math.round(behind.g)}, ${Math.round(behind.b)})`,
     });
   }
 
@@ -196,6 +220,27 @@ function measure(floor) {
   }
   aboveFoldText = aboveFoldText.replace(/\s+/g, ' ').trim().slice(0, 40000);
 
+  const pageWidth = Math.max(document.documentElement.scrollWidth, window.innerWidth);
+  const pageHeight = Math.max(document.documentElement.scrollHeight, window.innerHeight);
+  const regions = Array.from(document.querySelectorAll('[data-app-region]')).flatMap((element) => {
+    const name = (element.getAttribute('data-app-region') || '').trim().slice(0, 80);
+    const box = element.getBoundingClientRect();
+    if (!name || !visible(element, box)) return [];
+    const left = Math.max(0, Math.min(1, box.left / pageWidth));
+    const right = Math.max(0, Math.min(1, box.right / pageWidth));
+    const top = Math.max(0, Math.min(1, (box.top + window.scrollY) / pageHeight));
+    const bottom = Math.max(0, Math.min(1, (box.bottom + window.scrollY) / pageHeight));
+    if (left >= right || top >= bottom) return [];
+    return [{
+      name,
+      left,
+      top,
+      width: right - left,
+      height: bottom - top,
+      aboveFold: box.bottom > 0 && box.top < window.innerHeight,
+    }];
+  }).slice(0, 20);
+
   const wider = [];
   const clipped = [];
   for (const element of document.querySelectorAll('*')) {
@@ -226,6 +271,7 @@ function measure(floor) {
     renderedText,
     renderedParts,
     aboveFoldText,
+    regions,
     pastViewport: wider.slice(0, 12),
     clipped: clipped.slice(0, 8),
   };
@@ -307,6 +353,392 @@ async function applicationFrame(page) {
   if (!frame) throw new Error('application frame did not load');
   await frame.waitForSelector('#root > *', { timeout: 15000 });
   return frame;
+}
+
+async function renderedDesignRegions(page) {
+  return page.evaluate(async ({
+    alphaFloor,
+    animatedAttributeByteMax,
+    animatedPointMax,
+    cloneByteMax,
+    declarationMax,
+    elementMax,
+    outputByteMax,
+    presentationProperties,
+    propertyMax,
+    regionMax,
+    viewport,
+  }) => {
+    const root = document.querySelector('svg');
+    if (!root) return [];
+    if (typeof root.pauseAnimations === 'function') root.pauseAnimations();
+    if (typeof root.setCurrentTime === 'function') root.setCurrentTime(0);
+    document.getAnimations().forEach((animation) => {
+      animation.pause();
+      animation.currentTime = 0;
+    });
+    await document.fonts.ready;
+    const names = Array.from(root.querySelectorAll('[data-app-region]'))
+      .map((element) => (element.getAttribute('data-app-region') || '').trim())
+      .filter(Boolean)
+      .slice(0, regionMax);
+    const presentation = new Set(presentationProperties);
+    const serializer = new XMLSerializer();
+    const encoder = new TextEncoder();
+    const source = root.outerHTML;
+    const sourceShape = () => JSON.stringify([root, ...root.querySelectorAll('*')].map(
+      (element) => [
+        element.tagName,
+        Array.from(element.attributes).map((attribute) => [attribute.name, attribute.value]),
+      ]
+    ));
+    const shape = sourceShape();
+    const originals = [root, ...root.querySelectorAll('*')];
+    if (originals.length > elementMax) {
+      throw new Error('application design has too many SVG elements');
+    }
+
+    const ruleProperties = new Set();
+    const collectRuleProperties = (rules) => {
+      for (const rule of rules) {
+        if (rule.style) {
+          for (let index = 0; index < rule.style.length; index += 1) {
+            ruleProperties.add(rule.style[index]);
+          }
+        }
+        if (rule.cssRules) collectRuleProperties(rule.cssRules);
+      }
+    };
+    for (const element of root.querySelectorAll('style,link[rel="stylesheet"]')) {
+      if (element.sheet) collectRuleProperties(element.sheet.cssRules);
+    }
+    if (ruleProperties.delete('all')) {
+      for (const property of getComputedStyle(root)) ruleProperties.add(property);
+    }
+    if (ruleProperties.size > propertyMax) {
+      throw new Error('application design uses too many style properties');
+    }
+
+    const animatedProperties = new Map();
+    for (const animation of root.querySelectorAll(
+      'animate, animateMotion, animateTransform, set'
+    )) {
+      const target = animation.targetElement || animation.parentElement;
+      if (!target) continue;
+      const property = ['animateMotion', 'animateTransform'].includes(animation.localName)
+        ? 'transform'
+        : (animation.getAttribute('attributeName') || '').trim();
+      if (!property) continue;
+      if (!animatedProperties.has(target)) animatedProperties.set(target, new Set());
+      animatedProperties.get(target).add(property);
+    }
+    const animatedAttributeValue = (element, property) => {
+      let value = null;
+      if (property === 'points' && element.animatedPoints) {
+        if (element.animatedPoints.numberOfItems > animatedPointMax) {
+          throw new Error('application design animation is too large');
+        }
+        const points = [];
+        for (let index = 0; index < element.animatedPoints.numberOfItems; index += 1) {
+          const point = element.animatedPoints.getItem(index);
+          if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+            throw new Error('application design animation is invalid');
+          }
+          points.push(`${point.x},${point.y}`);
+        }
+        value = points.join(' ');
+      } else if (property === 'viewBox' && element.viewBox?.animVal) {
+        const box = element.viewBox.animVal;
+        const values = [box.x, box.y, box.width, box.height];
+        if (!values.every(Number.isFinite)) {
+          throw new Error('application design animation is invalid');
+        }
+        value = values.join(' ');
+      } else {
+        const animated = element[property]?.animVal;
+        if (typeof animated === 'string' || typeof animated === 'number') value = String(animated);
+        else if (typeof animated?.valueAsString === 'string') value = animated.valueAsString;
+        else if (typeof animated?.value === 'number' && Number.isFinite(animated.value)) {
+          value = String(animated.value);
+        }
+      }
+      if (value === null) return null;
+      if (encoder.encode(value).length > animatedAttributeByteMax) {
+        throw new Error('application design animation is too large');
+      }
+      return value;
+    };
+
+    const clone = root.cloneNode(true);
+    const clones = [clone, ...clone.querySelectorAll('*')];
+    let declarations = 0;
+    let cloneBytes = encoder.encode(serializer.serializeToString(clone)).length;
+    for (let index = 0; index < originals.length; index += 1) {
+      const original = originals[index];
+      const target = clones[index];
+      const properties = new Set(ruleProperties);
+      const inline = document.createElementNS('http://www.w3.org/1999/xhtml', 'span').style;
+      inline.cssText = original.getAttribute('style') || '';
+      for (let property = 0; property < inline.length; property += 1) {
+        properties.add(inline[property]);
+      }
+      for (const attribute of original.attributes) {
+        if (original.style && presentation.has(attribute.name)) properties.add(attribute.name);
+      }
+      for (const property of animatedProperties.get(original) || []) properties.add(property);
+      if (properties.size > propertyMax) {
+        throw new Error('application design uses too many style properties');
+      }
+      const computed = getComputedStyle(original);
+      const frozen = document.createElementNS('http://www.w3.org/1999/xhtml', 'span').style;
+      for (const property of properties) {
+        const value = computed.getPropertyValue(property);
+        if (value) {
+          frozen.setProperty(property, value, 'important');
+          declarations += 1;
+          if (declarations > declarationMax) {
+            throw new Error('application design style is too large');
+          }
+        } else if ((animatedProperties.get(original) || new Set()).has(property)) {
+          const animated = animatedAttributeValue(original, property);
+          if (animated === null) throw new Error('application design animation is unsupported');
+          target.setAttribute(property, animated);
+        }
+      }
+      const frozenBytes = encoder.encode(frozen.cssText).length;
+      if (cloneBytes + frozenBytes * 6 + 32 > cloneByteMax) {
+        throw new Error('application design rendered form is too large');
+      }
+      cloneBytes += frozenBytes * 6 + 32;
+      if (frozen.cssText) target.setAttribute('style', frozen.cssText);
+      else target.removeAttribute('style');
+    }
+    clone.querySelectorAll('style,link').forEach((element) => element.remove());
+    clone.querySelectorAll('animate, animateMotion, animateTransform, set')
+      .forEach((element) => element.remove());
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('width', String(viewport.width));
+    clone.setAttribute('height', String(viewport.height));
+    clone.setAttribute(
+      'style',
+      `${clone.getAttribute('style') || ''};background:transparent!important`
+    );
+    if (encoder.encode(serializer.serializeToString(clone)).length > cloneByteMax) {
+      throw new Error('application design rendered form is too large');
+    }
+
+    const definitionTags = new Set([
+      'clippath', 'defs', 'filter', 'lineargradient', 'marker', 'mask', 'metadata',
+      'pattern', 'radialgradient', 'symbol', 'title',
+    ]);
+    const isolate = (name) => {
+      const isolated = clone.cloneNode(true);
+      const elements = [isolated, ...isolated.querySelectorAll('*')];
+      const retained = new Set([isolated]);
+      const retainTree = (element) => {
+        for (let current = element; current; current = current.parentElement) retained.add(current);
+        retained.add(element);
+        element.querySelectorAll('*').forEach((descendant) => retained.add(descendant));
+      };
+      for (const element of elements) {
+        if (definitionTags.has(element.localName.toLowerCase())) retainTree(element);
+      }
+      const target = name
+        ? elements.find((element) =>
+          (element.getAttribute?.('data-app-region') || '').trim() === name
+        )
+        : null;
+      if (target) retainTree(target);
+      const ids = new Map();
+      for (const element of elements) {
+        const id = element.getAttribute?.('id')?.trim();
+        if (!id) continue;
+        if (ids.has(id)) throw new Error('application design SVG ids must be unique');
+        ids.set(id, element);
+      }
+      const references = (element) => {
+        const found = new Set();
+        for (const attribute of Array.from(element.attributes || [])) {
+          const value = attribute.value.trim();
+          if (attribute.localName === 'href' && value.startsWith('#')) found.add(value.slice(1));
+          for (const match of value.matchAll(
+            /url\(\s*(['"]?)#([A-Za-z_][\w:.-]*)\1\s*\)/g
+          )) found.add(match[2]);
+        }
+        return found;
+      };
+      const visitedReferences = new Set();
+      let retainedCount = -1;
+      let referenceDefinitions = null;
+      while (retainedCount !== retained.size) {
+        retainedCount = retained.size;
+        for (const element of Array.from(retained)) {
+          for (const id of references(element)) {
+            if (visitedReferences.has(id)) continue;
+            visitedReferences.add(id);
+            if (visitedReferences.size > elementMax) {
+              throw new Error('application design has too many SVG references');
+            }
+            const reference = ids.get(id);
+            if (!reference) continue;
+            if (!retained.has(reference)) {
+              referenceDefinitions ||= isolated.querySelector('defs');
+              if (!referenceDefinitions) {
+                referenceDefinitions = document.createElementNS(
+                  'http://www.w3.org/2000/svg',
+                  'defs'
+                );
+                isolated.prepend(referenceDefinitions);
+                retained.add(referenceDefinitions);
+              }
+              referenceDefinitions.append(reference);
+            }
+            retainTree(reference);
+          }
+        }
+      }
+      for (const element of elements) {
+        if (retained.has(element)) continue;
+        element.setAttribute(
+          'style',
+          `${element.getAttribute('style') || ''};display:none!important`
+        );
+      }
+      return isolated;
+    };
+    const canvas = document.createElementNS('http://www.w3.org/1999/xhtml', 'canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    const render = async (isolated) => {
+      const serialized = serializer.serializeToString(isolated);
+      if (encoder.encode(serialized).length > cloneByteMax) {
+        throw new Error('application design rendered form is too large');
+      }
+      const objectUrl = URL.createObjectURL(new Blob(
+        [serialized],
+        { type: 'image/svg+xml' }
+      ));
+      const image = new Image();
+      try {
+        await new Promise((resolve, reject) => {
+          image.addEventListener('load', resolve, { once: true });
+          image.addEventListener('error', () => reject(new Error('design region did not render')), {
+            once: true,
+          });
+          image.src = objectUrl;
+        });
+        context.clearRect(0, 0, viewport.width, viewport.height);
+        context.drawImage(image, 0, 0, viewport.width, viewport.height);
+        return context.getImageData(0, 0, viewport.width, viewport.height).data;
+      } finally {
+        image.src = '';
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+    const baseline = await render(isolate(null));
+    const regions = [];
+    for (const name of names) {
+      const pixels = await render(isolate(name));
+      let left = viewport.width;
+      let right = -1;
+      let top = viewport.height;
+      let bottom = -1;
+      for (let pixel = 0; pixel < viewport.width * viewport.height; pixel += 1) {
+        const offset = pixel * 4;
+        if (pixels[offset + 3] / 255 < alphaFloor) continue;
+        if (
+          pixels[offset] === baseline[offset] &&
+          pixels[offset + 1] === baseline[offset + 1] &&
+          pixels[offset + 2] === baseline[offset + 2] &&
+          pixels[offset + 3] === baseline[offset + 3]
+        ) continue;
+        const x = pixel % viewport.width;
+        const y = Math.floor(pixel / viewport.width);
+        left = Math.min(left, x);
+        right = Math.max(right, x);
+        top = Math.min(top, y);
+        bottom = Math.max(bottom, y);
+      }
+      if (right < left || bottom < top) continue;
+      regions.push({
+        name,
+        left: left / viewport.width,
+        top: top / viewport.height,
+        width: (right + 1 - left) / viewport.width,
+        height: (bottom + 1 - top) / viewport.height,
+        aboveFold: true,
+      });
+    }
+    if (root.outerHTML !== source || sourceShape() !== shape) {
+      throw new Error('application design source changed during validation');
+    }
+    if (encoder.encode(JSON.stringify(regions)).length > outputByteMax) {
+      throw new Error('application design measurement is too large');
+    }
+    return regions;
+  }, {
+    alphaFloor: DESIGN_ALPHA_FLOOR,
+    animatedAttributeByteMax: DESIGN_ANIMATED_ATTRIBUTE_BYTE_MAX,
+    animatedPointMax: DESIGN_ANIMATED_POINT_MAX,
+    cloneByteMax: DESIGN_CLONE_BYTE_MAX,
+    declarationMax: DESIGN_DECLARATION_MAX,
+    elementMax: DESIGN_ELEMENT_MAX,
+    outputByteMax: DESIGN_OUTPUT_BYTE_MAX,
+    presentationProperties: Array.from(SVG_PRESENTATION_PROPERTIES),
+    propertyMax: DESIGN_PROPERTY_MAX,
+    regionMax: DESIGN_REGION_MAX,
+    viewport: DESIGN_VIEWPORT,
+  });
+}
+
+async function designRegionAudit(browser, designUrl) {
+  const context = await browser.newContext({
+    viewport: DESIGN_VIEWPORT,
+    deviceScaleFactor: 1,
+    reducedMotion: 'reduce',
+    serviceWorkers: 'block',
+  });
+  await context.route(/^https?:/, async (route) => {
+    if (route.request().url() === designUrl) await route.continue();
+    else await route.abort();
+  });
+  const page = await context.newPage();
+  try {
+    const response = await page.goto(designUrl, {
+      waitUntil: 'load',
+    });
+    if (!response || !response.ok()) return [];
+    return await renderedDesignRegions(page);
+  } finally {
+    await context.close();
+  }
+}
+
+async function designOnly(svgPath) {
+  const browser = await chromium.launch();
+  const context = await browser.newContext({
+    viewport: DESIGN_VIEWPORT,
+    deviceScaleFactor: 1,
+    reducedMotion: 'reduce',
+    serviceWorkers: 'block',
+  });
+  let blockedRequests = 0;
+  await context.route(/^https?:/, (route) => {
+    blockedRequests += 1;
+    return route.abort();
+  });
+  const page = await context.newPage();
+  try {
+    const source = fs.readFileSync(svgPath).toString('base64');
+    await page.goto(`data:image/svg+xml;base64,${source}`, { waitUntil: 'load' });
+    const regions = await renderedDesignRegions(page);
+    if (blockedRequests) throw new Error('application design must not contain active or external content');
+    process.stdout.write(JSON.stringify(regions));
+  } finally {
+    await context.close();
+    await browser.close();
+  }
 }
 
 async function interactionAudit(browser, url) {
@@ -473,16 +905,35 @@ async function interactiveDocument(frame) {
 }
 
 (async () => {
-  const [url, reportPath, lightShot, darkShot, interactivePath, staticPath] = process.argv.slice(2);
-  if (!url || !reportPath || !lightShot || !darkShot || !interactivePath || !staticPath) {
+  if (process.argv[2] === '--design') {
+    if (!process.argv[3] || process.argv.length !== 4) {
+      console.error('usage: node app-audit.cjs --design <application-design.svg>');
+      process.exit(2);
+    }
+    await designOnly(process.argv[3]);
+    return;
+  }
+  const [url, reportPath, lightShot, darkShot, interactivePath, staticPath, designUrl] = process.argv.slice(2);
+  if (!url || !reportPath || !lightShot || !darkShot || !interactivePath || !staticPath || !designUrl) {
     console.error(
-      'usage: node app-audit.cjs <url> <report.json> <light.png> <dark.png> <interactive.html> <static.html>'
+      'usage: node app-audit.cjs <url> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <design-url>'
     );
     process.exit(2);
+  }
+  const applicationUrl = new URL(url);
+  const acceptedDesignUrl = new URL(designUrl);
+  if (
+    acceptedDesignUrl.origin !== applicationUrl.origin ||
+    acceptedDesignUrl.pathname !== '/accepted-design.svg' ||
+    acceptedDesignUrl.search ||
+    acceptedDesignUrl.hash
+  ) {
+    throw new Error('accepted application design URL is invalid');
   }
   const shots = { light: lightShot, dark: darkShot };
   const browser = await chromium.launch();
   try {
+    const designRegions = await designRegionAudit(browser, acceptedDesignUrl.href);
     const views = await Promise.all(VIEWS.map(async (view) => {
       const context = await browser.newContext({
         viewport: { width: view.width, height: view.height },
@@ -552,7 +1003,7 @@ async function interactiveDocument(frame) {
       }
     }));
     const interaction = await interactionAudit(browser, url);
-    const report = { url, floor: AA_FLOOR, views, interaction };
+    const report = { url, floor: AA_FLOOR, designRegions, views, interaction };
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
     for (const view of views) {
       console.log(

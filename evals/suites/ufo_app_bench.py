@@ -56,6 +56,7 @@ from ufo_ext_sites.application_audit import (
     ApplicationAuditContract,
     ApplicationAuditFact,
     ApplicationAuditReport,
+    application_design_fidelity,
     audit_application,
 )
 from ufo_ext_sites.application_audit import (
@@ -864,6 +865,40 @@ def _above_fold_scorer(spec: _ConnectedApp) -> Grader:
     )
 
 
+def _design_region_scorer() -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        reports = tuple(
+            artifact for artifact in output.artifacts if artifact.name.endswith("-audit.json")
+        )
+        if len(reports) != 1:
+            return CapabilityVerdict(
+                False,
+                f"design fidelity measured no valid audit from {len(reports)} report(s)",
+                _score_evidence("appDesign", 0, 1),
+            )
+        try:
+            report = ApplicationAuditReport.model_validate_json(reports[0].content)
+        except ValueError:
+            return CapabilityVerdict(
+                False,
+                "design fidelity measured an invalid audit report",
+                _score_evidence("appDesign", 0, 1),
+            )
+        fidelity = application_design_fidelity(report)
+        reason = f"design fidelity measured {fidelity.passed}/{fidelity.total} named-region checks"
+        if fidelity.failures:
+            reason += f": {'; '.join(fidelity.failures[:4])}"
+        return CapabilityVerdict(
+            not fidelity.failures,
+            reason,
+            _score_evidence("appDesign", fidelity.passed, fidelity.total),
+        )
+
+    return DescribedGrader(
+        "named application regions retain the accepted SVG order above the fold", grade
+    )
+
+
 def _application_audit_contract(spec: _ConnectedApp) -> ApplicationAuditContract:
     return ApplicationAuditContract(
         facts=tuple(
@@ -1121,13 +1156,15 @@ PY"""
             f'>> "$capture/{self.name}-design.html"\n'
             f"(fuser -k {PROBE_PORT}/tcp 2>/dev/null || true)\n"
             f"nohup python3 /tmp/ufo-app-bench-server.py {APP_WORKSPACE_ROOT} {PROBE_PORT} "
+            f'"$capture/{self.name}-design.svg" '
             ">/tmp/ufo-app-bench-server.log 2>&1 &\n"
             f"{readiness}\n"
             "node /tmp/ufo-app-bench-audit.cjs "
             f"http://localhost:{PROBE_PORT}/preview.html "
             f'"$capture/{self.name}-audit.json" "$capture/{self.name}-light.png" '
             f'"$capture/{self.name}-dark.png" "$capture/{self.name}-interactive.html" '
-            f'"$capture/{self.name}-static.html"'
+            f'"$capture/{self.name}-static.html" '
+            f"http://localhost:{PROBE_PORT}/accepted-design.svg"
         )
 
 
@@ -1954,6 +1991,7 @@ def _score_app_report(report: EvalReport) -> EvalReport:
     cases = []
     layer_values: dict[str, list[float]] = {
         "delivery": [],
+        "design": [],
         "source": [],
         "density": [],
         "page": [],
@@ -1994,6 +2032,7 @@ def _score_app_report(report: EvalReport) -> EvalReport:
             action_total += setup_total if isinstance(setup_total, int) else 0
         layers = {
             "delivery": _fraction(scored, "appDelivery"),
+            "design": _fraction(scored, "appDesign"),
             "source": _fraction(
                 scored, "appSource", 1.0 if case.name in CONTROL_MEMBER_QUERIES else 0.0
             ),
@@ -2097,6 +2136,7 @@ def _screen(
             _qa_efficiency_scorer(),
             _page_scorer(),
             _interaction_scorer(name),
+            _design_region_scorer(),
             *extra_graders,
         ),
         visual_rubric=(
