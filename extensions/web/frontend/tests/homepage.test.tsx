@@ -327,7 +327,7 @@ test("the chat toggle opens the composer when no directive conversation exists",
   await userEvent.click(screen.getByRole("button", { name: "Chat with Assistant" }));
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=new");
-  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
 });
 
 /** The state the reporter's app is in: it stands on its page, the rail carries the member's chat
@@ -366,7 +366,7 @@ test("the chat toggle opens a rail chat the app's index does not answer", async 
   const latched = await screen.findByRole("button", { name: "Close chat with Assistant" });
   expect(latched.getAttribute("aria-pressed")).toBe("true");
   expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
-  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   await waitFor(() =>
     expect(calls.some((url) => url.includes("/transcript?conversation=" + CONVO_ID))).toBe(true),
@@ -379,7 +379,7 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
 
   const frame = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
   expect(await screen.findByRole("heading", { level: 2, name: "Pick one thread" })).toBeTruthy();
-  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(
     screen.getByRole("button", { name: "Close chat with Assistant" }).getAttribute("aria-pressed"),
   ).toBe("true");

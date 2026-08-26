@@ -376,7 +376,7 @@ test("the term is said to the agent, by the composer on the screen it lands on",
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
-  const composer = (await screen.findByLabelText("Ask anything")) as HTMLTextAreaElement;
+  const composer = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
   expect(composer.value).toBe("");
 });
 
@@ -397,7 +397,7 @@ test("the term is said to the agent the row names, from another agent's start sc
   });
   location.hash = "#/new/" + SECOND_ID;
   portal();
-  await screen.findByLabelText("Ask anything");
+  await screen.findByLabelText("Ask UFO");
   await userEvent.click(screen.getByRole("button", { name: "Search" }));
   await type("deploy");
 
@@ -410,7 +410,7 @@ test("the term is said to the agent the row names, from another agent's start sc
   expect(said[0]).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
   expect(said[0]).not.toContain(SECOND_ID);
   expect(location.hash).toBe("#/c/" + FOUNDED_ID);
-  const composer = (await screen.findByLabelText("Ask anything")) as HTMLTextAreaElement;
+  const composer = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
   expect(composer.value).toBe("");
 });
 
@@ -431,7 +431,7 @@ test("the term founds a new conversation, though the member was reading another"
   });
   location.hash = "#/c/" + CONVO_ID;
   portal();
-  await screen.findByLabelText("Ask anything");
+  await screen.findByLabelText("Ask UFO");
   await userEvent.click(screen.getByRole("button", { name: "Search" }));
   await type("deploy");
 

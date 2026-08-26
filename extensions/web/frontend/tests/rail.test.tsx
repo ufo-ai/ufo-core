@@ -13,6 +13,7 @@ import {
   heldRailShut,
   holdRailShown,
   holdRailShut,
+  holdRailSort,
   mergeChats,
   railGroups,
   railShut,
@@ -55,34 +56,15 @@ function theirs(id: string, last_at: string, speaker: string): ChatRow {
   return { ...row(id, last_at), mine: false, speaker };
 }
 
-test("chats group by recency in rail order and empty groups are absent", () => {
-  const grouped = railGroups(
-    [
-      row("a", hoursAgo(3)),
-      row("b", hoursAgo(20)),
-      row("c", hoursAgo(4 * 24)),
-      row("d", hoursAgo(20 * 24)),
-      row("e", hoursAgo(90 * 24)),
-    ],
-    "recency",
-    PORTAL_ONLY,
-    NOW,
-  );
-  expect(grouped.map((group) => group.label)).toEqual([
-    "Today",
-    "Yesterday",
-    "Previous 7 days",
-    "Previous 30 days",
-    "Older",
-  ]);
-  expect(grouped.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
-    ["a"],
-    ["b"],
-    ["c"],
-    ["d"],
-    ["e"],
-  ]);
-  expect(railGroups([row("a", hoursAgo(4))], "recency", PORTAL_ONLY, NOW)).toHaveLength(1);
+test("the recency sort is one unheaded run of rows, and no run at all where none stand", () => {
+  const rows = [
+    row("a", hoursAgo(3)),
+    row("b", hoursAgo(20)),
+    row("c", hoursAgo(4 * 24)),
+    row("d", hoursAgo(90 * 24)),
+  ];
+  expect(railGroups(rows, "recency", PORTAL_ONLY)).toEqual([{ label: null, rows }]);
+  expect(railGroups([], "recency", PORTAL_ONLY)).toEqual([]);
 });
 
 test("agent sort groups rows under their agent and keeps recency within each group", () => {
@@ -94,7 +76,6 @@ test("agent sort groups rows under their agent and keeps recency within each gro
     ],
     "agent",
     PORTAL_ONLY,
-    NOW,
   );
   expect(grouped.map((group) => group.label)).toEqual(["Assistant", "Support"]);
   expect(grouped.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
@@ -111,17 +92,18 @@ test("everyone else's conversations are one group at the foot, under either sort
     theirs("t2", hoursAgo(30 * 24), "sam@example.com"),
   ];
 
-  const byRecency = railGroups(rows, "recency", PORTAL_ONLY, NOW);
-  expect(byRecency.map((group) => group.label)).toEqual(["Today", "Yesterday", "Other members"]);
-  expect(byRecency[2].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
+  const byRecency = railGroups(rows, "recency", PORTAL_ONLY);
+  expect(byRecency.map((group) => group.label)).toEqual([null, "Other members"]);
+  expect(byRecency[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "b"]);
+  expect(byRecency[1].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
 
-  const byAgent = railGroups(rows, "agent", PORTAL_ONLY, NOW);
+  const byAgent = railGroups(rows, "agent", PORTAL_ONLY);
   expect(byAgent.map((group) => group.label)).toEqual(["Assistant", "Other members"]);
   expect(byAgent[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "b"]);
   expect(byAgent[1].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
 
-  expect(railGroups([row("a", hoursAgo(1))], "recency", PORTAL_ONLY, NOW).map((group) => group.label)).toEqual([
-    "Today",
+  expect(railGroups([row("a", hoursAgo(1))], "recency", PORTAL_ONLY).map((group) => group.label)).toEqual([
+    null,
   ]);
 });
 
@@ -137,21 +119,19 @@ test("the rail holds portal conversations until the filter names another surface
     { ...elsewhere("s2", "slack"), mine: false, speaker: "sam@example.com" },
   ];
 
-  expect(railGroups(rows, "recency", PORTAL_ONLY, NOW)).toEqual([
-    { label: "Today", rows: [rows[0]] },
-  ]);
+  expect(railGroups(rows, "recency", PORTAL_ONLY)).toEqual([{ label: null, rows: [rows[0]] }]);
 
-  const withSlack = railGroups(rows, "recency", { terminal: false, slack: true, imessage: false }, NOW);
-  expect(withSlack.map((group) => group.label)).toEqual(["Today", "Other members"]);
+  const withSlack = railGroups(rows, "recency", { terminal: false, slack: true, imessage: false });
+  expect(withSlack.map((group) => group.label)).toEqual([null, "Other members"]);
   expect(withSlack[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "s1"]);
   expect(withSlack[1].rows.map((entry) => entry.conversation_id)).toEqual(["s2"]);
 
-  const withTerminal = railGroups(rows, "agent", { terminal: true, slack: false, imessage: false }, NOW);
+  const withTerminal = railGroups(rows, "agent", { terminal: true, slack: false, imessage: false });
   expect(withTerminal.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
     ["a", "u1"],
   ]);
 
-  const withBoth = railGroups(rows, "recency", EVERY_SURFACE, NOW);
+  const withBoth = railGroups(rows, "recency", EVERY_SURFACE);
   expect(withBoth[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "s1", "u1"]);
 });
 
@@ -239,8 +219,8 @@ test("the filter admits a surface into the rail and the browser keeps the choice
 });
 
 /** A phone screen has no width for a column beside the page, so the nav drawer holds the rail
- *  there: the same rows under the same headings, the filter that governs them, and a pick that both
- *  opens the conversation and shuts the drawer. */
+ *  there: the same rows, the filter that governs them, and a pick that both opens the conversation
+ *  and shuts the drawer. */
 test("the drawer holds the rail at a phone width, and a pick shuts it", async () => {
   atPhoneWidth();
   wire({ ...chatsOnWire([CHAT_ROW]) });
@@ -252,7 +232,6 @@ test("the drawer holds the rail at a phone width, and a pick shuts it", async ()
   const drawer = await screen.findByRole("dialog");
   const rail = within(drawer).getByRole("navigation", { name: "Workspace" });
   expect(within(rail).getByRole("button", { name: "Conversations" })).toBeTruthy();
-  expect(within(rail).getAllByRole("heading", { level: 2 })).toHaveLength(1);
 
   await userEvent.click(await within(rail).findByRole("button", { name: /Pick one thread/ }));
 
@@ -287,48 +266,74 @@ async function openGroup(label: string) {
 
 test("an untouched rail opens its first group and shuts the rest", () => {
   expect(heldRailShut()).toBeNull();
-  expect(railShut(null, ["Today", "Yesterday", "Older"])).toEqual(["Yesterday", "Older"]);
-  expect(railShut(null, ["Today"])).toEqual([]);
+  expect(railShut(null, ["Assistant", "Support", "Other members"])).toEqual([
+    "Support",
+    "Other members",
+  ]);
+  expect(railShut(null, ["Assistant"])).toEqual([]);
   expect(railShut(null, [])).toEqual([]);
 });
 
+test("the unheaded run leads the rail and shuts every heading under it", () => {
+  expect(railShut(null, [null, "Other members"])).toEqual(["Other members"]);
+  expect(railShut(null, [null])).toEqual([]);
+});
+
 test("once a heading is clicked the member's own set governs, empty or not", () => {
-  const labels = ["Today", "Yesterday", "Older"];
+  const labels = ["Assistant", "Support", "Other members"];
   expect(railShut([], labels)).toEqual([]);
-  expect(railShut(["Today"], labels)).toEqual(["Today"]);
+  expect(railShut(["Assistant"], labels)).toEqual(["Assistant"]);
 });
 
 test("a browser keeps which groups are shut, and holding none is not holding an empty set", () => {
   expect(heldRailShut()).toBeNull();
 
-  holdRailShut(["Yesterday", "Older"]);
-  expect(heldRailShut()).toEqual(["Yesterday", "Older"]);
+  holdRailShut(["Support", "Other members"]);
+  expect(heldRailShut()).toEqual(["Support", "Other members"]);
 
   holdRailShut([]);
   expect(heldRailShut()).toEqual([]);
 });
 
 test("an agent name carrying a comma survives the round trip", () => {
-  holdRailShut(["Reyes, Pat", "Older"]);
-  expect(heldRailShut()).toEqual(["Reyes, Pat", "Older"]);
+  holdRailShut(["Reyes, Pat", "Other members"]);
+  expect(heldRailShut()).toEqual(["Reyes, Pat", "Other members"]);
+});
+
+test("the recency rail heads its own conversations with nothing at all", async () => {
+  const today = { ...CHAT_ROW, last_at: stampIso(new Date()) };
+  const older = {
+    ...CHAT_ROW,
+    conversation_id: SECOND_ID,
+    title: "Last month's thread",
+    last_at: stampIso(new Date(Date.now() - 40 * 24 * 3_600_000)),
+  };
+  wire({ ...chatsOnWire([today, older]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Last month's thread/ })).toBeTruthy();
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  expect(within(sidebar).queryAllByRole("heading")).toEqual([]);
 });
 
 test("a group heading shuts its rows, and the browser holds that past a remount", async () => {
+  holdRailSort("agent");
   const today = { ...CHAT_ROW, last_at: stampIso(new Date()) };
   wire({ ...chatsOnWire([today]) });
   const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Today", expanded: true }));
+  await userEvent.click(screen.getByRole("button", { name: "Assistant", expanded: true }));
   expect(screen.queryByRole("button", { name: /Pick one thread/ })).toBeNull();
 
   first.unmount();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  expect(await screen.findByRole("button", { name: "Today", expanded: false })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Assistant", expanded: false })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /Pick one thread/ })).toBeNull();
 });
 
-test("opening one group leaves the groups the default shut alone", async () => {
+test("opening the group at the foot leaves the run above it standing", async () => {
   const today = { ...CHAT_ROW, last_at: stampIso(new Date()) };
   const colleague = {
     ...today,
@@ -340,9 +345,10 @@ test("opening one group leaves the groups the default shut alone", async () => {
   wire({ ...chatsOnWire([today, colleague]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
   await openGroup("Other members");
   expect(await screen.findByRole("button", { name: /Colleague thread/ })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Today", expanded: true })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Pick one thread/ })).toBeTruthy();
   expect(heldRailShut()).toEqual([]);
 });
 
@@ -418,7 +424,7 @@ test("a first message opens a conversation, lands it in the rail, and routes to 
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Ask anything"), "hello there");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "hello there");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
@@ -444,17 +450,17 @@ test("a second message sent before the first is answered opens no second convers
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Ask anything"), "first half");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "first half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   // Until that POST answers, nothing here knows which conversation it opened, and a second send to
   // the `new` sentinel opens another one: the two halves would end up in separate conversations,
   // each answered without the other. So the composer holds the words rather than founding again.
-  await userEvent.type(screen.getByLabelText("Ask anything"), "second half");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "second half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(posts.length).toBe(1);
-  expect((screen.getByLabelText("Ask anything") as HTMLInputElement).value).toBe("second half");
+  expect((screen.getByLabelText("Ask UFO") as HTMLInputElement).value).toBe("second half");
 
   found({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "first half", opened_run: true });
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
@@ -479,8 +485,8 @@ test("two submits the page could not re-render between still open one conversati
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Ask anything"), "one thought");
-  const form = screen.getByLabelText("Ask anything").closest("form");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "one thought");
+  const form = screen.getByLabelText("Ask UFO").closest("form");
 
   // Both submits read the composer of one render, so a held form cannot be what keeps the second
   // from founding — the send is, which is where the `new` sentinel is spent.
@@ -504,7 +510,7 @@ test("a first message sent before the rail resolves still lands, and the rail me
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Ask anything"), "early words");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "early words");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
   expect(within(screen.getByTestId("log")).getByText("early words")).toBeTruthy();
@@ -560,7 +566,7 @@ test("sending from an existing conversation posts to it and bumps its rail row",
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
-  await userEvent.type(screen.getByLabelText("Ask anything"), "follow-up");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "follow-up");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() =>
@@ -667,9 +673,67 @@ test("a conversation another member spoke stands at the foot and names them", as
   const section = railRow.closest("section");
   expect(section?.textContent).toContain("Other members");
   expect(section?.textContent).not.toContain("Pick one thread");
-  expect(
-    screen.getByRole("button", { name: /Pick one thread/ }).closest("section")?.textContent,
-  ).not.toContain("Other members");
+  /* The member's own conversations stand in the run above, which no heading and so no section
+     encloses. */
+  expect(screen.getByRole("button", { name: /Pick one thread/ }).closest("section")).toBeNull();
+});
+
+/** jsdom lays nothing out, so the frame and the words it holds are given their widths rather than
+ *  measured. What the test is after is the arithmetic the row does with them and what it draws on
+ *  either side of the pointer. */
+function overrunning(row: HTMLElement, frameWidth: number, textWidth: number) {
+  const frame = row.querySelector("span") as HTMLElement;
+  const text = frame.querySelector("span") as HTMLElement;
+  Object.defineProperty(frame, "clientWidth", { value: frameWidth, configurable: true });
+  text.getBoundingClientRect = () => ({ width: textWidth }) as DOMRect;
+  return { frame, text };
+}
+
+test("a title too long for its row travels its overrun under the pointer, and rests again after", async () => {
+  const long = { ...CHAT_ROW, title: "The thread about the migration we ran on the release branch" };
+  wire({ ...chatsOnWire([long]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const row = await screen.findByRole("button", { name: /The thread about the migration/ });
+  const { frame, text } = overrunning(row, 180, 300);
+  expect(text.style.transform).toBe("translateX(0px)");
+  expect(frame.className).toContain("text-ellipsis");
+
+  /* At rest the title is an inline run, which is what the frame can ellipse. */
+  expect(text.className).toContain("inline");
+  expect(text.className).not.toContain("inline-block");
+
+  fireEvent.pointerEnter(row);
+  expect(text.style.transform).toBe("translateX(-120px)");
+  /* Travelled at a pace rather than in a duration: 120px at 45px a second. */
+  expect(text.style.transitionDuration).toBe("2667ms");
+  /* A transform moves a box, not an inline run — and the mark that says there is more has nothing
+     to say while the more is being read. */
+  expect(text.className).toContain("inline-block");
+  expect(frame.className).toContain("text-clip");
+
+  fireEvent.pointerLeave(row);
+  expect(text.style.transform).toBe("translateX(0px)");
+  expect(text.style.transitionDuration).toBe("150ms");
+  expect(frame.className).toContain("text-ellipsis");
+  expect(text.className).not.toContain("inline-block");
+});
+
+test("a title the row holds whole moves nothing, and the keyboard starts one that does not", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const row = await screen.findByRole("button", { name: /Pick one thread/ });
+  const { frame, text } = overrunning(row, 180, 180);
+  fireEvent.pointerEnter(row);
+  expect(text.style.transform).toBe("translateX(0px)");
+  expect(frame.className).toContain("text-ellipsis");
+
+  overrunning(row, 180, 240);
+  fireEvent.focus(row);
+  expect(text.style.transform).toBe("translateX(-60px)");
+  fireEvent.blur(row);
+  expect(text.style.transform).toBe("translateX(0px)");
 });
 
 test("an origin rail row opens a live comment chat", async () => {
@@ -708,10 +772,10 @@ test("an origin rail row opens a live comment chat", async () => {
   await userEvent.click(await screen.findByRole("button", { name: /Slack question/ }));
 
   expect(await screen.findByText("slack words")).toBeTruthy();
-  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 
-  await userEvent.type(screen.getByLabelText("Ask anything"), "from the portal");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "from the portal");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() =>
     expect(calls.some((url) => url.includes("/chat?conversation=" + CONVO_ID))).toBe(true),
@@ -748,7 +812,7 @@ test("a private extension conversation opens the live chat", async () => {
   // linked.
   expect(crumb.getByText("Daily-Brief")).toBeTruthy();
   expect(crumb.queryByRole("link")).toBeNull();
-  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
@@ -826,7 +890,7 @@ test("a Slack conversation permalink opens a live comment chat", async () => {
 
   expect(await screen.findByText("from Slack")).toBeTruthy();
   expect(screen.getByText("reply in Slack")).toBeTruthy();
-  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
   expect(
@@ -896,7 +960,7 @@ test("a terminal conversation is marked with its surface and no way out", async 
   expect(header.getByText("Deploy the branch")).toBeTruthy();
   expect(header.getByText("Terminal")).toBeTruthy();
   expect(header.getByText("Terminal").closest("a")).toBeNull();
-  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
@@ -1015,7 +1079,7 @@ test("the new-conversation control targets the main agent, and offers no other",
   await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
-  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   // A conversation that does not exist yet is headed by nothing: the address names the app that
   // would hold it, and a crumb back to a conversation nobody has founded leads nowhere.
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
@@ -1035,7 +1099,7 @@ test("the applications flyout opens the agent's page, and the sidebar starts the
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   await userEvent.click(rail.getByRole("button", { name: "New conversation" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
-  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
@@ -1126,7 +1190,7 @@ test("a failed send neither bumps the rail nor reorders it", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
-  await userEvent.type(screen.getByLabelText("Ask anything"), "doomed");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "doomed");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(await screen.findByText("Error 500 — try again.")).toBeTruthy();

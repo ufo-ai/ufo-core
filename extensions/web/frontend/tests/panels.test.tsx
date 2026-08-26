@@ -569,7 +569,7 @@ test("a Slack conversation names its channel in its heading, and those words are
   expect(drawn).not.toContain("underline");
   expect(drawn).not.toContain("text-link");
   expect(within(out).getByText("↗").className).toContain("text-ink-soft");
-  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
@@ -750,7 +750,7 @@ test("a conversation nobody shared is never named, and the half stands on the co
   expect(await heldConversation()).toBe(FRESH);
   expect(screen.queryByText("#ops")).toBeNull();
   expect(screen.queryByText("Private channel")).toBeNull();
-  expect(screen.getByLabelText("Ask anything")).toBeTruthy();
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
 });
 
 test("the sources listing groups a binding's streams and acts on the main agent's lane", async () => {

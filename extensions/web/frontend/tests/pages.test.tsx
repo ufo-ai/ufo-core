@@ -359,7 +359,7 @@ test("the chat page opens a Slack or terminal conversation for comments", async 
   await screen.findByRole("heading", { name: "Chat" });
   window.postMessage({ ufo: "place", place: { opens: [SLACK] } }, "*");
 
-  expect(await screen.findByLabelText("Ask anything")).toBeTruthy();
+  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
   expect(screen.queryByText("This conversation is not available here.")).toBeNull();
   await vi.waitFor(() =>

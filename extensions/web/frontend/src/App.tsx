@@ -1,13 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
-  IconAdjustments,
   IconApps,
   IconBrandSlack,
   IconChevronRight,
   IconDeviceDesktop,
   IconEdit,
-  IconLayoutGrid,
+  IconFilter2,
   IconLayoutSidebarRight,
   IconLogout,
   IconMenu2,
@@ -81,7 +80,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { RAIL_SHOWN_OPTIONS, railGroups, railShut, stampIso } from "@/lib/rail";
+import { RAIL_SHOWN_OPTIONS, railGroups, railShut, stampIso, type RailGroup } from "@/lib/rail";
 import {
   foldSidebar,
   pickPinned,
@@ -422,6 +421,17 @@ function AccountMenu({ member }: { member: Member }) {
 const NAV_ROW =
   "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill";
 
+/** A sidebar section's heading — the muted band the whole line of which opens the section's menu.
+ *  The glyph that states the menu is drawn only once the section is pointed at, reached by keyboard,
+ *  or standing open: a column of headings each carrying a control the member is not using reads as
+ *  a toolbar, and the heading is a place before it is an act. It holds its box while hidden, so
+ *  nothing under the pointer moves. */
+const SECTION_HEAD =
+  "group/head flex h-(--size-row) w-full items-center gap-sm rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill data-[state=open]:bg-fill";
+
+const SECTION_HEAD_GLYPH =
+  "size-(--size-glyph) shrink-0 opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none group-hover/head:opacity-100 group-focus-visible/head:opacity-100 group-data-[state=open]/head:opacity-100";
+
 /** The rows the sidebar pins where the member has pinned none themselves: the workspace's shipped
  *  apps, in name order, so the sidebar arrives holding its own destinations. The chat app is not one
  *  of them — the New conversation row above is the way to it. */
@@ -459,14 +469,13 @@ function SidebarTooltip({
   );
 }
 
+/** The two controls the sidebar header carries beside the mark. Their glyphs stand 8px apart and
+ *  12px in from the sidebar's edge, on the pitch the rows under them keep. */
+const HEADER_CONTROL = "rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill";
+
 function SidebarToggle({ label, onClick }: { label: string; onClick: () => void }) {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      onClick={onClick}
-      className="rounded-control border-0 bg-transparent p-xs text-ink-soft hover:bg-fill"
-    >
+    <button type="button" aria-label={label} onClick={onClick} className={HEADER_CONTROL}>
       <IconLayoutSidebarRight className={GLYPH} aria-hidden />
     </button>
   );
@@ -591,16 +600,9 @@ function ApplicationsFlyout({
         </SidebarTooltip>
       ) : (
         <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className={cn(
-              "flex h-(--size-row) w-full items-center gap-sm rounded-control border-0",
-              "bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft",
-              "hover:bg-fill data-[state=open]:bg-fill",
-            )}
-          >
+          <button type="button" className={SECTION_HEAD}>
             <span className="min-w-0 flex-1 truncate">Applications</span>
-            <IconLayoutGrid className="size-(--size-glyph) shrink-0" aria-hidden />
+            <IconFilter2 className={SECTION_HEAD_GLYPH} aria-hidden />
           </button>
         </DropdownMenuTrigger>
       )}
@@ -667,8 +669,10 @@ function WorkspaceSidebar({
     >
       <div
         className={cn(
-          "flex h-(--size-row) shrink-0 items-center max-narrow:hidden",
-          collapsed ? "justify-center px-sm" : "justify-between pl-2xl pr-md",
+          "flex shrink-0 items-center max-narrow:hidden",
+          collapsed
+            ? "flex-col justify-center px-sm"
+            : "h-(--size-row) justify-between pl-2xl pr-sm",
         )}
       >
         <span
@@ -677,27 +681,17 @@ function WorkspaceSidebar({
           className={cn("h-(--size-wordmark) w-(--size-logo) bg-current", collapsed && "hidden")}
           style={{ mask: `url(${logo}) center / contain no-repeat` }}
         />
-        <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
-          <SidebarToggle
-            label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={() => foldSidebar(!collapsed)}
-          />
-        </SidebarTooltip>
+        <span className={cn("flex items-center", collapsed && "flex-col")}>
+          <Spotlight agents={agents} className={HEADER_CONTROL} />
+          <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
+            <SidebarToggle
+              label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              onClick={() => foldSidebar(!collapsed)}
+            />
+          </SidebarTooltip>
+        </span>
       </div>
       <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
-        {narrow ? null : (
-          <li>
-            <Spotlight
-              agents={agents}
-              className={cn(NAV_ROW, collapsed && "justify-center gap-0 px-0")}
-              label={
-                <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>
-                  Search
-                </span>
-              }
-            />
-          </li>
-        )}
         {mainAgent ? (
           <li>
             <NavRow
@@ -751,16 +745,15 @@ function WorkspaceSidebar({
           })}
         </ul>
       </div>
-      <div className={cn("shrink-0 px-sm", collapsed && "hidden")}>
+      {/* The conversations section is built the way the applications section above it is: the
+          heading and what stands under it are one column, so a section's first row sits the same
+          hair below its heading in both. Only the rows scroll — a heading that scrolled away would
+          leave the filter it carries unreachable at the foot of a long rail. */}
+      <div className={cn("flex min-h-0 flex-1 flex-col gap-px px-sm", collapsed && "hidden")}>
         <RailSettingsFlyout />
-      </div>
-      <div
-        className={cn(
-          "flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto px-sm",
-          collapsed && "hidden",
-        )}
-      >
-        <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
+        <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
+          <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
+        </div>
       </div>
       <ul className="m-0 mt-auto flex shrink-0 list-none flex-col gap-px px-sm py-0">
         <li>
@@ -1161,16 +1154,9 @@ function RailSettingsFlyout() {
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            "flex h-(--size-row) w-full items-center gap-sm rounded-control border-0",
-            "bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft",
-            "hover:bg-fill data-[state=open]:bg-fill",
-          )}
-        >
+        <button type="button" className={SECTION_HEAD}>
           <span className="min-w-0 flex-1 truncate">Conversations</span>
-          <IconAdjustments className="size-(--size-glyph) shrink-0" aria-hidden />
+          <IconFilter2 className={SECTION_HEAD_GLYPH} aria-hidden />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="right" align="start" container={host}>
@@ -1288,11 +1274,33 @@ function RailList({
   chatApp: Agent | null;
 }) {
   const rail = useRail();
-  const now = new Date();
-  const groups = railGroups(rail.rows, rail.sort, rail.shown, now);
+  const groups = railGroups(rail.rows, rail.sort, rail.shown);
   const folded = railShut(
     rail.shut,
     groups.map((group) => group.label),
+  );
+  /** The rows a group holds, drawn the same whether a heading stands over them or not. */
+  const rows = (group: RailGroup) => (
+    <ul className="m-0 flex list-none flex-col gap-px p-0">
+      {group.rows.map((row) => {
+        const facts = [
+          row.speaker ? speakerName(row.speaker) : null,
+          isPortalChat(row.surface) ? null : origin(row),
+          mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
+        ].filter((fact): fact is string => fact !== null);
+        return (
+          <li key={row.conversation_id}>
+            <RailRow
+              current={standing(route, `open:${row.conversation_id}`)}
+              facts={facts.length ? facts.join(" · ") : null}
+              title={row.title}
+              surface={row.surface}
+              onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
+            />
+          </li>
+        );
+      })}
+    </ul>
   );
   return (
     <>
@@ -1313,86 +1321,124 @@ function RailList({
           </button>
         </div>
       ) : null}
-      {groups.map((group) => (
-        <Collapsible
-          key={group.label}
-          asChild
-          open={!folded.includes(group.label)}
-          onOpenChange={(open) =>
-            pickRailShut(
-              open ? folded.filter((label) => label !== group.label) : [...folded, group.label],
-            )
-          }
-        >
-          <section>
-            <h2 className="m-0">
-              <CollapsibleTrigger className="group/rail flex h-(--size-row) w-full items-center gap-2xs rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill">
-                <span className="min-w-0 truncate">{group.label}</span>
-                <IconChevronRight
-                  aria-hidden
-                  className="size-icon shrink-0 transition-transform group-data-[state=open]/rail:rotate-90"
-                />
-              </CollapsibleTrigger>
-            </h2>
-            <CollapsibleContent asChild>
-              <ul className="m-0 flex list-none flex-col gap-px p-0">
-                {group.rows.map((row) => {
-                  const facts = [
-                    row.speaker ? speakerName(row.speaker) : null,
-                    isPortalChat(row.surface) ? null : origin(row),
-                    mainAgent && row.agent_id !== mainAgent.id ? agentName(row.agent_name) : null,
-                  ].filter((fact): fact is string => fact !== null);
-                  return (
-                    <li key={row.conversation_id}>
-                      <RailRow
-                        current={standing(route, `open:${row.conversation_id}`)}
-                        facts={facts.length ? facts.join(" · ") : null}
-                        onClick={() =>
-                          openRailRow(agents, chatApp, row.conversation_id, row.agent_id)
-                        }
-                      >
-                        <span className="min-w-0 flex-1 truncate">{row.title}</span>
-                        <SurfaceGlyph surface={row.surface} />
-                      </RailRow>
-                    </li>
-                  );
-                })}
-              </ul>
-            </CollapsibleContent>
-          </section>
-        </Collapsible>
-      ))}
+      {groups.map((group) => {
+        const label = group.label;
+        if (label === null) return <Fragment key="rows">{rows(group)}</Fragment>;
+        return (
+          <Collapsible
+            key={label}
+            asChild
+            open={!folded.includes(label)}
+            onOpenChange={(open) =>
+              pickRailShut(open ? folded.filter((shut) => shut !== label) : [...folded, label])
+            }
+          >
+            <section>
+              <h2 className="m-0">
+                <CollapsibleTrigger className="group/rail flex h-(--size-row) w-full items-center gap-2xs rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill">
+                  <span className="min-w-0 truncate">{label}</span>
+                  <IconChevronRight
+                    aria-hidden
+                    className="size-icon shrink-0 transition-transform group-data-[state=open]/rail:rotate-90"
+                  />
+                </CollapsibleTrigger>
+              </h2>
+              <CollapsibleContent asChild>{rows(group)}</CollapsibleContent>
+            </section>
+          </Collapsible>
+        );
+      })}
     </>
   );
 }
+
+/** How a title too long for its row travels while the member is on it. The pace is a reading one
+ *  rather than a duration, so a title that overruns by a word and one that overruns by a sentence
+ *  both pass the frame at the speed they are read at. The rest is what the pointer pays to start
+ *  it: crossing the rail on the way somewhere else passes over every row in it, and a ticker that
+ *  began on contact would set the whole column moving. The way back is a return rather than a
+ *  reading, so it takes one duration and no rest. */
+const TICKER_SPEED = 45;
+const TICKER_REST_MS = 300;
+const TICKER_BACK_MS = 150;
 
 /** A fact the group above cannot state — the agent holding the conversation, the surface it came
  *  in on, whoever else spoke — is read on the way to a decision, not scanned. As a second line it
  *  doubles every row in the rail to serve the few that carry one, so it is held at the pointer and
  *  the rail keeps one pitch. A row with no such fact triggers nothing and draws no tooltip. The
- *  glyph is the exception: it costs the row no height, so the surface is scanned as well as read. */
+ *  glyph is the exception: it costs the row no height, so the surface is scanned as well as read.
+ *
+ *  The title itself is the other half of that bargain. The rail is one column wide and a
+ *  conversation is named in a sentence, so the row states as much of the title as it holds and
+ *  ellipses the rest — until the member puts the pointer or the keyboard on it, when the title
+ *  travels far enough left to state its tail and stays there until they leave. The travel is
+ *  measured at that moment rather than held: a title that fits moves nothing, and one measured
+ *  before the face it is set in had loaded would travel the wrong distance. It is the words' own
+ *  width that is measured, not the frame's overflow, which reports the ellipsis rather than the
+ *  text behind it.
+ *
+ *  The resting title is an inline run so that the frame ellipses it, the way every other truncated
+ *  row in the sidebar is drawn; the moment it travels it becomes a box, because a transform does
+ *  not move an inline one. The ellipsis goes with it — a mark that says "there is more" has
+ *  nothing to say while the more is being read, and left standing it sits over the moving words. */
 function RailRow({
   current,
   facts,
+  title,
+  surface,
   onClick,
-  children,
 }: {
   current: boolean;
   facts: string | null;
+  title: string;
+  surface: string;
   onClick: () => void;
-  children: React.ReactNode;
 }) {
+  const frame = useRef<HTMLSpanElement>(null);
+  const text = useRef<HTMLSpanElement>(null);
+  const [shift, setShift] = useState(0);
+  const run = () => {
+    const held = frame.current;
+    const words = text.current;
+    if (!held || !words || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    setShift(Math.max(0, Math.round(words.getBoundingClientRect().width - held.clientWidth)));
+  };
   const button = (
     <button
       type="button"
       aria-current={current}
       onClick={onClick}
+      onPointerEnter={run}
+      onPointerLeave={() => setShift(0)}
+      onFocus={run}
+      onBlur={() => setShift(0)}
       className={cn(
         "flex h-(--size-row) w-full items-center gap-xs rounded-row border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
         current && "bg-fill",
       )}
     >
-      {children}
+      <span
+        ref={frame}
+        className={cn(
+          "min-w-0 flex-1 overflow-hidden whitespace-nowrap",
+          shift ? "text-clip" : "text-ellipsis",
+        )}
+      >
+        <span
+          ref={text}
+          className={cn("transition-transform ease-linear", shift ? "inline-block" : "inline")}
+          style={{
+            transform: `translateX(${-shift}px)`,
+            transitionDuration: shift
+              ? Math.round((shift / TICKER_SPEED) * 1000) + "ms"
+              : TICKER_BACK_MS + "ms",
+            transitionDelay: shift ? TICKER_REST_MS + "ms" : "0ms",
+          }}
+        >
+          {title}
+        </span>
+      </span>
+      <SurfaceGlyph surface={surface} />
     </button>
   );
   if (!facts) return button;

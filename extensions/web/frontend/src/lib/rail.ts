@@ -48,34 +48,10 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
   }));
 }
 
-export type RailGroup = { label: string; rows: ChatRow[] };
-
-const GROUPS = ["Today", "Yesterday", "Previous 7 days", "Previous 30 days", "Older"] as const;
-
-const DAY_MS = 86_400_000;
-
-function groupLabel(raw: string, now: Date): (typeof GROUPS)[number] {
-  const at = new Date(raw);
-  if (Number.isNaN(at.getTime())) return "Older";
-  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  if (at.getTime() >= midnight) return "Today";
-  if (at.getTime() >= midnight - DAY_MS) return "Yesterday";
-  if (at.getTime() >= midnight - 7 * DAY_MS) return "Previous 7 days";
-  if (at.getTime() >= midnight - 30 * DAY_MS) return "Previous 30 days";
-  return "Older";
-}
-
-function groupChats(rows: ChatRow[], now: Date): RailGroup[] {
-  const buckets = new Map<string, ChatRow[]>();
-  for (const row of rows) {
-    const label = groupLabel(row.last_at, now);
-    buckets.set(label, (buckets.get(label) ?? []).concat(row));
-  }
-  return GROUPS.filter((label) => buckets.has(label)).map((label) => ({
-    label,
-    rows: buckets.get(label) ?? [],
-  }));
-}
+/** A run of rows the rail draws together. A group the member can fold states its heading; the
+ *  recency ladder is the rail's own order rather than a set of places, so it is drawn as one
+ *  unheaded run of rows and carries no label. */
+export type RailGroup = { label: string | null; rows: ChatRow[] };
 
 export type RailSort = "recency" | "agent";
 
@@ -148,11 +124,13 @@ export function holdRailShut(shut: string[]): void {
 
 /** Which groups stand shut. Until the member has touched a heading the rail opens its first group
  *  and shuts the rest: the conversations someone is working from are the recent ones, and the rest
- *  of the history is a list they ask for. The first click writes that whole set down, so from then
- *  on the member's own set governs — including the set that holds nothing shut. A label the rail
- *  has stopped drawing stays in the set and governs nothing until it is drawn again. */
-export function railShut(held: string[] | null, labels: string[]): string[] {
-  return held ?? labels.slice(1);
+ *  of the history is a list they ask for. The unheaded run of rows counts as a group here and can
+ *  never be shut, so a rail led by it opens nothing else. The first click writes that whole set
+ *  down, so from then on the member's own set governs — including the set that holds nothing shut.
+ *  A label the rail has stopped drawing stays in the set and governs nothing until it is drawn
+ *  again. */
+export function railShut(held: string[] | null, labels: (string | null)[]): string[] {
+  return held ?? labels.slice(1).filter((label) => label !== null);
 }
 
 const HELD_SIDEBAR = "sidebar";
@@ -195,23 +173,22 @@ function admits(row: ChatRow, shown: RailShown): boolean {
 const OTHER_MEMBERS = "Other members";
 
 /** The rail's groups, in the order it draws them. The member's own conversations take the ladder
- *  the sort names, and the readable ones their colleagues are in follow as one group at the foot —
- *  never subdivided, and by recency under either sort: a sidebar column holds two heading weights,
- *  not three, and a colleague's thread is read for what happened lately in it. The group is drawn
- *  only when it holds a row.
+ *  the sort names — an app's name over each run, or, by recency, one unheaded run in the order the
+ *  rows already stand in. A date the rail can state in the row's own words buys nothing as a
+ *  heading, and five of them turn a column of a dozen conversations into a column of headings.
+ *  The readable ones their colleagues are in follow as one group at the foot — never subdivided,
+ *  and by recency under either sort: a sidebar column holds two heading weights, not three, and a
+ *  colleague's thread is read for what happened lately in it. A group is drawn only when it holds
+ *  a row.
  *
  *  The filter narrows the groups and never the rail itself: a permalink to a Slack thread opens it
  *  whether or not the rail is admitting Slack. */
-export function railGroups(
-  rows: ChatRow[],
-  sort: RailSort,
-  shown: RailShown,
-  now: Date,
-): RailGroup[] {
+export function railGroups(rows: ChatRow[], sort: RailSort, shown: RailShown): RailGroup[] {
   const admitted = rows.filter((row) => admits(row, shown));
   const own = admitted.filter((row) => row.mine);
   const theirs = admitted.filter((row) => !row.mine);
-  const grouped = sort === "agent" ? groupChatsByAgent(own) : groupChats(own, now);
+  const grouped =
+    sort === "agent" ? groupChatsByAgent(own) : own.length ? [{ label: null, rows: own }] : [];
   return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
 }
 

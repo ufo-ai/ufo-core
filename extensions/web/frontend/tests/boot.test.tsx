@@ -194,8 +194,8 @@ test("the sidebar names the shell's destinations and states the member at its fo
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
-    "Expand sidebar",
     "Search",
+    "Expand sidebar",
     "New conversation",
     "Applications",
     "Conversations",
@@ -205,6 +205,24 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Sign out",
   ]);
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
+});
+
+test("a section heading holds its menu glyph but draws it only under the pointer", async () => {
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  for (const name of ["Applications", "Conversations"]) {
+    const glyph = within(sidebar).getByRole("button", { name }).querySelector("svg");
+    if (!glyph) throw new Error(name + " states no menu glyph");
+    /* Held in the layout and drawn transparent rather than taken out of it: a glyph that arrives
+       on hover would move the heading's own words as the pointer lands on them. */
+    expect(glyph.getAttribute("class")).toContain("opacity-0");
+    expect(glyph.getAttribute("class")).toContain("group-hover/head:opacity-100");
+    expect(glyph.getAttribute("class")).toContain("group-focus-visible/head:opacity-100");
+    expect(glyph.getAttribute("class")).not.toContain("hidden");
+  }
 });
 
 test("the shell opens on the rail, and a sidebar the member widened stays widened", async () => {
@@ -301,6 +319,7 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
+    "Search",
     "Collapse sidebar",
     "New conversation",
     "Applications",

@@ -567,7 +567,7 @@ async function deliver(
   await answerQuestions(target, question.turn_id, given);
 }
 
-const COMPOSER_LABEL = "Ask anything";
+const COMPOSER_LABEL = "Ask UFO";
 const COMPOSER_PLACEHOLDER = COMPOSER_LABEL + "…";
 /** What the start screen says before the member has said anything. The screen is otherwise empty,
  *  and a pane that opens on nothing states nothing about what it is for. */
