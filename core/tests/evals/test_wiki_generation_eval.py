@@ -4,6 +4,7 @@ from evals.suites.wiki_generation import (
     CASES,
     DISTINCT,
     EXTRACTION_CASES,
+    FILED,
     OVERVIEW_CASES,
     SAMPLES_MET,
     SAMPLES_SCORED,
@@ -24,6 +25,7 @@ SYNC = BY_NAME["daily-sync-across-passes"]
 NOTICE = BY_NAME["service-notice-in-one-pass"]
 PULL_REQUEST = BY_NAME["pull-request-in-one-pass"]
 OVERVIEW = BY_NAME["overview-keeps-the-parties-apart"]
+WAITLIST = BY_NAME["waitlist-across-passes"]
 
 
 def test_the_deploys_own_rows_fail_every_defect_they_were_read_for() -> None:
@@ -45,9 +47,50 @@ def test_the_deploys_own_rows_fail_every_defect_they_were_read_for() -> None:
     assert "row 4: an implied subject, 'The group'" in failed[STATED].reasons
 
 
-def test_the_hand_rewrite_passes_every_dimension() -> None:
-    for dimension, failures in SYNC.parts(SYNC.rewrite).items():
-        assert failures.passed, (dimension, failures.reasons)
+def test_a_waitlist_signup_filed_as_a_preference_becomes_how_the_team_works() -> None:
+    """The screenshot's rows, read from the deploy 2026-08-26. Every one names its person, so no
+    reading of a row on its own catches this — the wiki lists them under "How this workspace has
+    said it wants things done" because the pass filed them `preference`."""
+    failed = WAITLIST.parts(WAITLIST.production)
+
+    assert failed[FILED].reasons[0] == (
+        "row 0 files an outside party's claim as 'preference', "
+        "which the wiki renders under 'How the team works'"
+    )
+    assert len(failed[FILED].reasons) == len(WAITLIST.production)
+    assert "row 0: a person by a short name, 'Jayesh'" in failed[STATED].reasons
+
+
+def test_the_band_a_kind_files_under_is_what_makes_it_a_defect() -> None:
+    """A stranger's claim is fine as `fact` or `event`; it is the three bands whose note speaks for
+    the workspace that cannot carry it."""
+    kinds = tuple(
+        Row("page/waitlist-form", "Bruno Salas — Wants agents on business development.", kind)
+        for kind in ("fact", "event", "preference", "task", "decision")
+    )
+    reasons = WAITLIST.parts(kinds)[FILED].reasons
+
+    assert [reason.split("as ")[1].split(",")[0] for reason in reasons] == [
+        "'preference'",
+        "'task'",
+        "'decision'",
+    ]
+
+
+def test_the_workspaces_own_page_may_file_a_preference() -> None:
+    """The rule is about a stranger's page. The workspace's own way of working is exactly what
+    `preference` is for, and the daily sync is where it comes from."""
+    own = (
+        Row("page/daily-sync-message", "Metalcraft — Favours dashboards over chat.", "preference"),
+    )
+
+    assert SYNC.parts(own)[FILED].passed
+
+
+def test_the_hand_rewrites_pass_every_dimension() -> None:
+    for case in (SYNC, WAITLIST):
+        for dimension, failures in case.parts(case.rewrite).items():
+            assert failures.passed, (case.name, dimension, failures.reasons)
 
 
 def test_a_stranger_notice_about_our_own_cluster_keeps_both_parties() -> None:
@@ -173,7 +216,7 @@ def test_the_corpus_carries_the_streams_the_deploy_actually_syncs() -> None:
     `issues` are 96% of the pages a wiki is built from. A corpus of invented email is not that."""
     streams = {page.stream for case in EXTRACTION_CASES for page in case.pages}
 
-    assert streams == {"messages", "comments", "pull_requests"}
+    assert streams == {"messages", "comments", "pull_requests", "sheet_values"}
 
 
 def test_the_suite_writes_on_the_background_model_and_judges_on_the_semantic_one() -> None:
@@ -181,7 +224,7 @@ def test_the_suite_writes_on_the_background_model_and_judges_on_the_semantic_one
 
     assert task.simulator_model == DEFAULT_BACKGROUND_JOBS_MODEL
     assert task.judge_model == SEMANTIC_JUDGE_MODEL
-    assert len(task.cases) == 3 * len(EXTRACTION_CASES) + 2 * len(OVERVIEW_CASES)
+    assert len(task.cases) == 4 * len(EXTRACTION_CASES) + 2 * len(OVERVIEW_CASES)
     assert task.narrow is not None
     assert task.narrow(("daily-sync-across-passes-distinct",)).cases == (
         "daily-sync-across-passes-distinct",

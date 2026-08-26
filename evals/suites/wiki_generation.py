@@ -4,7 +4,7 @@ reads those items, so a wiki a member cannot trust is a derivation defect, and t
 two passes directly — the condenser's own prompts, tool schema and bounds — the way `asd_writing`
 drives them for the writing standard.
 
-Three defects, one verdict each off one generation:
+Four defects, one verdict each off one generation:
 
 `attributed` is the self-versus-others question, and it is asked of a stranger's page: a row off an
 outside party's page has to name that party, and may not head with this workspace or a member of
@@ -22,8 +22,16 @@ page-derived row outside its own extraction reply: `_restates` compares entries 
 written twice, and a change spread over a request, its comment and its notification is written
 three times.
 
+`filed` is the same self-versus-others question asked of the section rather than the sentence, and
+it is the one no reading of a row can answer. `memory_kind` is not a label a member ever sees — it
+is the band the wiki files the row under, and three of those bands speak for the workspace. The
+waitlist is what that costs: every signup on the deploy is filed `preference` on the shared subject,
+so "Jayesh at Silurian — He wants agents to automate customer-data ingestion" — a row that names its
+person perfectly — is listed under "How this workspace has said it wants things done".
+
 `stated` is the row shape the prompt asks for and the reader scans: one subject, an em dash, one
-sentence about it, inside the row budget, with no value the system reports about itself.
+sentence about it, inside the row budget, with no value the system reports about itself, and every
+person by their full name.
 
 Every corpus runs in both batchings, because the batch turned out to be the variable each dimension
 moves with, and the pair holds the pages constant against it. The row budget is measured on what the
@@ -80,7 +88,19 @@ SAMPLES = 3
 
 ATTRIBUTED = "attributed"
 DISTINCT = "distinct"
+FILED = "filed"
 STATED = "stated"
+
+WORKSPACE_BANDS = {
+    "preference": "How the team works",
+    "task": "Open work",
+    "decision": "Decisions",
+}
+"""The wiki bands whose note speaks for the workspace — "How this workspace has said it wants things
+done", "What the workspace asked to have carried", "What was settled". A `memory_kind` is not a
+label on a row, it is the section the row is filed under, so a stranger's stated want filed
+`preference` renders as this workspace's own way of working however well the row itself names them.
+The bands are `WORKSPACE_TOPICS` in the wiki app's `app.tsx`."""
 
 SAMPLES_MET = "samplesMet"
 SAMPLES_SCORED = "samplesScored"
@@ -119,6 +139,10 @@ GRADING: JsonObject = {
     DISTINCT: (
         "each claim the corpus states more than once reaches the wiki once, and the batch stays "
         "inside the row count its pages earn"
+    ),
+    FILED: (
+        "no row off an outside party's page carries a memory_kind the wiki renders under a band "
+        f"that speaks for {WORKSPACE} — preference, task or decision"
     ),
     STATED: (
         f"every row is one subject, an em dash, and one sentence about it inside "
@@ -191,6 +215,7 @@ class Row:
 
     page_ref: str
     body: str
+    kind: str = "fact"
 
     @property
     def head(self) -> str:
@@ -217,7 +242,7 @@ class ExtractionCase:
 
     @property
     def dimensions(self) -> tuple[str, ...]:
-        return (ATTRIBUTED, DISTINCT, STATED)
+        return (ATTRIBUTED, DISTINCT, FILED, STATED)
 
     @property
     def instruction(self) -> str:
@@ -230,6 +255,7 @@ class ExtractionCase:
         return {
             ATTRIBUTED: _attributed(rows, by_ref),
             DISTINCT: self._distinct(rows),
+            FILED: _filed(rows, by_ref),
             STATED: self._stated(rows, by_ref),
         }
 
@@ -340,6 +366,29 @@ def _attributed(rows: tuple[Row, ...], by_ref: dict[str, SourcePage]) -> Failure
     return Failures(
         tuple(reasons),
         {"rows": [{"page": row.page_ref, "body": row.body, "head": row.head} for row in rows]},
+    )
+
+
+def _filed(rows: tuple[Row, ...], by_ref: dict[str, SourcePage]) -> Failures:
+    """Which band each row lands in. `memory_kind` is not a label the reader ever sees — it is the
+    section the wiki files the row under, and three of those sections speak for the workspace. A
+    waitlist signup filed `preference` is rendered under "How this workspace has said it wants
+    things done", so the page asserts a stranger's want as the team's own way of working while the
+    row itself names them perfectly. No row can be read alone to catch it."""
+    reasons: list[str] = []
+    for index, row in enumerate(rows):
+        page = by_ref.get(row.page_ref)
+        if page is None or page.is_ours:
+            continue
+        band = WORKSPACE_BANDS.get(row.kind)
+        if band is not None:
+            reasons.append(
+                f"row {index} files an outside party's claim as {row.kind!r}, "
+                f"which the wiki renders under {band!r}"
+            )
+    return Failures(
+        tuple(reasons),
+        {"kinds": [{"page": row.page_ref, "kind": row.kind, "body": row.body} for row in rows]},
     )
 
 
@@ -596,6 +645,121 @@ SYNC_REWRITE = (
     ),
 )
 
+WAITLIST_FORM = """Form Responses 1 — UFO.ai waitlist
+
+Timestamp | Name | Company | What do you want agents to do?
+2026-08-19 09:14 | Jayesh Rana | Silurian | Automate customer-data ingestion and quality assurance.
+2026-08-19 11:02 | Jeremy Vance | PitPro Automation | Handle internal admin workflows, and build a
+computer-vision data-labeling pipeline.
+2026-08-20 08:41 | Bruno Salas | OfferLab | Handle business development.
+2026-08-20 15:23 | Andrew Fenn | FreeCode | Run go-to-market on autopilot so I focus on product."""
+
+WAITLIST_EMAIL = """Set up your account
+
+New waitlist signups since Monday:
+
+Jayesh Rana (Silurian) wants agents to automate customer-data ingestion and quality assurance.
+Jeremy Vance (PitPro Automation) wants agents for internal admin workflows and a computer-vision
+data-labeling pipeline.
+Bruno Salas (OfferLab) wants agents working on business development.
+Andrew Fenn (FreeCode) wants his go-to-market work on autopilot so he can focus on product."""
+
+WAITLIST_PAGES = (
+    SourcePage(
+        "page/waitlist-form",
+        "Form Responses 1",
+        "sheet_values",
+        WAITLIST_FORM,
+        owners=("Jayesh Rana", "Jeremy Vance", "Bruno Salas", "Andrew Fenn"),
+        noise=("Timestamp",),
+    ),
+    SourcePage(
+        "page/waitlist-email",
+        "Set up your account",
+        "messages",
+        WAITLIST_EMAIL,
+        owners=("Jayesh Rana", "Jeremy Vance", "Bruno Salas", "Andrew Fenn"),
+    ),
+)
+"""The waitlist, on the two pages that carry it — the signup form and the digest email. Read from
+the testing deploy 2026-08-26, where every one of these people is filed `preference` on the shared
+subject, so the wiki lists them under "How the team works" as this workspace's own way of working.
+Each row names its person correctly; the section is what makes the page lie."""
+
+WAITLIST_CLAIMS = (
+    Claim("Jayesh's want", ("Jayesh",)),
+    Claim("Jeremy's want", ("Jeremy",)),
+    Claim("Bruno's want", ("Bruno",)),
+    Claim("Andrew's want", ("Andrew",)),
+)
+
+WAITLIST_PRODUCTION = (
+    Row(
+        "page/waitlist-email",
+        "Jayesh — Wants to automate customer data ingestion and quality assurance with UFO.ai.",
+        "preference",
+    ),
+    Row(
+        "page/waitlist-email",
+        "Jeremy — He requested internal admin workflows and a computer-vision data-labeling "
+        "pipeline.",
+        "preference",
+    ),
+    Row(
+        "page/waitlist-email",
+        "Bruno — Wants agents working on business development, according to Marshall Kiely.",
+        "preference",
+    ),
+    Row(
+        "page/waitlist-email",
+        "Andrew — He wants his go-to-market work on autopilot so he can focus on product.",
+        "preference",
+    ),
+    Row(
+        "page/waitlist-form",
+        "Jayesh at Silurian — He wants agents to automate customer-data ingestion and quality "
+        "assurance.",
+        "preference",
+    ),
+    Row(
+        "page/waitlist-form",
+        "Bruno at OfferLab — He wants agents to handle business development.",
+        "preference",
+    ),
+    Row(
+        "page/waitlist-form",
+        "Andrew at FreeCode — He wants UFO to run his go-to-market on autopilot so he can focus on "
+        "product.",
+        "preference",
+    ),
+)
+"""The rows behind the screenshot, read from the testing deploy 2026-08-26. Every one is filed
+`preference`, every person is named by a first name alone, each signup is written twice, and one
+row carries the sourcing hedge "according to Marshall Kiely"."""
+
+WAITLIST_REWRITE = (
+    Row(
+        "page/waitlist-form",
+        "Jayesh Rana — Joined the waitlist for Silurian, to automate customer-data ingestion.",
+        "event",
+    ),
+    Row(
+        "page/waitlist-form",
+        "Jeremy Vance — Joined the waitlist for PitPro Automation, for admin workflows.",
+        "event",
+    ),
+    Row(
+        "page/waitlist-form",
+        "Bruno Salas — Joined the waitlist for OfferLab, for business development.",
+        "event",
+    ),
+    Row(
+        "page/waitlist-form",
+        "Andrew Fenn — Joined the waitlist for FreeCode, to run go-to-market.",
+        "event",
+    ),
+)
+
 EXTRACTION_CASES = (
     ExtractionCase("daily-sync-in-one-pass", (SYNC_PAGES,), max_rows=6, repeated=SYNC_CLAIMS),
     ExtractionCase(
@@ -615,6 +779,15 @@ EXTRACTION_CASES = (
         tuple((page,) for page in PR_PAGES),
         max_rows=4,
         repeated=PR_CLAIMS,
+    ),
+    ExtractionCase("waitlist-in-one-pass", (WAITLIST_PAGES,), max_rows=4, repeated=WAITLIST_CLAIMS),
+    ExtractionCase(
+        "waitlist-across-passes",
+        tuple((page,) for page in WAITLIST_PAGES),
+        max_rows=4,
+        repeated=WAITLIST_CLAIMS,
+        production=WAITLIST_PRODUCTION,
+        rewrite=WAITLIST_REWRITE,
     ),
 )
 """Every corpus that spans pages runs in both batchings, because the batch is the variable the pair
@@ -646,6 +819,7 @@ class RecordedRow(BaseModel):
 
     page_id: str = ""
     body: str = ""
+    memory_kind: str = "fact"
 
 
 @dataclass(frozen=True)
@@ -782,7 +956,7 @@ class WikiGenerationSuite:
         if not isinstance(entries, list):
             raise ValueError(f"{FACT_EXTRACT_TOOL} arguments carry no facts list")
         recorded = tuple(RecordedRow.model_validate(entry) for entry in entries)
-        return tuple(Row(row.page_id, row.body.strip()) for row in recorded)
+        return tuple(Row(row.page_id, row.body.strip(), row.memory_kind) for row in recorded)
 
     async def _summary(self, case: OverviewCase, writer: ModelAccess) -> str:
         """The consolidator's own pass over the case's aged rows."""
