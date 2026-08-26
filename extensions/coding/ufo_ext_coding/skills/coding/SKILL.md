@@ -1,6 +1,6 @@
 ---
 name: coding
-description: Load when asked to inspect or change source code, fix bugs, produce patches or diffs, work in or clone repositories, use pinned commits, or check GitHub access. On a repository task, call only `load_skill` for coding in the first round. Call no other tool until it returns.
+description: Load when asked to inspect or change source code, fix bugs, produce patches or diffs, work in or clone repositories, use pinned commits, check GitHub access, or delegate an installed-App GitHub write. On repository tasks, load coding first and call no other tool until it returns.
 ---
 # Coding Subagent Routing
 

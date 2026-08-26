@@ -9,7 +9,7 @@ from evals.harness.capability import (
     DescribedGrader,
     Grader,
 )
-from evals.harness.scorers import combine, exact_scorer, lane_scorer
+from evals.harness.scorers import combine, exact_scorer, lane_scorer, restraint_scorer
 
 BACKGROUND_FLAG = TypeAdapter(bool)
 GITHUB_APP_API_COMMAND = 'GH_TOKEN="$UFO_GITHUB_API_AUTH" gh api'
@@ -149,5 +149,12 @@ CASES = (
         "not connect another GitHub account.",
         github_app_api_scorer(),
         digest_tag="delegation:coding-subagent-github-app-api:answer-or-objective",
+    ),
+    CapabilityCase(
+        "github-app-write-explanation",
+        "In one sentence, explain what an installed GitHub App can write to. Do not delegate, "
+        "inspect a repository, or access an account.",
+        restraint_scorer(("load_skill", "spawn")),
+        digest_tag="delegation:github-app-write-explanation",
     ),
 )
