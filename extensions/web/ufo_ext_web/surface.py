@@ -2657,6 +2657,11 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
     here and no portal read lists them: that record is the operator's, read with
     `ufoctl transcript-reads`.
 
+    This read carries the newest of them and no cursor, so `more` says whether it stopped at its
+    own bound: a screen drawing the rows has to state that the rest are there rather than end in
+    silence on a set the member has no way to know is cut. It is read one row past the bound and
+    answers the bound, so the fact is counted rather than guessed from a full page.
+
     `q` narrows the read itself rather than the page it returns, so a member searching for a
     conversation older than the bound finds it."""
     gated = await _panel_gate(ctx, request)
@@ -2667,11 +2672,15 @@ async def conversations(ctx: SurfaceContext, request: Request) -> Response:
         agent_id,
         member_id,
         admin=audience.admin,
-        limit=CONVERSATION_LIST_LIMIT,
+        limit=CONVERSATION_LIST_LIMIT + 1,
         search=_searched(request),
     )
+    page = listed[:CONVERSATION_LIST_LIMIT]
     return JSONResponse(
-        {"conversations": [_conversation_row(entry, member_id) for entry in listed]}
+        {
+            "conversations": [_conversation_row(entry, member_id) for entry in page],
+            "more": len(listed) > CONVERSATION_LIST_LIMIT,
+        }
     )
 
 

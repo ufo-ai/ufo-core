@@ -12610,6 +12610,38 @@ async def test_the_conversations_search_narrows_the_read_not_the_page(
     assert unmatched.json()["conversations"] == []
 
 
+async def test_the_conversations_read_says_it_stopped_at_its_bound(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read carries no cursor, so the screen drawing its rows can only say the rest are there
+    if this answer says so. It is counted rather than guessed from a full page: a set exactly the
+    size of the bound says nothing stands behind it."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    for title in ("Rename the deploy job", "Order more coffee"):
+        await _seed_web_turn(
+            workspace_id,
+            agent_id,
+            member_id,
+            "m@example.com",
+            TerminalFrame(status="done", text="hi"),
+            title=title,
+        )
+    path = f"/surface/web/agents/{agent_id}/conversations"
+
+    monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 1)
+    bounded = (await client.get(path, headers=cookie)).json()
+    monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 2)
+    exact = (await client.get(path, headers=cookie)).json()
+
+    assert len(bounded["conversations"]) == 1
+    assert bounded["more"] is True
+    assert len(exact["conversations"]) == 2
+    assert exact["more"] is False
+
+
 async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

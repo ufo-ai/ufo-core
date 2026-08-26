@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   IconClipboardCheck,
   IconDots,
+  IconHistory,
   IconLayoutSidebarRight,
   IconMessage,
   IconPlug,
@@ -17,13 +18,15 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { PressRow } from "@/components/ui/pressrow";
 import { Header } from "@/kernel/pane";
-import { PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { isPortalChat, surfaceWord, useViewer } from "@/lib/audience";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
+import { day } from "@/lib/moments";
 import type { ChatRow } from "@/lib/rail";
 import type { SetupState } from "@/views/AgentSetup";
 import { Chat } from "@/views/Chat";
@@ -55,6 +58,17 @@ const NEW = "New";
  *  named by the conversation it holds; this one has no conversation to name it, and the send that
  *  founds one writes that conversation's id over it. */
 const FRESH = "new";
+
+/** What the lane's own list of the app's conversations is called, and what it says where the app
+ *  has held none. The lane holds either a conversation or the list of them, so the band names
+ *  whichever is standing and the way out shuts that one. */
+const HISTORY = "History";
+const NO_HISTORY = "No conversations yet.";
+/** What the list says where the read stopped at its own bound. The read carries no cursor, so the
+ *  list cannot page — and a list that ended in silence on a set the member cannot know is cut
+ *  states a history the app does not have. Search is the way past the bound: it narrows the read
+ *  rather than the page, so a conversation older than this list holds is still found. */
+const HISTORY_BOUND = "The newest few. Search finds an older one.";
 
 /** What an app's own dialog holds: the spec the member edits, the accounts the app reaches, and the
  *  tasks that run it on a clock. Three reads of one app, none of which heads a page of its own. The
@@ -259,7 +273,7 @@ export function AgentPane({
   // there the conversation is the screen. An app showing its own set page with nothing open needs
   // none of it, so switching between apps does not pull each one's conversation history; the chat
   // toggle resumes the editing conversation from the rail the shell already holds.
-  const listed = usePanelRead<{ conversations: Conversation[] }>(
+  const listed = usePanelRead<{ conversations: Conversation[]; more: boolean }>(
     target !== COMPOSE && (target !== undefined || home.state !== "set")
       ? "/agents/" + agent.id + "/conversations"
       : null,
@@ -315,6 +329,14 @@ export function AgentPane({
   // made. What the member did in this pane is held here, the way a permalink's pane holds it.
   const [disclosed, setDisclosed] = useState<string | null>(null);
   const start = () => onPlace({ ...place, opens: [FRESH] }, "push");
+  // Which lane the list is standing over, rather than whether it is open at all. The lane is named
+  // by the conversation it holds, so opening one from the list — or shutting the lane, or starting
+  // a conversation — names a different lane and puts the list away with nothing having to remember
+  // to. A flag would survive all three and draw the list over the conversation the member just
+  // opened.
+  const [listing, setListing] = useState<string | null>(null);
+  const lane = held ?? FRESH;
+  const history = held !== undefined && listing === lane;
   // The fallback to the newest conversation the member can speak in stands for an address that
   // names none; a target the rail holds is already named, so answering it with another row would
   // open a place the address never asked for.
@@ -553,6 +575,46 @@ export function AgentPane({
     </section>
   );
 
+  /** Every conversation this app holds, newest first, for the member to open one. It is the app's
+   *  own index rather than the rail's chats — every surface the app has spoken on, so a thread it
+   *  answered in Slack stands here beside the ones started in this lane, and one the member may not
+   *  read is named by whose it is. The row states what the conversation is about and where and when
+   *  it last moved — the three facts the app's own band states, so one conversation is named the
+   *  same wherever it is listed. The day stands at the row's end rather than after its name, since
+   *  what the member scans for is the name and every row carries a day; the surface is named only
+   *  where it is not this one, the way the rail names none on a conversation the portal holds; and
+   *  no mark, because every row here is a conversation and a glyph repeated down the list tells no
+   *  two of them apart. The read carries the newest of them and no cursor, so where it says it
+   *  stopped at its bound the list says so under the rows rather than ending as though the app had
+   *  spoken that many times. Picking a row opens it at its own address, which names a different
+   *  lane and puts this list away. */
+  const past = (
+    <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable py-md">
+      <Panel
+        state={listed}
+        shape="table"
+        empty={(payload) => ((payload.conversations ?? []).length ? null : NO_HISTORY)}
+      >
+        {(payload) => (
+          <div className="flex flex-col">
+            {(payload.conversations ?? []).map((row) => (
+              <PressRow
+                key={row.id}
+                line={subject(row, viewer)}
+                note={isPortalChat(row.surface) ? undefined : surfaceWord(row.surface)}
+                when={day(row.last_turn_at) ?? undefined}
+                onPress={() => onPlace({ ...place, opens: [row.id] }, "push")}
+              />
+            ))}
+            {payload.more ? (
+              <p className="m-0 px-lg py-lg text-label text-ink-soft">{HISTORY_BOUND}</p>
+            ) : null}
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+
   /** Where the conversation stands when the app has a page: a slot in the screen's own track,
    *  opened by the titlebar's act and named by the conversation it holds. Its band carries the one
    *  act the member cannot reach from the page — starting another conversation with this app —
@@ -560,22 +622,42 @@ export function AgentPane({
    *  its own address. The act is spent where the pane already stands on a conversation nobody has
    *  spoken in, so it draws as unavailable rather than founding a second empty one. An app with no
    *  page has no track to divide, so the conversation is the screen and takes the width whole. */
-  const slot = useSlot(beside && held !== undefined ? conversation : null, {
-    id: held ?? FRESH,
+  const slot = useSlot(beside && held !== undefined ? (history ? past : conversation) : null, {
+    id: lane,
     kind: "panel",
-    title: opened ? subject(opened, viewer) : (railHeld?.title ?? NEW_CONVERSATION),
+    title: history
+      ? HISTORY
+      : opened
+        ? subject(opened, viewer)
+        : (railHeld?.title ?? NEW_CONVERSATION),
     acts: (
-      <Button
-        variant="quiet"
-        size="icon"
-        aria-label={NEW_CONVERSATION + " with " + agentName(agent.name)}
-        disabled={held === FRESH}
-        onClick={start}
-      >
-        <IconPlus aria-hidden />
-      </Button>
+      <>
+        <Button
+          variant="quiet"
+          size="icon"
+          aria-label={NEW_CONVERSATION + " with " + agentName(agent.name)}
+          disabled={held === FRESH}
+          onClick={start}
+        >
+          <IconPlus aria-hidden />
+        </Button>
+        <Button
+          variant="quiet"
+          size="icon"
+          aria-label={HISTORY + " for " + agentName(agent.name)}
+          aria-pressed={history}
+          className={cn(history && "bg-fill")}
+          onClick={() => setListing(history ? null : lane)}
+        >
+          <IconHistory aria-hidden />
+        </Button>
+      </>
     ),
-    onClose: () => onPlace({ ...place, opens: [] }, "replace"),
+    // The way out shuts what is standing: the list first, then the lane under it. A single X that
+    // took the lane away from a member reading the list would shut two things on one press.
+    onClose: history
+      ? () => setListing(null)
+      : () => onPlace({ ...place, opens: [] }, "replace"),
   });
 
   if (beside) {

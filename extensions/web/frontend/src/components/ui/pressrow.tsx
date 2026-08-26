@@ -20,6 +20,13 @@ const ROW = cn(
  *  row that only admits it under the pointer reads as text until the member happens to cross it. */
 const CHEVRON = "size-(--size-glyph) shrink-0 text-ink-soft";
 
+/** The stamp at the row's end: held in the layout at rest and faded in on the row the pointer or
+ *  the keyboard is on, so the row it belongs to is the one that states it. */
+const STAMP = cn(
+  "shrink-0 text-ink-soft opacity-0 transition-opacity duration-100 ease-control",
+  "group-hover:opacity-100 group-focus-visible:opacity-100",
+);
+
 /** Whether the line is cut, so a row that fits is never given a tooltip saying what it already
  *  says. */
 function useCutLine(): [RefObject<HTMLSpanElement | null>, boolean] {
@@ -43,17 +50,29 @@ function useCutLine(): [RefObject<HTMLSpanElement | null>, boolean] {
  *  `line` is what the row says: one sentence that reads on its own. `note` is the trailing detail
  *  a few rows carry — what a listed row costs, or when it last moved — and it is set in the same
  *  type as the line, because a row drawn in two registers is a row the eye assembles out of two
- *  pieces rather than reads as one thing. */
+ *  pieces rather than reads as one thing.
+ *
+ *  `when` is the stamp a list of one kind of record scans down: it stands at the row's own end,
+ *  muted, and shows under the pointer, because a column of dates every row carries is the same
+ *  fact repeated against the names the member came to read. It holds its width at rest, so a name
+ *  is cut to the same measure whether the pointer is on the row or not, and it is drawn rather than
+ *  withheld, so a reader who never hovers is still told it.
+ *
+ *  `glyph` is the mark for the kind of thing the row opens, and a list whose rows are all one kind
+ *  draws none: a mark repeated down every row states nothing that tells two rows apart, and takes
+ *  the width the line reads in. */
 export function PressRow({
   glyph,
   line,
   note,
+  when,
   onPress,
   href,
 }: {
-  glyph: ReactNode;
+  glyph?: ReactNode;
   line: string;
   note?: string;
+  when?: string;
   onPress?: () => void;
   href?: string;
 }) {
@@ -65,6 +84,7 @@ export function PressRow({
       <span ref={measured} className="min-w-0 flex-1 truncate">
         {says}
       </span>
+      {when ? <span className={STAMP}>{when}</span> : null}
       <IconChevronRight className={CHEVRON} aria-hidden />
     </>
   );

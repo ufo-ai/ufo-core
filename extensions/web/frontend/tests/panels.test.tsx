@@ -1273,3 +1273,129 @@ test("a slot standing on its own address is headed by its name under the app", a
     agentHash(AGENT.id),
   );
 });
+
+/** Every conversation the app holds, reached from the lane its chat stands in. The list is the
+ *  app's own index rather than the rail's chats — every surface it has spoken on — so a thread
+ *  another surface holds stands here beside the ones this lane founded. */
+const APP_SITE = { state: "set", url: "https://tasks.example.test", deploy_generation: 1 } as const;
+
+function appConversation(id: string, description: string, surface = "web") {
+  return {
+    id,
+    agent: null,
+    surface,
+    surface_label: null,
+    audience: "member:m1",
+    member_email: "member@example.com",
+    description,
+    source: null,
+    speakers: ["member@example.com"],
+    turn_count: 1,
+    created_at: "2026-07-30T10:00:00",
+    last_turn_at: "2026-07-30T10:00:01",
+    readable: true,
+    disclosable: false,
+    commentable: false,
+  };
+}
+
+function appOnWire(conversations: ReturnType<typeof appConversation>[], more = false) {
+  return {
+    ...chatsOnWire([{ ...CHAT_ROW, title: "Newest thread" }]),
+    "/conversations$": () => json({ conversations, more }),
+    "/homepage": () => json(APP_SITE),
+    "/setup": () => json({ own_page: false, connectors: [], credentials: [], standing: [] }),
+    "/transcript": () => json({ messages: [] }),
+  };
+}
+
+// The pane draws the page off the agent it was handed; the read only refreshes it later.
+const APP = { ...AGENT, app: "tasks", homepage: APP_SITE };
+const OLDER = "44444444-4444-4444-8444-444444444444";
+
+test("the lane's History lists the app's conversations, and one press opens it in the lane", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
+  wire(
+    appOnWire([
+      appConversation(CONVO_ID, "Newest thread"),
+      appConversation(OLDER, "Older thread", "slack"),
+    ]),
+  );
+  render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
+
+  const act = await screen.findByRole("button", { name: "History for Assistant" });
+  const start = screen.getByRole("button", { name: "New conversation with Assistant" });
+  // Starting a conversation leads the bar; reaching the old ones stands after it.
+  expect(start.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  await userEvent.click(act);
+
+  expect(act.getAttribute("aria-pressed")).toBe("true");
+  // A conversation the portal holds is named by what it is about and nothing else; one another
+  // surface holds names that surface, because the portal is not where it is read. The day is at
+  // the row's own end rather than in the line the member scans down.
+  const row = await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
+  const other = screen.getByRole("button", { name: "Older thread Slack Jul 30 2026" });
+  expect(within(row).getByText("Jul 30 2026").previousElementSibling?.textContent).toBe(
+    "Newest thread",
+  );
+
+  await userEvent.click(other);
+
+  // The address is what opens the conversation, and it names a lane this list is not standing over.
+  await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + OLDER));
+  expect(
+    screen.queryByRole("button", { name: "History for Assistant" })?.getAttribute("aria-pressed"),
+  ).toBe("false");
+});
+
+/** The way out shuts what is standing: the list first, then the lane under it. One X that took the
+ *  lane away from a member reading the list would shut two things on one press. */
+test("the lane's way out names the list, and shuts it without shutting the lane", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
+  wire(appOnWire([appConversation(CONVO_ID, "Newest thread")]));
+  render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+  await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
+
+  await userEvent.click(screen.getByRole("button", { name: "Close History" }));
+
+  expect(screen.queryByRole("button", { name: "Newest thread Jul 30 2026" })).toBeNull();
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
+  expect(await screen.findByRole("button", { name: "Close Newest thread" })).toBeTruthy();
+});
+
+test("an app nobody has spoken to says so rather than standing an empty list", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=new";
+  wire(appOnWire([]));
+  render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+
+  expect(await screen.findByText("No conversations yet.")).toBeTruthy();
+});
+
+/** The read carries the newest conversations and no cursor. A list that drew them and stopped
+ *  would state a history the app does not have, so where the answer says it stopped at its bound
+ *  the list says so and names the way past it. */
+test("a history longer than the read carries says so under the rows", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
+  wire(appOnWire([appConversation(CONVO_ID, "Newest thread")], true));
+  render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+
+  expect(await screen.findByText("The newest few. Search finds an older one.")).toBeTruthy();
+});
+
+test("a history the read carries whole ends on its last row", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
+  wire(appOnWire([appConversation(CONVO_ID, "Newest thread")]));
+  render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+  await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
+
+  expect(screen.queryByText(/The newest few/)).toBeNull();
+});
