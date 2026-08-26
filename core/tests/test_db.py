@@ -67,6 +67,10 @@ class _RefusingEngine:
 
     error: Exception | None
 
+    @property
+    def dialect(self) -> SimpleNamespace:
+        return SimpleNamespace(name="postgresql")
+
     @asynccontextmanager
     async def begin(self) -> AsyncIterator[object]:
         if self.error is not None:
@@ -1677,6 +1681,40 @@ async def test_a_cancel_after_checkout_returns_the_connection_before_the_caller_
         await task
 
     assert tx_engine.pool.checkedout() == 0
+
+
+async def test_a_cancelled_sqlite_contender_never_checks_out_a_connection(
+    tx_engine: AsyncEngine,
+) -> None:
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first() -> None:
+        async with _opened(tx_engine, "workspace"):
+            first_entered.set()
+            await release_first.wait()
+
+    async def second() -> None:
+        async with _opened(tx_engine, "workspace"):
+            second_entered.set()
+
+    first_task = asyncio.create_task(first())
+    await first_entered.wait()
+    second_task = asyncio.create_task(second())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    queued_before_checkout = tx_engine.pool.checkedout() == 1 and not second_entered.is_set()
+    second_task.cancel()
+    release_first.set()
+    await first_task
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+
+    assert queued_before_checkout
+    assert tx_engine.pool.checkedout() == 0
+    async with _opened(tx_engine, "workspace"):
+        pass
 
 
 async def test_a_cancel_landing_inside_the_teardown_finishes_it_first(

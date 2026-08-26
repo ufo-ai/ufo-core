@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import UUID
+from weakref import WeakKeyDictionary
 
 import sqlalchemy as sa
 from alembic import command
@@ -92,6 +93,7 @@ _OWNER = _Pool(application_name="ufo_owner", size=OWNER_POOL_SIZE, overflow=OWNE
 _app_url: str | None = None
 _owner_url: str | None = None
 _disposing: set[asyncio.Task[None]] = set()
+_SQLITE_TRANSACTION_LOCKS: WeakKeyDictionary[AsyncEngine, asyncio.Lock] = WeakKeyDictionary()
 
 current_workspace: ContextVar[UUID | None] = ContextVar("current_workspace", default=None)
 
@@ -300,11 +302,12 @@ def _stopping() -> bool:
 @asynccontextmanager
 async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]:
     """Begin a transaction, timing the acquisition and counting the ones that never begin. A
-    transaction waits twice before it runs — for a slot in this loop's pool, then for a dial if the
-    pool has no warm connection to hand it — and the database sees neither: a connection that
-    never arrives is not one Postgres ever receives, so the count has to be taken here, where the
-    wait happens. Only the acquisition is watched; a failure inside the caller's transaction is the
-    caller's own.
+    Postgres transaction waits twice before it runs — for a slot in this loop's pool, then for a
+    dial if the pool has no warm connection to hand it. SQLite queues on its one local writer slot
+    before checking out a connection; `begin immediate` keeps the same ordering across processes.
+    The database sees none of the waits before checkout, so the count has to be taken here, where
+    the wait happens. Only the acquisition is watched; a failure inside the caller's transaction is
+    the caller's own.
 
     A pool exhausted at its ceiling raises `sqlalchemy.exc.TimeoutError`, whose class name is the
     bare `TimeoutError` a lost dial raises too — one is this fleet reaching its own ceiling, the
@@ -315,53 +318,67 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
     cycle `apply_migrations` breaks the same way."""
     from ufo.o11y import emit_histogram, emit_metric
 
-    stack = AsyncExitStack()
+    lock = None
+    if engine.dialect.name == "sqlite":
+        lock = _SQLITE_TRANSACTION_LOCKS.get(engine)
+        if lock is None:
+            lock = _SQLITE_TRANSACTION_LOCKS[engine] = asyncio.Lock()
+    locked = False
     started = time.monotonic()
-    opening = asyncio.ensure_future(stack.enter_async_context(engine.begin()))
-    cancelled: asyncio.CancelledError | None = None
-    while not opening.done():
-        try:
-            await asyncio.shield(opening)
-        except asyncio.CancelledError as cancel:
-            cancelled = cancel
-        except Exception:
-            break
     try:
-        connection = opening.result()
-    except Exception as error:
-        if isinstance(error, sa.exc.TimeoutError):
-            emit_metric("db_pool_exhausted_total", path=path)
-        emit_metric("db_tx_unavailable_total", path=path, error_class=type(error).__name__)
-        if _stopping():
-            raise asyncio.CancelledError from error
-        raise
+        try:
+            if lock is not None:
+                await lock.acquire()
+                locked = True
+            stack = AsyncExitStack()
+            opening = asyncio.ensure_future(stack.enter_async_context(engine.begin()))
+            cancelled: asyncio.CancelledError | None = None
+            while not opening.done():
+                try:
+                    await asyncio.shield(opening)
+                except asyncio.CancelledError as cancel:
+                    cancelled = cancel
+                except Exception:
+                    break
+            try:
+                connection = opening.result()
+            except Exception as error:
+                if isinstance(error, sa.exc.TimeoutError):
+                    emit_metric("db_pool_exhausted_total", path=path)
+                emit_metric("db_tx_unavailable_total", path=path, error_class=type(error).__name__)
+                if _stopping():
+                    raise asyncio.CancelledError from error
+                raise
+        finally:
+            elapsed = round((time.monotonic() - started) * 1000)
+            emit_histogram("db_tx_acquire_ms", elapsed, path=path)
+        caught: BaseException | None = cancelled
+        if caught is None:
+            try:
+                yield connection
+            except BaseException as error:
+                caught = error
+        close = asyncio.ensure_future(
+            stack.__aexit__(type(caught), caught, caught.__traceback__)
+            if caught is not None
+            else stack.__aexit__(None, None, None)
+        )
+        cancelled = None
+        while not close.done():
+            try:
+                await asyncio.shield(close)
+            except asyncio.CancelledError as cancel:
+                cancelled = cancel
+        close.result()
+        if cancelled is not None:
+            raise cancelled
+        if caught is not None:
+            if _stopping() and not isinstance(caught, asyncio.CancelledError):
+                raise asyncio.CancelledError from caught
+            raise caught
     finally:
-        elapsed = round((time.monotonic() - started) * 1000)
-        emit_histogram("db_tx_acquire_ms", elapsed, path=path)
-    caught: BaseException | None = cancelled
-    if caught is None:
-        try:
-            yield connection
-        except BaseException as error:
-            caught = error
-    close = asyncio.ensure_future(
-        stack.__aexit__(type(caught), caught, caught.__traceback__)
-        if caught is not None
-        else stack.__aexit__(None, None, None)
-    )
-    cancelled = None
-    while not close.done():
-        try:
-            await asyncio.shield(close)
-        except asyncio.CancelledError as cancel:
-            cancelled = cancel
-    close.result()
-    if cancelled is not None:
-        raise cancelled
-    if caught is not None:
-        if _stopping() and not isinstance(caught, asyncio.CancelledError):
-            raise asyncio.CancelledError from caught
-        raise caught
+        if locked and lock is not None:
+            lock.release()
 
 
 @asynccontextmanager
