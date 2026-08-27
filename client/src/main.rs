@@ -4,7 +4,7 @@ use std::io::{BufRead, IsTerminal};
 use std::process;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
 
@@ -47,8 +47,9 @@ Options:
 
 const GATEWAY_URL_DEFAULT: &str = "https://ufo.ai";
 const ONBOARDING_CHANNEL: &str = "onboard";
-const RECONNECT_ATTEMPTS: u32 = 3;
 const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
+const RECONNECT_ATTEMPTS: u32 =
+    (ufo::wire::CONNECT_TIMEOUT.as_secs() / RECONNECT_PAUSE.as_secs()) as u32;
 const TICK: Duration = Duration::from_millis(80);
 const SEND_ATTEMPTS: usize = 3;
 const SEND_RETRY: Duration = Duration::from_millis(500);
@@ -498,6 +499,12 @@ struct Wire {
     pause: Duration,
 }
 
+struct Reconnect {
+    attempt: u32,
+    remaining: Duration,
+    failed_at: Instant,
+}
+
 impl Wire {
     /// Post, read the stream it opens, then post whatever that read left to send. Each post's stop
     /// goes to the loop before the post itself, which blocks until the reply's headers arrive —
@@ -512,7 +519,7 @@ impl Wire {
             self.queue.push_back(first);
             Some(self.take_queue())
         };
-        let mut attempts = 0u32;
+        let mut reconnect = None;
         loop {
             let Some(post) = body.take() else { return };
             if let Some(stop) = self.session.stop() {
@@ -530,7 +537,7 @@ impl Wire {
                         body = self.next_body();
                         continue;
                     }
-                    if !self.reconnect(&mut attempts, &error) {
+                    if !self.reconnect(&mut reconnect, &error, None) {
                         return;
                     }
                     body = Some(post);
@@ -538,11 +545,13 @@ impl Wire {
                 }
             };
             self.listen = None;
+            let opened_at = Instant::now();
             let mut got = false;
             let mut severed = None;
             for item in stream {
                 match item {
                     Ok(directive) => {
+                        reconnect = None;
                         got = true;
                         self.opened = true;
                         if self.handle(directive) {
@@ -561,13 +570,13 @@ impl Wire {
                     continue;
                 }
                 let resend = if got { None } else { Some(post) };
-                if !self.reconnect(&mut attempts, &error) {
+                if !self.reconnect(&mut reconnect, &error, Some(opened_at)) {
                     return;
                 }
                 body = resend.or(Some(PostBody::Empty));
                 continue;
             }
-            attempts = 0;
+            reconnect = None;
             if self.install {
                 self.ensure_installed();
             }
@@ -688,9 +697,33 @@ impl Wire {
         }
     }
 
-    fn reconnect(&mut self, attempts: &mut u32, error: &str) -> bool {
-        *attempts += 1;
-        if !self.opened || *attempts > RECONNECT_ATTEMPTS {
+    fn reconnect(
+        &mut self,
+        reconnect: &mut Option<Reconnect>,
+        error: &str,
+        opened_at: Option<Instant>,
+    ) -> bool {
+        self.reconnect_at(reconnect, error, opened_at, Instant::now())
+    }
+
+    fn reconnect_at(
+        &mut self,
+        reconnect: &mut Option<Reconnect>,
+        error: &str,
+        opened_at: Option<Instant>,
+        now: Instant,
+    ) -> bool {
+        let recovery = reconnect.get_or_insert(Reconnect {
+            attempt: 0,
+            remaining: ufo::wire::CONNECT_TIMEOUT,
+            failed_at: now,
+        });
+        let offline_until = opened_at.unwrap_or(now);
+        recovery.remaining = recovery
+            .remaining
+            .saturating_sub(offline_until.saturating_duration_since(recovery.failed_at));
+        recovery.failed_at = now;
+        if !self.opened || recovery.remaining.is_zero() {
             let said = if self.opened {
                 error.to_string()
             } else {
@@ -699,11 +732,12 @@ impl Wire {
             let _ = self.evt.send(WireEvent::Fatal(said));
             return false;
         }
+        recovery.attempt += 1;
         let _ = self.evt.send(WireEvent::Reconnecting {
-            attempt: *attempts,
+            attempt: recovery.attempt,
             retry_in_s: RECONNECT_PAUSE.as_secs(),
         });
-        thread::sleep(self.pause);
+        thread::sleep(self.pause.min(recovery.remaining));
         true
     }
 
@@ -1836,9 +1870,8 @@ mod tests {
     #[test]
     fn a_first_failure_before_any_stream_names_the_gateway() {
         let (mut wire, _cmd, evt) = listening_wire(None);
-        let mut attempts = 0;
-        assert!(!wire.reconnect(&mut attempts, "connection refused"));
-        assert_eq!(attempts, 1);
+        let mut reconnect = None;
+        assert!(!wire.reconnect(&mut reconnect, "connection refused", None));
         assert_eq!(
             said(&evt),
             vec!["fatal:No response from https://gw (connection refused)"]
@@ -1846,23 +1879,90 @@ mod tests {
     }
 
     #[test]
-    fn an_opened_stream_retries_to_its_last_attempt() {
+    fn an_opened_stream_recovers_across_four_failures_within_the_connect_window() {
         let (mut wire, _cmd, evt) = listening_wire(None);
         wire.opened = true;
-        let mut attempts = 0;
-        for attempt in 1..=RECONNECT_ATTEMPTS {
-            assert!(wire.reconnect(&mut attempts, "lost connection"));
-            assert_eq!(attempts, attempt);
+        let mut reconnect = None;
+        let started = Instant::now();
+        for second in 0..4 {
+            assert!(wire.reconnect_at(
+                &mut reconnect,
+                "lost connection",
+                None,
+                started + Duration::from_secs(second),
+            ));
         }
-        assert!(
-            !wire.reconnect(&mut attempts, "lost connection"),
-            "the ladder ends after {RECONNECT_ATTEMPTS} attempts"
-        );
-        let mut expected: Vec<String> = (1..=RECONNECT_ATTEMPTS)
+        let expected: Vec<String> = (1..=4)
             .map(|attempt| format!("retry:{attempt}:{}", RECONNECT_PAUSE.as_secs()))
             .collect();
-        expected.push("fatal:lost connection".to_string());
         assert_eq!(said(&evt), expected);
+    }
+
+    #[test]
+    fn an_opened_stream_stops_recovery_at_the_connect_deadline() {
+        let (mut wire, _cmd, evt) = listening_wire(None);
+        wire.opened = true;
+        let mut reconnect = None;
+        let started = Instant::now();
+        assert!(wire.reconnect_at(&mut reconnect, "lost connection", None, started));
+        assert!(!wire.reconnect_at(
+            &mut reconnect,
+            "lost connection",
+            None,
+            started + ufo::wire::CONNECT_TIMEOUT,
+        ));
+        assert_eq!(said(&evt), vec!["retry:1:1", "fatal:lost connection"],);
+    }
+
+    #[test]
+    fn a_quiet_85_second_stream_preserves_remaining_recovery_time() {
+        let (mut wire, _cmd, evt) = listening_wire(None);
+        wire.opened = true;
+        let mut reconnect = None;
+        let started = Instant::now();
+        assert!(wire.reconnect_at(&mut reconnect, "lost connection", None, started));
+        assert!(wire.reconnect_at(
+            &mut reconnect,
+            "lost connection",
+            Some(started + RECONNECT_PAUSE),
+            started + RECONNECT_PAUSE + Duration::from_secs(85),
+        ));
+        assert_eq!(said(&evt), vec!["retry:1:1", "retry:2:1"]);
+    }
+
+    #[test]
+    fn repeated_header_only_streams_exhaust_the_recovery_window() {
+        let (mut wire, _cmd, evt) = listening_wire(None);
+        wire.opened = true;
+        let mut reconnect = None;
+        let started = Instant::now();
+        assert!(wire.reconnect_at(&mut reconnect, "lost connection", None, started));
+        for second in 1..ufo::wire::CONNECT_TIMEOUT.as_secs() {
+            let opened_at = started + Duration::from_secs(second);
+            assert!(wire.reconnect_at(
+                &mut reconnect,
+                "lost connection",
+                Some(opened_at),
+                opened_at,
+            ));
+        }
+        let exhausted = started + ufo::wire::CONNECT_TIMEOUT;
+        assert!(!wire.reconnect_at(
+            &mut reconnect,
+            "lost connection",
+            Some(exhausted),
+            exhausted,
+        ));
+        let events = said(&evt);
+        assert_eq!(
+            events.len(),
+            ufo::wire::CONNECT_TIMEOUT.as_secs() as usize + 1
+        );
+        assert_eq!(events.first().map(String::as_str), Some("retry:1:1"));
+        assert_eq!(
+            events.last().map(String::as_str),
+            Some("fatal:lost connection")
+        );
     }
 
     #[test]

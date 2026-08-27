@@ -8,7 +8,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time one connection attempt and one reconnect window may take.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 const AGENT_IDLE_REFRESH: Duration = Duration::from_secs(4);
