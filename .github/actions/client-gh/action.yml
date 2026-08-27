@@ -12,6 +12,8 @@ runs:
         go-version: 1.27.0
         cache: false
     - shell: bash
+      env:
+        GODEBUG: http2client=0
       run: |
         root="$RUNNER_TEMP"
         if [ "$RUNNER_OS" = Windows ]; then

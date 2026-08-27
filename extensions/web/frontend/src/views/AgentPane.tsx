@@ -225,6 +225,10 @@ export function AgentPane({
     HOMEPAGE_POLL_MS,
   );
   const home: Homepage = site.phase === "ready" ? site.payload : boot;
+  // The chat app's page is the conversation screen itself, so a conversation it holds is that page's
+  // own target rather than a chat beside it. The main agent is the chat app's row, so this is every
+  // conversation the member has: each stands in the page's own column, never in a lane over it.
+  const speaks = agent.app === CHAT_SURFACE && home.state === "set";
   // An app the workspace has not finished wiring stands on its setup screen instead of here. With
   // no account there is nothing real for its page to draw, and the alternative — sample rows in
   // place of records — shows a member someone else's app and calls it theirs. The screen is an
@@ -275,7 +279,7 @@ export function AgentPane({
   // none of it, so switching between apps does not pull each one's conversation history; the chat
   // toggle resumes the editing conversation from the rail the shell already holds.
   const listed = usePanelRead<{ conversations: Conversation[]; more: boolean }>(
-    target !== COMPOSE && (target !== undefined || home.state !== "set")
+    !speaks && target !== COMPOSE && (target !== undefined || home.state !== "set")
       ? "/agents/" + agent.id + "/conversations"
       : null,
     settles,
@@ -317,9 +321,10 @@ export function AgentPane({
       ? (directives?.find((row) => row.conversation_id === target) ?? null)
       : null;
   const conversational =
-    composeFallback ||
-    (target !== undefined &&
-      (target === FRESH || rows.some((entry) => entry.id === target) || railHeld !== null));
+    !speaks &&
+    (composeFallback ||
+      (target !== undefined &&
+        (target === FRESH || rows.some((entry) => entry.id === target) || railHeld !== null)));
   const held = composeFallback ? FRESH : conversational ? target : undefined;
   const wanted = held === FRESH;
   const named =
@@ -679,35 +684,39 @@ export function AgentPane({
               onPick={onSettings}
               className="rounded-full border border-edge bg-surface"
             />
-            <Button
-              variant="quiet"
-              size={held !== undefined ? "icon" : "bar"}
-              aria-label={
-                (held !== undefined ? "Close edit of " : "Edit ") + agentName(agent.name)
-              }
-              aria-pressed={held !== undefined}
-              className={cn(
-                "rounded-full border border-edge bg-surface",
-                held !== undefined && "bg-fill",
-              )}
-              onClick={() =>
-                held === undefined
-                  ? onPlace(
-                      { ...place, opens: [opened?.id ?? editing?.conversation_id ?? FRESH] },
-                      "push",
-                    )
-                  : onPlace({ ...place, opens: [] }, "replace")
-              }
-            >
-              {held !== undefined ? (
-                <IconLayoutSidebarRight aria-hidden />
-              ) : (
-                <>
-                  <IconPencil className="size-(--size-glyph)" aria-hidden />
-                  Edit
-                </>
-              )}
-            </Button>
+            {/* The act opens the app's editing chat in the lane beside its page. The chat app's page
+                is that conversation, so the act names nothing there and stands nowhere. */}
+            {speaks ? null : (
+              <Button
+                variant="quiet"
+                size={held !== undefined ? "icon" : "bar"}
+                aria-label={
+                  (held !== undefined ? "Close edit of " : "Edit ") + agentName(agent.name)
+                }
+                aria-pressed={held !== undefined}
+                className={cn(
+                  "rounded-full border border-edge bg-surface",
+                  held !== undefined && "bg-fill",
+                )}
+                onClick={() =>
+                  held === undefined
+                    ? onPlace(
+                        { ...place, opens: [opened?.id ?? editing?.conversation_id ?? FRESH] },
+                        "push",
+                      )
+                    : onPlace({ ...place, opens: [] }, "replace")
+                }
+              >
+                {held !== undefined ? (
+                  <IconLayoutSidebarRight aria-hidden />
+                ) : (
+                  <>
+                    <IconPencil className="size-(--size-glyph)" aria-hidden />
+                    Edit
+                  </>
+                )}
+              </Button>
+            )}
           </div>
           {/* Each frame's key carries the deploy generation, so a redeploy at the same URL mounts
               a fresh copy rather than showing the page the member last loaded — arriving invisible

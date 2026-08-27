@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -401,6 +401,47 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
     place: { opens?: string[] };
   };
   expect(init.place.opens).toBeUndefined();
+});
+
+/** The chat app is the main agent, and its page is the conversation screen itself. So a chat the
+ *  member picks in the sidebar is that page's own target: it stands in the page's column, and no
+ *  lane over the page draws it a second time. */
+test("a sidebar chat on the chat app stands in the page's column alone", async () => {
+  location.hash = "#/";
+  const { calls } = wire({
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json(SET),
+    ...chatsOnWire([CHAT_ROW]),
+    "/conversations$": () => json({ conversations: [LISTED], more: false }),
+  });
+  render(
+    <App agents={[{ ...withHome(SET), app: "chat" }]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
+  await userEvent.click(await rail.findByRole("button", { name: /Pick one thread/ }));
+
+  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
+  const frame = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
+  expect(screen.queryByRole("region", { name: "Pick one thread" })).toBeNull();
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
+  // The page is the chat, so the act that opens a chat beside a page names nothing here.
+  expect(screen.queryByRole("button", { name: "Edit Assistant" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Close edit of Assistant" })).toBeNull();
+  expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(false);
+
+  const sent: unknown[] = [];
+  vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
+    postMessage: (message: unknown) => void sent.push(message),
+  } as unknown as Window);
+  fireEvent(
+    window,
+    new MessageEvent("message", { data: { ufo: "ready" }, source: frame.contentWindow }),
+  );
+  const init = sent.find((message) => (message as { ufo?: string }).ufo === "init") as {
+    place: { opens?: string[] };
+  };
+  expect(init.place.opens).toEqual([CONVO_ID]);
 });
 
 /** An app whose page has not been built yet has none, and the pane draws its conversation — never a
