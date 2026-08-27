@@ -97,8 +97,9 @@ spec:
     - {secretKey: GITHUB_APP_PRIVATE_KEY, remoteRef: {key: ${secret_api_keys}, property: github-app-private-key}}
     # The Flagship app this deploy reads feature flags from ([flags] backend): the app id and the
     # account name it, the token carries the Flagship Evaluate permission. All three or none — serve
-    # builds no flag provider without them and every flag resolves to the closed default its call
-    # site passes, so an unseeded key ships the flagged features dark instead of failing a boot.
+    # builds no flag provider without them and every flag resolves to the default its call site
+    # passes. Today's flags withhold shipped screens, so an unseeded key leaves the product whole
+    # rather than dark: only a flag service answering false takes a screen away.
     - {secretKey: CLOUDFLARE_FLAGSHIP_APP_ID, remoteRef: {key: ${secret_api_keys}, property: cloudflare-flagship-app-id}}
     - {secretKey: CLOUDFLARE_ACCOUNT_ID, remoteRef: {key: ${secret_api_keys}, property: cloudflare-account-id}}
     - {secretKey: CLOUDFLARE_FLAGSHIP_TOKEN, remoteRef: {key: ${secret_api_keys}, property: cloudflare-flagship-token}}

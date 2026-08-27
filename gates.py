@@ -1449,6 +1449,7 @@ def _provider_names(manifest: Manifest) -> list[tuple[str, str]]:
         *(("carriers", spec.name) for spec in manifest.carriers),
         *(("search_providers", spec.backend) for spec in manifest.search_providers),
         *(("flag_providers", spec.backend) for spec in manifest.flag_providers),
+        *(("flag_admins", spec.backend) for spec in manifest.flag_admins),
         *(("embeds", spec.name) for spec in manifest.embeds),
         *(("indexes", spec.name) for spec in manifest.indexes),
     ]

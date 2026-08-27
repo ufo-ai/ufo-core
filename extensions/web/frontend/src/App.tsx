@@ -120,17 +120,26 @@ import {
   type Route,
   type Section,
   type WorkspacePlace,
+  type WorkspaceTab,
 } from "@/lib/route";
-import type { Agent, ArchivedApp, Member, OwnedConversation } from "@/lib/types";
+import { ALL_SURFACES, SurfacesProvider, useSurfaces } from "@/lib/surfaces";
+import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
 
 export type AppProps = {
   agents: Agent[];
   archived?: ArchivedApp[];
   member: Member;
+  surfaces?: Surfaces;
   onAgents: () => void;
 };
 
-export function App({ agents, archived = [], member, onAgents }: AppProps) {
+export function App({
+  agents,
+  archived = [],
+  member,
+  surfaces = ALL_SURFACES,
+  onAgents,
+}: AppProps) {
   const route = useRoute();
   const rail = useRail();
   const [menu, setMenu] = useState(false);
@@ -138,6 +147,11 @@ export function App({ agents, archived = [], member, onAgents }: AppProps) {
   const narrow = useNarrow();
   useScrollMark();
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
+  /** What the navigation draws. An app the deploy withholds is still the workspace's, still opens
+   *  from its address, and still answers a picker — it is kept out of the rail, the flyout and the
+   *  apps listing, which is the whole of what hiding one means. `mainAgent` reads the whole set
+   *  above, so withholding the assistant costs the composer and the first run nothing. */
+  const listed = agents.filter((agent) => !agent.hidden);
 
   /** The router owns the address: it states the boot address in the bar, lands the arrival on the
    *  track the screen was left holding, and follows the browser from there. It starts here rather
@@ -194,25 +208,28 @@ export function App({ agents, archived = [], member, onAgents }: AppProps) {
   if (route.kind === "first-run") {
     return (
       <Viewer.Provider value={member.email}>
-        <MainAgentProvider agents={agents}>
-          {mainAgent ? (
-            <FirstRun
-              agent={mainAgent}
-              member={member}
-              onOpenChat={() => openNewChat(mainAgent.id)}
-            />
-          ) : (
-            <PaneNote>No such app.</PaneNote>
-          )}
-        </MainAgentProvider>
+        <SurfacesProvider surfaces={surfaces}>
+          <MainAgentProvider agents={agents}>
+            {mainAgent ? (
+              <FirstRun
+                agent={mainAgent}
+                member={member}
+                onOpenChat={() => openNewChat(mainAgent.id)}
+              />
+            ) : (
+              <PaneNote>No such app.</PaneNote>
+            )}
+          </MainAgentProvider>
+        </SurfacesProvider>
       </Viewer.Provider>
     );
   }
 
   return (
     <Viewer.Provider value={member.email}>
-      <MainAgentProvider agents={agents}>
-        <TooltipProvider>
+      <SurfacesProvider surfaces={surfaces}>
+        <MainAgentProvider agents={agents}>
+          <TooltipProvider>
           <DrawerHost hosted={narrow} shut={shutMenu}>
             <div
               className={cn(
@@ -223,17 +240,17 @@ export function App({ agents, archived = [], member, onAgents }: AppProps) {
               )}
             >
               {narrow ? (
-                <NarrowBar agents={agents} member={member} menu={menu} onMenu={setMenu} />
+                <NarrowBar agents={listed} member={member} menu={menu} onMenu={setMenu} />
               ) : null}
               <WorkspaceSidebar
                 route={route}
-                agents={agents}
+                agents={listed}
                 member={member}
                 mainAgent={mainAgent}
                 narrow={narrow}
                 onBuild={startBuild}
               />
-              <AppsProvider agents={agents} archived={archived} onRestored={onAgents}>
+              <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
                 <RoutedPane
                   route={route}
                   agents={agents}
@@ -248,8 +265,9 @@ export function App({ agents, archived = [], member, onAgents }: AppProps) {
               <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
             </div>
           </DrawerHost>
-        </TooltipProvider>
-      </MainAgentProvider>
+          </TooltipProvider>
+        </MainAgentProvider>
+      </SurfacesProvider>
     </Viewer.Provider>
   );
 }
@@ -375,6 +393,7 @@ function signOut(): void {
  *  had picked light. */
 function AccountMenu({ member }: { member: Member }) {
   const scheme = useScheme();
+  const surfaces = useSurfaces();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -409,7 +428,7 @@ function AccountMenu({ member }: { member: Member }) {
             </DropdownMenuRadioGroup>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-        {member.admin ? (
+        {member.admin && surfaces.admin ? (
           <DropdownMenuItem onSelect={openAdmin}>Administration</DropdownMenuItem>
         ) : null}
         <DropdownMenuItem onSelect={signOut}>Sign out</DropdownMenuItem>
@@ -655,6 +674,7 @@ function WorkspaceSidebar({
   onBuild: () => void;
 }) {
   const rail = useRail();
+  const surfaces = useSurfaces();
   /* A drawer is always drawn whole, so the fold a desk width holds is ignored while it stands. */
   const collapsed = rail.collapsed && !narrow;
   const pinned = rail.pinned ?? defaultPins(agents);
@@ -795,7 +815,7 @@ function WorkspaceSidebar({
           <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
         </span>
         <SchemePick collapsed={collapsed} />
-        {member.admin ? (
+        {member.admin && surfaces.admin ? (
           <SidebarTooltip collapsed={collapsed} label="Administration">
             <button
               type="button"
@@ -829,6 +849,19 @@ function SectionLanding({ agentId, place }: { agentId: string; place: WorkspaceP
   return null;
 }
 
+/** The workspace tabs this deploy draws. A withheld screen loses its tab and keeps its address, so
+ *  a member holding the link still lands on it; the skills tab stands while either of its two
+ *  panels does, and goes when neither is offered. */
+function offeredTabs(surfaces: Surfaces): readonly WorkspaceTab[] {
+  return WORKSPACE_TABS.filter((tab) =>
+    tab === "memory"
+      ? surfaces.memory
+      : tab === "skills"
+        ? surfaces["community-skills"] || surfaces["installed-skills"]
+        : true,
+  );
+}
+
 function RoutedPane({
   route,
   agents,
@@ -849,6 +882,7 @@ function RoutedPane({
   buildWanted: boolean;
 }) {
   const rail = useRail();
+  const surfaces = useSurfaces();
   /** Where the member came from, off the trail that makes the tab title: every band on this screen
    *  names the trail's innermost step, so they all draw this one step over it and none of them
    *  derives it a second time. */
@@ -876,7 +910,7 @@ function RoutedPane({
       return (
         <TabbedPane
           group="workspace"
-          tabs={WORKSPACE_TABS}
+          tabs={offeredTabs(surfaces)}
           views={WORKSPACE_VIEWS}
           view={route.view}
           crumb={crumb}

@@ -100,6 +100,7 @@ export function Portal() {
       agents={boot.payload.agents}
       archived={boot.payload.archived}
       member={boot.payload.member}
+      surfaces={boot.payload.surfaces}
       onAgents={reload}
     />
   );

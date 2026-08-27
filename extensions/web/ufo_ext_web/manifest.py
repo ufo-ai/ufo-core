@@ -11,13 +11,16 @@ the hub in its own stream route, and claims the browser home, so the deploy's ba
 portal."""
 
 from ufo.sdk.jobs import JobSpec, unseeded_agent_workspaces, untitled_conversation_workspaces
-from ufo.sdk.manifest import Manifest
+from ufo.sdk.manifest import FlagSpec, Manifest
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo_ext_web.audience import EXTENSION_WEB, WEB_ACCESS_TOOLS
 from ufo_ext_web.surface import (
+    APP_FLAGS,
     ARTIFACTS_SLOT,
     CHANGES_SLOT,
     HOMEPAGE_SEED_PREFIX,
+    MAIN_AGENT_FLAG,
+    PORTAL_SURFACES,
     ROUTES,
     SEED_JOB_NAME,
     SEED_JOB_SCHEDULE,
@@ -31,6 +34,24 @@ from ufo_ext_web.surface import (
 
 NAME = EXTENSION_WEB
 VERSION = "0.1.0"
+# What the portal reads a flag to decide, stated for the operator turning one on — they are reading
+# this line, not the boot read. Every key the portal reads is declared here, so `ufoctl flags` can
+# put the whole set into a deploy's flag service and name the ones it holds that nothing reads.
+FLAGS = (
+    FlagSpec(key=APP_FLAGS["wiki"], what="The Wiki app is listed in the portal."),
+    FlagSpec(key=APP_FLAGS["issues"], what="The Issues app is listed in the portal."),
+    FlagSpec(key=MAIN_AGENT_FLAG, what="The workspace's main agent is listed in the portal."),
+    FlagSpec(key=PORTAL_SURFACES["admin"], what="An admin is offered the administration screen."),
+    FlagSpec(key=PORTAL_SURFACES["memory"], what="The workspace Memory tab is drawn."),
+    FlagSpec(
+        key=PORTAL_SURFACES["community-skills"],
+        what="The Skills tab offers the community catalogue.",
+    ),
+    FlagSpec(
+        key=PORTAL_SURFACES["installed-skills"],
+        what="The Skills tab offers the workspace's own skills.",
+    ),
+)
 
 
 def manifest() -> Manifest:
@@ -56,5 +77,6 @@ def manifest() -> Manifest:
                 candidates=unseeded_agent_workspaces(EXTENSION_WEB, HOMEPAGE_SEED_PREFIX),
             ),
         ),
+        flags=FLAGS,
         member_context_read=True,
     )

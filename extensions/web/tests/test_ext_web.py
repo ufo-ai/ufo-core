@@ -22,6 +22,8 @@ import ufo_ext_todos as todos
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, MockTransport, Response
+from openfeature import api
+from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from PIL import Image
 from pydantic import BaseModel, ValidationError
 from ufo_ext_app_chat.manifest import manifest as app_chat_manifest
@@ -137,6 +139,7 @@ from ufo.ext.surface import (
     member_message_text,
     mint_marker,
 )
+from ufo.flags import init_flags
 from ufo.hub import (
     Absorbed,
     Activity,
@@ -2368,6 +2371,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     assert index.status_code == 200
     assert index.json() == {
         "member": {"email": "outsider@example.com", "admin": False},
+        "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True),
         "archived": [],
         "agents": [
             {
@@ -2379,6 +2383,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
                 "purpose": None,
                 "app": None,
                 "mine": False,
+                "hidden": False,
                 "homepage": {"state": "none"},
             }
         ],
@@ -2467,6 +2472,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "purpose": None,
             "app": None,
             "mine": False,
+            "hidden": False,
             "homepage": {"state": "none"},
             "web_audience": [],
         },
@@ -2479,6 +2485,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "purpose": None,
             "app": None,
             "mine": False,
+            "hidden": False,
             "homepage": {"state": "none"},
             "web_audience": ["member@example.com"],
         },
@@ -2539,6 +2546,124 @@ async def test_every_agent_read_carries_its_icon_and_no_form_asks_for_one(
     ).json()
     assert settings["spec"]["icon"] == "telescope"
     assert "icon" not in settings["spec_schema"]["properties"]
+
+
+@pytest.fixture
+def unbound_flags() -> Iterator[None]:
+    """The boot read asks the deploy's flag backend what to offer, so a backend one case binds must
+    not answer the next — and the fact that one was bound at all is what a case here drives."""
+    yield
+    api.clear_providers()
+    init_flags(None)
+
+
+async def _seed_wiki_app(workspace_id: UUID) -> UUID:
+    """The wiki app as its extension provisions it: the slug the portal reads its flag by comes off
+    `provisioned_by`, not off the row's member-visible name."""
+    agent_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="wiki",
+                prompt="be the wiki",
+                model="claude-sonnet-5",
+                icon="book",
+                provisioned_by="app_wiki",
+                provisioned_name="wiki",
+                provisioned_version="0.1.0",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return agent_id
+
+
+@pytest.mark.parametrize("bound", [False, True])
+async def test_a_flag_service_that_answers_nothing_leaves_a_member_what_they_had(
+    web: tuple[AsyncClient, UUID, UUID], unbound_flags: None, bound: bool
+) -> None:
+    """The two silences are one state to a member: a deploy that selected no flag backend (a
+    development run, an eval stack, a self-hosted deploy) and one whose service holds none of these
+    keys — which is every deploy the moment this lands, and every deploy again while Flagship is
+    unreachable. Neither takes a shipped screen away, and neither is what finally offers the wiki
+    app, which has never been offered and so is the one flag read closed."""
+    client, workspace_id, _agent_id = web
+    init_flags(InMemoryProvider({}) if bound else None)
+    await _seed_wiki_app(workspace_id)
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    boot = (
+        await client.get("/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()
+    assert boot["surfaces"] == dict.fromkeys(web_surface.PORTAL_SURFACES, True)
+    assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [
+        (None, False),
+        ("wiki", True),
+    ]
+
+
+async def test_the_wiki_app_is_listed_where_the_service_answers_for_it(
+    web: tuple[AsyncClient, UUID, UUID], unbound_flags: None
+) -> None:
+    """The other half of the exception: closed is the state before an answer, not a state no answer
+    can leave — `ufoctl flags set enable-wiki-app --on` is the whole act that offers the app."""
+    client, workspace_id, _agent_id = web
+    init_flags(
+        InMemoryProvider(
+            {
+                "enable-wiki-app": InMemoryFlag(
+                    default_variant="on", variants={"on": True, "off": False}
+                )
+            }
+        )
+    )
+    await _seed_wiki_app(workspace_id)
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    boot = (
+        await client.get("/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()
+    assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [
+        (None, False),
+        ("wiki", False),
+    ]
+
+
+async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
+    web: tuple[AsyncClient, UUID, UUID], unbound_flags: None
+) -> None:
+    """What an operator running `ufoctl flags sync --off` produces, read back through the boot the
+    portal paints from. A withheld app stays in the payload — the workspace holds it, and the
+    address still opens it — carrying the mark that keeps it out of every list, while a flag the
+    same service answers true leaves its screen exactly where it was."""
+    client, workspace_id, _agent_id = web
+    variants = {"on": True, "off": False}
+    init_flags(
+        InMemoryProvider(
+            {
+                "enable-admin-settings": InMemoryFlag(default_variant="off", variants=variants),
+                "enable-community-skills": InMemoryFlag(default_variant="off", variants=variants),
+                "enable-installed-skills": InMemoryFlag(default_variant="off", variants=variants),
+                "enable-memory-tab": InMemoryFlag(default_variant="on", variants=variants),
+                "enable-wiki-app": InMemoryFlag(default_variant="off", variants=variants),
+            }
+        )
+    )
+    await _seed_wiki_app(workspace_id)
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    boot = (
+        await client.get("/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={token}"})
+    ).json()
+    assert boot["surfaces"] == {
+        "admin": False,
+        "memory": True,
+        "community-skills": False,
+        "installed-skills": False,
+    }
+    assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [
+        (None, False),
+        ("wiki", True),
+    ]
 
 
 STATUS_PATH = "/surface/web/api/agents/status"

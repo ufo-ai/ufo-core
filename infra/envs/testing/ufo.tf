@@ -121,6 +121,10 @@ locals {
 
     [flags]
     backend = "flagship"
+    # The window a flag answer stands for. Every portal boot read consults these flags, so the
+    # cost of a short window is one Cloudflare round trip on the member's first paint; the cost
+    # of a long one is how long a flag turned on takes to reach a workspace already reading it.
+    cache_ttl_seconds = 900
 
     [serve]
     host = "0.0.0.0"

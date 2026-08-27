@@ -5,13 +5,8 @@ ordinary row, a second application changes nothing, an identical row the workspa
 adopted, a differing one is left alone under its name, a member's edit survives a later application,
 and a later version of the extension rewrites nothing. Rows are read back through the `agent` table
 every other read uses.
-
-The sample also registers a flag backend answering one flag on and one off, so the flag gate runs
-through the real OpenFeature seam: a flagged provision lands where its flag is on, is withheld where
-it is off, and is withheld on a deploy that bound no backend at all.
 """
 
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -20,7 +15,6 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
-from openfeature import api
 from ufo_ext_sample import (
     CONNECTOR_PROVIDER,
     PROVISIONED_AGENT_NAME,
@@ -33,7 +27,6 @@ from ufo.config import BlobConfig, Config, DatabaseConfig
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext
 from ufo.ext.manifest import SETUP_TOOLS, AgentProvision, JobSpec, Manifest
-from ufo.flags import init_flags
 from ufo.kinds.agent_setup import (
     SETUP_SKILL_NAME,
     AgentSetup,
@@ -41,7 +34,7 @@ from ufo.kinds.agent_setup import (
     setup_skill,
 )
 from ufo.kinds.agents import AgentSpec
-from ufo.kinds.provisioning import ADOPTED, CREATED, PRESENT, WITHHELD, AgentProvisioning
+from ufo.kinds.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
 from ufo.loop.queue import _agent_tools, _apply_provisions, _provisioned_workspaces
 from ufo.object_name import validate_object_name
 from ufo.onboard.onboarding import Onboarding
@@ -63,20 +56,10 @@ OTHER_EXTENSION = "other"
 MEMBER_PROMPT = "A prompt this workspace wrote for itself."
 
 
-@pytest.fixture(autouse=True)
-def unbound_flag_provider() -> Iterator[None]:
-    """Each case states the flag backend it runs on, so a provider one test bound never answers the
-    next test's flagged provision."""
-    api.clear_providers()
-    yield
-    api.clear_providers()
-
-
 def _provision(
     name: str = PROVISIONED_AGENT_NAME,
     icon: str | None = None,
     setup: AgentSetup | None = None,
-    flag: str = "",
     **overrides: object,
 ) -> AgentProvision:
     spec = AgentSpec(
@@ -92,7 +75,6 @@ def _provision(
         tools=("sample_echo", *SETUP_TOOLS),
         icon=icon,
         setup=setup if setup is not None else AgentSetup(),
-        flag=flag,
     )
 
 
@@ -460,77 +442,6 @@ async def test_the_recorded_version_names_the_declaration_the_row_carries(
     assert row.setup["connectors"] == [CONNECTOR_PROVIDER]
 
 
-async def test_a_flagged_provision_lands_where_its_flag_is_on(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The gate decides creation and nothing else: with the flag on, the shipped agent is the same
-    ordinary row an unflagged provision creates."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    init_flags(sample.build_flag_provider(0.0))
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    manifest = _manifest(OTHER_EXTENSION, _provision(flag=sample.FLAG_ON))
-    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
-    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
-    assert [outcome.result for outcome in outcomes] == [CREATED]
-    assert created is not None
-    assert created.provisioned_by == OTHER_EXTENSION
-
-
-async def test_a_flagged_provision_is_withheld_where_its_flag_is_off(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An app ships dark: the workspace gets no row at all, and the pass says so rather than
-    reporting work it did not do."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    init_flags(sample.build_flag_provider(0.0))
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    manifest = _manifest(OTHER_EXTENSION, _provision(flag=sample.FLAG_OFF))
-    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
-    assert [(outcome.name, outcome.result) for outcome in outcomes] == [
-        (PROVISIONED_AGENT_NAME, WITHHELD)
-    ]
-    assert await _row(workspace_id, PROVISIONED_AGENT_NAME) is None
-
-
-async def test_a_flag_the_deploy_turns_on_later_creates_the_row_then(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Withholding is not a decision the workspace keeps: the next pass reads the flag again, so
-    turning the flag on is the whole act that ships the app."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    manifest = _manifest(OTHER_EXTENSION, _provision(flag=sample.FLAG_ON))
-    init_flags(None)
-    withheld = await AgentProvisioning((manifest,)).apply(workspace_id)
-    init_flags(sample.build_flag_provider(0.0))
-    landed = await AgentProvisioning((manifest,)).apply(workspace_id)
-    assert [outcome.result for outcome in withheld] == [WITHHELD]
-    assert [outcome.result for outcome in landed] == [CREATED]
-    assert await _row(workspace_id, PROVISIONED_AGENT_NAME) is not None
-
-
-async def test_a_deploy_with_no_flag_backend_withholds_only_the_flagged_provisions(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The read fails closed, so a deploy carrying no flag service creates no flagged app — and the
-    gate is per provision, so everything else in the same pass still lands."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    init_flags(None)
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    manifest = _manifest(
-        OTHER_EXTENSION,
-        _provision(name="flagged-probe-agent", flag=sample.FLAG_ON),
-        _provision(),
-    )
-    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
-    assert [(outcome.name, outcome.result) for outcome in outcomes] == [
-        ("flagged-probe-agent", WITHHELD),
-        (PROVISIONED_AGENT_NAME, CREATED),
-    ]
-    assert await _row(workspace_id, "flagged-probe-agent") is None
-    assert await _row(workspace_id, PROVISIONED_AGENT_NAME) is not None
-
-
 async def test_the_purpose_a_member_wrote_stands(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -570,29 +481,6 @@ async def test_a_new_account_a_feature_needs_reaches_a_workspace_that_already_ho
     row = await _row(workspace_id, PROVISIONED_AGENT_NAME)
     assert row.setup["connectors"] == [CONNECTOR_PROVIDER, "googledocs"]
     assert row.setup["instructions"] == "Ask first."
-
-
-async def test_a_turn_that_withheld_a_flagged_provision_reads_the_flag_again_next_turn(
-    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The once-per-process record names a settled workspace, and a pass that withheld a flagged
-    provision is not one. Turning the flag on is the whole act that ships the app: the workspace's
-    next turn creates the row, without waiting for the process to restart."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
-    workspace_id = await _workspace(database_url, tmp_path, ())
-    manifest = _manifest(OTHER_EXTENSION, _provision(flag=sample.FLAG_ON))
-    runtime = SimpleNamespace(manifests=(manifest,))
-    _provisioned_workspaces.discard(workspace_id)
-
-    init_flags(None)
-    await _apply_provisions(runtime, workspace_id)
-    assert await _row(workspace_id, PROVISIONED_AGENT_NAME) is None
-    assert workspace_id not in _provisioned_workspaces
-
-    init_flags(sample.build_flag_provider(0.0))
-    await _apply_provisions(runtime, workspace_id)
-    assert await _row(workspace_id, PROVISIONED_AGENT_NAME) is not None
-    assert workspace_id in _provisioned_workspaces
 
 
 async def test_a_workspace_that_predates_the_extension_gets_the_agent_on_its_next_turn(

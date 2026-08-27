@@ -360,8 +360,9 @@ The flag backend's three keys (`cloudflare-flagship-app-id`, `cloudflare-account
 `cloudflare-flagship-token`) are the one family neither deploy requires: both write them empty when
 the document lacks them, because the cluster projects each one by name and a property Secrets
 Manager does not hold leaves the ExternalSecret unready. Seed all three to read flags; leave them
-and serve builds no flag provider, so every flag resolves to the closed default its call site
-passes.
+and serve builds no flag provider, so every flag resolves to the default its call site passes — for
+the portal's own flags that is the screen drawn, because each of them withholds something already
+shipped.
 
 ## Web login
 

@@ -1,10 +1,12 @@
-"""The feature-flag seam: one helper, read through the real OpenFeature SDK, failing closed.
+"""The feature-flag seam: one helper, read through the real OpenFeature SDK, failing to the
+default its call site passed.
 
 Core registers no backend, so every case here drives `flag_enabled` against what a deploy actually
 has: nothing bound (the SDK's own no-op provider), the sample extension's registered in-memory
 backend answering on and off, a backend that decides per workspace, and the two ways a live backend
 stops answering — an evaluation that raises and one that outlives the ceiling. Each of those returns
-the default the call site passed, which is the closed state a flagged feature ships in.
+the default the call site passed: closed where the flag releases something unshipped, open where it
+withholds something the product already offers.
 """
 
 import asyncio
@@ -93,6 +95,16 @@ async def test_a_deploy_with_no_backend_reads_every_flag_as_its_call_site_defaul
     with ws(uuid4()):
         assert await flag_enabled(FLAG, default=False) is False
         assert await flag_enabled(FLAG, default=True) is True
+
+
+async def test_a_backend_holding_no_such_flag_reads_as_the_call_site_default() -> None:
+    """The state a deploy is in before an operator creates a flag, and the one a deleted flag leaves
+    behind. A caller withholding a shipped screen passes True here, so the screen stands until the
+    service answers false — the direction that cannot take a working portal away."""
+    init_flags(sample.build_flag_provider(0.0))
+    with ws(uuid4()):
+        assert await flag_enabled("no-such-flag", default=True) is True
+        assert await flag_enabled("no-such-flag", default=False) is False
 
 
 async def test_the_selected_backend_answers_on_and_off() -> None:

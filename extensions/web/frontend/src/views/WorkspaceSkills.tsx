@@ -37,6 +37,7 @@ import {
 import { getJson, postIntent } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
+import { useSurfaces } from "@/lib/surfaces";
 
 /** One saved or shipped skill as the workspace reads it. `depends` and `agents` are the
  *  frontmatter's routing metadata — a save regenerates SKILL.md, so it writes them back. */
@@ -231,7 +232,15 @@ export function WorkspaceSkills({
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
   const [busy, setBusy] = useState(false);
-  const [narrowed, setNarrowed] = useState(COMMUNITY);
+  const surfaces = useSurfaces();
+  /** The two halves of this screen are offered one flag each, so a deploy may draw the workspace's
+   *  own skills without the community catalogue, or neither — the tab itself goes when neither
+   *  stands. The screen opens on whichever is offered, and the narrowing between them is drawn
+   *  only where both are. */
+  const offered = NARROWINGS.filter(({ value }) =>
+    value === COMMUNITY ? surfaces["community-skills"] : surfaces["installed-skills"],
+  );
+  const [narrowed, setNarrowed] = useState(offered[0]?.value ?? COMMUNITY);
   const [toast, setToast] = useState<ToastState>(SILENT);
   const [viewing, setViewing] = useState<Skill | null>(null);
   const [adding, setAdding] = useState<CommunityDocument | null>(null);
@@ -507,15 +516,17 @@ export function WorkspaceSkills({
       {box ? <PageToolbar /> : null}
       <Section
         bar={
-          <Filter
-            all={false}
-            options={NARROWINGS}
-            value={narrowed}
-            onChange={(next) => {
-              setNarrowed(next);
-              onPlace({ q: undefined });
-            }}
-          />
+          offered.length > 1 ? (
+            <Filter
+              all={false}
+              options={offered}
+              value={narrowed}
+              onChange={(next) => {
+                setNarrowed(next);
+                onPlace({ q: undefined });
+              }}
+            />
+          ) : null
         }
       >
         {browsing ? (

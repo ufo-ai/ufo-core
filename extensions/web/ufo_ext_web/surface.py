@@ -49,6 +49,7 @@ from ufo.sdk.balance import read_headroom
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
 from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader
+from ufo.sdk.flags import flag_enabled
 from ufo.sdk.http import (
     FormData,
     FormParserError,
@@ -948,10 +949,65 @@ async def _audience_for(
     return member_id, email, await web_audience(ctx, web_extension(), email)
 
 
+APP_FLAGS = {
+    "wiki": "enable-wiki-app",
+    "issues": "enable-issues-app",
+}
+MAIN_AGENT_FLAG = "enable-assistant-app"
+PORTAL_SURFACES = {
+    "admin": "enable-admin-settings",
+    "memory": "enable-memory-tab",
+    "community-skills": "enable-community-skills",
+    "installed-skills": "enable-installed-skills",
+}
+# The flags that read closed. A flag withholding a screen the product already offers reads open, so
+# no outage, no unseeded deploy and no key an operator has yet to create takes it away. The wiki app
+# has never been offered, and the same silence must not be what ships it — so its flag is the one
+# that has to be answered before a member sees the app.
+CLOSED_UNTIL_ANSWERED = frozenset({APP_FLAGS["wiki"]})
+
+
+def _visibility_flag(agent: AgentSummary) -> str | None:
+    """The flag deciding whether the portal lists this agent, or None for one it always lists."""
+    if agent.main:
+        return MAIN_AGENT_FLAG
+    return APP_FLAGS.get(shipped_app_slug(agent.provisioned_by) or "")
+
+
+async def _flag_reads(agents: tuple[AgentSummary, ...]) -> dict[str, bool]:
+    """Every flag the boot read consults, answered in one round: the portal's own screens and the
+    visibility of each agent listed.
+
+    Each is read at the default its own feature ships in (`CLOSED_UNTIL_ANSWERED`). A flag
+    withholding a screen the product already offers reads open, so a deploy holding no flag service,
+    one whose keys are unseeded, a key nobody has created and a Flagship outage all leave a member
+    exactly what they had; a flag holding back something never offered reads closed, so none of
+    those four is what finally ships it."""
+    keys = list(
+        dict.fromkeys(
+            [
+                *PORTAL_SURFACES.values(),
+                *(flag for agent in agents if (flag := _visibility_flag(agent)) is not None),
+            ]
+        )
+    )
+    answers = await asyncio.gather(
+        *(flag_enabled(key, default=key not in CLOSED_UNTIL_ANSWERED) for key in keys)
+    )
+    return dict(zip(keys, answers, strict=True))
+
+
 async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     """The portal's first read: the signed-in member and the agents their web audience holds — every
     agent for a workspace admin, the main agent plus the granted non-main agents for everyone else.
-    `agents` is the set a member may open and message. The create act draws nothing from this read:
+    `agents` is the set a member may open and message. An agent whose flag is off is marked `hidden`
+    rather than dropped: the workspace holds the app either way, the portal draws it in no list, and
+    a member holding its link still opens it. `surfaces` answers the same question for the portal's
+    own screens. Each flag is read at the default its own feature ships in, so a deploy whose flag
+    service answers nothing draws the portal it drew before — with the wiki app, which has never
+    been offered, still withheld.
+
+    The create act draws nothing from this read:
     it is a conversation the `create-application` skill runs, and the screen offers it to every
     signed-in member, because the `agent` kind admits a create from any speaking member and stamps
     them the owner. `archived` contains the apps this member may restore."""
@@ -974,9 +1030,16 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
         for app in await ctx.list_archived_agents()
         if audience.admin or app.owner_member_id == member_id
     ]
+    flags = await _flag_reads(audience.agents)
+    hidden = {
+        agent.id
+        for agent in audience.agents
+        if (key := _visibility_flag(agent)) is not None and not flags[key]
+    }
     return JSONResponse(
         {
             "member": {"email": email, "admin": audience.admin},
+            "surfaces": {name: flags[key] for name, key in PORTAL_SURFACES.items()},
             "archived": [
                 {
                     "id": str(app.id),
@@ -996,6 +1059,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "purpose": agent.purpose,
                     "app": shipped_app_slug(agent.provisioned_by),
                     "mine": agent.owner_member_id == member_id,
+                    "hidden": agent.id in hidden,
                     "homepage": homepages[agent.id],
                     **(
                         {"web_audience": list(grants.get(agent.id, ()))}

@@ -26,6 +26,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
+import ufo_ext_sample as sample
 import uvicorn
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
@@ -50,6 +51,7 @@ from ufo.config import Config, DatabaseConfig, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import skill_registry
+from ufo.ext.manifest import FlagState
 from ufo.hub import InProcessHub
 from ufo.loop import queue as loop_queue
 from ufo.loop.subagents import SubagentRegistry
@@ -93,6 +95,36 @@ root = "./blobs"
 
 [ext]
 store = "catalog.toml"
+"""
+FLAGS_CONFIG = """\
+[database]
+url = "sqlite+aiosqlite:///ufo.db"
+
+[blob]
+backend = "filesystem"
+root = "./blobs"
+
+[flags]
+backend = "sample_flags"
+"""
+NO_FLAGS_CONFIG = """\
+[database]
+url = "sqlite+aiosqlite:///ufo.db"
+
+[blob]
+backend = "filesystem"
+root = "./blobs"
+"""
+FLAGSHIP_CONFIG = """\
+[database]
+url = "sqlite+aiosqlite:///ufo.db"
+
+[blob]
+backend = "filesystem"
+root = "./blobs"
+
+[flags]
+backend = "flagship"
 """
 
 
@@ -906,3 +938,109 @@ async def _noop_dispose() -> None:
 
 async def _unreached_target(named: str) -> UUID:
     raise RuntimeError("stop after the owner database is initialized")
+
+
+@pytest.fixture
+def unadministered_flags() -> Iterator[None]:
+    """The probe's flag service starts each case holding nothing, so what a verb wrote is what the
+    next read sees."""
+    sample._ADMINISTERED_FLAGS.clear()
+    yield
+    sample._ADMINISTERED_FLAGS.clear()
+
+
+def test_flags_sync_creates_what_the_service_lacks_then_sets_what_it_holds(
+    cli_home: CliRunner, unadministered_flags: None
+) -> None:
+    """The verb an operator runs to set an environment: every flag the active extensions read,
+    brought to one state through the backend `[flags] backend` selects. A second run writes the same
+    state — creating a flag the service already holds is refused by the service, so the run has to
+    tell the two apart — and `set` moves one flag without touching the rest."""
+    Path("ufo.toml").write_text(FLAGS_CONFIG)
+
+    created = cli_home.invoke(cli.main, ["flags", "sync", "--on"])
+    assert created.exit_code == 0, created.output
+    assert f"{sample.PROBE_FLAG} on (created)" in created.output
+
+    again = cli_home.invoke(cli.main, ["flags", "sync", "--on"])
+    assert again.exit_code == 0, again.output
+    assert f"{sample.PROBE_FLAG} on (already)" in again.output
+
+    off = cli_home.invoke(cli.main, ["flags", "set", sample.PROBE_FLAG, "--off"])
+    assert off.exit_code == 0, off.output
+    assert f"{sample.PROBE_FLAG} off" in off.output
+    assert sample._ADMINISTERED_FLAGS[sample.PROBE_FLAG].on is False
+
+    listed = cli_home.invoke(cli.main, ["flags", "list"])
+    assert f"{sample.PROBE_FLAG:<30} off          {sample.PROBE_FLAG_WHAT}" in listed.output
+
+
+def test_flags_names_a_targeted_flag_and_sets_it_without_taking_the_targeting_away(
+    cli_home: CliRunner, unadministered_flags: None
+) -> None:
+    """A flag the service holds rules for does not answer every workspace the same way, so the
+    listing says so — `on` alone would read as settled. Setting it states the untargeted answer and
+    leaves the rollout standing, which is the difference between an operator turning a feature off
+    and deleting how it reaches the workspaces it already reaches."""
+    Path("ufo.toml").write_text(FLAGS_CONFIG)
+    sample._ADMINISTERED_FLAGS[sample.PROBE_FLAG] = FlagState(
+        key=sample.PROBE_FLAG, on=True, targeted=True
+    )
+
+    listed = cli_home.invoke(cli.main, ["flags", "list"])
+    assert f"{sample.PROBE_FLAG:<30} on (rules)   {sample.PROBE_FLAG_WHAT}" in listed.output
+
+    off = cli_home.invoke(cli.main, ["flags", "set", sample.PROBE_FLAG, "--off"])
+    assert off.exit_code == 0, off.output
+    assert sample._ADMINISTERED_FLAGS[sample.PROBE_FLAG] == FlagState(
+        key=sample.PROBE_FLAG, on=False, targeted=True
+    )
+
+
+def test_flags_list_names_a_declared_flag_the_service_does_not_hold(
+    cli_home: CliRunner, unadministered_flags: None
+) -> None:
+    """A key the code reads and the service lacks evaluates to its closed default forever, which on
+    a screen is indistinguishable from a feature an operator turned off. The listing separates
+    them."""
+    Path("ufo.toml").write_text(FLAGS_CONFIG)
+    listed = cli_home.invoke(cli.main, ["flags", "list"])
+    assert listed.exit_code == 0, listed.output
+    assert f"{sample.PROBE_FLAG:<30} missing" in listed.output
+
+
+def test_flags_set_refuses_a_key_no_extension_reads(
+    cli_home: CliRunner, unadministered_flags: None
+) -> None:
+    """A flag nothing reads is a typo or a leftover, and creating one leaves a service holding
+    state no deploy consults."""
+    Path("ufo.toml").write_text(FLAGS_CONFIG)
+    refused = cli_home.invoke(cli.main, ["flags", "set", "enable-nothing-at-all", "--on"])
+    assert refused.exit_code != 0
+    assert "no active extension reads flag" in refused.output
+    assert sample._ADMINISTERED_FLAGS == {}
+
+
+def test_a_flag_service_that_refuses_answers_the_operator_in_one_line(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator ran one verb, and what they need is the reason it wrote nothing — a traceback
+    out of an HTTP client is not that. The shipped Flagship backend refuses without its own write
+    token, which is the refusal every operator meets first."""
+    monkeypatch.delenv("CLOUDFLARE_FLAGSHIP_ADMIN_TOKEN", raising=False)
+    Path("ufo.toml").write_text(FLAGSHIP_CONFIG)
+    refused = cli_home.invoke(cli.main, ["flags", "list"])
+    assert refused.exit_code != 0
+    assert refused.output.splitlines()[-1] == (
+        "Error: flagship administration needs CLOUDFLARE_ACCOUNT_ID, "
+        "CLOUDFLARE_FLAGSHIP_APP_ID, CLOUDFLARE_FLAGSHIP_ADMIN_TOKEN"
+    )
+
+
+def test_flags_refuses_a_deploy_that_selected_no_backend(cli_home: CliRunner) -> None:
+    """There is no service to write, and a deploy holding none already offers every flagged
+    feature — so the verb says so rather than reporting work it did not do."""
+    Path("ufo.toml").write_text(NO_FLAGS_CONFIG)
+    refused = cli_home.invoke(cli.main, ["flags", "sync", "--on"])
+    assert refused.exit_code != 0
+    assert "selects no flag backend" in refused.output

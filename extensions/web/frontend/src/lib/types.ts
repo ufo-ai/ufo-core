@@ -29,6 +29,10 @@ export type Agent = {
   app?: string | null;
   /** Whether the signed-in member created this app — the fact the apps listing narrows on. */
   mine?: boolean;
+  /** Whether the deploy withholds this app from every list the portal draws. The workspace holds
+   *  it either way, and a member arriving on its address still opens it — hidden is what the
+   *  portal shows, never what the workspace has. */
+  hidden?: boolean;
   web_audience?: string[];
 };
 
@@ -75,10 +79,21 @@ export type ArchivedApp = {
   archived_at: string;
 };
 
+/** Which of the portal's own screens this deploy offers. Each one is a feature flag the boot read
+ *  answers closed, so a portal that reached no flag backend draws none of them. A screen withheld
+ *  here keeps its address: the tab is undrawn, and a member holding the link still lands on it. */
+export type Surfaces = {
+  admin: boolean;
+  memory: boolean;
+  "community-skills": boolean;
+  "installed-skills": boolean;
+};
+
 export type AgentsPayload = {
   agents: Agent[];
   archived: ArchivedApp[];
   member: Member;
+  surfaces: Surfaces;
 };
 
 export type SpendCap = {
