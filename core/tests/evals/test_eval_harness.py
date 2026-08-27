@@ -1528,6 +1528,8 @@ class StubWorker:
     order: list[str] | None = None
     tokens: int = 0
     cost_micro_usd: int = 0
+    error_class: str | None = None
+    error_message: str | None = None
     child_tokens: int = 0
     child_cost_micro_usd: int = 0
 
@@ -1592,6 +1594,8 @@ class StubWorker:
                             "model": MODEL,
                             "tokens": self.tokens,
                             "cost_micro_usd": self.cost_micro_usd,
+                            "error_class": self.error_class,
+                            "error_message": self.error_message,
                         }
                     ),
                     created_at=sa.func.now(),
@@ -2345,6 +2349,7 @@ class CrashedTarget:
     """A turn that never terminated cleanly, carrying the class its terminal frame recorded."""
 
     error_class: str
+    error_message: str = ""
     judge: None = None
 
     async def run(self, case: CapabilityCase) -> TargetResult:
@@ -2353,6 +2358,7 @@ class CrashedTarget:
             clean=False,
             failure_reason=f"turn ended with status failed ({self.error_class})",
             error_class=self.error_class,
+            error_message=self.error_message,
         )
 
 
@@ -2380,6 +2386,24 @@ async def test_a_turn_that_died_on_a_rejected_provider_key_is_excluded_not_score
     assert result.excluded is True
     assert result.passed is False
     assert "the eval configuration owns this fault" in result.reason
+
+
+async def test_a_turn_that_died_on_exhausted_provider_credit_is_excluded_not_scored() -> None:
+    case = CapabilityCase("crashed", "do the task", exact_scorer("done"))
+    exhausted = CrashedTarget(
+        "APIError", "You have no credits remaining. Add credits to continue using the API."
+    )
+
+    result = await run_capability_case(case, exhausted)  # type: ignore[arg-type]
+
+    assert result.excluded is True
+    assert result.passed is False
+    assert "the eval configuration owns this fault" in result.reason
+
+    rejected = replace(exhausted, error_message="The provider returned an invalid response frame")
+    scored = await run_capability_case(case, rejected)  # type: ignore[arg-type]
+    assert scored.excluded is False
+    assert scored.passed is False
 
 
 async def test_a_turn_that_died_on_an_internal_fault_stays_a_failure() -> None:
@@ -2936,6 +2960,37 @@ async def test_capability_case_rejects_a_failed_turn_with_a_passing_transcript(
     assert attempt["tokens"] == 140
     assert attempt["costMicroUsd"] == 9
     assert len(logs.discarded) == 1
+
+
+async def test_capability_case_excludes_provider_quota_from_a_durable_terminal(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = StubWorker(
+        blob,
+        workspace_id,
+        (Message(role="assistant", content=""),),
+        status="failed",
+        error_class="APIError",
+        error_message="You have no credits remaining. Add credits to continue using the API.",
+    )
+    ctx = _context(blob, worker)
+    target = InProcessTarget(
+        ctx=ctx,
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id, worker),
+        outcome=CorpusOutcome(ctx),
+    )
+
+    with ws(workspace_id):
+        result = await run_capability_case(
+            CapabilityCase("failed", "answer", exact_scorer("expected")), target
+        )
+
+    assert result.excluded
+    assert "eval configuration owns this fault" in result.reason
 
 
 async def test_in_process_target_discards_logs_without_a_terminal_trajectory(

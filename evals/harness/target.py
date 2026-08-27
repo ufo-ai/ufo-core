@@ -99,6 +99,7 @@ class TargetResult:
     failure_reason: str = ""
     error_class: str | None = None
     trajectory: EvalTrajectory | None = None
+    error_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -543,7 +544,7 @@ class InProcessTarget:
             )
         turn_failure = self._turn_failure(status)
         if turn_failure:
-            error_class = await self._turn_error_class(turn_id)
+            error_class, error_message = await self._turn_error(turn_id)
             reason = f"{turn_failure} ({error_class})" if error_class else turn_failure
             return _Settled(
                 TargetResult(
@@ -552,6 +553,7 @@ class InProcessTarget:
                     failure_reason=reason,
                     error_class=error_class or None,
                     trajectory=snapshot,
+                    error_message=error_message,
                 ),
                 descendant_ids,
             )
@@ -733,10 +735,7 @@ class InProcessTarget:
             return f"turn ended with status {status}"
         return ""
 
-    async def _turn_error_class(self, turn_id: UUID) -> str:
-        """The model/transport error class a failed turn recorded on its terminal frame (e.g.
-        `ReadTimeout`), so a caller can tell a transient provider fault from a real one — empty when
-        the terminal carries no error."""
+    async def _turn_error(self, turn_id: UUID) -> tuple[str, str]:
         async with workspace_tx() as connection:
             terminal = (
                 await connection.execute(
@@ -744,8 +743,9 @@ class InProcessTarget:
                 )
             ).scalar_one_or_none()
         if terminal is None:
-            return ""
-        return TerminalFrame.model_validate(terminal).error_class or ""
+            return "", ""
+        frame = TerminalFrame.model_validate(terminal)
+        return frame.error_class or "", frame.error_message or ""
 
     async def _shared_artifacts(self, turn_ids: tuple[UUID, ...]) -> ArtifactCollection:
         """Artifacts the run shared, from the evaluated turn and every delegated descendant — a

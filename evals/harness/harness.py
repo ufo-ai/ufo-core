@@ -203,6 +203,7 @@ INFRA_ERROR_MARKERS = (
     "payment required",
     "rate limit",
     "no_more_credits",
+    "no credits remaining",
     "quota",
     "service unavailable",
     " 500",

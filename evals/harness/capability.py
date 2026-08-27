@@ -570,11 +570,16 @@ def _unclean_verdict(result: TargetResult) -> CapabilityVerdict:
     rather than scored. Every other unclean end stays a failure. Exclusion reaches only turns that
     never terminated cleanly, so a graded answer, refusal, and failed rubric remain scored."""
     status = result.trajectory.status if result.trajectory is not None else None
-    if not infra_owned_fault(result.error_class, result.failure_reason, status):
+    provider_configuration = result.error_class == "APIError" and bool(
+        infra_error((result.error_message,))
+    )
+    if not provider_configuration and not infra_owned_fault(
+        result.error_class, result.failure_reason, status
+    ):
         return CapabilityVerdict(False, result.failure_reason)
     if is_transient_fault(result.error_class):
         owner = "the provider owns this fault"
-    elif result.error_class == "CredentialValueInvalid":
+    elif result.error_class == "CredentialValueInvalid" or provider_configuration:
         owner = "the eval configuration owns this fault"
     else:
         owner = "the harness's own wait expired on a working turn"
