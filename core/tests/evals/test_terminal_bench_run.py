@@ -10,8 +10,9 @@ from evals.__main__ import _terminal_bench_credentials
 from evals.__main__ import main as evals_main
 from evals.terminal_bench.run import (
     CUSTOM_AGENT,
-    REMOTE_ENVIRONMENT,
+    DAYTONA_BACKEND,
     BenchCredentials,
+    HarborBackend,
     TerminalBenchRun,
     harbor_command,
     harbor_environment,
@@ -65,17 +66,34 @@ def test_harbor_command_runs_one_remote_job_at_bounded_concurrency(tmp_path: Pat
         "uv",
         "run",
         "--with",
-        "harbor[modal]==0.21.0",
+        "harbor[daytona]==0.21.0",
         "harbor",
         "run",
     )
     assert CUSTOM_AGENT == "evals.terminal_bench.agent:UfoAgent"
-    assert command[command.index("--env") + 1] == REMOTE_ENVIRONMENT == "modal"
+    assert DAYTONA_BACKEND == HarborBackend(environment="daytona", extra="daytona")
+    assert command[command.index("--env") + 1] == "daytona"
     assert command[command.index("--n-concurrent") + 1] == "24"
     assert command[command.index("--allow-agent-host") + 1] == "eval.ufo.test"
     assert command.count("--include-task-name") == 3
     assert all(case in command for case in CASES)
     assert command[-3:] == ("--max-retries", "0", "--yes")
+
+
+def test_harbor_command_accepts_an_environment_and_its_extra(tmp_path: Path) -> None:
+    command = harbor_command(
+        tmp_path / "tasks",
+        select_cases(load_upstream(UPSTREAM_FILE), ("html-js-filter",)),
+        tmp_path / "jobs",
+        "ufo-one",
+        1,
+        "eval.ufo.test",
+        "0.21.0",
+        HarborBackend(environment="e2b", extra="e2b"),
+    )
+
+    assert command[3] == "harbor[e2b]==0.21.0"
+    assert command[command.index("--env") + 1] == "e2b"
 
 
 def test_token_reaches_harbor_only_through_the_environment(tmp_path: Path) -> None:
@@ -208,7 +226,7 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
     workspace_id = uuid4()
     root = tmp_path / "terminal-bench"
     credentials = BenchCredentials(root / "bin/x86_64/ufo", TOKEN, "https://eval.ufo.test")
-    captured: list[tuple[Path, tuple[str, ...], int, BenchCredentials]] = []
+    captured: list[tuple[Path, tuple[str, ...], int, BenchCredentials, HarborBackend]] = []
 
     async def resolved(*_args: object) -> BenchCredentials:
         return credentials
@@ -223,8 +241,9 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             cases: tuple[str, ...],
             concurrency: int,
             credentials: BenchCredentials,
+            backend: HarborBackend,
         ) -> None:
-            captured.append((root, cases, concurrency, credentials))
+            captured.append((root, cases, concurrency, credentials, backend))
 
         def run(self) -> int:
             return 0
@@ -246,6 +265,10 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
             "html-js-filter",
             "--terminal-bench-root",
             str(root),
+            "--terminal-bench-environment",
+            "e2b",
+            "--terminal-bench-harbor-extra",
+            "e2b",
             "--remote",
             "--workspace",
             str(workspace_id),
@@ -254,7 +277,15 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
         ]
     )
 
-    assert captured == [(root, ("html-js-filter",), 18, credentials)]
+    assert captured == [
+        (
+            root,
+            ("html-js-filter",),
+            18,
+            credentials,
+            HarborBackend(environment="e2b", extra="e2b"),
+        )
+    ]
 
 
 def test_eval_runner_requires_remote_workspace_for_terminal_bench(

@@ -16,7 +16,6 @@ from evals.terminal_bench.models import SelectedTask, UpstreamMetadata
 from evals.terminal_bench.setup import UPSTREAM_FILE, load_upstream
 
 CUSTOM_AGENT = "evals.terminal_bench.agent:UfoAgent"
-REMOTE_ENVIRONMENT = "modal"
 TASK_MANIFEST = "task.toml"
 CLIENT = "bin/x86_64/ufo"
 BENCH_ENVIRONMENT = (
@@ -26,6 +25,15 @@ BENCH_ENVIRONMENT = (
 )
 REWARD_FILES = ("reward.txt", "reward.json")
 JOB_STAMP = "%Y%m%dT%H%M%SZ"
+
+
+@dataclass(frozen=True)
+class HarborBackend:
+    environment: str
+    extra: str
+
+
+DAYTONA_BACKEND = HarborBackend(environment="daytona", extra="daytona")
 
 
 @dataclass(frozen=True, repr=False)
@@ -86,13 +94,14 @@ def harbor_command(
     concurrency: int,
     workspace_host: str,
     harbor_version: str,
+    backend: HarborBackend = DAYTONA_BACKEND,
 ) -> tuple[str, ...]:
     """Build one pinned Harbor job for every selected case."""
     return (
         "uv",
         "run",
         "--with",
-        f"harbor[modal]=={harbor_version}",
+        f"harbor[{backend.extra}]=={harbor_version}",
         "harbor",
         "run",
         "--path",
@@ -101,7 +110,7 @@ def harbor_command(
         "--agent",
         CUSTOM_AGENT,
         "--env",
-        REMOTE_ENVIRONMENT,
+        backend.environment,
         "--allow-agent-host",
         workspace_host,
         "--jobs-dir",
@@ -171,6 +180,7 @@ class TerminalBenchRun:
     cases: tuple[str, ...]
     concurrency: int
     credentials: BenchCredentials
+    backend: HarborBackend = DAYTONA_BACKEND
     upstream_file: Path = UPSTREAM_FILE
 
     def run(self) -> int:
@@ -191,6 +201,7 @@ class TerminalBenchRun:
             self.concurrency,
             workspace_host,
             upstream.harbor_version,
+            self.backend,
         )
         print(shlex.join(command))
         completed = subprocess.run(

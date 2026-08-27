@@ -13,8 +13,10 @@ uv run python -m evals \
 ```
 
 The configured `connect.public_base_url` must be a public HTTPS URL for the running ufo service,
-`UFO_TOKEN_SECRET` must match that service, and Harbor's Modal environment must be configured. Add
-`--terminal-bench-case NAME` to select cases.
+`UFO_TOKEN_SECRET` must match that service, and `DAYTONA_API_KEY` must be set. Add
+`--terminal-bench-case NAME` to select cases. Daytona runs Dockerfile tasks directly and the
+multi-container task through Docker-in-Docker. To select another Harbor provider, pass both
+`--terminal-bench-environment` and its `--terminal-bench-harbor-extra`.
 
 Setup downloads and verifies the pinned release asset, extracts only the selected task directories,
 and builds the static x86-64 client uploaded to the remote environments. One Harbor job runs the

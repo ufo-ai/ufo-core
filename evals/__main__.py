@@ -141,7 +141,12 @@ from evals.swebench.runner import (
     WORKFLOW_WAIT_SECONDS as SWEBENCH_WORKFLOW_WAIT_SECONDS,
 )
 from evals.terminal_bench.run import CLIENT as TERMINAL_BENCH_CLIENT
-from evals.terminal_bench.run import BenchCredentials, TerminalBenchRun
+from evals.terminal_bench.run import (
+    DAYTONA_BACKEND,
+    BenchCredentials,
+    HarborBackend,
+    TerminalBenchRun,
+)
 from evals.terminal_bench.setup import DEFAULT_ROOT as TERMINAL_BENCH_ROOT
 from evals.turn_logs import TurnLogCollector
 from evals.wandr.runner import (
@@ -367,6 +372,16 @@ def main(argv: list[str] | None = None) -> None:
         default=TERMINAL_BENCH_ROOT,
         metavar="DIR",
     )
+    parser.add_argument(
+        "--terminal-bench-environment",
+        default=DAYTONA_BACKEND.environment,
+        metavar="ENVIRONMENT",
+    )
+    parser.add_argument(
+        "--terminal-bench-harbor-extra",
+        default=DAYTONA_BACKEND.extra,
+        metavar="EXTRA",
+    )
     parser.add_argument("--jobbench", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--jobbench-case", action="append", default=[], metavar="CASE_ID")
     parser.add_argument(
@@ -544,6 +559,10 @@ def main(argv: list[str] | None = None) -> None:
                 cases=tuple(args.terminal_bench_case),
                 concurrency=args.concurrency,
                 credentials=credentials,
+                backend=HarborBackend(
+                    environment=args.terminal_bench_environment,
+                    extra=args.terminal_bench_harbor_extra,
+                ),
             ).run()
         except (OSError, ValueError, ValidationError) as error:
             parser.error(str(error))
