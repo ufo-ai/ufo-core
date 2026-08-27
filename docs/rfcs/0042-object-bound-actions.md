@@ -181,8 +181,10 @@ key; a global call carries none. The target never enters `input_model`, so a mem
 `kind`, `name`, `agent`, or `generation` through action input, and a portal does not need RFC
 0022's `compose` callback to strip server-owned fields. The existing registry gate that refuses an
 input model reserving `requested_by` covers actions for free. `agent_targetable` has three
-declared consumers — `grant_web_access`, `read_private_transcript`, and `set_homepage` — each
-resolving its target under the existing cross-agent gate.
+declared consumers — `grant_web_access`, `read_private_transcript`, and `set_homepage` — and
+dispatch resolves their target under the same gate the object verbs use for cross-agent reads. An
+empty `agent` means the current turn's agent, which is these handlers' whole behavior today — so
+web's speakerless homepage seed keeps working, and cross-agent targeting is strictly additive.
 
 Collection binding is used when an action creates or searches instances or spans the collection.
 Instance binding is used only when one existing visible `kind/name` is the target. This is the
@@ -213,7 +215,9 @@ fail. This is required for:
 - coding attaching `connect_github` to core's `credential`;
 - metronome attaching `manage_billing` to core's `workspace`;
 - Slack and iMessage attaching to core's `surface`;
-- web attaching `read_private_transcript` to core's `conversation`.
+- web attaching `read_private_transcript` to core's `conversation`;
+- memory attaching `rebuild_page_facts` to sources' `page` — extension-to-extension, so the loader
+  supports every direction, not only extension-to-core.
 
 Object visibility is evaluated by the kind owner's store. The action then runs with the
 contributor's `ExtensionContext`, preserving its own credential slots, store, blob namespace,
@@ -456,9 +460,14 @@ include description and call template; portal views additionally include label a
 No layout, widget, grouping, order, or CSS metadata enters core.
 
 The credential and connect final acts retain their typed `TerminalFrame` fields. The effective
-action declaration supplies the final-act model, and parsing remains after `post_tool_use` so a hook
+action declaration supplies the final-act model; a mapping beside `TerminalFrame` binds each model
+to its frame field and its parse rule — a question reads from the round's last call, a pending
+handoff from anywhere in the round and persists — so the declaration replaces the engine's name
+constants without flattening that distinction. Parsing remains after `post_tool_use` so a hook
 that replaces the result also suppresses the handoff. Global `ask_user` and `connect_account` use
-the same final-act declaration on their global call definitions.
+the same final-act declaration on their global call definitions. One admission carve-out re-keys:
+a spent workspace admits exactly the billing intent today by tool name, and afterwards by the
+dispatcher intent whose input names the billing action.
 
 Because the declaration is one shape, `presentation` is binding-agnostic: a retained global tool
 with a portal control declares it on the same field, the route prepares `ToolIntent(tool=<name>,
@@ -467,8 +476,9 @@ model discovery, and every portal control; a second member-action registry never
 
 ### 9. Sandbox bridge
 
-The bridge lists the six generic object verbs, including `object_action`. It never lists bound
-actions as top-level tools. A sandbox client follows the same flow:
+The bridge adds `object_action` to its tool set (today the five object verbs plus the four
+connector-gateway tools). It never lists bound actions as top-level tools. A sandbox client
+follows the same flow:
 
 1. describe/call `object_list`, `object_get`, or `object_explain`;
 2. read the action schema and invocation template;
@@ -513,11 +523,11 @@ the locality; renaming is not needed to achieve it.
 |---|---|---|---|
 | `member` | collection | `add_member` | Creates a member; role/seat updates already use the member kind. |
 | `member/<id>` | instance | `grant_web_access`, `revoke_web_access` | The grant subject is the member. The action may target a visible agent through the existing cross-agent gate. |
-| `agent/<archived-id>` | instance | `restore_application` | An archived agent stays a gettable row with archived status (AIP-164); restore is its undelete, taking a new live name as action input when the old one is taken. |
+| `agent/<archived-id>` | instance | `restore_application` | An archived agent becomes a gettable row (AIP-164), addressed by its durable archived row name with the original exposed as a field; restore is its undelete, and its input shrinks to the new live name — the target supplies the identity `app_id` carries today. |
 | `credential` | collection | `request_credentials` | One handoff may request several slots. |
 | `credential/github_app_installation` | instance | `connect_github` | The action authorizes the exact non-member-filled slot the callback fills. |
-| `conversation/<id>` | instance | `read_private_transcript` | The conversation kind's get serves a speaking admin the private row it already lists; the transcript itself stays behind acknowledgement, which is this action, and its handler records the access. |
-| `skill` | collection | `skill_search` | Searches the complete loadable catalog, beyond CRUD listing of member-authored skill objects. |
+| `conversation/<id>` | instance | `read_private_transcript` | The conversation kind widens for a speaking admin only: get serves another member's private row as metadata, and list accepts an explicit private filter. The transcript itself stays behind acknowledgement, which is this action, and its handler records the access. |
+| `skill` | collection | `skill_search` | Searches the complete loadable catalog, beyond CRUD listing of member-authored skill objects. The declaration moves into the kind's owner (skill_create) — core cannot bind to an optional extension's kind without failing deploys that lack it — and the allowlist pairing that grants search alongside `load_skill` re-expresses over the canonical id. |
 | `surface/slack` | instance | `slack_connect`, `slack_app_manifest`, `slack_channels` | Install state, manifest, credentials, and remote channels belong to the Slack surface. |
 | `surface/imessage` | instance | `imessage_connect` | Provider binding and phone proof configure the iMessage surface. |
 | `workspace/<workspace-id>` | instance | `manage_billing` | Balance, payment method, and auto-refill are workspace-wide. |
@@ -843,7 +853,13 @@ excludes the target.
 
 ## Implementation units
 
-Each unit is independently reviewable and removes every global registration it replaces.
+Each unit is independently reviewable and removes every global registration it replaces. A family
+unit also prunes its names from the live catalog's eager set (unit 1 adds `object_action` there so
+dispatch needs no search round while the catalog survives), ships a migration rewriting stored
+`agent.tools` allowlist entries to canonical ids, and corrects a moved tool's mis-declared
+execution flags deliberately — `deploy_website`, `publish_website`, `set_homepage`,
+`slack_connect`, `request_credentials`, and `connect_github` gain `side_effecting`;
+`memory_search` gains `parallel_safe` — each named in its unit.
 
 1. **Registry and dispatch.** `ObjectBinding` on the one declaration, boot validation, canonical
    ids, `EffectiveCall`, `object_action`, object projections, SDK export, bridge exposure, and
