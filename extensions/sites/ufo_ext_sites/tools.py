@@ -943,7 +943,9 @@ async def _audit_builder_application(
 
 
 async def _application_source_sha256(ctx: ToolContext) -> str:
-    source = await ctx.sandbox.python(APPLICATION_SOURCE_READ, APPLICATION_SOURCE_PATH)
+    source = await ctx.sandbox.python(
+        APPLICATION_SOURCE_READ, APPLICATION_SOURCE_PATH, WORKSPACE_DIR
+    )
     if source.exit_code != 0:
         raise RuntimeError(source.stderr or "app.tsx could not be read")
     return sha256(source.stdout.encode()).hexdigest()

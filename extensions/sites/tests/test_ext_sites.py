@@ -176,6 +176,7 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.manifest import Deny, HookContext, PreToolUse
+from ufo.sdk.sandbox import WORKSPACE_DIR
 from ufo.sdk.tools import TextContent, ToolResult
 from ufo.skills.runtime import install_skill
 from ufo.tools.builtins import BUILTIN_TOOLS
@@ -261,6 +262,7 @@ class FakeSandbox:
     runtime_writes: list[str] = field(default_factory=list)
     workspace_writes: list[str] = field(default_factory=list)
     workspace_write_error: OSError | None = None
+    require_application_source_root: bool = False
     track_design_claim: bool = False
     design_claimed: bool = False
     design_audit_barrier: asyncio.Barrier | None = None
@@ -299,6 +301,9 @@ class FakeSandbox:
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         self.programs.append((program, args))
+        if self.require_application_source_root and program == APPLICATION_SOURCE_READ:
+            if args[1] != WORKSPACE_DIR:
+                return ExecResult("", "application source escaped the workspace", 1)
         if program in self.program_errors:
             raise self.program_errors[program]
         if self.track_design_claim and program == APPLICATION_SOURCE_CLAIM:
@@ -1868,7 +1873,10 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
         }
     )
     source = "import { mountApp } from 'ufo/kit';\n"
-    sandbox = FakeSandbox(scripted_paths={"/application-audit/": ExecResult(report, "", 0)})
+    sandbox = FakeSandbox(
+        scripted_paths={"/application-audit/": ExecResult(report, "", 0)},
+        require_application_source_root=True,
+    )
     sandbox.writes["/workspace/ufo-app/app.tsx"] = source.encode()
     parent_turn_id = uuid4()
     store = FakeHookStore(
