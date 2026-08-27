@@ -180,6 +180,9 @@ export type AgentPaneProps = {
   /** A conversation the framed page's own send founded, with the agent it ran under — the page
    *  chats across agents, so the pane's own agent cannot stand in. */
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
+  /** Re-read the roster. The boot read says which app the workspace is still building, and the pane
+   *  is where a build that landed after that read is first met. */
+  onAgents: () => void;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
 };
 
@@ -202,6 +205,7 @@ export function AgentPane({
   onSettings,
   onCreated,
   onFounded,
+  onAgents,
   onPlace,
 }: AgentPaneProps) {
   const [settles, setSettles] = useState(0);
@@ -246,31 +250,36 @@ export function AgentPane({
   // draws its conversation column, and a gate that read "no site" as "never built" made that
   // column unreachable at its own address.
   //
-  // And only an answer that says so in as many words sends the member away: a read that failed, or
-  // one whose payload states nothing, leaves them on the page they asked for.
-  const shipped = Boolean(agent.app);
-  const setup = usePanelRead<SetupState>(
-    shipped ? "/agents/" + agent.id + "/setup" : null,
-    settles,
-  );
-  // An app is sent to its setup screen only while it has setup to do: it declares something, and
-  // the workspace has not built it a page yet. An app that declares nothing has nothing that screen
-  // could list — chat, radar, tasks, wiki and artifacts declare none — so it stands on its page.
+  // The boot read says which app the workspace is still building, on the agent object: the shell
+  // draws its sidebar from that same roster, and a fact learned a request later had it draw the
+  // column and take it away again. An app that declares nothing has nothing that screen could
+  // list — chat, radar, tasks, wiki and artifacts declare none — so the roster answers no and the
+  // app stands on its page.
+  //
+  // What the roster cannot answer is when the build lands. It is the answer the page was given at
+  // boot, and a build binds the app's page long after that — so an app built in this session still
+  // wears the flag, and moving on it alone leaves the member on a setup screen for an app that has
+  // its page. The flagged app is therefore asked for itself, and only its own fresh answer moves
+  // them. An answer saying the page is built re-reads the roster instead, which is what puts the
+  // shell back around an app the workspace is no longer building; a read that failed, or one whose
+  // payload states nothing, leaves the member on the page they asked for.
   //
   // The move replaces rather than pushes. A pushed entry sends Back to the app address, which
   // mounts the pane, reads the same answer and pushes the setup screen over it again, so the member
   // can never step back past the app.
-  const owed =
-    setup.phase === "ready" &&
-    Boolean(
-      setup.payload.connectors?.length
-        || setup.payload.credentials?.length
-        || setup.payload.standing?.length,
-    );
-  const unbuilt = shipped && owed && setup.payload.own_page === false;
+  const flagged = agent.stands_on_setup === true;
+  const setup = usePanelRead<SetupState>(
+    flagged ? "/agents/" + agent.id + "/setup" : null,
+    settles,
+  );
+  const unbuilt = flagged && setup.phase === "ready" && setup.payload.own_page === false;
+  const built = flagged && setup.phase === "ready" && setup.payload.own_page === true;
   useEffect(() => {
     if (unbuilt) navigate(agentSetupHash(agent.id), "replace");
   }, [unbuilt, agent.id]);
+  useEffect(() => {
+    if (built) onAgents();
+  }, [built, onAgents]);
   // Two reads, each authoritative for a different question. The index says which conversations the
   // app has at all — every surface it has ever spoken on — and which external ones accept comments.
   // The rail says which portal and extension conversations are the app's directive chats.

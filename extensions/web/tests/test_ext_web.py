@@ -2386,6 +2386,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
                 "hidden": False,
                 "homepage": {"state": "none"},
                 "setup_due": False,
+                "stands_on_setup": False,
             }
         ],
     }
@@ -2476,6 +2477,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "hidden": False,
             "homepage": {"state": "none"},
             "setup_due": False,
+            "stands_on_setup": False,
             "web_audience": [],
         },
         {
@@ -2490,6 +2492,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "hidden": False,
             "homepage": {"state": "none"},
             "setup_due": False,
+            "stands_on_setup": False,
             "web_audience": ["member@example.com"],
         },
     ]
@@ -12142,6 +12145,48 @@ async def test_the_setup_read_says_whether_this_workspace_has_its_own_page(
         )
         assert await sites.set_homepage(agent_id, conversation_id, "meetings-home") is not None
     assert (await client.get(path, headers=cookie)).json()["own_page"] is True
+
+
+async def test_the_boot_read_says_which_app_stands_on_its_setup_screen(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The portal draws its shell from the boot read, and the setup screen draws no navigation. A
+    portal that learned where an app stands from a later per-app read drew the sidebar for the app's
+    own address and took it away when the move to setup landed — a column the member watches flash.
+
+    An app that declares nothing has no setup screen to stand on, and an app whose page this
+    workspace built stands on that page from then on, todos or no todos."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    quiet = await _seed_app_agent(workspace_id, "radar")
+    wired = await _seed_app_agent(workspace_id, "meetings")
+    await _declare_setup(quiet, AgentSetup())
+    await _declare_setup(wired)
+
+    async def standing() -> dict[str, bool]:
+        read = await client.get("/surface/web/api/agents", headers=cookie)
+        return {agent["name"]: agent["stands_on_setup"] for agent in read.json()["agents"]}
+
+    assert await standing() == {"assistant": False, "radar": False, "meetings": True}
+
+    conversation_id = await _seed_agent_conversation(
+        workspace_id, wired, queue_key="fork", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    with ws(workspace_id):
+        sites = HostedSites(workspace_id, workspace_tx)
+        await sites.register(
+            conversation_id,
+            "meetings-home",
+            8100,
+            member_id,
+            "workspace",
+            SHARED_AUDIENCE,
+            True,
+            manifest=None,
+        )
+        assert await sites.set_homepage(wired, conversation_id, "meetings-home") is not None
+    assert await standing() == {"assistant": False, "radar": False, "meetings": False}
 
 
 async def test_an_agent_no_extension_shipped_declares_nothing_at_all(

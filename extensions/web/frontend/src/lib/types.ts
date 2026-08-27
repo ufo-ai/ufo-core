@@ -38,6 +38,11 @@ export type Agent = {
    *  when the member settles one of those, and the setup screen re-reads for itself as they do. An
    *  agent nobody provisioned declares nothing and so owes nothing. */
   setup_due?: boolean;
+  /** Whether this app stands on its setup screen rather than on a page: it declares something that
+   *  screen lists, and this workspace has never built it a page. It rides the boot read because the
+   *  shell draws from that read — the setup screen draws no navigation, and a fact learned a
+   *  request later had the sidebar drawn and then taken away again. */
+  stands_on_setup?: boolean;
   web_audience?: string[];
 };
 

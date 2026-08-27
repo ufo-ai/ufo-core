@@ -297,7 +297,18 @@ function SetupStepper({ steps }: { steps: SetupStep[] }) {
  *  account there is nothing real to draw, and rows of sample data in their place would be showing a
  *  member someone else's app and calling it theirs. The page draws what the app is and what it has
  *  done; this screen exists so it never has to draw what it would be. */
-export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
+export function AgentSetup({
+  agent,
+  admin,
+  onBuilt,
+}: {
+  agent: Agent;
+  admin: boolean;
+  /** Told when this read says the workspace has built the app its page. The boot roster carries that
+   *  fact for the shell, and a build lands long after boot — so the roster is read again, and the
+   *  app stops being one the workspace is still building. */
+  onBuilt: () => void;
+}) {
   const [reloads, setReloads] = useState(0);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [installing, setInstalling] = useState<string | null>(null);
@@ -307,6 +318,10 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
   const [link, setLink] = useState<string | null>(null);
   const consent = useRef<Window | null>(null);
   const state = usePanelRead<SetupState>("/agents/" + agent.id + "/setup", reloads);
+  const built = state.phase === "ready" && state.payload.own_page === true;
+  useEffect(() => {
+    if (built) onBuilt();
+  }, [built, onBuilt]);
   /** The turn the connect admitted, watched for the link it mints.
    *
    *  A consent link is minted per speaking member at stream time — never in a transcript and never

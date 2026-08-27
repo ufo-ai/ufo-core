@@ -98,7 +98,7 @@ from ufo.sdk.manifest import (
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import Message, ModelRequest, TextBlock, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
-from ufo.sdk.objects import AGENT_KIND, ObjectListQuery, ObjectRef
+from ufo.sdk.objects import AGENT_KIND, ObjectListQuery, ObjectRef, ObjectRow
 from ufo.sdk.sandbox import shipped_app_slug
 from ufo.sdk.seats import Seats
 from ufo.sdk.surfaces import (
@@ -1035,7 +1035,14 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     `SETUP_READ_FANOUT` wide because that price is per app on the one request the member is
     waiting on: a workspace holding thirty apps would otherwise hold thirty transactions open at
     once on the pool the whole deploy shares, and eight keeps the read wide enough that its
-    latency is the slowest answer rather than the sum of them."""
+    latency is the slowest answer rather than the sum of them.
+
+    `stands_on_setup` says the app stands on its setup screen rather than on a page: it declared
+    something a setup screen lists, and this workspace has never built it one. It rides this read
+    because the portal draws its shell from this read — the setup screen draws no navigation, and a
+    portal that learned the fact from a later per-app request would draw the sidebar and take it
+    away again. The page row it needs is the row the homepage answer already reads, so the fact
+    costs no query of its own."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1046,8 +1053,9 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     # The agent carries its homepage — an app's own page or the answer it has none — so a screen
     # opens the page from the boot read and never asks per agent as the member moves between them.
     await _assets_published(ctx.fleet_blob, apps())
+    bound_pages = {agent.id: await _bound_page(ctx, agent, member_id) for agent in audience.agents}
     homepages = {
-        agent.id: await _homepage_state(ctx, agent, member_id, audience.admin)
+        agent.id: _homepage_state(ctx, agent, bound_pages[agent.id], audience.admin, member_id)
         for agent in audience.agents
     }
     provisioned = tuple(agent for agent in audience.agents if agent.provisioned_by is not None)
@@ -1062,6 +1070,15 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
         agent.id
         for agent, state in zip(provisioned, setup_states, strict=True)
         if not _setup_ready(state)
+    )
+    # An app that declared nothing has no setup screen to stand on — chat, radar, tasks, wiki and
+    # artifacts stand on their page from the first moment — and an app whose page this workspace
+    # built stands on that page from then on, todos or no todos.
+    on_setup = frozenset(
+        agent.id
+        for agent, state in zip(provisioned, setup_states, strict=True)
+        if (state.connectors or state.credentials or state.standing)
+        and bound_pages[agent.id] is None
     )
     archived = [
         app
@@ -1100,6 +1117,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "hidden": agent.id in hidden,
                     "homepage": homepages[agent.id],
                     "setup_due": agent.id in due,
+                    "stands_on_setup": agent.id in on_setup,
                     **(
                         {"web_audience": list(grants.get(agent.id, ()))}
                         if grants is not None
@@ -4562,7 +4580,7 @@ async def agent_setup(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, _email, _audience, agent_id = gated
+    member_id, _email, audience, agent_id = gated
     state = await ctx.agent_setup(agent_id, member_id)
     payload = state.model_dump(mode="json")
     payload["connectors"] = [
@@ -4573,35 +4591,39 @@ async def agent_setup(ctx: SurfaceContext, request: Request) -> Response:
         }
         for connector in payload["connectors"]
     ]
-    return JSONResponse({**payload, "own_page": await _has_own_page(ctx, agent_id, member_id)})
+    summary = next(a for a in audience.agents if a.id == agent_id)
+    own_page = await _bound_page(ctx, summary, member_id) is not None
+    return JSONResponse({**payload, "own_page": own_page})
 
 
-async def _has_own_page(ctx: SurfaceContext, agent_id: UUID, member_id: UUID) -> bool:
-    """Whether this workspace has built this app its own page, read from the row the homepage read
-    answers `set` from.
+async def _bound_page(
+    ctx: SurfaceContext,
+    summary: AgentSummary,
+    member_id: UUID,
+) -> ObjectRow | None:
+    """The page this workspace built this agent and bound as its homepage, or `None` where it built
+    none. One read answers both what the page is and whether the workspace built it, so the
+    homepage state and the setup gate can never disagree about whose page this is.
 
-    It asks whether the workspace built one, not whether a page exists to draw. A shipped app always
-    has a page — the deploy carries one for every workspace — so "is a page available" is answered
-    `yes` from the first moment and could gate nothing.
+    A bound row is what the workspace built, not what a page a member may look at: a shipped app
+    always has a page — the deploy carries one for every workspace — so "is a page available" is
+    answered `yes` from the first moment and could gate nothing.
 
     What it gates is where a shipped app stands. Until the workspace builds, the app stands on its
     setup screen, which is what holds the accounts, the installs, the cadences, and the Build app
     press; from the first build it stands on the page it built, for good. The deploy's own page is
     the shape that build starts from rather than a screen a member browses first — an app the
-    workspace has not wired has nothing real to draw on it.
-
-    Read the same way the homepage read reads it, so the two can never disagree about whose page
-    this is."""
+    workspace has not wired has nothing real to draw on it."""
     page = await ctx.list_member_objects(
         SITE_KIND,
-        agent_id,
+        summary.id,
         member_id,
         admin=True,
-        query=ObjectListQuery(filters={"homepage_agent": str(agent_id)}),
+        query=ObjectListQuery(filters={"homepage_agent": str(summary.id)}),
     )
     if page is None:
-        return False
-    return any("site_url" in row.fields for row in page.rows)
+        return None
+    return next((row for row in page.rows if "site_url" in row.fields), None)
 
 
 async def homepage(ctx: SurfaceContext, request: Request) -> Response:
@@ -4622,14 +4644,16 @@ async def homepage(ctx: SurfaceContext, request: Request) -> Response:
     member_id, _email, audience, agent_id = gated
     summary = next(a for a in audience.agents if a.id == agent_id)
     await _assets_published(ctx.fleet_blob, apps())
-    return JSONResponse(await _homepage_state(ctx, summary, member_id, audience.admin))
+    bound = await _bound_page(ctx, summary, member_id)
+    return JSONResponse(_homepage_state(ctx, summary, bound, audience.admin, member_id))
 
 
-async def _homepage_state(
+def _homepage_state(
     ctx: SurfaceContext,
     summary: AgentSummary,
-    member_id: UUID,
+    bound: ObjectRow | None,
     admin: bool,
+    member_id: UUID,
 ) -> dict[str, JsonValue]:
     """One agent's homepage: `set` for a forked hosted_site row or the shipped bundle, `none` when
     it has no page — a first page still building is simply `none` until it registers, and a page
@@ -4643,19 +4667,8 @@ async def _homepage_state(
     the frame hands to whoever asks: it answers every member whose web audience already holds the
     agent, the member a grant put there included, because the reader passed that gate to reach
     this read at all. A shipped page's `deploy_generation` is the digest folded to a JS-safe int,
-    so the frame's identity moves onto the new bundle across the next answer."""
-    page = await ctx.list_member_objects(
-        SITE_KIND,
-        summary.id,
-        member_id,
-        admin=True,
-        query=ObjectListQuery(filters={"homepage_agent": str(summary.id)}),
-    )
-    bound = (
-        next((row for row in page.rows if "site_url" in row.fields), None)
-        if page is not None
-        else None
-    )
+    so the frame's identity moves onto the new bundle across the next answer. `bound` is the page
+    row the workspace built, read by `_bound_page`."""
     if bound is not None:
         if summary.visibility != "workspace" and member_id != summary.owner_member_id and not admin:
             return {"state": "none"}

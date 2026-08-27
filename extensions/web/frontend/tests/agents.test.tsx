@@ -18,6 +18,7 @@ import { sendMessage } from "@/lib/turnStream";
 import {
   AGENT,
   AGENT_ID,
+  CHAT_ROW,
   CONVO_ID,
   FRESH,
   MEMBER,
@@ -28,6 +29,7 @@ import {
   TURN_ID,
   agentIndex,
   atPhoneWidth,
+  chatsOnWire,
   expandApps,
   json,
   objectIndex,
@@ -1418,16 +1420,18 @@ test("an app the workspace has never built stands on its setup screen", async ()
       json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
     "/setup": () =>
       json({
-        own_page: false,
         credentials: [],
         connectors: [{ provider: "googlecalendar", granted: false }],
         standing: [],
+        own_page: false,
       }),
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(
     <App
-      agents={[{ ...AGENT, main: false, app: "meetings", purpose: PURPOSE }]}
+      agents={[
+        { ...AGENT, main: false, app: "meetings", purpose: PURPOSE, stands_on_setup: true },
+      ]}
       member={MEMBER}
       onAgents={() => {}}
     />,
@@ -1441,6 +1445,68 @@ test("an app the workspace has never built stands on its setup screen", async ()
   await screen.findByText(PURPOSE);
 });
 
+/** The setup screen draws no navigation, and neither does the app's own address while the app
+ *  stands on that screen: the column is not drawn for one address and taken away by the move to the
+ *  other, which is a sidebar the member watches appear and vanish. */
+test("an app in setup draws no sidebar, on its own address or on the setup one", async () => {
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () =>
+      json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
+    "/setup": () =>
+      json({
+        credentials: [],
+        connectors: [{ provider: "googlecalendar", granted: false }],
+        standing: [],
+        own_page: false,
+      }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(
+    <App
+      agents={[{ ...AGENT, main: false, app: "meetings", stands_on_setup: true }]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
+  );
+
+  // The first render already draws none of it: the boot read carries the fact, so no frame stands
+  // in which the column is on screen.
+  expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
+  await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
+  await screen.findByText(/Set up your .* app/);
+  expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
+});
+
+/** An app that has been built reaches the same address of its own accord — that screen is where an
+ *  account is reconnected — and there the member is standing in a workspace they move around from. */
+test("a built app's setup screen keeps the sidebar", async () => {
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/setup": () =>
+      json({
+        credentials: [],
+        connectors: [{ provider: "googlecalendar", granted: false }],
+        standing: [],
+        own_page: true,
+      }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "/setup";
+  render(
+    <App
+      agents={[{ ...AGENT, main: false, app: "meetings" }]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
+  );
+
+  await screen.findByText(/Set up your .* app/);
+  expect(screen.getByRole("navigation", { name: "Workspace" })).toBeTruthy();
+});
+
 test("a shipped app that declares no setup stands on its page", async () => {
   /** Chat, radar, tasks, wiki and artifacts declare none, and their page is the deploy's own.
    *  A gate that read "no forked page" as "not set up" stranded them on a screen with no account
@@ -1451,8 +1517,6 @@ test("a shipped app that declares no setup stands on its page", async () => {
     "/transcript": () => json({ messages: [] }),
     "/homepage": () =>
       json({ state: "set", url: "https://wiki.example.test", deploy_generation: 1 }),
-    "/setup": () =>
-      json({ own_page: false, connectors: [], credentials: [], standing: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(
@@ -1480,19 +1544,85 @@ test("the move to setup replaces, so Back steps past the app", async () => {
       json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
     "/setup": () =>
       json({
-        own_page: false,
         connectors: [{ provider: "googlecalendar", granted: false }],
         credentials: [],
         standing: [],
+        own_page: false,
       }),
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(
-    <App agents={[{ ...AGENT, main: false, app: "meetings" }]} member={MEMBER} onAgents={() => {}} />,
+    <App
+      agents={[{ ...AGENT, main: false, app: "meetings", stands_on_setup: true }]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
   );
 
   await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
   expect(replaced).toContain("#/agents/" + AGENT_ID + "/setup");
+});
+
+/** The roster is what the page was told at boot, and a build binds the app's page long after that:
+ *  the app the member has just built still wears the flag for the rest of the session. The app's own
+ *  read is what says the page is there, so the member opens it, and the roster is read again — which
+ *  is what puts the sidebar back. */
+test("an app built since the boot read opens at its own address", async () => {
+  const roster = vi.fn();
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () =>
+      json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
+    "/setup": () =>
+      json({
+        credentials: [],
+        connectors: [{ provider: "googlecalendar", granted: false }],
+        standing: [],
+        own_page: true,
+      }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(
+    <App
+      agents={[{ ...AGENT, main: false, app: "meetings", stands_on_setup: true }]}
+      member={MEMBER}
+      onAgents={roster}
+    />,
+  );
+
+  expect(await screen.findByLabelText(/^Menu for/)).toBeTruthy();
+  await waitFor(() => expect(roster).toHaveBeenCalled());
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+});
+
+/** A read that failed says nothing about where the app stands. Moving on it would put the member on
+ *  a setup screen whose own read failed too, and the crumb back to the app would move them there
+ *  again. */
+test("a setup read that failed leaves the member on the app they opened", async () => {
+  const { calls } = wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/settings": () => json({ ...NEEDS_SETUP, agent: { ...NEEDS_SETUP.agent, main: false } }),
+    "/connections": () => json({ connections: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () =>
+      json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
+    "/setup": () => new Response("nope", { status: 503 }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(
+    <App
+      agents={[{ ...AGENT, main: false, app: "meetings", stands_on_setup: true }]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
+  );
+
+  expect(await screen.findByLabelText(/^Menu for/)).toBeTruthy();
+  await waitFor(() => expect(calls.some((url) => url.includes("/setup"))).toBe(true));
+  expect(location.hash).toBe("#/agents/" + AGENT_ID);
 });
 
 test("an agent no extension shipped keeps its conversation column, however unbuilt", async () => {
@@ -1504,14 +1634,13 @@ test("an agent no extension shipped keeps its conversation column, however unbui
     "/connections": () => json({ connections: [] }),
     "/transcript": () => json({ messages: [] }),
     "/homepage": () => json({ state: "none" }),
-    "/setup": () => json({ own_page: false, credentials: [], connectors: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  // It does not even ask: the read is for apps an extension shipped.
+  // The pane asks about an app the roster says the workspace is building, and this is not one.
   expect(calls.filter((url) => url.includes("/setup"))).toEqual([]);
 });
 
@@ -1522,15 +1651,6 @@ test("an app that has been built once stands on its page, and the setup screen i
     "/transcript": () => json({ messages: [] }),
     "/homepage": () =>
       json({ state: "set", url: "https://meetings.example.test", deploy_generation: 1 }),
-    // Still owed an account, and still on its own page: the build is what settles this, not the
-    // todos.
-    "/setup": () =>
-      json({
-        own_page: true,
-        credentials: [],
-        connectors: [{ provider: "googlecalendar", granted: false }],
-        standing: [],
-      }),
   });
   location.hash = "#/agents/" + AGENT_ID;
   render(
@@ -1539,6 +1659,9 @@ test("an app that has been built once stands on its page, and the setup screen i
 
   expect(await screen.findByLabelText(/^Menu for/)).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
+  // And it is somewhere the member moves around from, so the column stands beside it: the setup
+  // screen is the one place it does not.
+  expect(screen.getByRole("navigation", { name: "Workspace" })).toBeTruthy();
 });
 
 /** Starting a conversation with the open app is an act of its own band, standing with the acts at

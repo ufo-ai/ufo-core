@@ -136,6 +136,18 @@ export type AppProps = {
   onAgents: () => void;
 };
 
+/** Whether the member stands in an app the workspace is still building: the app's setup address or
+ *  its own address — the pane replaces the second with the first — while the boot read says the app
+ *  stands on that setup screen.
+ *
+ *  An app that has been built reaches the same setup address of its own accord, to reconnect an
+ *  account, and that is not this: the member is somewhere they move around from, and the answer is
+ *  no. An app the roster does not carry is not one either — the pane answers `No such app.` */
+function inSetup(route: Route, agents: Agent[]): boolean {
+  if (route.kind !== "agent" && route.kind !== "agent-setup") return false;
+  return agents.some((agent) => agent.id === route.agentId && agent.stands_on_setup === true);
+}
+
 /** Apps the workspace gained after this page loaded. A workspace ships its apps on its first turn,
  *  which is a turn the member takes from inside an already-loaded portal — so the boot read that
  *  seeded the sidebar predates every one of them, and without this the column states one app until
@@ -251,31 +263,49 @@ export function App({
     );
   }
 
+  /** An app the workspace is still building draws no navigation either. Its setup screen is the one
+   *  act it offers, and the column beside it names destinations the app is not one of yet — so the
+   *  screen is the whole page until the setup ends.
+   *
+   *  The boot read carries the fact, so the app's own address answers it as surely as the setup
+   *  address the pane replaces it with. Both are held before the first render: the sidebar is never
+   *  drawn and then taken away, which is a column the member watches appear and vanish. A build
+   *  that landed after that read is the pane's to find — it confirms before it moves the member,
+   *  and the roster it re-reads is what stands this column back up. */
+  const shell = !inSetup(route, agents);
+
   return (
     <Viewer.Provider value={member.email}>
       <SurfacesProvider surfaces={surfaces}>
         <MainAgentProvider agents={agents}>
           <TooltipProvider>
-          <DrawerHost hosted={narrow} shut={shutMenu}>
+          <DrawerHost hosted={narrow && shell} shut={shutMenu}>
             <div
               className={cn(
-                "grid h-dvh max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
-                rail.collapsed
-                  ? "grid-cols-[var(--container-rail)_1fr]"
-                  : "grid-cols-[var(--container-sidebar)_1fr]",
+                "grid h-dvh",
+                shell
+                  ? cn(
+                      "max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
+                      rail.collapsed
+                        ? "grid-cols-[var(--container-rail)_1fr]"
+                        : "grid-cols-[var(--container-sidebar)_1fr]",
+                    )
+                  : "grid-cols-1",
               )}
             >
-              {narrow ? (
+              {shell && narrow ? (
                 <NarrowBar agents={listed} member={member} menu={menu} onMenu={setMenu} />
               ) : null}
-              <WorkspaceSidebar
-                route={route}
-                agents={listed}
-                member={member}
-                mainAgent={mainAgent}
-                narrow={narrow}
-                onBuild={startBuild}
-              />
+              {shell ? (
+                <WorkspaceSidebar
+                  route={route}
+                  agents={listed}
+                  member={member}
+                  mainAgent={mainAgent}
+                  narrow={narrow}
+                  onBuild={startBuild}
+                />
+              ) : null}
               <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
                 <RoutedPane
                   route={route}
@@ -918,7 +948,7 @@ function RoutedPane({
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <Header crumb={crumb} title={SETUP} pinned />
             <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")}>
-              <AgentSetup agent={app} admin={member.admin} />
+              <AgentSetup agent={app} admin={member.admin} onBuilt={onAgents} />
             </div>
           </div>
         </Pane>

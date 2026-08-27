@@ -64,10 +64,10 @@ function atOffset(minutes: number) {
   vi.spyOn(Date.prototype, "getTimezoneOffset").mockReturnValue(minutes);
 }
 
-function mount(admin = true) {
+function mount(admin = true, onBuilt: () => void = () => {}) {
   render(
     <TooltipProvider>
-      <AgentSetup agent={APP} admin={admin} />
+      <AgentSetup agent={APP} admin={admin} onBuilt={onBuilt} />
     </TooltipProvider>,
   );
 }
@@ -466,4 +466,24 @@ test("the cadence is stored in UTC, converted from the member's own clock", () =
   expect(cronFor({ hour: 21, minute: 0, weekdays: [1] }, 300)).toBe("0 2 * * 2");
   // An hourly cadence names no wall-clock time, so there is nothing to convert.
   expect(cronFor({ hour: null, minute: 0, weekdays: [] }, 300)).toBe("0 * * * *");
+});
+
+/** The shell reads the roster to know which app the workspace is still building, and a build lands
+ *  long after that read. This screen holds the fresh answer, so it says when the page is there and
+ *  the roster is read again. */
+test("the screen says when the workspace has built the page, and stays quiet until it has", async () => {
+  wire({ [SETUP]: () => json(owed()) });
+  const built = vi.fn();
+  mount(true, built);
+
+  expect(await actButton("Connect Google Calendar")).toBeTruthy();
+  expect(built).not.toHaveBeenCalled();
+});
+
+test("a page the workspace has built is stated once", async () => {
+  wire({ [SETUP]: () => json(owed({ own_page: true })) });
+  const built = vi.fn();
+  mount(true, built);
+
+  await waitFor(() => expect(built).toHaveBeenCalled());
 });
