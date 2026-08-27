@@ -48,6 +48,7 @@ resource "cloudflare_flagship_flag" "testing_portal" {
 
   account_id        = data.cloudflare_zone.ufo_ai.account.id
   app_id            = local.flagship_apps.testing
+  flag_key          = each.key
   key               = each.key
   type              = "boolean"
   enabled           = true
@@ -66,6 +67,7 @@ resource "cloudflare_flagship_flag" "prod_portal" {
 
   account_id        = data.cloudflare_zone.ufo_ai.account.id
   app_id            = local.flagship_apps.prod
+  flag_key          = each.key
   key               = each.key
   type              = "boolean"
   enabled           = true

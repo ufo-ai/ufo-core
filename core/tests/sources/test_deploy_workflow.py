@@ -1528,6 +1528,14 @@ def test_edge_deploys_are_isolated(
     assert failed.returncode != 0
 
 
+@pytest.mark.parametrize("name", ["testing_portal", "prod_portal"])
+def test_flag_resources_keep_their_refresh_address(name: str) -> None:
+    source = _code((ROOT / "infra" / "envs" / "edge" / "flags.tf").read_text())
+    resource = _terraform_block(source, "resource", name)
+    assert re.search(r"^\s*key\s*=\s*each\.key$", resource, re.MULTILINE)
+    assert re.search(r"^\s*flag_key\s*=\s*each\.key$", resource, re.MULTILINE)
+
+
 def test_production_edge_preserves_the_promoted_workspace() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
