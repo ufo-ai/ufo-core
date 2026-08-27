@@ -90,6 +90,14 @@ class SetupCredential(BaseModel):
     honest — there is nothing that member can press — but one that an admin can settle in a single
     press should say so rather than leaving them to find the verb in chat."""
 
+    required: bool = False
+    """Whether the app is unusable until this is filled.
+
+    An install is settled once for the whole workspace, and by an admin — a member who is not one
+    reads a row they cannot press. So it is optional by default: the app answers the member it has
+    in front of it, thinner, rather than refusing until somebody else acts. An app that genuinely
+    cannot read anything without the install says so here."""
+
 
 class AgentSetup(BaseModel):
     """What a shipped agent still needs from a member, and what to do about it. An agent arrives
@@ -164,6 +172,10 @@ class SetupConnector(BaseModel):
 
     provider: str
     granted: bool
+    required: bool
+    """Always true. An account is the one need nothing works without: an app with no connection has
+    nothing to read, so every screen marks it and no app declares otherwise. It is answered here
+    rather than assumed by the reader, so what a member must settle is stated in one place."""
 
 
 class SetupCredentialState(BaseModel):
@@ -173,6 +185,7 @@ class SetupCredentialState(BaseModel):
     label: str
     filled: bool
     provider: str | None = None
+    required: bool
 
 
 class SetupStanding(BaseModel):
@@ -180,6 +193,14 @@ class SetupStanding(BaseModel):
 
     kind: str
     armed: bool
+    required: bool
+    """Always false. A standing order is an occasion to run unasked; an app holding none still
+    answers the member who asks it, so the screen offers the row without demanding it."""
+
+    schedule: str | None = None
+    """The cron the order this agent holds fires on, where it is a scheduled task. The screen reads
+    it back into the cadence it offered, so a settled step shows the answer the member gave rather
+    than only the fact that they gave one."""
 
 
 class SetupState(BaseModel):
@@ -203,7 +224,16 @@ class SetupState(BaseModel):
     instructions: str = ""
 
 
-Armed = Callable[[str, str | None], Awaitable[bool]]
+class ArmedOrder(BaseModel):
+    """A standing order this agent holds, if it holds one. `schedule` is the cron a scheduled task
+    fires on, so a screen that offered the cadences can say which of them was taken rather than
+    only that something was."""
+
+    held: bool
+    schedule: str | None = None
+
+
+Armed = Callable[[str, str | None], Awaitable[ArmedOrder]]
 """Whether this agent holds a standing order of one kind: the one that carries `name`, or any at
 all when the caller names none. It is the caller's because the kinds belong to extensions and their
 rows live in extension tables: core owns the declaration and the grants, and the surface that has
@@ -216,7 +246,7 @@ that reads the first page alone calls a real order missing as soon as the rows b
 page."""
 
 
-async def _armed(kind: str, wanted: AgentSetup, armed: Armed) -> bool:
+async def _armed(kind: str, wanted: AgentSetup, armed: Armed) -> ArmedOrder:
     """Whether the app's own order of this kind exists.
 
     An app that offers a schedule names the task that schedule arms, and that name is what is asked
@@ -293,7 +323,7 @@ async def setup_state(agent_id: UUID, member_id: UUID, *, armed: Armed) -> Setup
             )
         )
     connectors = tuple(
-        SetupConnector(provider=provider, granted=provider in granted)
+        SetupConnector(provider=provider, granted=provider in granted, required=True)
         for provider in wanted.connectors
     )
     # A slot the deploy supplies from its own environment is filled: `WorkspaceScope.credential`
@@ -307,12 +337,18 @@ async def setup_state(agent_id: UUID, member_id: UUID, *, armed: Armed) -> Setup
             label=credential.label,
             filled=bool(set(credential.slots) & filled_slots),
             provider=credential.provider,
+            required=credential.required,
         )
         for credential in wanted.credentials
     )
     standing = tuple(
         [
-            SetupStanding(kind=kind, armed=await _armed(kind, wanted, armed))
+            SetupStanding(
+                kind=kind,
+                armed=(order := await _armed(kind, wanted, armed)).held,
+                required=False,
+                schedule=order.schedule,
+            )
             for kind in wanted.standing
         ]
     )

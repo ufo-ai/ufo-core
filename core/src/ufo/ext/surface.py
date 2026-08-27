@@ -82,7 +82,7 @@ from ufo.billing.accounting import (
 from ufo.blob import BlobNotFound, FleetBlobStore, WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
 from ufo.hub import Activity, LiveFrame
-from ufo.kinds.agent_setup import AgentSetup, SetupState, pending_setup, setup_state
+from ufo.kinds.agent_setup import AgentSetup, ArmedOrder, SetupState, pending_setup, setup_state
 from ufo.kinds.governance import prompt_digest
 from ufo.media.artifact_url import (
     artifact_url_expiry,
@@ -3356,16 +3356,21 @@ class SurfaceContext:
         as missing, and re-applying the same name only moves the row that is already there."""
         from ufo.objects import ObjectListQuery
 
-        async def armed(kind: str, name: str | None) -> bool:
+        async def armed(kind: str, name: str | None) -> ArmedOrder:
             if name is not None:
-                return (
-                    await self.member_object(kind, name, agent_id, member_id, admin=True)
-                    is not None
-                )
+                held = await self.member_object(kind, name, agent_id, member_id, admin=True)
+                if held is None:
+                    return ArmedOrder(held=False)
+                # The cron the order fires on, read off the kind's own spec: a screen that offered
+                # the cadences reads it back into the offer it took, so the answer stays on the
+                # step. The spec is the extension's, so it is read as the record it serialises to
+                # rather than by reaching for an attribute core cannot name.
+                cron = held.detail.spec.model_dump(mode="json").get("schedule")
+                return ArmedOrder(held=True, schedule=cron if isinstance(cron, str) else None)
             page = await self.list_member_objects(
                 kind, agent_id, member_id, admin=True, query=ObjectListQuery()
             )
-            return page is not None and bool(page.rows)
+            return ArmedOrder(held=page is not None and bool(page.rows))
 
         with ws(self.workspace_id):
             return await setup_state(agent_id, member_id, armed=armed)

@@ -1302,9 +1302,10 @@ test("an app the workspace has never built stands on its setup screen", async ()
   );
 
   await waitFor(() => expect(location.hash).toBe("#/agents/" + AGENT_ID + "/setup"));
-  // The band names this screen and the app above it, and states the app's one sentence under both
-  // — the member arrived at an app somebody else installed, and reads what it is for first.
-  await screen.findByText("Setup");
+  // The screen names the app it is setting up and states the app's one sentence under it — the
+  // member arrived at an app somebody else installed, and reads what it is for before the list of
+  // what it is waiting on.
+  await screen.findByText(/Set up your .* app/);
   await screen.findByText(PURPOSE);
 });
 

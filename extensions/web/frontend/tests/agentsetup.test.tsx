@@ -34,9 +34,17 @@ beforeEach(() => {
  *  install fills, and the standing order that gives it an occasion to run. */
 function owed(over: Record<string, unknown> = {}) {
   return {
-    connectors: [{ provider: "googlecalendar", granted: false }],
-    credentials: [{ label: "ufo GitHub App", filled: false, provider: "github" }],
-    standing: [{ kind: "scheduled_task", armed: false }],
+    connectors: [{
+        provider: "googlecalendar",
+        label: "Google Calendar",
+        summary: "Brief what is on the calendar.",
+        granted: false,
+        required: true,
+      }],
+    credentials: [
+      { label: "ufo GitHub App", filled: false, provider: "github", required: false },
+    ],
+    standing: [{ kind: "scheduled_task", armed: false, required: false, schedule: null }],
     schedule: {
       name: "meeting-briefs",
       prompt: "Brief each meeting starting in the next few hours.",
@@ -62,6 +70,20 @@ function mount(admin = true) {
       <AgentSetup agent={APP} admin={admin} />
     </TooltipProvider>,
   );
+}
+
+async function stepTrigger(name: string | RegExp) {
+  const buttons = await screen.findAllByRole("button", { name });
+  const trigger = buttons.find((button) => button.hasAttribute("aria-controls"));
+  if (!trigger) throw new Error("step trigger not found");
+  return trigger;
+}
+
+async function actButton(name: string | RegExp) {
+  const buttons = await screen.findAllByRole("button", { name });
+  const act = buttons.find((button) => !button.hasAttribute("aria-controls"));
+  if (!act) throw new Error("step act not found");
+  return act;
 }
 
 function applied(handler: ReturnType<typeof wire>["handler"]) {
@@ -91,12 +113,65 @@ test("the screen states every need the app declares, with the act that settles i
   wire({ [SETUP]: () => json(owed()) });
   mount();
 
-  expect(await screen.findByText("googlecalendar")).toBeTruthy();
-  expect(await screen.findByRole("button", { name: "Connect" })).toBeTruthy();
-  expect(await screen.findByText("ufo GitHub App")).toBeTruthy();
-  expect(await screen.findByRole("button", { name: "Install" })).toBeTruthy();
-  expect(await screen.findByRole("button", { name: "Choose a cadence" })).toBeTruthy();
-  expect(await screen.findByText("Connect the calendar.")).toBeTruthy();
+  expect(await actButton("Connect Google Calendar")).toBeTruthy();
+  await userEvent.click(await stepTrigger("Install the workspace app"));
+  expect(await actButton("Install ufo GitHub App")).toBeTruthy();
+  await userEvent.click(await stepTrigger("Choose when it runs"));
+  expect(await screen.findByRole("radio", { name: /every weekday at 9:00 AM/ })).toBeTruthy();
+  expect(await screen.findByLabelText("Something else")).toBeTruthy();
+  expect(screen.queryByText("Connect the calendar.")).toBeNull();
+});
+
+test("the first unfinished step is open on arrival", async () => {
+  wire({
+    [SETUP]: () =>
+      json(
+        owed({
+          connectors: [{
+            provider: "googlecalendar",
+            label: "Google Calendar",
+            summary: "Brief what is on the calendar.",
+            granted: true,
+            required: true,
+          }],
+        }),
+      ),
+  });
+  mount();
+
+  expect((await stepTrigger(/Choose your account/)).getAttribute("aria-expanded")).toBe("false");
+  expect((await stepTrigger("Install the workspace app")).getAttribute("aria-expanded")).toBe("true");
+});
+
+test("a done step draws the filled check mark", async () => {
+  wire({
+    [SETUP]: () =>
+      json(
+        owed({
+          connectors: [{
+            provider: "googlecalendar",
+            label: "Google Calendar",
+            summary: "Brief what is on the calendar.",
+            granted: true,
+            required: true,
+          }],
+        }),
+      ),
+  });
+  mount();
+
+  const trigger = await stepTrigger(/Choose your account/);
+  expect(trigger.querySelector(".tabler-icon-square-rounded-check-filled")).toBeTruthy();
+});
+
+test("required steps draw an asterisk and optional steps do not", async () => {
+  wire({ [SETUP]: () => json(owed()) });
+  mount();
+
+  expect((await stepTrigger(/Choose your account/)).textContent).toContain(
+    "Choose your account*",
+  );
+  expect((await stepTrigger("Install the workspace app")).textContent).not.toContain("*");
 });
 
 test("a workspace install is one press, and its link opens the provider's own page", async () => {
@@ -111,10 +186,113 @@ test("a workspace install is one press, and its link opens the provider's own pa
   });
   mount();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Install" }));
+  await userEvent.click(await stepTrigger("Install the workspace app"));
+  await userEvent.click(await actButton("Install ufo GitHub App"));
 
   await waitFor(() => expect(applied(handler)).toEqual({ verb: "connect_github" }));
   expect(opened.location.href).toBe("https://github.test/install");
+});
+
+test("a completed open step advances to the next step in the payload", async () => {
+  const opened = { location: { href: "" }, close: vi.fn(), focus: vi.fn() };
+  vi.stubGlobal("open", vi.fn().mockReturnValue(opened));
+  let reads = 0;
+  wire({
+    [SETUP]: () => {
+      reads += 1;
+      return json(
+        owed(
+          reads === 1
+            ? {}
+            : {
+                credentials: [
+                  { label: "ufo GitHub App", filled: true, provider: "github", required: false },
+                ],
+              },
+        ),
+      );
+    },
+    [INTENTS]: () => json({ applied: true, message: "", url: "https://github.test/install" }),
+  });
+  mount();
+
+  await userEvent.click(await stepTrigger("Install the workspace app"));
+  await userEvent.click(await actButton("Install ufo GitHub App"));
+
+  await waitFor(async () => {
+    expect((await stepTrigger("Choose when it runs")).getAttribute("aria-expanded")).toBe("true");
+  });
+});
+
+test("settling the last step hands the drawer back to the first one outstanding", async () => {
+  let reads = 0;
+  wire({
+    [SETUP]: () => {
+      reads += 1;
+      return json(
+        owed(
+          reads === 1
+            ? {}
+            : { standing: [{ kind: "scheduled_task", armed: true, required: false, schedule: "0 9 * * 1,2,3,4,5" }] },
+        ),
+      );
+    },
+    [INTENTS]: () => json({ applied: true, message: "" }),
+  });
+  mount();
+
+  await userEvent.click(await stepTrigger("Choose when it runs"));
+  await userEvent.click(await screen.findByRole("radio", { name: /every hour/ }));
+
+  await waitFor(async () => {
+    expect((await stepTrigger("Choose when it runs")).getAttribute("aria-expanded")).toBe("false");
+  });
+  expect((await stepTrigger(/Choose your account/)).getAttribute("aria-expanded")).toBe("true");
+});
+
+test("a settled schedule keeps the offer it took, checked", async () => {
+  atOffset(0);
+  wire({
+    [SETUP]: () =>
+      json(
+        owed({
+          standing: [
+            {
+              kind: "scheduled_task",
+              armed: true,
+              required: false,
+              schedule: "0 9 * * 1,2,3,4,5",
+            },
+          ],
+        }),
+      ),
+  });
+  mount();
+
+  await userEvent.click(await stepTrigger("Choose when it runs"));
+  const taken = await screen.findByRole("radio", { name: /every weekday at 9:00 AM/ });
+  expect(taken.getAttribute("aria-checked")).toBe("true");
+  expect(screen.queryByText("Set")).toBeNull();
+});
+
+test("a schedule the member composed stands in the field they wrote it in", async () => {
+  atOffset(0);
+  wire({
+    [SETUP]: () =>
+      json(
+        owed({
+          standing: [
+            { kind: "scheduled_task", armed: true, required: false, schedule: "0 6 * * 2" },
+          ],
+        }),
+      ),
+  });
+  mount();
+
+  await userEvent.click(await stepTrigger("Choose when it runs"));
+  expect((await screen.findByLabelText("Something else")).getAttribute("value")).toBe(
+    "Tuesday at 6:00 AM",
+  );
 });
 
 test("a need the app offers no cadence for still carries an act", async () => {
@@ -123,12 +301,17 @@ test("a need the app offers no cadence for still carries an act", async () => {
    *  and offering nothing left the member reading a chore with no way to do it. */
   wire({
     [SETUP]: () =>
-      json(owed({ standing: [{ kind: "source_trigger", armed: false }], schedule: null })),
+      json(
+        owed({
+          standing: [{ kind: "source_trigger", armed: false, required: false, schedule: null }],
+          schedule: null,
+        }),
+      ),
   });
   mount();
 
-  expect(await screen.findByText("source trigger")).toBeTruthy();
-  await userEvent.click(await screen.findByRole("button", { name: "Set up" }));
+  await userEvent.click(await stepTrigger("Choose what wakes it"));
+  await userEvent.click(await actButton("Set up"));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
 });
@@ -159,8 +342,9 @@ test("a member who is not an admin is told who installs it, and offered no press
   wire({ [SETUP]: () => json(owed()) });
   mount(false);
 
+  await userEvent.click(await stepTrigger("Install the workspace app"));
   expect(await screen.findByText("An admin installs this.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
+  expect(screen.queryAllByRole("button", { name: "Install" })).toHaveLength(0);
 });
 
 test("connect opens the consent window on the press, and points it at the turn's own link", async () => {
@@ -176,7 +360,7 @@ test("connect opens the consent window on the press, and points it at the turn's
   });
   mount();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+  await userEvent.click(await actButton("Connect Google Calendar"));
   await waitFor(() => expect(streams.length).toBe(1));
   expect(streams[0].url).toContain("/turns/" + TURN + "/stream");
 
@@ -194,7 +378,7 @@ test("a turn that mints no link says so, and gives the controls back", async () 
   });
   mount();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Connect" }));
+  await userEvent.click(await actButton("Connect Google Calendar"));
   await waitFor(() => expect(streams.length).toBe(1));
   streams[0].listeners.terminal(new MessageEvent("terminal"));
 
@@ -202,7 +386,7 @@ test("a turn that mints no link says so, and gives the controls back", async () 
     await screen.findByText("The connect did not open a consent page. Try again."),
   ).toBeTruthy();
   expect(opened.close).toHaveBeenCalled();
-  expect(await screen.findByRole("button", { name: "Connect" })).toBeTruthy();
+  expect(await actButton("Connect Google Calendar")).toBeTruthy();
 });
 
 test("the pick applies the app's own schedule, under the app's own name", async () => {
@@ -213,8 +397,8 @@ test("the pick applies the app's own schedule, under the app's own name", async 
   });
   mount();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Choose a cadence" }));
-  await userEvent.click(await screen.findByText("every weekday at 9:00 AM"));
+  await userEvent.click(await stepTrigger("Choose when it runs"));
+  await userEvent.click(await screen.findByRole("radio", { name: /every weekday at 9:00 AM/ }));
 
   await waitFor(() => expect(applied(handler)).toBeTruthy());
   expect(applied(handler)).toEqual({
@@ -225,6 +409,41 @@ test("the pick applies the app's own schedule, under the app's own name", async 
       schedule: "0 9 * * 1,2,3,4,5",
       prompt: "Brief each meeting starting in the next few hours.",
     },
+  });
+});
+
+test("a re-pick on an armed schedule moves the cadence and nothing else", async () => {
+  /** The order already holds the prompt, and the kind holds content to the task's creator: a spec
+   *  that set `prompt` again is refused for every admin who did not arm the order, and the cadence
+   *  they pressed would stay unchanged. The re-pick sends the schedule alone. */
+  atOffset(0);
+  const { handler } = wire({
+    [SETUP]: () =>
+      json(
+        owed({
+          standing: [
+            {
+              kind: "scheduled_task",
+              armed: true,
+              required: false,
+              schedule: "0 9 * * 1,2,3,4,5",
+            },
+          ],
+        }),
+      ),
+    [INTENTS]: () => json({ applied: true, message: "Saved." }),
+  });
+  mount();
+
+  await userEvent.click(await stepTrigger("Choose when it runs"));
+  await userEvent.click(await screen.findByRole("radio", { name: /every hour/ }));
+
+  await waitFor(() => expect(applied(handler)).toBeTruthy());
+  expect(applied(handler)).toEqual({
+    verb: "apply",
+    kind: "scheduled_task",
+    name: "meeting-briefs",
+    spec: { schedule: "0 * * * *" },
   });
 });
 

@@ -297,7 +297,7 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
             <Toast state={toast} onDone={() => setToast(SILENT)} position="surface" />
             <OutcomeNotice state={notice} />
             {ready.agent.setup ? (
-              <Group title="Setup">
+              <Group title="Set up">
                 <Facts
                   rows={[
                     {

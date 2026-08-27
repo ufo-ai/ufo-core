@@ -11325,6 +11325,8 @@ async def test_the_session_cookie_is_secure_where_the_portal_publishes_https(
     assert "HttpOnly" in cookie and "domain" not in cookie.lower()
 
 
+ARMED_CRON = "0 9 * * 1-5"
+
 SHIPPED_SETUP = AgentSetup(
     connectors=("acme",),
     credentials=(
@@ -11441,12 +11443,47 @@ async def test_the_setup_read_states_the_whole_declaration_and_what_is_outstandi
             headers={"cookie": f"{SESSION_COOKIE}={token}"},
         )
     ).json()
-    assert state["connectors"] == [{"provider": "acme", "granted": False}]
-    assert state["credentials"] == [{"label": "ACME install", "filled": False, "provider": None}]
-    assert state["standing"] == [{"kind": "scheduled_task", "armed": False}]
+    assert state["connectors"] == [
+        {"provider": "acme", "label": "acme", "summary": "", "granted": False, "required": True}
+    ]
+    assert state["credentials"] == [
+        {"label": "ACME install", "filled": False, "provider": None, "required": False}
+    ]
+    assert state["standing"] == [
+        {"kind": "scheduled_task", "armed": False, "required": False, "schedule": None}
+    ]
     assert state["schedule"]["name"] == "acme-sweep"
     assert state["schedule"]["cadences"][0] == {"hour": None, "minute": 0, "weekdays": []}
     assert state["instructions"] == "Connect the ACME account."
+
+
+async def test_a_credential_an_app_cannot_work_without_says_so(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An install is optional by default because an admin settles it and the app answers a member
+    thinner in the meantime. An app that cannot read anything without one declares it, and the read
+    carries that so the screen marks the row rather than deciding the rule for itself."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "reader@example.com")
+    await _declare_setup(
+        agent_id,
+        AgentSetup(
+            credentials=(
+                SetupCredential(label="ACME key", slots=("acme_api_key",), required=True),
+                SetupCredential(label="ACME install", slots=("acme_install_seal",)),
+            )
+        ),
+    )
+    state = (
+        await client.get(
+            f"/surface/web/agents/{agent_id}/setup",
+            headers={"cookie": f"{SESSION_COOKIE}={token}"},
+        )
+    ).json()
+    assert [(row["label"], row["required"]) for row in state["credentials"]] == [
+        ("ACME key", True),
+        ("ACME install", False),
+    ]
 
 
 async def test_a_private_account_is_connected_only_for_the_member_who_made_it(
@@ -11469,14 +11506,20 @@ async def test_a_private_account_is_connected_only_for_the_member_who_made_it(
         )
         return read.json()["connectors"]
 
-    assert await connectors(owner_token) == [{"provider": "acme", "granted": True}]
-    assert await connectors(other_token) == [{"provider": "acme", "granted": False}]
+    assert await connectors(owner_token) == [
+        {"provider": "acme", "label": "acme", "summary": "", "granted": True, "required": True}
+    ]
+    assert await connectors(other_token) == [
+        {"provider": "acme", "label": "acme", "summary": "", "granted": False, "required": True}
+    ]
 
     # Shared is the workspace's own: every member reads the one account, because every member's
     # turns work from it.
     shared_id = await _seed_account(workspace_id, agent_id, owner_id, "acme", shared=True)
     await _grant_account(workspace_id, agent_id, shared_id)
-    assert await connectors(other_token) == [{"provider": "acme", "granted": True}]
+    assert await connectors(other_token) == [
+        {"provider": "acme", "label": "acme", "summary": "", "granted": True, "required": True}
+    ]
 
 
 async def test_a_credential_is_filled_by_any_slot_that_answers_it(
@@ -11491,12 +11534,12 @@ async def test_a_credential_is_filled_by_any_slot_that_answers_it(
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     assert (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()[
         "credentials"
-    ] == [{"label": "ACME install", "filled": False, "provider": None}]
+    ] == [{"label": "ACME install", "filled": False, "provider": None, "required": False}]
 
     await _fill_slot(workspace_id, "acme_api_key")
     assert (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()[
         "credentials"
-    ] == [{"label": "ACME install", "filled": True, "provider": None}]
+    ] == [{"label": "ACME install", "filled": True, "provider": None, "required": False}]
 
 
 async def test_a_credential_the_deploy_supplies_reads_as_filled(
@@ -11533,7 +11576,9 @@ async def test_an_app_with_every_account_and_no_standing_order_still_owes_one(
     await _grant_account(workspace_id, agent_id, connection_id)
     await _fill_slot(workspace_id, "acme_api_key")
     unarmed = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
-    assert unarmed["standing"] == [{"kind": "scheduled_task", "armed": False}]
+    assert unarmed["standing"] == [
+        {"kind": "scheduled_task", "armed": False, "required": False, "schedule": None}
+    ]
 
     applied = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
@@ -11547,7 +11592,9 @@ async def test_an_app_with_every_account_and_no_standing_order_still_owes_one(
     )
     assert applied.status_code == 200, applied.text
     armed = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
-    assert armed["standing"] == [{"kind": "scheduled_task", "armed": True}]
+    assert armed["standing"] == [
+        {"kind": "scheduled_task", "armed": True, "required": False, "schedule": ARMED_CRON}
+    ]
     # The offer stands after the arming: the band says what the app runs on, not only what is
     # missing, and a member who wants a different hour picks again against the same schedule.
     assert armed["schedule"]["name"] == "acme-sweep"
@@ -11583,7 +11630,9 @@ async def test_a_second_feature_armed_does_not_arm_the_one_the_app_arrived_holdi
     )
     assert other.status_code == 200, other.text
     state = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
-    assert state["standing"] == [{"kind": "scheduled_task", "armed": False}]
+    assert state["standing"] == [
+        {"kind": "scheduled_task", "armed": False, "required": False, "schedule": None}
+    ]
     assert state["schedule"]["name"] == "acme-sweep"
 
     # The app's own task is what arms it.
@@ -11599,7 +11648,9 @@ async def test_a_second_feature_armed_does_not_arm_the_one_the_app_arrived_holdi
     )
     assert armed.status_code == 200, armed.text
     settled = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
-    assert settled["standing"] == [{"kind": "scheduled_task", "armed": True}]
+    assert settled["standing"] == [
+        {"kind": "scheduled_task", "armed": True, "required": False, "schedule": ARMED_CRON}
+    ]
 
 
 async def test_the_app_reads_armed_with_its_own_task_behind_a_page_of_others(
@@ -11632,7 +11683,9 @@ async def test_the_app_reads_armed_with_its_own_task_behind_a_page_of_others(
     await _crowd_the_listing(agent_id, "acme-sweep", OBJECT_LIST_PAGE)
 
     state = (await client.get(f"/surface/web/agents/{agent_id}/setup", headers=cookie)).json()
-    assert state["standing"] == [{"kind": "scheduled_task", "armed": True}]
+    assert state["standing"] == [
+        {"kind": "scheduled_task", "armed": True, "required": False, "schedule": ARMED_CRON}
+    ]
 
 
 async def _crowd_the_listing(agent_id: UUID, held: str, count: int) -> None:

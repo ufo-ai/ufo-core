@@ -269,6 +269,7 @@
   --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --text-mono: 11px;
+  --text-fine: 11px;
   --text-small: 12px;
   --text-label: 13px;
   --text-ui: 14px;

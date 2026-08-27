@@ -1,18 +1,28 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconSquareRoundedCheckFilled,
+  IconSquareRoundedFilled,
+} from "@tabler/icons-react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/field";
+import { ToggleGroupItem, ToggleGroupOne } from "@/components/ui/toggle-group";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Facts, Group } from "@/components/ui/facts";
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Notice, Panel, QUIET, usePanelRead, type NoticeState } from "@/kernel/panel";
 import { BASE, postIntent } from "@/lib/api";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { newChatHash } from "@/lib/route";
+import { agentName } from "@/lib/agentName";
 import { setPendingAsk } from "@/lib/pendingAsk";
+import { ProviderGlyph } from "@/lib/providerGlyph";
+import { cn } from "@/lib/cn";
 import { navigate } from "@/lib/router";
 import type { Agent } from "@/lib/types";
 
@@ -26,9 +36,15 @@ export type SetupSchedule = { name: string; prompt: string; cadences: SetupCaden
  *  checked: a screen that indexed a list the answer did not carry would blank itself over a payload
  *  that merely declared nothing. `own_page` is whether this workspace has built the app its page. */
 export type SetupState = {
-  connectors?: { provider: string; granted: boolean }[];
-  credentials?: { label: string; filled: boolean; provider: string | null }[];
-  standing?: { kind: string; armed: boolean }[];
+  connectors?: {
+    provider: string;
+    label: string;
+    summary: string;
+    granted: boolean;
+    required: boolean;
+  }[];
+  credentials?: { label: string; filled: boolean; provider: string | null; required: boolean }[];
+  standing?: { kind: string; armed: boolean; required: boolean; schedule: string | null }[];
   schedule?: SetupSchedule | null;
   instructions?: string;
   own_page?: boolean;
@@ -36,33 +52,40 @@ export type SetupState = {
 
 const SCHEDULE_KIND = "scheduled_task";
 
-const ACCOUNTS = "Accounts";
-const WORKSPACE_INSTALLS = "Workspace";
-const RUNS = "Runs";
-
 const CONNECT = "Connect";
 const CONNECTING = "Connecting";
 const CONNECTED = "Connected";
-const OUTSTANDING = "Not connected";
 const INSTALL = "Install";
+
+/* A step is titled by what it asks of the member and says nothing about which account answers it,
+   because the same question is put whatever the app happens to be connected to. The line under it
+   is where the provider is named, and the act carries its verb. */
+const ACCOUNT_STEP = "Choose your account";
+const INSTALL_STEP = "Install the workspace app";
+const SCHEDULE_STEP = "Choose when it runs";
+const TRIGGER_STEP = "Choose what wakes it";
+
+const SCHEDULE_NOTE = "Pick how often it runs without being asked.";
+const TRIGGER_NOTE = "A change in a source starts a run.";
+const OWN_CADENCE = "Say when, in your own words";
+const CADENCE_ASK = "Run on this cadence:";
 const INSTALLED = "Installed";
 const NOT_INSTALLED = "Not installed";
 const ADMIN_INSTALLS = "An admin installs this.";
 const ARMED = "Set";
-const NOT_SET = "Not set";
-const PICK = "Choose a cadence";
-const ARMING = "Setting";
+const CHOOSE_WHEN = "Choose when it runs";
 const SET_UP = "Set up";
+/** The gutter the status mark stands in, so the name, the line under it and the answers all share
+ *  one left edge. It is the mark and the gap beside it, named where both are. */
+const STEP_INSET = "pl-[calc(var(--size-glyph)+var(--spacing-sm))]";
+const ANOTHER_CADENCE = "Something else";
 
 /** What the row types on the member's behalf. It names the skill rather than the steps, so the app
  *  reads its own outstanding setup at that moment instead of following a stale sentence. */
 const SETUP_ASK = "Load the agent-setup skill and follow its instructions.";
 
 const BUILD_APP = "Build app";
-const BUILD_NOTE =
-  "The app reads what it is connected to and builds its own page. It runs in a conversation you "
-  + "can watch, and you can ask for changes there.";
-
+const SET_UP_APP = "Set up your";
 /** What the press types on the member's behalf, into the composer they send it from. It names the
  *  skill and stops: the steps live in the skill, and an ask repeating them would be a second copy
  *  of the procedure that drifts the first time either changes. */
@@ -131,10 +154,134 @@ export function labelOf(cadence: SetupCadence): string {
   return `${days} at ${time}`;
 }
 
-/** A kind as a member says it. An object kind is a slug, and a row wearing one reads as the one
- *  line on the screen written for the machine. */
-function noun(kind: string): string {
-  return kind.replace(/_/g, " ");
+/** The cadence a cron stands for, in the member's own clock — the read `cronFor` writes back, so a
+ *  schedule the member armed is recognised as the offer they took. Null where the cron is not one
+ *  of the shapes an offer converts to: an app's own composition can name anything, and a guess at
+ *  what it meant would put words on the screen the schedule does not hold. */
+export function cadenceOf(cron: string, offsetMinutes: number): SetupCadence | null {
+  const field = cron.trim().split(/\s+/);
+  if (field.length !== 5) return null;
+  const [minute, hour, day, month, weekday] = field;
+  if (day !== "*" || month !== "*") return null;
+  const past = Number(minute);
+  if (!Number.isInteger(past)) return null;
+  if (hour === "*") return weekday === "*" ? { hour: null, minute: past, weekdays: [] } : null;
+  const struck = Number(hour);
+  if (!Number.isInteger(struck)) return null;
+  const local = struck * 60 + past - offsetMinutes;
+  const shift = Math.floor(local / MINUTES_IN_DAY);
+  const settled = ((local % MINUTES_IN_DAY) + MINUTES_IN_DAY) % MINUTES_IN_DAY;
+  const days =
+    weekday === "*"
+      ? []
+      : weekday
+          .split(",")
+          .flatMap((one) => (one.includes("-") ? span(one) : [Number(one)]))
+          .map((day) => (((day + shift) % WEEK) + WEEK) % WEEK)
+          .sort();
+  if (days.some((day) => !Number.isInteger(day))) return null;
+  return { hour: Math.floor(settled / 60), minute: settled % 60, weekdays: days };
+}
+
+/** Cron's own range, which a member's app may write where the offers write a list. */
+function span(range: string): number[] {
+  const [from, to] = range.split("-").map(Number);
+  if (!Number.isInteger(from) || !Number.isInteger(to) || to < from) return [NaN];
+  return Array.from({ length: to - from + 1 }, (_, step) => from + step);
+}
+
+/** Why an account is being asked for, in the words the connect tiles already use for it. The
+ *  catalog states what an agent does with the provider, so the line reads as the reason to connect
+ *  it; a provider the catalog does not curate is named without one. */
+function connectNote(label: string, summary: string): string {
+  if (!summary) return `Connect ${label} so this app can work from your account.`;
+  return `Connect ${label} to ${summary[0].toLowerCase()}${summary.slice(1)}`;
+}
+
+type SetupStep = {
+  key: string;
+  title: string;
+  note: string;
+  required: boolean;
+  done: boolean;
+  body: ReactNode;
+};
+
+function SetupStepper({ steps }: { steps: SetupStep[] }) {
+  const baseId = useId();
+  const [opened, setOpened] = useState<string | null>(null);
+  const previous = useRef(new Map<string, boolean>());
+  const active =
+    opened && steps.some((step) => step.key === opened)
+      ? opened
+      : (steps.find((step) => !step.done)?.key ?? steps[0]?.key ?? null);
+
+  useEffect(() => {
+    if (opened !== null) {
+      const index = steps.findIndex((candidate) => candidate.key === opened);
+      const step = steps[index];
+      if (previous.current.get(opened) === false && step?.done) {
+        setOpened(steps[index + 1]?.key ?? null);
+      }
+    }
+    previous.current = new Map(steps.map((step) => [step.key, step.done]));
+  }, [opened, steps]);
+
+  return (
+    <div className="flex flex-col gap-2xl">
+      {steps.map((step, index) => {
+        const open = step.key === active;
+        const contentId = `${baseId}-step-${index}`;
+        const Status = step.done ? IconSquareRoundedCheckFilled : IconSquareRoundedFilled;
+        const Chevron = open ? IconChevronDown : IconChevronRight;
+        return (
+          <Collapsible
+            key={step.key}
+            className="rounded-(--radius-answer) bg-fill px-2xl py-sm"
+            open={open}
+            onOpenChange={(next) => {
+              if (next) setOpened(step.key);
+            }}
+          >
+            <CollapsibleTrigger
+              type="button"
+              aria-expanded={open}
+              aria-controls={contentId}
+              className="flex h-(--size-record) w-full items-center gap-sm text-left"
+            >
+              <Status
+                aria-hidden="true"
+                className={
+                  "size-(--size-glyph) shrink-0 " + (step.done ? "text-ink" : "text-ink-faint")
+                }
+                stroke={1.25}
+              />
+              <span className="min-w-0 flex-1 text-label font-medium tracking-ui">
+                {step.title}
+                {step.required ? <span className="text-ink-soft">*</span> : null}
+              </span>
+              <Chevron
+                aria-hidden="true"
+                className="size-(--size-glyph) shrink-0 text-ink-soft"
+                stroke={1.25}
+              />
+            </CollapsibleTrigger>
+            <CollapsibleContent id={contentId}>
+              {/* Everything under the name stands where the name stands, past the mark's own
+                  gutter, so the step reads as one column rather than as a title with the rest
+                  hanging off its left. */}
+              <div className={cn(STEP_INSET, "flex flex-col items-start gap-2xl pb-sm")}>
+                {step.note ? (
+                  <span className="text-fine leading-chrome text-ink-soft">{step.note}</span>
+                ) : null}
+                {step.body}
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        );
+      })}
+    </div>
+  );
 }
 
 /** Wiring one app: the accounts it works from, the workspace installs it needs, and the standing
@@ -262,17 +409,30 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
     navigate(newChatHash(agent.id));
   }
 
-  async function arm(schedule: SetupSchedule, cadence: SetupCadence) {
+  /** A cadence the offers do not cover, in the member's own words. Only they know what they meant
+   *  by it, so the words go to the app rather than to a parser here: it composes the schedule and
+   *  says back what it armed, in the conversation the member sends them from. */
+  function sayCadence(said: string) {
+    setPendingAsk(agent.id, `${CADENCE_ASK} ${said}`, false);
+    navigate(newChatHash(agent.id));
+  }
+
+  /** Arm the app's declared schedule on this cadence, or move the cadence of the order it already
+   *  holds.
+   *
+   *  The prompt rides on the create alone. The row that exists holds it already, and the kind holds
+   *  content to the task's creator: a spec that set `prompt` again is refused for every admin who
+   *  did not arm it, on a step that only ever asked them how often. Omitting it preserves what the
+   *  order runs. */
+  async function arm(schedule: SetupSchedule, cadence: SetupCadence, armed: boolean) {
     setNotice(QUIET);
     setArming(schedule.name);
+    const cron = cronFor(cadence, new Date().getTimezoneOffset());
     const outcome = await postIntent(agent.id, {
       verb: "apply",
       kind: SCHEDULE_KIND,
       name: schedule.name,
-      spec: {
-        schedule: cronFor(cadence, new Date().getTimezoneOffset()),
-        prompt: schedule.prompt,
-      },
+      spec: armed ? { schedule: cron } : { schedule: cron, prompt: schedule.prompt },
     });
     setArming(null);
     if (!outcome.applied) {
@@ -288,68 +448,86 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
         const connectors = payload.connectors ?? [];
         const credentials = payload.credentials ?? [];
         const standing = payload.standing ?? [];
+        const schedule = payload.schedule ?? null;
+        const steps: SetupStep[] = [
+          ...connectors.map((connector, index) => {
+            const title = `${CONNECT} ${connector.label}`;
+            return {
+              key: `connector:${connector.provider}:${index}`,
+              title: ACCOUNT_STEP,
+              note: connectNote(connector.label, connector.summary),
+              required: connector.required,
+              done: connector.granted,
+              body: connector.granted ? (
+                CONNECTED
+              ) : (
+                <Button
+                    variant="outline"
+                    size="bar"
+                    className="my-sm bg-surface text-ink"
+                    busy={connecting === connector.provider}
+                    disabled={connecting !== null && connecting !== connector.provider}
+                    onClick={() => connect(connector.provider)}
+                  >
+                    <ProviderGlyph
+                      provider={connector.provider}
+                      className="size-(--size-glyph) text-ink"
+                    />
+                    {connecting === connector.provider ? CONNECTING : title}
+                  </Button>
+              ),
+            };
+          }),
+          ...credentials.map((credential, index) => {
+            const title = `${INSTALL} ${credential.label}`;
+            return {
+              key: `credential:${credential.label}:${index}`,
+              title: INSTALL_STEP,
+              note: `${credential.label} is filled once for the whole workspace.`,
+              required: credential.required,
+              done: credential.filled,
+              body: installValue(credential, title),
+            };
+          }),
+          ...standing.map((order, index) => {
+            const scheduled = order.kind === SCHEDULE_KIND && schedule !== null;
+            const title = scheduled ? CHOOSE_WHEN : SET_UP;
+            return {
+              key: `standing:${order.kind}:${index}`,
+              title: scheduled ? SCHEDULE_STEP : TRIGGER_STEP,
+              note: scheduled ? SCHEDULE_NOTE : TRIGGER_NOTE,
+              required: order.required,
+              done: order.armed,
+              body: standingValue(order, schedule, title),
+            };
+          }),
+        ];
         return (
           <div className="flex flex-col gap-2xl">
-          {connectors.length ? (
-            <Group title={ACCOUNTS}>
-              <Facts
-                rows={connectors.map((connector) => ({
-                  label: connector.provider,
-                  value: connector.granted ? (
-                    CONNECTED
-                  ) : (
-                    <span className="flex items-center justify-end gap-lg">
-                      <span>{OUTSTANDING}</span>
-                      <Button
-                        variant="outline"
-                        size="bar"
-                        busy={connecting === connector.provider}
-                        disabled={connecting !== null && connecting !== connector.provider}
-                        onClick={() => connect(connector.provider)}
-                      >
-                        {connecting === connector.provider ? CONNECTING : CONNECT}
-                      </Button>
-                    </span>
-                  ),
-                }))}
-              />
-            </Group>
-          ) : null}
-          {credentials.length ? (
-            <Group title={WORKSPACE_INSTALLS}>
-              <Facts
-                rows={credentials.map((credential) => ({
-                  label: credential.label,
-                  value: installValue(credential),
-                }))}
-              />
-            </Group>
-          ) : null}
-          {standing.length ? (
-            <Group title={RUNS}>
-              <Facts
-                rows={standing.map((order) => ({
-                  label: noun(order.kind),
-                  value: standingValue(order, payload.schedule ?? null),
-                }))}
-              />
-            </Group>
-          ) : null}
-          <Notice tone={notice.refused ? "attention" : "quiet"}>{notice.text}</Notice>
-          {link ? (
-            <Notice>
-              <ConsentLink url={link}>Open the install page</ConsentLink>
-            </Notice>
-          ) : null}
-          {payload.instructions ? (
-            <p className="m-0 max-w-hint text-label text-ink-soft">{payload.instructions}</p>
-          ) : null}
-            <div className="flex flex-col gap-lg">
-              <Button variant="send" className="self-start" onClick={buildApp}>
-                {BUILD_APP}
-              </Button>
-              <p className="m-0 max-w-hint text-label text-ink-soft">{BUILD_NOTE}</p>
+            {/* What the app is stands over what it still needs, in the column that holds them
+                both: a member meets the app before the list of what it is waiting on. */}
+            <div className="flex flex-col gap-2xs">
+              <h1 className="m-0 text-subtitle leading-chrome font-medium">
+                {`${SET_UP_APP} ${agentName(agent.name)} app`}
+              </h1>
+              {agent.purpose ? (
+                <p className="m-0 max-w-hint text-label leading-chrome text-ink-soft">
+                  {agent.purpose}
+                </p>
+              ) : null}
             </div>
+            <SetupStepper steps={steps} />
+            {notice.text ? (
+              <Notice tone={notice.refused ? "attention" : "quiet"}>{notice.text}</Notice>
+            ) : null}
+            {link ? (
+              <Notice>
+                <ConsentLink url={link}>Open the install page</ConsentLink>
+              </Notice>
+            ) : null}
+            <Button variant="send" size="bar" className="self-start" onClick={buildApp}>
+              {BUILD_APP}
+            </Button>
           </div>
         );
       }}
@@ -360,78 +538,105 @@ export function AgentSetup({ agent, admin }: { agent: Agent; admin: boolean }) {
    *  the press that hands an admin the link; where it does not, or where the member is not an
    *  admin, the row states what is true and offers nothing — which is honest, because there is
    *  nothing they can press. */
-  function installValue(credential: NonNullable<SetupState["credentials"]>[number]) {
+  function installValue(
+    credential: NonNullable<SetupState["credentials"]>[number],
+    title: string,
+  ) {
     if (credential.filled) return INSTALLED;
     const verb = credential.provider === null ? undefined : INSTALL_VERB[credential.provider];
     if (verb === undefined) return NOT_INSTALLED;
     if (!admin) {
       return (
-        <span className="flex items-center justify-end gap-lg">
-          <span>{NOT_INSTALLED}</span>
-          <span className="text-ink-soft">{ADMIN_INSTALLS}</span>
-        </span>
+        <span className="text-ink-soft">{ADMIN_INSTALLS}</span>
       );
     }
     const provider = credential.provider as string;
     return (
-      <span className="flex items-center justify-end gap-lg">
-        <span>{NOT_INSTALLED}</span>
-        <Button
+      <Button
           variant="outline"
           size="bar"
+          className="my-sm bg-surface text-ink"
           busy={installing === provider}
           disabled={installing !== null && installing !== provider}
           onClick={() => install(provider)}
         >
-          {INSTALL}
-        </Button>
-      </span>
+          {title}
+      </Button>
     );
   }
 
   function standingValue(
     order: NonNullable<SetupState["standing"]>[number],
     schedule: SetupSchedule | null,
+    title: string,
   ) {
-    if (order.armed) return ARMED;
+    if (order.armed && (order.kind !== SCHEDULE_KIND || schedule === null)) return ARMED;
     /* A kind the app offers no cadence for is settled in chat, because settling it is more than one
        answer: a feed trigger takes a registered source, shared, and a trigger naming it. So the row
        carries the ask rather than a control it cannot complete — a row that stated the need and
        offered nothing left the member reading a chore with no way to do it. */
     if (order.kind !== SCHEDULE_KIND || schedule === null) {
       return (
-        <span className="flex items-center justify-end gap-lg">
-          <span>{NOT_SET}</span>
-          <Button variant="outline" size="bar" onClick={ask}>
-            {SET_UP}
-          </Button>
-        </span>
+        <Button variant="outline" size="bar" className="my-sm bg-surface text-ink" onClick={ask}>
+          {title}
+        </Button>
       );
     }
     /* The cadence is the whole of what the member is asked. The app authored the prompt, because
        the prompt IS the app's job — asking a member to write it is asking them to write the app
        they were given. */
+    /* What the app is armed with, said the way the offers say it. An answer the member composed
+       themselves matches no offer, so it stands in the field they wrote it in rather than being
+       dropped: the step shows what it is set to either way. */
+    const held = order.schedule ? cadenceOf(order.schedule, new Date().getTimezoneOffset()) : null;
+    const taken = held ? labelOf(held) : "";
+    const offered = schedule.cadences.some((offer) => labelOf(offer) === taken);
     return (
-      <span className="flex items-center justify-end gap-lg">
-        <span>{NOT_SET}</span>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="bar" busy={arming === schedule.name}>
-              {arming === schedule.name ? ARMING : PICK}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {schedule.cadences.map((cadence) => (
-              <DropdownMenuItem
-                key={cronFor(cadence, 0)}
-                onSelect={() => void arm(schedule, cadence)}
-              >
-                {labelOf(cadence)}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </span>
+      <div className="flex w-full flex-col gap-2xl">
+        <ToggleGroupOne
+          className="flex flex-col gap-2xs"
+          value={taken && offered ? taken : ""}
+          onValueChange={(picked) => {
+            const cadence = schedule.cadences.find((offer) => labelOf(offer) === picked);
+            if (cadence) void arm(schedule, cadence, order.armed);
+          }}
+        >
+          {schedule.cadences.map((cadence) => (
+            <ToggleGroupItem
+              key={cronFor(cadence, 0)}
+              value={labelOf(cadence)}
+              disabled={arming !== null}
+              className={cn(
+                "group flex h-10 w-full items-center justify-between rounded-(--radius-answer)",
+                "border-0 bg-surface px-2xl text-start text-label text-ink hover:bg-fill-strong",
+                "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
+              )}
+            >
+              {labelOf(cadence)}
+              <IconCheck
+                className={cn(
+                  "size-(--size-glyph) shrink-0 text-ink-soft opacity-0",
+                  "group-data-[state=on]:opacity-100",
+                )}
+                aria-hidden
+              />
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroupOne>
+        <Input
+          surface="answer"
+          className="bg-surface placeholder:text-ink-soft"
+          aria-label={ANOTHER_CADENCE}
+          placeholder={OWN_CADENCE}
+          defaultValue={taken && !offered ? taken : undefined}
+          disabled={arming !== null}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            const said = event.currentTarget.value.trim();
+            if (said) sayCadence(said);
+          }}
+        />
+      </div>
     );
   }
 }

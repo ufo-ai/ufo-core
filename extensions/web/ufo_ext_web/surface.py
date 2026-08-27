@@ -2245,11 +2245,25 @@ def _connect_control(ctx: SurfaceContext, provider: str, turn_id: UUID) -> dict[
 def _provider_label(ctx: SurfaceContext, provider: str) -> str:
     """The words the portal already uses for this provider: the first-run catalog's label, so the
     chat control and the connect tiles name one thing one way, or the connect flow's declared name
-    for a provider the catalog does not curate."""
+    for a provider the catalog does not curate.
+
+    A deploy holding no connect machinery still draws the accounts an app declares — the setup
+    screen states what an app runs on whether or not this deploy can grant it — so an uncurated
+    provider falls back to the slug it is named by rather than taking the screen down with it."""
     for tile in FIRST_RUN_PROVIDERS:
         if tile.name == provider:
             return tile.label
-    return ctx.connect_label(provider)
+    return ctx.connect_label(provider) if ctx.connect_available() else provider
+
+
+def _provider_summary(provider: str) -> str:
+    """What an app does once this account answers for it, in the words the connect tiles already
+    use. A provider the catalog does not curate says nothing rather than a sentence written here:
+    the screen carries a line under the name only where there is one to carry."""
+    for tile in FIRST_RUN_PROVIDERS:
+        if tile.name == provider:
+            return tile.summary
+    return ""
 
 
 async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
@@ -4424,15 +4438,27 @@ async def agent_setup(ctx: SurfaceContext, request: Request) -> Response:
     It answers the agent's whole web audience, like the settings read beside it — what an app runs
     on is what the app is, and a member who cannot see it cannot tell a resting app from an unwired
     one. Which account answered a provider is not here; that is `agents/{id}/connections`, gated on
-    the member."""
+    the member.
+
+    Each account carries the words the portal names that provider by. The declaration holds a slug,
+    and a step reading "Connect googlecalendar" names the wire rather than the account a member
+    would go and find; the label is added here because this is where the portal's own naming lives,
+    beside the connect tiles it has to agree with."""
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     member_id, _email, _audience, agent_id = gated
     state = await ctx.agent_setup(agent_id, member_id)
-    return JSONResponse(
-        {**state.model_dump(mode="json"), "own_page": await _has_own_page(ctx, agent_id, member_id)}
-    )
+    payload = state.model_dump(mode="json")
+    payload["connectors"] = [
+        {
+            **connector,
+            "label": _provider_label(ctx, connector["provider"]),
+            "summary": _provider_summary(connector["provider"]),
+        }
+        for connector in payload["connectors"]
+    ]
+    return JSONResponse({**payload, "own_page": await _has_own_page(ctx, agent_id, member_id)})
 
 
 async def _has_own_page(ctx: SurfaceContext, agent_id: UUID, member_id: UUID) -> bool:

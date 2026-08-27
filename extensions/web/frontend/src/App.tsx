@@ -860,10 +860,12 @@ function RoutedPane({
       const app = agents.find((entry) => entry.id === route.agentId) ?? null;
       if (!app) return <PaneNote>No such app.</PaneNote>;
       return (
-        <Pane className={COLUMN}>
-          <Header crumb={crumb} title={SETUP} lede={app.purpose ?? undefined} />
-          <div className="flex-1 overflow-y-auto p-2xl">
-            <AgentSetup agent={app} admin={member.admin} />
+        <Pane>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <Header crumb={crumb} title={SETUP} pinned />
+            <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")}>
+              <AgentSetup agent={app} admin={member.admin} />
+            </div>
           </div>
         </Pane>
       );
