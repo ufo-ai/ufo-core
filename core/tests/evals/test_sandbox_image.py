@@ -51,6 +51,24 @@ def test_prepare_reuses_a_compatible_content_address(
     plan.prepare()
 
 
+def test_prepare_creates_the_lock_parent_for_a_registry_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+    plan = SandboxImagePlan(
+        tmp_path / "unused.Dockerfile",
+        "ghcr.io/metalcraftai/ufo-sandbox:0123456789abcdef",
+        "sha256:source",
+    )
+    monkeypatch.setattr("evals.sandbox_image.tempfile.gettempdir", lambda: str(temp_dir))
+    monkeypatch.setattr(SandboxImagePlan, "_compatible", lambda _: True)
+
+    plan.prepare()
+
+    assert (temp_dir / "ghcr.io/metalcraftai/ufo-sandbox-0123456789abcdef.lock").is_file()
+
+
 def test_prepare_replaces_a_stale_image_with_the_current_content_address(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

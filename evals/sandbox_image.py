@@ -39,6 +39,7 @@ class SandboxImagePlan:
 
     def prepare(self) -> None:
         lock = Path(tempfile.gettempdir()) / f"{self.reference.replace(':', '-')}.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
         with lock.open("a+b") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             if self._compatible():
