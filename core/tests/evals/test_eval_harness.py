@@ -51,6 +51,7 @@ from evals.__main__ import (
 )
 from evals.__main__ import _run as run_evals
 from evals.__main__ import main as eval_main
+from evals.budget import EvalRunBudget
 from evals.compaction.target import CompactionTarget
 from evals.driver import (
     CANDIDATE_AGENT_NAME,
@@ -209,7 +210,7 @@ from ufo.access.credentials import (
     open_installation,
     seal_installation,
 )
-from ufo.billing.accounting import Pricing
+from ufo.billing.accounting import BalanceGate, Pricing, record_workspace_usage
 from ufo.billing.balance import credit, set_reserve
 from ufo.blob import BlobNotFound, FilesystemBlobStore, S3BlobStore
 from ufo.config import (
@@ -253,6 +254,7 @@ from ufo.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.models.pricing import ModelPrice, pricing_from
 from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef, validate_object_name
 from ufo.onboard.onboard_control import deterministic_workspace_id
@@ -7002,7 +7004,7 @@ def test_remote_eval_homes_live_under_the_ignored_local_root() -> None:
     assert ".local/" in Path(".gitignore").read_text().splitlines()
 
 
-async def test_remote_workspace_provisioner_founds_an_unmetered_run_derived_workspace(
+async def test_remote_workspace_provisioner_reserves_the_run_budget(
     db: None,
 ) -> None:
     run_id = UUID("11111111-2222-3333-4444-555555555555")
@@ -7037,7 +7039,9 @@ async def test_remote_workspace_provisioner_founds_an_unmetered_run_derived_work
         headers={"authorization": "Bearer control-token"},
         transport=MockTransport(handle),
     ) as client:
-        workspace_id = await RemoteWorkspaceProvisioner(client).provision(run_id)
+        workspace_id = await RemoteWorkspaceProvisioner(
+            client, budget_micro_usd=20_000_000
+        ).provision(run_id)
 
     assert workspace_id == expected
     assert received == [
@@ -7055,20 +7059,104 @@ async def test_remote_workspace_provisioner_founds_an_unmetered_run_derived_work
     async with workspace_tx() as connection:
         purchases = (
             await connection.execute(
-                sa.select(sa.func.count())
-                .select_from(tables.balance_purchase)
-                .where(tables.balance_purchase.c.workspace_id == expected)
+                sa.select(
+                    tables.balance_purchase.c.reference,
+                    tables.balance_purchase.c.granted_micro_usd,
+                    tables.balance_purchase.c.charged_micro_usd,
+                ).where(tables.balance_purchase.c.workspace_id == expected)
             )
-        ).scalar_one()
+        ).all()
         balance = (
             await connection.execute(
-                sa.select(tables.workspace_balance.c.workspace_id).where(
-                    tables.workspace_balance.c.workspace_id == expected
-                )
+                sa.select(
+                    tables.workspace_balance.c.balance_micro_usd,
+                    tables.workspace_balance.c.reserve_micro_usd,
+                ).where(tables.workspace_balance.c.workspace_id == expected)
             )
-        ).one_or_none()
-    assert purchases == 0
-    assert balance is None
+        ).one()
+    assert purchases == [(f"eval/{run_id}", 20_000_000, 0)]
+    assert balance == (20_000_000, 0)
+
+
+async def test_remote_run_budget_is_not_replenished_after_corpus_spend(db: None) -> None:
+    run_id = UUID("11111111-2222-3333-4444-555555555555")
+    workspace_id = await _workspace()
+    allocation = 1_200_000
+
+    budget = EvalRunBudget(run_id, allocation)
+    await budget.install(workspace_id)
+
+    async with workspace_tx() as connection:
+        purchases = (
+            await connection.execute(
+                sa.select(
+                    tables.balance_purchase.c.reference,
+                    tables.balance_purchase.c.granted_micro_usd,
+                    tables.balance_purchase.c.charged_micro_usd,
+                ).where(tables.balance_purchase.c.workspace_id == workspace_id)
+            )
+        ).all()
+        balance = (
+            await connection.execute(
+                sa.select(
+                    tables.workspace_balance.c.balance_micro_usd,
+                    tables.workspace_balance.c.reserve_micro_usd,
+                ).where(tables.workspace_balance.c.workspace_id == workspace_id)
+            )
+        ).one()
+        gate = BalanceGate(workspace_id)
+        entering = await gate.admits(connection)
+        positive = await gate.sustains(connection, pending_micro_usd=allocation - 1)
+        zero = await gate.sustains(connection, pending_micro_usd=allocation)
+        pricing = pricing_from(
+            {
+                "metered": ModelPrice(
+                    input=allocation + 1,
+                    output=0,
+                    cache_read=0,
+                    cache_write_5m=0,
+                    cache_write_1h=0,
+                )
+            }
+        )
+        await record_workspace_usage(
+            connection,
+            workspace_id,
+            "metered",
+            Usage(input_tokens=1_000_000),
+            pricing,
+        )
+
+    await budget.install(workspace_id)
+
+    async with workspace_tx() as connection:
+        gate = BalanceGate(workspace_id)
+        stopped = await gate.sustains(connection, pending_micro_usd=1)
+        exhausted_balance = (
+            await connection.execute(
+                sa.select(
+                    tables.workspace_balance.c.balance_micro_usd,
+                    tables.workspace_balance.c.reserve_micro_usd,
+                ).where(tables.workspace_balance.c.workspace_id == workspace_id)
+            )
+        ).one()
+        ledger = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.debited_micro_usd,
+                ).where(tables.ledger.c.workspace_id == workspace_id)
+            )
+        ).one()
+    assert purchases == [(f"eval/{run_id}", allocation, 0)]
+    assert balance == (allocation, 0)
+    assert entering.outcome == "allow"
+    assert positive.outcome == "allow"
+    assert zero.outcome == "reject"
+    assert exhausted_balance == (-1, 0)
+    assert ledger == (1_000_000, allocation + 1, allocation + 1)
+    assert stopped.outcome == "reject"
 
 
 @pytest.mark.parametrize("invalid", ("workspace", "admin", "founding"))
@@ -7090,7 +7178,7 @@ async def test_remote_workspace_provisioner_rejects_a_non_founding_response(
         base_url="https://workspace.test", transport=MockTransport(handle)
     ) as client:
         with pytest.raises(RuntimeError, match="did not create the expected admin workspace"):
-            await RemoteWorkspaceProvisioner(client).provision(run_id)
+            await RemoteWorkspaceProvisioner(client, 20_000_000).provision(run_id)
 
 
 async def test_remote_workspace_driver_uses_the_ufo_json_transport(
@@ -8749,7 +8837,7 @@ async def test_capability_case_records_complete_evidence_from_the_real_target(
 
 
 def test_eval_run_is_recorded_without_git(tmp_path, monkeypatch) -> None:
-    async def run(*_args) -> tuple[tuple[EvalReport, ...], str]:
+    async def run(*_args, **_kwargs) -> tuple[tuple[EvalReport, ...], str]:
         return (), "be helpful"
 
     def missing_git(*_args, **_kwargs):
@@ -8769,28 +8857,39 @@ def test_eval_run_is_recorded_without_git(tmp_path, monkeypatch) -> None:
     assert recorded[0].agent_prompt == "be helpful"
 
 
-def test_remote_eval_flag_reaches_the_suite_runner(tmp_path, monkeypatch) -> None:
-    received: list[bool] = []
+def test_remote_eval_budget_and_stack_run_id_reach_the_suite_runner(tmp_path, monkeypatch) -> None:
+    run_id = UUID("11111111-2222-3333-4444-555555555555")
+    received: list[tuple[bool, int, UUID]] = []
 
-    async def run(*args) -> tuple[tuple[EvalReport, ...], str]:
-        received.append(args[-3])
+    async def run(*args, **kwargs) -> tuple[tuple[EvalReport, ...], str]:
+        received.append((kwargs["remote"], kwargs["budget_micro_usd"], args[3].id))
         return (), "be helpful"
 
     monkeypatch.setattr("evals.__main__._run", run)
     monkeypatch.setattr("evals.__main__.load_config", lambda: object())
     monkeypatch.setattr("evals.__main__.version", lambda _package: "0.1.0")
 
-    eval_main(["--remote", "--out", str(tmp_path)])
+    eval_main(
+        [
+            "--remote",
+            "--budget-usd",
+            "1.25",
+            "--run-id",
+            str(run_id),
+            "--out",
+            str(tmp_path),
+        ]
+    )
 
-    assert received == [True]
+    assert received == [(True, 1_250_000, run_id)]
 
 
 def test_candidate_arm_labels_the_recorded_run(tmp_path, monkeypatch) -> None:
     proposal_id = uuid4()
     received: list[UUID] = []
 
-    async def run(*args) -> tuple[tuple[EvalReport, ...], str]:
-        received.append(args[-2])
+    async def run(*_args, **kwargs) -> tuple[tuple[EvalReport, ...], str]:
+        received.append(kwargs["candidate_proposal"])
         return (), "candidate prompt"
 
     def missing_git(*_args, **_kwargs):
@@ -8939,8 +9038,9 @@ async def test_fresh_workspace_is_provisioned_before_agent_resolution(
         events.append("validated")
 
     class Provisioner:
-        def __init__(self, client: AsyncClient) -> None:
+        def __init__(self, client: AsyncClient, budget_micro_usd: int) -> None:
             assert client.headers["authorization"] == "Bearer onboard-token"
+            assert budget_micro_usd == 20_000_000
 
         async def provision(self, run_id: UUID) -> UUID:
             assert events == ["validated"]
@@ -8989,6 +9089,7 @@ async def test_fresh_workspace_is_provisioned_before_agent_resolution(
             recorder,
             remote=True,
             fresh_workspace=True,
+            budget_micro_usd=20_000_000,
         )
 
     assert calls == [recorder.id]

@@ -13,6 +13,7 @@ from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 from ufo_testsupport.migrations import apply_cached_migrations
 
 from evals.__main__ import _tasks as selected_eval_tasks
+from evals.budget import EvalRunBudget
 from evals.harness.capability import CapabilityOutput, ToolInvocation, TurnLog
 from evals.memory_100.build import SELECTION_FILE, Selection
 from evals.memory_ingestion.build import MemoryIngestionBuilder
@@ -40,6 +41,7 @@ from ufo.db import dispose_db, init_db, workspace_tx
 from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import ModelEvent, ModelRequest, ToolCallDelta, ToolCallStart
 from ufo.models.registry import ModelRegistry
+from ufo.schema import tables
 from ufo.schema.records import Usage
 
 
@@ -51,8 +53,22 @@ class DeterministicEmbed:
 @dataclass
 class ExtractionClient:
     requests: list[ModelRequest] = field(default_factory=list)
+    run_budget: EvalRunBudget | None = None
+    observed_budget: bool = False
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        if self.run_budget is not None:
+            async with workspace_tx() as connection:
+                purchase = (
+                    await connection.execute(
+                        sa.select(
+                            tables.balance_purchase.c.reference,
+                            tables.balance_purchase.c.granted_micro_usd,
+                        )
+                    )
+                ).one()
+            assert purchase == (f"eval/{self.run_budget.run_id}", self.run_budget.micro_usd)
+            self.observed_budget = True
         self.requests.append(request)
         message = request.messages[0].content
         assert isinstance(message, str)
@@ -270,7 +286,8 @@ async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory
 ) -> None:
     snapshot_root = tmp_path / "snapshot"
     _snapshot(snapshot_root)
-    client = ExtractionClient()
+    run_budget = EvalRunBudget(uuid4(), 1_250_000)
+    client = ExtractionClient(run_budget=run_budget)
     blob = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path / "blobs"))
     materializer = MemoryIngestionMaterializer.from_snapshot(
         snapshot_root,
@@ -281,6 +298,7 @@ async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory
         manifests=(memory_manifest.manifest(),),
         registry=_registry(client),
         background_model=DERIVATION_MODEL,
+        run_budget=run_budget,
     )
 
     readiness = await materializer.run()
@@ -290,6 +308,7 @@ async def test_materializer_runs_luna_derivation_and_indexes_only_derived_memory
     assert readiness.memory_count == 1
     assert readiness.evidence[0].memory_ids
     assert client.requests
+    assert client.observed_budget
     assert {request.model for request in client.requests} == {DERIVATION_MODEL}
     async with workspace_tx() as connection:
         owners = (

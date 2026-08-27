@@ -33,6 +33,7 @@ from ufo_ext_memory.store import (
     memory_item,
 )
 
+from evals.budget import EvalRunBudget
 from evals.issue_recall.corpus import (
     Ambient,
     RenderedPage,
@@ -81,6 +82,7 @@ class Materializer:
     registry: ModelRegistry
     background_model: str
     postgres: bool
+    run_budget: EvalRunBudget | None = None
 
     async def run(self) -> CorpusReadiness:
         workspace_id = await self._workspace()
@@ -91,6 +93,8 @@ class Materializer:
         with ws(workspace_id):
             await self._refuse_foreign_state(source_id)
         await asyncio.to_thread(self._stage_pages)
+        if self.run_budget is not None:
+            await self.run_budget.install(workspace_id)
         with ws(workspace_id):
             await register_sources((entry,))
             await SyncDriver(
@@ -312,7 +316,9 @@ class Materializer:
             ).scalar_one()
 
 
-async def _run(config: Config, state_root: Path) -> CorpusReadiness:
+async def _run(
+    config: Config, state_root: Path, run_budget: EvalRunBudget | None
+) -> CorpusReadiness:
     init_db(config.database.url)
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
@@ -330,6 +336,7 @@ async def _run(config: Config, state_root: Path) -> CorpusReadiness:
             registry=model_registry(config, manifests),
             background_model=config.models.background_jobs_model,
             postgres=config.database.url.startswith("postgresql"),
+            run_budget=run_budget,
         ).run()
     finally:
         init_workspace_credentials(None)
@@ -339,8 +346,13 @@ async def _run(config: Config, state_root: Path) -> CorpusReadiness:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m evals.issue_recall.materialize")
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--run-id", type=UUID)
+    parser.add_argument("--budget-micro-usd", type=int)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    readiness = asyncio.run(_run(load_config(), args.state))
+    if (args.run_id is None) != (args.budget_micro_usd is None):
+        parser.error("--run-id and --budget-micro-usd must be provided together")
+    run_budget = None if args.run_id is None else EvalRunBudget(args.run_id, args.budget_micro_usd)
+    readiness = asyncio.run(_run(load_config(), args.state, run_budget))
     output = args.state / readiness.corpus_digest.removeprefix("sha256:") / "readiness.json"
     output.write_text(
         json.dumps(readiness.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) + "\n"

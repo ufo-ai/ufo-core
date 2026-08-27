@@ -2,7 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -320,7 +320,10 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
 
 def test_eval_runner_requires_remote_workspace_for_terminal_bench(
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    load = Mock(side_effect=AssertionError("configuration was loaded"))
+    monkeypatch.setattr("evals.__main__.load_config", load)
     with pytest.raises(SystemExit):
         evals_main(["--terminal-bench"])
     assert "--terminal-bench requires --remote" in capsys.readouterr().err
@@ -328,6 +331,20 @@ def test_eval_runner_requires_remote_workspace_for_terminal_bench(
     with pytest.raises(SystemExit):
         evals_main(["--terminal-bench", "--remote"])
     assert "--terminal-bench requires --workspace" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        evals_main(
+            [
+                "--terminal-bench",
+                "--remote",
+                "--workspace",
+                str(uuid4()),
+                "--budget-usd",
+                "50",
+            ]
+        )
+    assert "--budget-usd is not supported with --terminal-bench" in capsys.readouterr().err
+    load.assert_not_called()
 
 
 async def test_remote_credentials_bind_the_workspace_admin_and_built_client(

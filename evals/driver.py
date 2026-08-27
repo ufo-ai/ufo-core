@@ -26,6 +26,7 @@ from httpx import AsyncClient
 from pydantic import JsonValue, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from evals.budget import EvalRunBudget
 from evals.harness.capability import UndeliveredRound, WorkspaceFile
 from evals.harness.timing import TurnStep
 from ufo.auth.bearer import mint_token
@@ -38,8 +39,6 @@ from ufo.models.catalog import CORE_PRICING
 from ufo.models.pricing import Pricing
 from ufo.object_name import validate_object_name
 from ufo.onboard.onboard_control import (
-    SIGNUP_GRANT_MICRO_USD,
-    SIGNUP_RESERVE_MICRO_USD,
     EnsuredWorkspace,
     SeatRequest,
     deterministic_workspace_id,
@@ -89,6 +88,7 @@ class RemoteTurnTimeout(Exception):
 @dataclass(frozen=True)
 class RemoteWorkspaceProvisioner:
     client: AsyncClient
+    budget_micro_usd: int
 
     async def provision(self, run_id: UUID) -> UUID:
         """Found one clean hosted workspace whose identity is derived from the eval run."""
@@ -122,41 +122,7 @@ class RemoteWorkspaceProvisioner:
             raise RuntimeError(
                 "hosted eval workspace provisioning did not create the expected admin workspace"
             )
-        with ws(workspace_id):
-            async with workspace_tx() as connection:
-                purchases = (
-                    await connection.execute(
-                        sa.select(
-                            tables.balance_purchase.c.reference,
-                            tables.balance_purchase.c.granted_micro_usd,
-                            tables.balance_purchase.c.charged_micro_usd,
-                        ).where(tables.balance_purchase.c.workspace_id == workspace_id)
-                    )
-                ).all()
-                balance = (
-                    await connection.execute(
-                        sa.select(
-                            tables.workspace_balance.c.balance_micro_usd,
-                            tables.workspace_balance.c.reserve_micro_usd,
-                        ).where(tables.workspace_balance.c.workspace_id == workspace_id)
-                    )
-                ).one_or_none()
-                if purchases != [
-                    (f"signup/{workspace_id}", SIGNUP_GRANT_MICRO_USD, 0)
-                ] or balance != (SIGNUP_GRANT_MICRO_USD, SIGNUP_RESERVE_MICRO_USD):
-                    raise RuntimeError(
-                        "hosted eval workspace provisioning returned an unexpected balance"
-                    )
-                await connection.execute(
-                    sa.delete(tables.balance_purchase).where(
-                        tables.balance_purchase.c.workspace_id == workspace_id
-                    )
-                )
-                await connection.execute(
-                    sa.delete(tables.workspace_balance).where(
-                        tables.workspace_balance.c.workspace_id == workspace_id
-                    )
-                )
+        await EvalRunBudget(run_id, self.budget_micro_usd).install(workspace_id)
         return workspace_id
 
 

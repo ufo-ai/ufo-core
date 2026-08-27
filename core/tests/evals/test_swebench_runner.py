@@ -764,6 +764,8 @@ def test_fresh_workspace_accepts_a_remote_capability_suite(
                 "coding-subagent-github-app-api",
                 "--fresh-workspace",
                 "--remote",
+                "--budget-usd",
+                "20",
                 "--out",
                 str(tmp_path),
             ]
@@ -802,26 +804,24 @@ def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
         pack=PackConfig(name="assistant"),
     )
     monkeypatch.setattr("evals.__main__.load_config", lambda: config)
-    reached: list[tuple[tuple[str, ...], float, str, bool, bool, int]] = []
+    reached: list[tuple[tuple[str, ...], float, str, bool, bool, int, int]] = []
 
     async def run(
         _config: object,
         tasks: tuple[EvalTask, ...],
         _agent: object,
         _recorder: object,
-        _workspace: object,
-        _collector: object,
-        workflow_wait_seconds: float,
-        *_rest: object,
+        **kwargs: object,
     ) -> NoReturn:
         reached.append(
             (
                 tuple(task.name for task in tasks),
-                workflow_wait_seconds,
+                float(kwargs["workflow_wait_seconds"]),
                 capsys.readouterr().out,
-                bool(_rest[2]),
-                bool(_rest[3]),
-                int(_rest[5]),
+                bool(kwargs["fresh_workspace"]),
+                bool(kwargs["remote"]),
+                int(kwargs["concurrency"]),
+                int(kwargs["budget_micro_usd"]),
             )
         )
         raise RunStarted
@@ -839,6 +839,8 @@ def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
                 str(submissions),
                 "--fresh-workspace",
                 "--remote",
+                "--budget-usd",
+                "20",
                 "--concurrency",
                 "8",
             ]
@@ -852,5 +854,6 @@ def test_cli_loads_task_prints_submissions_and_routes_remote_concurrency(
             True,
             True,
             8,
+            20_000_000,
         )
     ]

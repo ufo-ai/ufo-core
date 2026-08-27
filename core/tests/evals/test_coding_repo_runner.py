@@ -1034,7 +1034,9 @@ def test_the_cli_drops_captures_under_the_root_it_is_given_once_the_run_starts(
     monkeypatch.setattr("evals.__main__.load_config", lambda: config)
     survived: list[bool] = []
 
-    async def reached(_config: object, tasks: tuple[EvalTask, ...], *_rest: object) -> NoReturn:
+    async def reached(
+        _config: object, tasks: tuple[EvalTask, ...], *_rest: object, **_kwargs: object
+    ) -> NoReturn:
         survived.append(leftover.is_file())
         for task in tasks:
             await task.run(SurvivingTurn(), asyncio.Semaphore(1))

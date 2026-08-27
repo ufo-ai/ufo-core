@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO, Self
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 import tomli_w
@@ -32,10 +32,13 @@ from cryptography.x509.oid import NameOID
 from httpx import AsyncClient, HTTPError
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from evals.budget import EvalRunBudget
 from evals.harness.viewer import load_runs, write_viewer
 from evals.sandbox_image import SandboxImagePlan, sandbox_image_plan
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
+from ufo.billing.accounting import MICRO_USD_PER_USD
 from ufo.config import Config, ConnectConfig, DatabaseConfig, O11yConfig
+from ufo.ext.loader import load_manifests
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.sandbox.session import (
     EGRESS_CA_CERT_ENV,
@@ -50,6 +53,10 @@ STACK_OWNER_EMAIL = "evals@localhost"
 APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay"})
 CREATION_SUITES = frozenset({"new_application"})
 CREATION_DISABLED_JOBS = ("web:seed_homepages",)
+ISOLATED_EXTERNAL_BILLING_JOBS = (
+    "metronome:usage_shipper",
+    "metronome:balance_topup",
+)
 APPLICATION_BUILD_PRODUCTS = (
     Path("extensions/sites/ufo_ext_sites/page/kit/kit.js"),
     Path("extensions/sites/ufo_ext_sites/page/kit/kit.css"),
@@ -74,6 +81,7 @@ ORCHESTRATOR_ARGS = (
     "--memory-ingestion",
     "--memory-ingestion-state",
     "--issue-recall",
+    "--run-id",
 )
 ORCHESTRATOR_ENV = ("UFO_CONFIG", "UFOCTL_DIR")
 
@@ -232,6 +240,7 @@ class EvalStack:
     egress_log: IO[bytes]
     eval_log: IO[bytes]
     process_log: IO[str]
+    run_budget: EvalRunBudget | None
     sandbox_image: SandboxImagePlan | None = None
 
     @classmethod
@@ -262,18 +271,39 @@ class EvalStack:
         )
         selected_parser = argparse.ArgumentParser(add_help=False)
         selected_parser.add_argument("--only", nargs="*", default=())
+        selected_parser.add_argument("--remote", action="store_true")
+        selected_parser.add_argument("--budget-usd", type=float)
         selected, _ = selected_parser.parse_known_args(spec.args)
+        if selected.budget_usd is not None and (not selected.remote or selected.budget_usd <= 0):
+            raise ValueError(
+                f"run {spec.label!r}: --budget-usd requires --remote and a positive amount"
+            )
+        run_budget = (
+            None
+            if selected.budget_usd is None
+            else EvalRunBudget(uuid4(), round(selected.budget_usd * MICRO_USD_PER_USD))
+        )
         selected_suites = frozenset(selected.only)
         if not APP_SUITES.isdisjoint(selected_suites) and not selected_suites <= APP_SUITES:
             raise ValueError("app suites require a separate eval stack")
-        if not CREATION_SUITES.isdisjoint(selected.only):
-            config = config.model_copy(
-                update={
-                    "serve": config.serve.model_copy(
-                        update={"disabled_jobs": CREATION_DISABLED_JOBS}
-                    )
-                }
+        registered_jobs = {
+            f"{manifest.name}:{job.name}"
+            for manifest in load_manifests(config.pack.name)
+            for job in manifest.jobs
+        }
+        disabled_jobs = tuple(
+            dict.fromkeys(
+                (
+                    *config.serve.disabled_jobs,
+                    *(job for job in ISOLATED_EXTERNAL_BILLING_JOBS if job in registered_jobs),
+                )
             )
+        )
+        if not CREATION_SUITES.isdisjoint(selected.only):
+            disabled_jobs = tuple(dict.fromkeys((*disabled_jobs, *CREATION_DISABLED_JOBS)))
+        config = config.model_copy(
+            update={"serve": config.serve.model_copy(update={"disabled_jobs": disabled_jobs})}
+        )
         sandbox_image = None
         if not APP_SUITES.isdisjoint(selected_suites) and config.sandbox.backend == DOCKER_BACKEND:
             sandbox_image = sandbox_image_plan(repo_root, root / "sandbox.Dockerfile")
@@ -327,6 +357,7 @@ class EvalStack:
             egress_log=(root / "egress.log").open("wb"),
             eval_log=(root / "eval.log").open("wb"),
             process_log=(root / "process.log").open("w"),
+            run_budget=run_budget,
             sandbox_image=sandbox_image,
         )
 
@@ -441,11 +472,20 @@ class EvalStack:
         return await self._materialize("evals.issue_recall.materialize")
 
     async def _materialize(self, module: str, *corpus_args: str) -> Path:
+        budget_args: tuple[str, ...] = ()
+        if self.run_budget is not None:
+            budget_args = (
+                "--run-id",
+                str(self.run_budget.run_id),
+                "--budget-micro-usd",
+                str(self.run_budget.micro_usd),
+            )
         materialize = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             module,
             *corpus_args,
+            *budget_args,
             "--state",
             str(self.root.resolve() / "state"),
             cwd=self.repo_root,
@@ -636,6 +676,8 @@ class EvalStack:
     def _child_args(self, readiness: Path | None = None) -> tuple[str, ...]:
         argv = list(self.spec.args)
         argv += ["--out", str(self.out)]
+        if self.run_budget is not None:
+            argv += ["--run-id", str(self.run_budget.run_id)]
         flags = {token.partition("=")[0] for token in argv}
         if "--label" not in flags:
             argv += ["--label", self.spec.label]

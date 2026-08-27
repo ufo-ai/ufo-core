@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import tomllib
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -338,7 +339,43 @@ def test_remote_ablation_routes_every_arm_through_the_remote_transport(tmp_path:
     written = ablation.matrix(spec.arm[0], tmp_path / "ablate-template.toml")
     matrix = Matrix.model_validate(tomllib.loads(tomli_w.dumps(written)))
 
-    assert matrix.run[0].args == ("--concurrency", "4", "--remote", "--only", "basics")
+    assert matrix.run[0].args == (
+        "--concurrency",
+        "4",
+        "--remote",
+        "--budget-usd",
+        "2.5",
+        "--only",
+        "basics",
+    )
+
+
+def test_remote_run_allocations_conserve_the_experiment_budget(tmp_path: Path) -> None:
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("basics",),
+        repeats=2,
+        remote=True,
+        budget_usd=10.000003,
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(ArmSpec(name="left", files={}), ArmSpec(name="right", files={})),
+    )
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+    control = ArmSpec.model_construct(name="control", files={})
+
+    matrices = (
+        ablation.matrix(control, tmp_path / "template.toml"),
+        *(ablation.matrix(arm, tmp_path / "template.toml") for arm in spec.arm),
+    )
+    allocations = []
+    for matrix in matrices:
+        for run in Matrix.model_validate(matrix).run:
+            index = run.args.index("--budget-usd")
+            allocations.append(Decimal(run.args[index + 1]))
+
+    assert len(allocations) == 6
+    assert sum(allocations) == Decimal("10.000003")
 
 
 def test_remote_ablation_preflights_the_selected_client(

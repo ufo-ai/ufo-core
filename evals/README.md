@@ -106,7 +106,8 @@ The experiment file names:
 - the base revision
 - the suites and the cases
 - the repeat count
-- a budget — the preflight refuses a run that goes above it
+- a budget — preflight refuses an estimate above it; remote runs divide it exactly across every
+  arm and repeat, then fund each disposable workspace with that allocation
 - the template config for the stacks
 - `[[arm]]` blocks, which map repo paths to variant files
 
@@ -132,7 +133,8 @@ name = "no-topic-list"
 ```
 
 Set `remote = true` to admit every arm through `ufo --remote --json`. Each arm still runs against
-its own isolated stack.
+its own isolated stack. A running turn may cross its workspace allocation by one model round, and
+concurrent turns may each do so; the balance gate stops every later round and admission.
 
 Verdicts compare the pass counts for each case, at the sample level. A verdict calls a change only
 in these conditions: the gap is two samples or more at equal sample counts, or a case fully fails,

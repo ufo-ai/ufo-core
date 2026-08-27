@@ -32,6 +32,7 @@ from httpx import AsyncClient, Timeout
 from pydantic import ValidationError
 from ufo_ext_memory.events import MEMORY_RECALL_EVENT
 
+from evals.budget import EvalRunBudget
 from evals.coding_repo.runner import (
     CODING_REPO_PACKS,
     load_coding_repo,
@@ -167,6 +168,7 @@ from evals.wandr.runner import (
 from ufo.access.credentials import CredentialRequests, CredentialStore, install_credential_requests
 from ufo.agent_scope import agent
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
+from ufo.billing.accounting import MICRO_USD_PER_USD
 from ufo.blob import S3BlobStore, WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, config_path, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
@@ -298,6 +300,12 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="provision a clean hosted workspace for a remote eval run",
     )
+    parser.add_argument(
+        "--budget-usd",
+        type=float,
+        help="fund a remote eval workspace with this run's spend allocation",
+    )
+    parser.add_argument("--run-id", type=UUID, help=argparse.SUPPRESS)
     parser.add_argument("--s3-bucket", help="private bucket override for --share")
     parser.add_argument("--s3-region", help="S3 region for --share")
     parser.add_argument("--s3-endpoint-url", help="S3-compatible endpoint for --share")
@@ -445,6 +453,12 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--fresh-workspace requires --remote")
     if args.fresh_workspace and args.workspace is not None:
         parser.error("--fresh-workspace conflicts with --workspace")
+    if args.budget_usd is not None and (not args.remote or args.budget_usd <= 0):
+        parser.error("--budget-usd requires --remote and a positive amount")
+    if args.run_id is not None and args.budget_usd is None:
+        parser.error("--run-id requires --budget-usd")
+    if args.fresh_workspace and args.budget_usd is None:
+        parser.error("--fresh-workspace requires --budget-usd")
     names = tuple(args.only)
     if args.case and not names:
         parser.error("--case requires --only naming the suites to narrow")
@@ -490,6 +504,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--terminal-bench requires --remote")
     if args.terminal_bench and args.workspace is None:
         parser.error("--terminal-bench requires --workspace")
+    if args.terminal_bench and args.budget_usd is not None:
+        parser.error("--budget-usd is not supported with --terminal-bench")
     if args.terminal_bench and (names or args.case):
         parser.error("Terminal-Bench is a separate eval run")
     if args.skill_loading_case and "skill_loading" not in names:
@@ -831,7 +847,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     recorder = RunRecorder(
         root=args.out,
-        id=uuid4(),
+        id=args.run_id or uuid4(),
         created_at=datetime.now(UTC),
         label=args.label,
         agent=run_agent,
@@ -844,15 +860,18 @@ def main(argv: list[str] | None = None) -> None:
             tasks,
             args.agent,
             recorder,
-            workspace_id,
-            collector,
-            workflow_wait_seconds,
-            args.mcp_atlas_url,
-            args.mcp_atlas_external_url,
-            args.fresh_workspace,
-            args.remote,
-            args.candidate_from_proposal,
-            args.concurrency,
+            workspace_id=workspace_id,
+            collector=collector,
+            workflow_wait_seconds=workflow_wait_seconds,
+            mcp_atlas_url=args.mcp_atlas_url,
+            mcp_atlas_external_url=args.mcp_atlas_external_url,
+            fresh_workspace=args.fresh_workspace,
+            remote=args.remote,
+            candidate_proposal=args.candidate_from_proposal,
+            concurrency=args.concurrency,
+            budget_micro_usd=(
+                None if args.budget_usd is None else round(args.budget_usd * MICRO_USD_PER_USD)
+            ),
         )
     )
     recorder.agent_prompt = agent_prompt
@@ -914,6 +933,7 @@ async def _run(
     remote: bool = False,
     candidate_proposal: UUID | None = None,
     concurrency: int = 1,
+    budget_micro_usd: int | None = None,
 ) -> tuple[tuple[EvalReport, ...], str]:
     init_db(config.database.url)
     manifests = load_manifests(config.pack.name)
@@ -957,6 +977,8 @@ async def _run(
                 )
                 await remote_client.validate()
             if fresh_workspace:
+                if budget_micro_usd is None:
+                    raise ValueError("a fresh remote eval workspace requires a run budget")
                 public_url = config.connect.public_base_url
                 if public_url is None:
                     raise RuntimeError("--fresh-workspace requires connect.public_base_url")
@@ -969,7 +991,9 @@ async def _run(
                         headers={"authorization": f"Bearer {control_token}"},
                     )
                 )
-                workspace_id = await RemoteWorkspaceProvisioner(onboard).provision(recorder.id)
+                workspace_id = await RemoteWorkspaceProvisioner(
+                    onboard, budget_micro_usd
+                ).provision(recorder.id)
             profile = None
             if agent_name.startswith("profile:"):
                 if candidate_proposal is not None:
@@ -993,6 +1017,8 @@ async def _run(
                 agent_model,
                 agent_reasoning,
             ) = resolved_agent
+            if budget_micro_usd is not None and not fresh_workspace:
+                await EvalRunBudget(recorder.id, budget_micro_usd).install(workspace_id)
             target_prompt = profile.prompt if profile is not None else agent_prompt
             recorder.agent_prompt = target_prompt
             recorder.workspace_id = workspace_id

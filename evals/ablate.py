@@ -44,7 +44,9 @@ budget preflight counts their cases from the snapshot instead of the registry.
 Credentials come from the invoking environment — the orchestrator adds nothing and strips
 nothing, so run it under the same minimal environment an `evals.stack` run takes. A remote
 experiment selects and validates one native client before it creates an arm, then copies those
-exact bytes into every worktree and puts that copy first on the arm's command path."""
+exact bytes into every worktree and puts that copy first on the arm's command path. Its budget is
+divided to the micro-dollar across every arm and repeat, and each remote run's disposable workspace
+is funded with that allocation."""
 
 from __future__ import annotations
 
@@ -66,6 +68,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from evals.harness.registry import narrowed_tasks
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
+from ufo.billing.accounting import MICRO_USD_PER_USD
 from ufo.sandbox.client_binary import CLIENT_BINARY_NAME
 from ufo.schema.records import ReasoningEffort
 
@@ -140,7 +143,7 @@ class ExperimentSpec(BaseModel):
     concurrency: int = 4
     max_stacks: int = 3
     remote: bool = False
-    budget_usd: float
+    budget_usd: float = Field(gt=0)
     est_usd_per_case: float = 1.20
     model: str | None = None
     reasoning: ReasoningEffort | None = None
@@ -630,14 +633,6 @@ class Ablation:
         A memory-ingestion snapshot travels as a row key, never as an argument. The stack owns
         `--memory-ingestion` and `--memory-ingestion-state`, because it materializes the corpus
         itself and only then knows where the readiness state landed."""
-        args = ["--concurrency", str(self.spec.concurrency)]
-        if self.spec.remote:
-            args.append("--remote")
-        if self.spec.agent:
-            args += ["--agent", self.spec.agent]
-        args += ["--only", *self.spec.suites]
-        if self.spec.cases:
-            args += ["--case", *self.spec.cases]
         corpus: dict[str, object] = (
             {"memory_ingestion": str(self.spec.memory_ingestion)}
             if self.spec.memory_ingestion is not None
@@ -648,8 +643,25 @@ class Ablation:
             for key, value in (("model", self.spec.model), ("reasoning", self.spec.reasoning))
             if value is not None
         }
-        return {
-            "run": [
+        arm_names = (CONTROL_ARM, *(candidate.name for candidate in self.spec.arm))
+        arm_index = arm_names.index(arm.name)
+        run_count = len(arm_names) * self.spec.repeats
+        allocation, extra = divmod(round(self.spec.budget_usd * MICRO_USD_PER_USD), run_count)
+        runs: list[dict[str, object]] = []
+        for index in range(self.spec.repeats):
+            args = ["--concurrency", str(self.spec.concurrency)]
+            if self.spec.remote:
+                global_index = arm_index * self.spec.repeats + index
+                micro_usd = allocation + (global_index < extra)
+                dollars, micros = divmod(micro_usd, MICRO_USD_PER_USD)
+                budget = f"{dollars}.{micros:06d}".rstrip("0").rstrip(".")
+                args += ["--remote", "--budget-usd", budget]
+            if self.spec.agent:
+                args += ["--agent", self.spec.agent]
+            args += ["--only", *self.spec.suites]
+            if self.spec.cases:
+                args += ["--case", *self.spec.cases]
+            runs.append(
                 {
                     "label": f"{ARM_LABEL_PREFIX}-{arm.name}-{index}",
                     "config": str(config),
@@ -657,9 +669,8 @@ class Ablation:
                     **agent,
                     **corpus,
                 }
-                for index in range(self.spec.repeats)
-            ]
-        }
+            )
+        return {"run": runs}
 
     async def _stack(self, arm: ArmSpec, root: Path) -> tuple[int, str]:
         environment = None

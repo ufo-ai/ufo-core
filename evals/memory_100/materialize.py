@@ -16,6 +16,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from evals.budget import EvalRunBudget
 from evals.memory_100.models import Snapshot
 from evals.memory_100.snapshot import load_snapshot
 from evals.memory_100.state import AudienceBinding, CorpusAttestor, CorpusReadiness
@@ -69,6 +70,7 @@ class Memory100Materializer:
     embed: EmbedClient
     manifests: tuple[Manifest, ...]
     postgres: bool = False
+    run_budget: EvalRunBudget | None = None
 
     @classmethod
     def from_snapshot(
@@ -81,12 +83,13 @@ class Memory100Materializer:
         embed: EmbedClient,
         manifests: tuple[Manifest, ...] | None = None,
         postgres: bool = False,
+        run_budget: EvalRunBudget | None = None,
     ) -> "Memory100Materializer":
         """Load a snapshot and locate its deterministic staging directory."""
         snapshot = load_snapshot(root)
         pages_root = state_root / snapshot.manifest.digest.removeprefix("sha256:") / "pages"
         active = (memory_manifest.manifest(),) if manifests is None else manifests
-        return cls(snapshot, pages_root.resolve(), blob, index, embed, active, postgres)
+        return cls(snapshot, pages_root.resolve(), blob, index, embed, active, postgres, run_budget)
 
     async def run(self) -> CorpusReadiness:
         if not isinstance(self.index, index_default.DefaultIndex):
@@ -94,6 +97,8 @@ class Memory100Materializer:
         workspace_id = uuid5(NAMESPACE_URL, f"memory_100/workspace/{self.snapshot.manifest.digest}")
         audiences = self._audiences(workspace_id)
         await self._create_workspace(workspace_id, audiences)
+        if self.run_budget is not None:
+            await self.run_budget.install(workspace_id)
         entry = SourceEntry(
             backend="folder",
             config=SourceConfig(root=str(self.pages_root)),
@@ -357,7 +362,12 @@ class Memory100Materializer:
             await store.put("page_change_cursor:derive_facts", high_water)
 
 
-async def _run(config: Config, snapshot: Path, state_root: Path) -> CorpusReadiness:
+async def _run(
+    config: Config,
+    snapshot: Path,
+    state_root: Path,
+    run_budget: EvalRunBudget | None,
+) -> CorpusReadiness:
     init_db(config.database.url)
     key = os.environ.get(config.credentials.key_env)
     credentials = CredentialStore(fernet=Fernet(key.encode())) if key else None
@@ -374,6 +384,7 @@ async def _run(config: Config, snapshot: Path, state_root: Path) -> CorpusReadin
             embed=embed,
             manifests=manifests,
             postgres=config.database.url.startswith("postgresql"),
+            run_budget=run_budget,
         ).run()
     finally:
         init_workspace_credentials(None)
@@ -384,8 +395,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m evals.memory_100.materialize")
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--run-id", type=UUID)
+    parser.add_argument("--budget-micro-usd", type=int)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    readiness = asyncio.run(_run(load_config(), args.snapshot, args.state))
+    if (args.run_id is None) != (args.budget_micro_usd is None):
+        parser.error("--run-id and --budget-micro-usd must be provided together")
+    run_budget = None if args.run_id is None else EvalRunBudget(args.run_id, args.budget_micro_usd)
+    readiness = asyncio.run(_run(load_config(), args.snapshot, args.state, run_budget))
     output = args.state / readiness.snapshot_digest.removeprefix("sha256:") / "readiness.json"
     output.write_text(
         json.dumps(readiness.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) + "\n"

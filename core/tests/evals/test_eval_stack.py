@@ -21,6 +21,7 @@ from evals.sandbox_image import SandboxImagePlan
 from evals.stack import (
     APPLICATION_BUILD_PRODUCTS,
     CREATION_DISABLED_JOBS,
+    ISOLATED_EXTERNAL_BILLING_JOBS,
     STACK_OWNER_EMAIL,
     EvalStack,
     Matrix,
@@ -38,9 +39,13 @@ from evals.suites.ufo_app_prepare import (
     prepare_app_eval,
     prepare_creation_eval,
 )
+from ufo.billing.accounting import BalanceGate, record_probe_egress_request
+from ufo.billing.balance import credit, debit, set_reserve
 from ufo.config import Config
 from ufo.db import dispose_db, init_db, workspace_tx
+from ufo.ext.loader import load_manifests
 from ufo.proxy_serve import OWNER_DSN_ENV
+from ufo.runtime.jobs import bindings_from
 from ufo.schema import tables
 
 
@@ -97,6 +102,65 @@ url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
 backend = "filesystem"
 root = "./blobs"
 """
+
+
+async def test_isolated_stack_keeps_local_billing_and_omits_external_billing_workflows(
+    db: None,
+    tmp_path: Path,
+) -> None:
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE.replace('name = "assistant"', 'name = "assistant_hosted"'))
+    stack = EvalStack.provision(
+        RunSpec(label="hosted", config=template),
+        root=tmp_path / "hosted",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    manifests = load_manifests(stack.config.pack.name)
+    enabled = bindings_from(
+        manifests,
+        (),
+        disabled=frozenset(stack.config.serve.disabled_jobs),
+    )
+    _close(stack)
+
+    assert stack.config.serve.disabled_jobs == ISOLATED_EXTERNAL_BILLING_JOBS
+    assert "metronome" in {manifest.name for manifest in manifests}
+    assert not frozenset(ISOLATED_EXTERNAL_BILLING_JOBS) & {binding.key for binding in enabled}
+
+    workspace_id = UUID("11111111-2222-3333-4444-555555555555")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await credit(connection, workspace_id, 20_000_000, 0, "eval/test")
+        await set_reserve(connection, workspace_id, 2_000_000)
+        await record_probe_egress_request(connection, workspace_id)
+        await debit(connection, workspace_id, 18_000_000)
+        decision = await BalanceGate(workspace_id).admits(connection)
+        ledger = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.dimension,
+                    tables.ledger.c.amount,
+                    tables.ledger.c.priced_micro_usd,
+                ).where(tables.ledger.c.workspace_id == workspace_id)
+            )
+        ).one()
+        balance = (
+            await connection.execute(
+                sa.select(
+                    tables.workspace_balance.c.balance_micro_usd,
+                    tables.workspace_balance.c.reserve_micro_usd,
+                ).where(tables.workspace_balance.c.workspace_id == workspace_id)
+            )
+        ).one()
+
+    assert ledger == ("egress", 1, 0)
+    assert balance == (2_000_000, 2_000_000)
+    assert decision.outcome == "reject"
 
 
 def test_derived_config_isolates_a_sqlite_template(tmp_path: Path) -> None:
@@ -1000,6 +1064,60 @@ def test_materialize_readiness_parses_the_last_line_and_fails_loud(tmp_path: Pat
         materialize_readiness(0, b"", seed_log)
     with pytest.raises(RuntimeError, match="readiness path"):
         materialize_readiness(0, b"no path printed\n", seed_log)
+
+
+async def test_corpus_materializer_and_eval_child_share_one_run_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE + '\n[o11y]\notlp_endpoint = "http://127.0.0.1:4318"\n')
+    stack = EvalStack.provision(
+        RunSpec(
+            label="budgeted",
+            config=template,
+            args=("--remote", "--budget-usd", "1.25"),
+            issue_recall=True,
+        ),
+        root=tmp_path / "run",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    readiness = tmp_path / "run" / "state" / "abc" / "readiness.json"
+    spawned: list[tuple[str, ...]] = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return f"{readiness}\n".encode(), b""
+
+    async def create(*argv: str, **_kwargs: object) -> Process:
+        spawned.append(argv)
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+
+    assert await stack._materialize("evals.issue_recall.materialize") == readiness
+    child = stack._child_args(readiness)
+    _close(stack)
+
+    assert stack.run_budget is not None
+    assert spawned == [
+        (
+            sys.executable,
+            "-m",
+            "evals.issue_recall.materialize",
+            "--run-id",
+            str(stack.run_budget.run_id),
+            "--budget-micro-usd",
+            "1250000",
+            "--state",
+            str(tmp_path / "run" / "state"),
+        )
+    ]
+    assert child[child.index("--run-id") + 1] == str(stack.run_budget.run_id)
+    assert child[child.index("--budget-usd") + 1] == "1.25"
 
 
 def test_database_name_is_postgres_safe() -> None:

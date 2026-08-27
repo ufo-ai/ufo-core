@@ -15,6 +15,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
 
+from evals.budget import EvalRunBudget
 from evals.memory_ingestion.models import IngestionSnapshot, load_snapshot
 from ufo.access.credentials import CredentialStore
 from ufo.blob import WorkspaceBlobStore, blob_store_for
@@ -290,6 +291,7 @@ class MemoryIngestionMaterializer:
     registry: ModelRegistry
     background_model: str
     postgres: bool = False
+    run_budget: EvalRunBudget | None = None
 
     @classmethod
     def from_snapshot(
@@ -304,6 +306,7 @@ class MemoryIngestionMaterializer:
         registry: ModelRegistry,
         background_model: str,
         postgres: bool = False,
+        run_budget: EvalRunBudget | None = None,
     ) -> "MemoryIngestionMaterializer":
         """Load a snapshot and locate its deterministic staging directory."""
         snapshot = load_snapshot(root)
@@ -318,6 +321,7 @@ class MemoryIngestionMaterializer:
             registry,
             background_model,
             postgres,
+            run_budget,
         )
 
     async def run(self) -> IngestionReadiness:
@@ -333,6 +337,8 @@ class MemoryIngestionMaterializer:
             NAMESPACE_URL, f"memory_ingestion/workspace/{self.snapshot.manifest.digest}"
         )
         await self._create_workspace(workspace_id)
+        if self.run_budget is not None:
+            await self.run_budget.install(workspace_id)
         entry = SourceEntry(
             backend="folder",
             config=SourceConfig(root=str(self.pages_root)),
@@ -510,7 +516,12 @@ class MemoryIngestionMaterializer:
                 raise RuntimeError("memory_ingestion memory index made no progress")
 
 
-async def _run(config: Config, snapshot: Path, state_root: Path) -> IngestionReadiness:
+async def _run(
+    config: Config,
+    snapshot: Path,
+    state_root: Path,
+    run_budget: EvalRunBudget | None,
+) -> IngestionReadiness:
     if config.models.background_jobs_model != DERIVATION_MODEL:
         raise ValueError(
             f"memory_ingestion requires models.background_jobs_model = {DERIVATION_MODEL!r}"
@@ -534,6 +545,7 @@ async def _run(config: Config, snapshot: Path, state_root: Path) -> IngestionRea
             registry=registry,
             background_model=config.models.background_jobs_model,
             postgres=config.database.url.startswith("postgresql"),
+            run_budget=run_budget,
         ).run()
     finally:
         init_workspace_credentials(None)
@@ -544,8 +556,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m evals.memory_ingestion.materialize")
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--run-id", type=UUID)
+    parser.add_argument("--budget-micro-usd", type=int)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    readiness = asyncio.run(_run(load_config(), args.snapshot, args.state))
+    if (args.run_id is None) != (args.budget_micro_usd is None):
+        parser.error("--run-id and --budget-micro-usd must be provided together")
+    run_budget = None if args.run_id is None else EvalRunBudget(args.run_id, args.budget_micro_usd)
+    readiness = asyncio.run(_run(load_config(), args.snapshot, args.state, run_budget))
     output = args.state / readiness.snapshot_digest.removeprefix("sha256:") / "readiness.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
