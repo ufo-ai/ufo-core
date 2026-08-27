@@ -3,8 +3,12 @@ import json
 import pytest
 import ufo_ext_coding.connect as connect
 import ufo_ext_coding.manifest as coding
+from ufo_ext_objectives.tools import PLAN_OBJECTIVE_TOOL, READ_OBJECTIVE_TOOL, RECORD_STEP_TOOL
+from ufo_ext_research.tools import RESEARCH_TOOLS
 
 from ufo.ext.loader import load_manifests, skill_registry
+from ufo.ext.manifest import SubagentProfile
+from ufo.loop.queue import _subagent_tools
 from ufo.loop.subagents import FINISH_CONTRACT, subagent_system_prompt
 from ufo.models.catalog import CORE_MODEL_SPECS
 from ufo.sandbox.exec_env import CONVERSATION_ID_ENV
@@ -120,7 +124,35 @@ def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_
     for name in ("bash", "read", "write", "edit", "glob", "grep"):
         assert name in profile.tool_names and name in builtin_names
     assert "js_repl" in profile.tool_names
-    assert {"ask_user", "spawn", "cancel_spawn"}.isdisjoint(profile.tool_names)
+    assert {"ask_user", "spawn", "cancel_spawn", "search_web", "fetch_url"}.isdisjoint(
+        profile.tool_names
+    )
+
+
+@pytest.mark.parametrize("profile", (coding.CODING_PROFILE, coding.FABLE_ESCALATION_PROFILE))
+def test_coding_profiles_exclude_research_tools_from_the_live_tool_set(
+    profile: SubagentProfile,
+) -> None:
+    all_tools = (
+        *BUILTIN_TOOLS,
+        *RESEARCH_TOOLS,
+        PLAN_OBJECTIVE_TOOL,
+        RECORD_STEP_TOOL,
+        READ_OBJECTIVE_TOOL,
+    )
+    selected = {tool.name for tool in _subagent_tools(all_tools, profile, frozenset())}
+    assert {"search_web", "fetch_url"}.isdisjoint(selected)
+    assert {
+        "bash",
+        "read",
+        "write",
+        "edit",
+        "glob",
+        "grep",
+        "plan_objective",
+        "record_step",
+        "read_objective",
+    } <= selected
 
 
 def test_coding_profile_leaves_member_delivery_to_the_parent() -> None:

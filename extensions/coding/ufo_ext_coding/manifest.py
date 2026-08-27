@@ -64,8 +64,6 @@ CODING_TOOL_NAMES = (
     "grep",
     "load_skill",
     "js_repl",
-    "search_web",
-    "fetch_url",
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 100
