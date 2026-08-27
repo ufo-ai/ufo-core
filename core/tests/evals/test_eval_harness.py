@@ -99,6 +99,7 @@ from evals.harness.judge import (
     MAX_CRITERIA,
     MAX_CRITERION_CHARS,
     MAX_INSTRUCTION_CHARS,
+    MAX_MALFORMED_RESPONSE_CHARS,
     MAX_REASON_CHARS,
     MAX_VISUAL_PAGES,
     VISUAL_JUDGE_SYSTEM,
@@ -1842,6 +1843,17 @@ class RecordingJudge:
     async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
         self.messages = messages
         return '{"items":[{"passed":true,"reason":"supported by the answer"}]}'
+
+
+@dataclass
+class SequentialJudge:
+    responses: tuple[str, ...]
+    calls: int = 0
+
+    async def complete(self, system: str, messages: tuple[Message, ...]) -> str:
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
 
 
 @dataclass
@@ -5620,6 +5632,63 @@ async def test_visual_rubric_leads_with_the_page_images_and_fences_the_request()
     assert lines[0] == lines[-1]
     assert lines[0] not in lines[1]
     assert loads(lines[1]) == {"instruction": "build a memo", "rubric": ["no text is clipped"]}
+
+
+async def test_visual_rubric_retries_a_wrong_count_then_maps_the_exact_rubric() -> None:
+    rubric = tuple(f"criterion {index}" for index in range(11))
+    twelve = dumps({"items": [{"passed": True, "reason": f"extra {index}"} for index in range(12)]})
+    eleven = dumps(
+        {"items": [{"passed": True, "reason": f"evidence {index}"} for index in range(11)]}
+    )
+    judge = SequentialJudge((twelve, eleven))
+
+    verdict = await visual_rubric_pass("build a memo", (_image_page(),), rubric, judge)
+
+    assert verdict.passed
+    assert judge.calls == 2
+    assert verdict.criteria == tuple(
+        CriterionVerdict(criterion, True, f"evidence {index}")
+        for index, criterion in enumerate(rubric)
+    )
+    assert dumps(twelve[:MAX_MALFORMED_RESPONSE_CHARS], ensure_ascii=False) in verdict.reason
+
+
+async def test_visual_rubric_fails_after_two_wrong_counts_with_bounded_raw_evidence() -> None:
+    rubric = tuple(f"criterion {index}" for index in range(11))
+    twelve = dumps(
+        {"items": [{"passed": True, "reason": f"extra {index}" + "x" * 500} for index in range(12)]}
+    )
+    judge = SequentialJudge((twelve, twelve))
+
+    verdict = await visual_rubric_pass("build a memo", (_image_page(),), rubric, judge)
+
+    assert not verdict.passed
+    assert judge.calls == 2
+    assert verdict.reason.startswith("judge returned 12 items for 11 criteria")
+    assert verdict.reason.count(dumps(twelve[:MAX_MALFORMED_RESPONSE_CHARS])) == 2
+    assert len(verdict.reason) < MAX_MALFORMED_RESPONSE_CHARS * 2 + 200
+
+
+async def test_visual_rubric_does_not_retry_a_valid_semantic_failure() -> None:
+    rubric = tuple(f"criterion {index}" for index in range(11))
+    response = dumps(
+        {
+            "items": [
+                {
+                    "passed": index != 4,
+                    "reason": "clipped at right" if index == 4 else f"clear {index}",
+                }
+                for index in range(11)
+            ]
+        }
+    )
+    judge = SequentialJudge((response,))
+
+    verdict = await visual_rubric_pass("build a memo", (_image_page(),), rubric, judge)
+
+    assert not verdict.passed
+    assert judge.calls == 1
+    assert verdict.criteria[4] == CriterionVerdict("criterion 4", False, "clipped at right")
 
 
 def test_extract_json_object_pulls_the_balanced_object_out_of_prose() -> None:
