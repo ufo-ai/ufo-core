@@ -5,7 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import type { Agent } from "@/lib/types";
 
-import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, useStreamFake, wire } from "./harness";
 
 const HOMEPAGE_URL = "/surface/sites/tok-abc/";
 
@@ -491,4 +491,68 @@ test("the bare agents hash shows the main agent without navigating", async () =>
 
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
   expect(location.hash).toBe("#/agents");
+});
+
+/** The chat app, carrying the page every deploy ships it and its own conversation on the rail. */
+function openChatApp(hash: string, homepage: unknown = SET) {
+  location.hash = hash;
+  wire({
+    ...chatsOnWire([{ ...CHAT_ROW, agent_id: CHAT_APP_ID, agent_name: "chat" }]),
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json(homepage),
+    "/conversations$": () => json({ conversations: [LISTED], more: false }),
+  });
+  // The shipped chat app is the main agent, so the bare apps hash stands this same pane.
+  const main = { ...CHAT_APP, main: true, homepage } as Agent;
+  render(<App agents={[main]} member={MEMBER} onAgents={() => {}} />);
+}
+
+/** Where every other app wears Edit, the chat app wears the way back to the conversations its page
+ *  holds — History is a navigation, so the page draws that list at its own bare address rather than
+ *  the portal drawing a second one in a panel beside it. */
+test("History sends the chat app's page to the conversations it holds", async () => {
+  openChatApp("#/agents/" + CHAT_APP_ID + "?open=" + CONVO_ID);
+  await screen.findByTitle("Chat homepage");
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Chat" }));
+
+  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID);
+  // One column still: the list is the page's, never a panel the portal draws beside it.
+  expect(screen.queryByRole("region", { name: CHAT_ROW.title })).toBeNull();
+});
+
+/** The track store answers for a screen the address states nothing about, so History leaves no
+ *  track behind for it to answer with — otherwise the act would be undone by the conversation the
+ *  member asked to leave. The bare apps hash is the address that cannot tell the router it already
+ *  stands where it lands, and it is also where the page draws the list already, so the act is spent
+ *  there rather than pressable into that trap. */
+test("History leaves no track behind, and is spent where the list already stands", async () => {
+  openChatApp("#/agents/" + CHAT_APP_ID + "?open=" + CONVO_ID);
+  await screen.findByTitle("Chat homepage");
+  expect(sessionStorage.getItem("ufo.track.agent:" + CHAT_APP_ID)).toContain(CONVO_ID);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Chat" }));
+
+  expect(sessionStorage.getItem("ufo.track.agent:" + CHAT_APP_ID)).toBeNull();
+  expect(
+    (await screen.findByRole("button", { name: "History for Chat" })).hasAttribute("disabled"),
+  ).toBe(true);
+
+  location.hash = "#/agents";
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+  await screen.findByTitle("Chat homepage");
+  expect(
+    (await screen.findByRole("button", { name: "History for Chat" })).hasAttribute("disabled"),
+  ).toBe(true);
+});
+
+/** The page is what makes it the chat app. An install serving none falls back to the conversation
+ *  column every other page-less app draws, so the member still has somewhere to talk — and History,
+ *  which names that page's list, does not stand where there is no page. */
+test("a chat app with no page draws the conversation column", async () => {
+  openChatApp("#/agents/" + CHAT_APP_ID, { state: "none" });
+
+  expect(await screen.findByRole("region", { name: "Chat" })).toBeTruthy();
+  expect(document.querySelector("iframe")).toBeNull();
+  expect(screen.queryByRole("button", { name: "History for Chat" })).toBeNull();
 });

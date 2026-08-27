@@ -406,3 +406,51 @@ test("the chat page opens a Slack or terminal conversation for comments", async 
     expect(calls.some((url) => url.includes("transcript") && url.includes(SLACK))).toBe(true),
   );
 });
+
+/** What the History act does to the page: it empties the track, and the page answers with the
+ *  conversations it holds. The act is a navigation rather than a panel precisely because the page
+ *  already draws this list — so this is the proof the portal needs to draw no second one. */
+test("the chat page answers an emptied track with its conversation list", async () => {
+  const row = (id: string, title: string) => ({
+    name: id,
+    agent_id: AGENT.id,
+    agent_name: AGENT.name,
+    title,
+    surface: "web",
+    last_at: "2026-08-01T09:00:00.000Z",
+  });
+  await runPage(
+    "chat",
+    {
+      "/objects/conversation$": () =>
+        json({ objects: [row(CONVO_ID, "Alpha"), row(ARRIVAL_ID, "Bravo")], next_cursor: null }),
+      "/api/chats": () =>
+        json({
+          chats: [
+            {
+              conversation_id: CONVO_ID,
+              agent_id: AGENT.id,
+              agent_name: AGENT.name,
+              title: "Alpha",
+              surface: "web",
+              last_at: "2026-08-01T09:00:00.000Z",
+            },
+          ],
+        }),
+      "/transcript": () => json({ messages: [] }),
+    },
+    { place: { opens: [CONVO_ID] } },
+  );
+
+  // The track names one conversation, so the page is not standing on the list.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  });
+  expect(screen.queryByText("Bravo")).toBeNull();
+
+  window.postMessage({ ufo: "place", place: { opens: [] } }, "*");
+
+  await vi.waitFor(() => expect(screen.getByRole("heading", { name: "Chat" })).toBeTruthy());
+  expect(screen.getByText("Bravo")).toBeTruthy();
+  expect(screen.getByText("Alpha")).toBeTruthy();
+});

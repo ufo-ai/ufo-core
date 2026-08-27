@@ -8,7 +8,7 @@ import type { EarlierMessages } from "@/lib/earlier";
 import { conversationSlotHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
 
-import { AGENT, AGENT_ID, ARRIVAL_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, ARRIVAL_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -3146,21 +3146,35 @@ test("a starter says its sentence on the press, and leaves with the start screen
  *  pane is for above it, because a pane that opens on nothing else says nothing at all. */
 test("the composer names the app it addresses, and the band can be taken away", async () => {
   wire(transcript());
-  location.hash = "#/";
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  // An app that is not the chat app, which is the whole case the band exists for: it says the words
+  // are going somewhere other than the assistant. `app_chat` ships the chat app as the main agent,
+  // so a main agent standing in for "some app" here would be that app and would prove the opposite.
+  location.hash = "#/new/" + SECOND_ID;
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Ask UFO");
-  expect(screen.getByText("What can I help you with?")).toBeTruthy();
 
   // The band wears the mark the sidebar draws this app under, not a category glyph standing in.
-  const band = screen.getByText("Assistant");
+  const band = screen.getByText("Second");
   expect(band.parentElement!.querySelector("svg")).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Stop addressing Assistant" }));
+  await userEvent.click(screen.getByRole("button", { name: "Stop addressing Second" }));
 
-  expect(screen.queryByText("Assistant")).toBeNull();
+  expect(screen.queryByText("Second")).toBeNull();
   // Taking the band away leaves the words and the acts under it exactly where they were.
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
+});
+
+/** The band qualifies the words by naming the app they address, which the chat app's own composer
+ *  cannot do: there the app is the surface, so the band would name the screen the member is already
+ *  looking at. */
+test("the chat app's composer does not name itself over its own words", async () => {
+  wire(transcript());
+  location.hash = "#/agents/" + CHAT_APP_ID + "?open=compose";
+  render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Ask UFO");
+  expect(screen.queryByRole("button", { name: /^Stop addressing/ })).toBeNull();
 });
 
 const SLATE = {

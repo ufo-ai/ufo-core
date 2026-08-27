@@ -56,6 +56,7 @@ import {
   writeDraft,
 } from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
+import { CHAT_SURFACE } from "@/lib/mainAgent";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 import { newChatHash, sectionHash } from "@/lib/route";
 import { navigate } from "@/lib/router";
@@ -72,7 +73,15 @@ import type { ChatQuestion, Member, QuestionEntry, QuestionOption } from "@/lib/
 /** Who a chat is addressed to. A conversation another surface holds names its agent on the rail
  *  row alone, without the boot read listing it, so a chat asks for the facts such a row carries
  *  and never for the whole record. */
-export type ChatAgent = { id: string; name: string; model: string; icon?: string };
+export type ChatAgent = {
+  id: string;
+  name: string;
+  model: string;
+  icon?: string;
+  /** The slug the `app_*` extension shipped this agent under, where one did. The composer reads it
+   *  to know whether the app a message addresses is the chat app itself. */
+  app?: string | null;
+};
 
 export type ChatProps = {
   agent: ChatAgent;
@@ -226,7 +235,10 @@ export function Chat({
         draftKey={draftKey}
         input={composer}
         starting={starting}
-        eyebrow={agentName(agent.name)}
+        /* The band names the app a message addresses, which qualifies the words where the app is
+           not the surface — a directive chat with Radar reads as Radar's. The chat app is the
+           surface, so naming it there states the screen the member is already looking at. */
+        eyebrow={agent.app === CHAT_SURFACE ? null : agentName(agent.name)}
         eyebrowIcon={agent.icon}
       />
       <Toast
@@ -589,7 +601,7 @@ function Composer({
   draftKey: string;
   input: RefObject<HTMLTextAreaElement | null>;
   starting: boolean;
-  eyebrow: string;
+  eyebrow: string | null;
   eyebrowIcon?: string;
 }) {
   const state = useChat(target.key);
@@ -609,7 +621,8 @@ function Composer({
     return handed?.text ?? readDraft(draftKey);
   });
   const [stopping, setStopping] = useState(false);
-  const [showsEyebrow, setShowsEyebrow] = useState(true);
+  const [dismissed, setDismissed] = useState(false);
+  const showsEyebrow = eyebrow !== null && !dismissed;
   // The turn the page is tailing, and so the one a stop can name. A send holds the chat busy before
   // admission answers with a turn id, and a stop of a turn nobody has named yet reaches nothing.
   const running = state.turn;
@@ -699,7 +712,7 @@ function Composer({
             ) : null
           }
           label={eyebrow}
-          onDismiss={() => setShowsEyebrow(false)}
+          onDismiss={() => setDismissed(true)}
         />
       ) : null}
       <PromptInputAttachments />

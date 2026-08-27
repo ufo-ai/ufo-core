@@ -24,6 +24,7 @@ import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { isPortalChat, surfaceWord, useViewer } from "@/lib/audience";
 import { agentName } from "@/lib/agentName";
+import { holdTrack } from "@/lib/tracks";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import { day } from "@/lib/moments";
@@ -59,9 +60,10 @@ const NEW = "New";
  *  founds one writes that conversation's id over it. */
 const FRESH = "new";
 
-/** What the lane's own list of the app's conversations is called, and what it says where the app
- *  has held none. The lane holds either a conversation or the list of them, so the band names
- *  whichever is standing and the way out shuts that one. */
+/** What an app's own conversations are called wherever they are reached — the lane every app but
+ *  the chat app opens beside its page, and the act the chat app wears instead, which sends its page
+ *  to the same list. One word, so a member finds the same conversations under the same name on
+ *  either screen. */
 const HISTORY = "History";
 const NO_HISTORY = "No conversations yet.";
 /** What the list says where the read stopped at its own bound. The read carries no cursor, so the
@@ -685,8 +687,32 @@ export function AgentPane({
               className="rounded-full border border-edge bg-surface"
             />
             {/* The act opens the app's editing chat in the lane beside its page. The chat app's page
-                is that conversation, so the act names nothing there and stands nowhere. */}
-            {speaks ? null : (
+                is that conversation, so the act names nothing there; what stands in its place is the
+                way back to the conversations that page holds. */}
+            {speaks ? (
+              <Button
+                variant="quiet"
+                size="bar"
+                aria-label={HISTORY + " for " + agentName(agent.name)}
+                /* An act that carries an address, not a verb: it cannot be un-pressed, so it is
+                   spent where the page already stands on the list rather than drawn as a toggle
+                   holding it there — the way the lane's own New act is spent on a lane that holds
+                   nothing yet. */
+                disabled={target === undefined}
+                className="rounded-full border border-edge bg-surface"
+                onClick={() => {
+                  // The track this screen is leaving is cleared before the address changes. An
+                  // empty track writes no key, so the address states none, and on a route that
+                  // carries no place — the bare apps hash — the store would answer over it and hand
+                  // back the conversation the member asked to leave.
+                  holdTrack(`agent:${agent.id}`, []);
+                  onPlace({ ...place, opens: [] }, "push");
+                }}
+              >
+                <IconHistory className="size-(--size-glyph)" aria-hidden />
+                {HISTORY}
+              </Button>
+            ) : (
               <Button
                 variant="quiet"
                 size={held !== undefined ? "icon" : "bar"}
