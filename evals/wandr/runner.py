@@ -115,6 +115,7 @@ def _capability_case(
         message=instruction + _envelope(case.required_files),
         grader=SubmissionCapture(case.name, submissions_root, case.required_files),
         web_dependent=True,
+        wait_for_background=True,
         digest_tag=(
             f"{snapshot_digest}:{ENVELOPE_REVISION}:wait-{WORKFLOW_WAIT_SECONDS:g}:"
             f"{case.name}:{case.digest}"

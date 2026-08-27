@@ -86,6 +86,7 @@ def test_case_message_carries_instruction_and_envelope(
     )
     assert snapshot.manifest.digest in capability.digest_tag
     assert case.digest in capability.digest_tag
+    assert capability.wait_for_background is True
 
 
 def test_subset_run_attaches_tiers(

@@ -42,7 +42,13 @@ from ufo.blob import BlobNotFound, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ConversationProbes
 from ufo.schema import tables
-from ufo.schema.records import CredentialRequest, TerminalFrame, TurnStatus
+from ufo.schema.records import (
+    DELIVERY_PENDING,
+    NON_TERMINAL_STATUSES,
+    CredentialRequest,
+    TerminalFrame,
+    TurnStatus,
+)
 from ufo.sdk.context import ExtensionContext, Trajectory
 from ufo.sdk.models import (
     ImageBlock,
@@ -245,7 +251,12 @@ class EvalConversations(Protocol):
 
 
 class TurnOutcome(Protocol):
+    @property
+    def workflow_wait_seconds(self) -> float: ...
+
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None: ...
+
+    async def cancel(self, turn_id: UUID) -> bool: ...
 
 
 class TurnLogReader(Protocol):
@@ -316,11 +327,10 @@ class InProcessTarget:
             )
         except Exception as error:
             return _invoke_failure(conversation_id, error)
-        settled = await self._settled(
-            conversation_id,
-            turn_id,
-            case.message,
-            wait_for_background=case.wait_for_background,
+        settled = (
+            await self._settled_workflow(conversation_id, turn_id, case.message)
+            if case.wait_for_background
+            else await self._settled(conversation_id, turn_id, case.message)
         )
         wall_ms = round((perf_counter() - started) * 1_000)
         result = await self._record_timing(settled, turn_id, wall_ms)
@@ -369,6 +379,229 @@ class InProcessTarget:
             )
         return replace(result, output=output)
 
+    async def _settled_workflow(
+        self, conversation_id: UUID, turn_id: UUID, inbound: str
+    ) -> _Settled:
+        async with workspace_tx() as connection:
+            origin_seq = (
+                await connection.execute(
+                    sa.select(tables.turn.c.seq).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one()
+        processed: set[UUID] = set()
+        root_turns: tuple[sa.Row, ...] = ()
+        workflow_failure = ""
+        failure_error_class = ""
+        failure_error_message = ""
+        timed_out = False
+        try:
+            async with asyncio.timeout(self.outcome.workflow_wait_seconds):
+                while True:
+                    async with workspace_tx() as connection:
+                        root_turns = tuple(
+                            (
+                                await connection.execute(
+                                    sa.select(
+                                        tables.turn.c.id,
+                                        tables.turn.c.inbound,
+                                        tables.turn.c.status,
+                                    )
+                                    .where(
+                                        tables.turn.c.conversation_id == conversation_id,
+                                        tables.turn.c.seq >= origin_seq,
+                                    )
+                                    .order_by(tables.turn.c.seq)
+                                )
+                            ).all()
+                        )
+                    pending = tuple(row for row in root_turns if row.id not in processed)
+                    if not pending:
+                        break
+                    for row in pending:
+                        if row.status in NON_TERMINAL_STATUSES:
+                            await self.outcome.settle(conversation_id, row.id)
+                        status = await self._turn_status(row.id)
+                        if status in NON_TERMINAL_STATUSES:
+                            raise TimeoutError
+                        failure = self._turn_failure(status)
+                        _, _, descendant_failure = await self._merge_descendants(
+                            row.id,
+                            CapabilityOutput("", ()),
+                            wait_for_background=True,
+                        )
+                        if failure or descendant_failure:
+                            await self._cancel_workflow(conversation_id, origin_seq)
+                            workflow_failure = failure or descendant_failure
+                            failure_error_class, failure_error_message = await self._turn_error(
+                                row.id
+                            )
+                            break
+                        processed.add(row.id)
+                    if workflow_failure:
+                        break
+        except TimeoutError:
+            await self._cancel_workflow(conversation_id, origin_seq)
+            workflow_failure = WAIT_EXPIRED
+            timed_out = True
+        if workflow_failure:
+            async with workspace_tx() as connection:
+                root_turns = tuple(
+                    (
+                        await connection.execute(
+                            sa.select(
+                                tables.turn.c.id,
+                                tables.turn.c.inbound,
+                                tables.turn.c.status,
+                            )
+                            .where(
+                                tables.turn.c.conversation_id == conversation_id,
+                                tables.turn.c.seq >= origin_seq,
+                            )
+                            .order_by(tables.turn.c.seq)
+                        )
+                    ).all()
+                )
+        if not root_turns:
+            if timed_out:
+                return await self._unsettled(conversation_id, turn_id, inbound)
+            return await self._settled(conversation_id, turn_id, inbound)
+
+        latest = root_turns[-1]
+        if timed_out:
+            settled = await self._unsettled(conversation_id, latest.id, latest.inbound)
+        else:
+            settled = await self._settled(
+                conversation_id,
+                latest.id,
+                latest.inbound,
+                wait_for_background=True,
+            )
+        if not settled.result.clean and not workflow_failure:
+            return settled
+        output = settled.result.output
+        descendant_ids = list(settled.descendant_ids)
+        merge_failure = ""
+        for row in root_turns[:-1]:
+            output, descendants, failure = await self._merge_descendants(row.id, output)
+            descendant_ids.extend(descendants)
+            if failure:
+                merge_failure = failure
+                break
+        all_turn_ids = tuple(dict.fromkeys((*[row.id for row in root_turns], *descendant_ids)))
+        tokens, cost_micro_usd = await self._turn_resources(all_turn_ids)
+        output = replace(output, tokens=tokens, cost_micro_usd=cost_micro_usd)
+        trajectory = settled.result.trajectory
+        if trajectory is not None:
+            trajectory = trajectory.model_copy(update={"turn_id": turn_id})
+        result = settled.result
+        failure_reason = workflow_failure or merge_failure
+        if failure_reason:
+            error_class = failure_error_class or result.error_class
+            error_message = failure_error_message or result.error_message
+            if failure_error_class:
+                failure_reason = f"{failure_reason} ({failure_error_class})"
+            result = replace(
+                result,
+                clean=False,
+                failure_reason=failure_reason,
+                error_class=error_class,
+                error_message=error_message,
+            )
+        return _Settled(
+            replace(result, output=output, trajectory=trajectory),
+            tuple(item for item in all_turn_ids if item != turn_id),
+        )
+
+    async def _cancel_workflow(self, conversation_id: UUID, origin_seq: int) -> None:
+        previous: tuple[frozenset[UUID], frozenset[UUID]] | None = None
+        while turns := await self._workflow_turns(conversation_id, origin_seq):
+            live = tuple(row for row in turns if row.status in NON_TERMINAL_STATUSES)
+            pending = tuple(
+                row
+                for row in turns
+                if row.status in TERMINAL_CHILD_STATUSES and row.result_delivery == DELIVERY_PENDING
+            )
+            if not live and not pending:
+                return
+            current = (
+                frozenset(row.id for row in live),
+                frozenset(row.id for row in pending),
+            )
+            if current == previous:
+                raise RuntimeError("logical workflow cancellation made no progress")
+            previous = current
+            if live:
+                live_ids = tuple(row.id for row in live)
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.update(tables.turn)
+                        .values(result_delivery=None, updated_at=sa.func.now())
+                        .where(
+                            tables.turn.c.id.in_(live_ids),
+                            tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                            tables.turn.c.result_delivery == DELIVERY_PENDING,
+                        )
+                    )
+                await asyncio.gather(*(self.outcome.cancel(turn_id) for turn_id in live_ids))
+                continue
+            await asyncio.gather(
+                *(self.outcome.settle(row.conversation_id, row.id) for row in pending)
+            )
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(result_delivery=None, updated_at=sa.func.now())
+                    .where(
+                        tables.turn.c.id.in_(tuple(row.id for row in pending)),
+                        tables.turn.c.result_delivery == DELIVERY_PENDING,
+                    )
+                )
+
+    async def _workflow_turns(self, conversation_id: UUID, origin_seq: int) -> tuple[sa.Row, ...]:
+        async with workspace_tx() as connection:
+            roots = tuple(
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.id).where(
+                            tables.turn.c.conversation_id == conversation_id,
+                            tables.turn.c.seq >= origin_seq,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            turn_ids = list(roots)
+            frontier = roots
+            while frontier:
+                frontier = tuple(
+                    (
+                        await connection.execute(
+                            sa.select(tables.turn.c.id).where(
+                                tables.turn.c.parent_turn_id.in_(frontier)
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                turn_ids.extend(frontier)
+            turns = tuple(
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.turn.c.id,
+                            tables.turn.c.conversation_id,
+                            tables.turn.c.status,
+                            tables.turn.c.result_delivery,
+                        ).where(
+                            tables.turn.c.id.in_(turn_ids),
+                        )
+                    )
+                ).all()
+            )
+        return turns
+
     async def _case_timing(
         self,
         wall_ms: int,
@@ -381,9 +614,18 @@ class InProcessTarget:
         the call id its durable step records."""
         if self.turn_steps is None:
             return case_timing(wall_ms, (), "no step reader is wired")
+        async with workspace_tx() as connection:
+            parent_rows = (
+                await connection.execute(
+                    sa.select(tables.turn.c.id, tables.turn.c.parent_turn_id).where(
+                        tables.turn.c.id.in_(turn_ids)
+                    )
+                )
+            ).all()
+        parents: dict[UUID, UUID | None] = {row.id: row.parent_turn_id for row in parent_rows}
         names = {call.call_id: call.name for call in output.calls if call.call_id}
         turns: list[TurnTiming] = []
-        for index, turn_id in enumerate(turn_ids):
+        for turn_id in turn_ids:
             steps = await self.turn_steps.steps(turn_id)
             tokens, cost_micro_usd = await self._turn_resources((turn_id,))
             step_tokens = tuple(step.tokens for step in steps if step.tokens is not None)
@@ -395,12 +637,12 @@ class InProcessTarget:
             turns.append(
                 turn_timing(
                     turn_id,
-                    "evaluated" if index == 0 else "child",
+                    "child" if parents[turn_id] is not None else "evaluated",
                     steps,
                     names,
                     tokens,
                     cost_micro_usd,
-                    messages if index == 0 else (),
+                    messages if turn_id == turn_ids[0] else (),
                 )
             )
         return case_timing(wall_ms, tuple(turns))
@@ -480,42 +722,11 @@ class InProcessTarget:
     ) -> _Settled:
         trajectory = await self.outcome.settle(conversation_id, turn_id)
         if trajectory is None:
-            steps = () if self.turn_steps is None else await self.turn_steps.steps(turn_id)
-            messages = (
-                Message(role="user", content=inbound),
-                *(message for step in steps for message in step.messages),
-            )
-            output = capability_output(messages)
-            output = replace(
-                output,
-                own_tools=tuple(call.name for call in output.calls),
-                own_calls=tuple(output.calls),
-            )
-            output, descendant_ids, missing_child = await self._merge_descendants(
-                turn_id, output, wait_for_background
-            )
-            tokens, cost_micro_usd = await self._turn_resources((turn_id, *descendant_ids))
-            output = replace(output, tokens=tokens, cost_micro_usd=cost_micro_usd)
-            snapshot = trajectory_snapshot(
+            return await self._unsettled(
                 conversation_id,
                 turn_id,
-                await self._turn_status(turn_id),
-                messages,
-            )
-            snapshot_error = (
-                WAIT_EXPIRED if not snapshot.error else f"{WAIT_EXPIRED}; {snapshot.error}"
-            )
-            if missing_child:
-                snapshot_error = f"{snapshot_error}; {missing_child}"
-            snapshot = snapshot.model_copy(update={"error": snapshot_error})
-            return _Settled(
-                TargetResult(
-                    output,
-                    False,
-                    WAIT_EXPIRED,
-                    trajectory=snapshot,
-                ),
-                descendant_ids,
+                inbound,
+                wait_for_background=wait_for_background,
             )
         messages = (
             _current_turn_messages(trajectory.messages, inbound)
@@ -558,6 +769,50 @@ class InProcessTarget:
                 descendant_ids,
             )
         return _Settled(TargetResult(output, clean=True, trajectory=snapshot), descendant_ids)
+
+    async def _unsettled(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+        inbound: str,
+        *,
+        wait_for_background: bool = False,
+    ) -> _Settled:
+        steps = () if self.turn_steps is None else await self.turn_steps.steps(turn_id)
+        messages = (
+            Message(role="user", content=inbound),
+            *(message for step in steps for message in step.messages),
+        )
+        output = capability_output(messages)
+        output = replace(
+            output,
+            own_tools=tuple(call.name for call in output.calls),
+            own_calls=tuple(output.calls),
+        )
+        output, descendant_ids, missing_child = await self._merge_descendants(
+            turn_id, output, wait_for_background
+        )
+        tokens, cost_micro_usd = await self._turn_resources((turn_id, *descendant_ids))
+        output = replace(output, tokens=tokens, cost_micro_usd=cost_micro_usd)
+        snapshot = trajectory_snapshot(
+            conversation_id,
+            turn_id,
+            await self._turn_status(turn_id),
+            messages,
+        )
+        snapshot_error = WAIT_EXPIRED if not snapshot.error else f"{WAIT_EXPIRED}; {snapshot.error}"
+        if missing_child:
+            snapshot_error = f"{snapshot_error}; {missing_child}"
+        snapshot = snapshot.model_copy(update={"error": snapshot_error})
+        return _Settled(
+            TargetResult(
+                output,
+                False,
+                WAIT_EXPIRED,
+                trajectory=snapshot,
+            ),
+            descendant_ids,
+        )
 
     async def _turn_resources(self, turn_ids: tuple[UUID, ...]) -> tuple[int, int]:
         async with workspace_tx() as connection:
@@ -608,13 +863,19 @@ class InProcessTarget:
                         tables.turn.c.status,
                         tables.turn.c.terminal,
                         tables.turn.c.inbound,
+                        tables.turn.c.result_delivery,
                     )
                     .where(tables.turn.c.parent_turn_id == turn_id)
                     .order_by(tables.turn.c.created_at, tables.turn.c.seq)
                 )
             ).all()
         if wait_for_background:
-            pending = tuple(row for row in rows if row.status not in TERMINAL_CHILD_STATUSES)
+            pending = tuple(
+                row
+                for row in rows
+                if row.status not in TERMINAL_CHILD_STATUSES
+                or row.result_delivery == DELIVERY_PENDING
+            )
             if pending:
                 background_trajectories = await asyncio.gather(
                     *(self.outcome.settle(row.conversation_id, row.id) for row in pending)
@@ -630,11 +891,19 @@ class InProcessTarget:
                                 tables.turn.c.status,
                                 tables.turn.c.terminal,
                                 tables.turn.c.inbound,
+                                tables.turn.c.result_delivery,
                             )
                             .where(tables.turn.c.parent_turn_id == turn_id)
                             .order_by(tables.turn.c.created_at, tables.turn.c.seq)
                         )
                     ).all()
+                undelivered = tuple(row for row in rows if row.result_delivery == DELIVERY_PENDING)
+                if undelivered:
+                    return (
+                        output,
+                        tuple(row.id for row in rows),
+                        "background child result did not deliver",
+                    )
         conversations: dict[UUID, list[sa.Row]] = {}
         for row in rows:
             conversations.setdefault(row.conversation_id, []).append(row)

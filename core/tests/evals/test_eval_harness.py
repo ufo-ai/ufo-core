@@ -90,6 +90,7 @@ from evals.harness.harness import (
     EvalCaseResult,
     EvalMetric,
     EvalReport,
+    infra_error,
     infra_owned_fault,
     is_transient_fault,
 )
@@ -228,7 +229,9 @@ from ufo.ext.context import (
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.kinds.agents import AGENT_KIND
 from ufo.kinds.governance import Governance, prompt_digest
+from ufo.loop.delivery import DeliverySweep
 from ufo.loop.engine import FINISH_PROMPT, DispatchResult, StreamResult
+from ufo.loop.subagents import SubagentRegistry, SubagentResult
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
@@ -253,7 +256,18 @@ from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef, validate_object_name
 from ufo.onboard.onboard_control import deterministic_workspace_id
 from ufo.schema import tables
-from ufo.schema.records import AgentChange, ToolIntent, TurnContext, TurnStatus, Usage
+from ufo.schema.records import (
+    DELIVERY_DELIVERED,
+    DELIVERY_PENDING,
+    NON_TERMINAL_STATUSES,
+    SPAWN_RESULT_KEY_PREFIX,
+    AgentChange,
+    ToolIntent,
+    TurnContext,
+    TurnStatus,
+    Usage,
+)
+from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.turns.transcript import (
     CompactionSummary,
     CompactionWindow,
@@ -7718,6 +7732,72 @@ async def test_workspace_driver_reads_a_terminal_transcript_at_the_turn_sequence
     assert delayed.messages == _research_transcript()
 
 
+async def test_workspace_driver_settles_a_terminal_childs_pending_delivery(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversation_id = await DbConversations(workspace_id).open("pending-delivery")
+    turn_id = uuid4()
+    blob = FilesystemBlobStore(root=tmp_path)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="research",
+                terminal={"status": "done", "text": "Done.", "model": MODEL},
+                result_delivery=DELIVERY_PENDING,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    @dataclass(frozen=True)
+    class DeliveryHandle:
+        async def get_result(self, polling_interval_sec: float) -> None:
+            await Transcript(blob=blob, conversation_id=conversation_id).write(
+                Conversation(seq=1, messages=_research_transcript())
+            )
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(result_delivery=DELIVERY_DELIVERED, updated_at=sa.func.now())
+                    .where(tables.turn.c.id == turn_id)
+                )
+
+    @dataclass(frozen=True)
+    class DeliveryDbos:
+        async def retrieve_workflow_async(self, workflow_id: str) -> DeliveryHandle:
+            return DeliveryHandle()
+
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        blob,
+        cast(DBOSClient, DeliveryDbos()),
+        tmp_path / "workspaces",
+    )
+
+    with ws(workspace_id):
+        settled = await driver.settle(conversation_id, turn_id)
+        async with workspace_tx() as connection:
+            delivery = (
+                await connection.execute(
+                    sa.select(tables.turn.c.result_delivery).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one()
+
+    assert settled is not None
+    assert settled.messages == _research_transcript()
+    assert delivery == DELIVERY_DELIVERED
+
+
 async def test_resolve_workspace_and_agent_accepts_an_explicit_workspace(db: None) -> None:
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
@@ -9205,6 +9285,911 @@ async def test_capability_merge_waits_for_requested_background_children(db: None
     assert descendant_ids == (child_turn_id,)
     assert outcome.calls == 1
     assert [call.name for call in merged.calls] == ["bash"]
+
+
+async def test_capability_workflow_waits_for_child_delivery_resumed_turn_and_artifact(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    root_turn_id = uuid4()
+    child_conversation_id = uuid4()
+    child_turn_id = uuid4()
+    resumed_turn_id = uuid4()
+    root_conversation_id: UUID | None = None
+    root_messages = (
+        Message(role="user", content="build the dataset"),
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="spawn-1",
+                    name="spawn",
+                    input={"target": "research", "background": True},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="spawn-1", content="running"),),
+        ),
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="pause-1",
+                    name="pause_and_wait",
+                    input={"wait_minutes": 10, "reason": "research is running"},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="pause-1", content="end your turn"),),
+        ),
+        Message(role="assistant", content="Research is running."),
+    )
+    child_messages = (
+        Message(role="user", content="research the records"),
+        Message(role="assistant", content="records ready"),
+    )
+    final_messages = (
+        *root_messages,
+        Message(role="user", content="The research child finished."),
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="share-1",
+                    name="share_file",
+                    input={"path": "/workspace/results.jsonl"},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="share-1", content="shared"),),
+        ),
+        Message(role="assistant", content="Done."),
+    )
+
+    @dataclass
+    class WorkflowWorker:
+        async def admit(
+            self,
+            conversation_id: UUID,
+            message: str,
+            idempotency_key: str | None = None,
+            speaker_key: str | None = None,
+        ) -> UUID:
+            nonlocal root_conversation_id
+            root_conversation_id = conversation_id
+            now = sa.func.now()
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=root_turn_id,
+                        workspace_id=workspace_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        seq=1,
+                        status="done",
+                        inbound=message,
+                        terminal={"status": "done", "text": "Research is running.", "model": MODEL},
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                await connection.execute(
+                    sa.insert(tables.conversation).values(
+                        id=child_conversation_id,
+                        workspace_id=workspace_id,
+                        agent_id=agent_id,
+                        surface="eval",
+                        queue_key=str(child_conversation_id),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=child_turn_id,
+                        workspace_id=workspace_id,
+                        conversation_id=child_conversation_id,
+                        agent_id=agent_id,
+                        seq=1,
+                        status="running",
+                        inbound="research the records",
+                        parent_turn_id=root_turn_id,
+                        result_delivery=DELIVERY_PENDING,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            await Transcript(blob=blob, conversation_id=conversation_id).write(
+                Conversation(seq=1, messages=root_messages)
+            )
+            return root_turn_id
+
+    @dataclass
+    class WorkflowOutcome:
+        workflow_wait_seconds = 1.0
+
+        async def cancel(self, turn_id: UUID) -> bool:
+            raise AssertionError("settled workflow must not be cancelled")
+
+        async def steps(self, turn_id: UUID) -> tuple[TurnStep, ...]:
+            return ()
+
+        async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory:
+            if turn_id == child_turn_id:
+                assert root_conversation_id is not None
+                key = f"artifacts/{uuid4()}/results.jsonl"
+                await blob.put(key, b'{"item": "railway"}\n')
+                now = sa.func.now()
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.update(tables.turn)
+                        .values(
+                            status="done",
+                            result_delivery=DELIVERY_DELIVERED,
+                            terminal={"status": "done", "text": "records ready", "model": MODEL},
+                            updated_at=now,
+                        )
+                        .where(tables.turn.c.id == child_turn_id)
+                    )
+                    await connection.execute(
+                        sa.insert(tables.turn).values(
+                            id=resumed_turn_id,
+                            workspace_id=workspace_id,
+                            conversation_id=root_conversation_id,
+                            agent_id=agent_id,
+                            seq=2,
+                            status="done",
+                            inbound="The research child finished.",
+                            terminal={"status": "done", "text": "Done.", "model": MODEL},
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    await connection.execute(
+                        sa.insert(tables.shared_artifact).values(
+                            turn_id=resumed_turn_id,
+                            blob_key=key,
+                            workspace_id=workspace_id,
+                            filename="results.jsonl",
+                            subject=None,
+                            media_type="application/jsonl",
+                            size_bytes=20,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                await Transcript(blob=blob, conversation_id=child_conversation_id).write(
+                    Conversation(seq=1, messages=child_messages)
+                )
+                await Transcript(blob=blob, conversation_id=root_conversation_id).write(
+                    Conversation(seq=2, messages=final_messages)
+                )
+                messages = child_messages
+            else:
+                messages = final_messages if turn_id == resumed_turn_id else root_messages
+            return Trajectory(
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                agent_prompt=PROMPT,
+                agent_prompt_digest=prompt_digest(PROMPT),
+                messages=messages,
+            )
+
+    worker = WorkflowWorker()
+    conversations = DbConversations(workspace_id, cast(StubWorker, worker))
+    outcome = WorkflowOutcome()
+    target = InProcessTarget(
+        ctx=_context(blob, cast(StubWorker, worker)),
+        agent_id=agent_id,
+        conversations=conversations,
+        outcome=outcome,
+        blob=blob,
+        turn_steps=outcome,
+    )
+    case = CapabilityCase(
+        "logical-workflow",
+        "build the dataset",
+        shared_artifact_scorer(".jsonl"),
+        wait_for_background=True,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(case)
+
+    assert result.clean is True
+    assert [call.name for call in result.output.calls] == [
+        "spawn",
+        "pause_and_wait",
+        "share_file",
+    ]
+    assert [(artifact.name, artifact.content) for artifact in result.output.artifacts] == [
+        ("results.jsonl", b'{"item": "railway"}\n')
+    ]
+    assert result.output.timing is not None
+    assert {turn.turn_id: turn.role for turn in result.output.timing.turns} == {
+        root_turn_id: "evaluated",
+        child_turn_id: "child",
+        resumed_turn_id: "evaluated",
+    }
+
+
+async def test_capability_workflow_reads_only_the_latest_resumed_turn_transcript(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversation_id = await DbConversations(workspace_id).open("resumed-turns")
+    root_turn_id = uuid4()
+    first_resumed_turn_id = uuid4()
+    latest_resumed_turn_id = uuid4()
+    blob = FilesystemBlobStore(root=tmp_path)
+    root_messages = (
+        Message(role="user", content="build the dataset"),
+        Message(role="assistant", content="Research is running."),
+    )
+    latest_messages = (
+        *root_messages,
+        Message(role="user", content="The first research child finished."),
+        Message(role="assistant", content="Waiting for the other child."),
+        Message(role="user", content="The second research child finished."),
+        Message(role="assistant", content="Done."),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=root_turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="build the dataset",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        PROMPT,
+        blob,
+        UNCALLED_DBOS,
+        tmp_path / "workspaces",
+        poll_interval_seconds=0,
+    )
+
+    @dataclass(frozen=True)
+    class ResumedOutcome:
+        workflow_wait_seconds = 1.0
+
+        async def cancel(self, turn_id: UUID) -> bool:
+            raise AssertionError("settled workflow must not be cancelled")
+
+        async def settle(self, settled_conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
+            if turn_id != root_turn_id:
+                return await driver.settle(settled_conversation_id, turn_id)
+            now = datetime.now(UTC)
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="done",
+                        terminal={"status": "done", "text": "Research is running.", "model": MODEL},
+                        updated_at=now,
+                    )
+                    .where(tables.turn.c.id == root_turn_id)
+                )
+                await connection.execute(
+                    sa.insert(tables.turn),
+                    (
+                        {
+                            "id": first_resumed_turn_id,
+                            "workspace_id": workspace_id,
+                            "conversation_id": conversation_id,
+                            "agent_id": agent_id,
+                            "seq": 2,
+                            "status": "done",
+                            "inbound": "The first research child finished.",
+                            "terminal": {
+                                "status": "done",
+                                "text": "Waiting for the other child.",
+                                "model": MODEL,
+                            },
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                        {
+                            "id": latest_resumed_turn_id,
+                            "workspace_id": workspace_id,
+                            "conversation_id": conversation_id,
+                            "agent_id": agent_id,
+                            "seq": 3,
+                            "status": "done",
+                            "inbound": "The second research child finished.",
+                            "terminal": {"status": "done", "text": "Done.", "model": MODEL},
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                    ),
+                )
+            await Transcript(blob=blob, conversation_id=conversation_id).write(
+                Conversation(seq=3, messages=latest_messages)
+            )
+            return Trajectory(
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                agent_prompt=PROMPT,
+                agent_prompt_digest=prompt_digest(PROMPT),
+                messages=root_messages,
+            )
+
+    target = InProcessTarget(
+        ctx=cast(ExtensionContext, object()),
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id),
+        outcome=ResumedOutcome(),
+        blob=blob,
+    )
+
+    with ws(workspace_id):
+        settled = await target._settled_workflow(conversation_id, root_turn_id, "build the dataset")
+
+    assert settled.result.clean is True
+    assert settled.result.output.response == "Done."
+    assert settled.result.trajectory is not None
+    assert settled.result.trajectory.turn_id == root_turn_id
+    assert settled.descendant_ids == (first_resumed_turn_id, latest_resumed_turn_id)
+
+
+@pytest.mark.parametrize("root_finishes", (False, True))
+async def test_capability_workflow_cancels_live_graph_after_immediate_missing_outcome(
+    db: None, tmp_path, root_finishes: bool
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversations = DbConversations(workspace_id)
+    root_conversation_id = await conversations.open("missing-root-outcome")
+    child_conversation_id = await conversations.open("missing-child-outcome")
+    root_turn_id = uuid4()
+    child_turn_id = uuid4()
+    now = datetime.now(UTC)
+    web_error = "upstream 503 from the search provider"
+    root_messages = (
+        Message(role="user", content="build the dataset"),
+        Message(
+            role="assistant",
+            content=(ToolUseBlock(id="search-1", name="search_web", input={"query": "railways"}),),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="search-1", content=web_error, is_error=True),),
+        ),
+        Message(role="assistant", content="Research is running."),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn),
+            (
+                {
+                    "id": root_turn_id,
+                    "workspace_id": workspace_id,
+                    "conversation_id": root_conversation_id,
+                    "agent_id": agent_id,
+                    "seq": 1,
+                    "status": "running",
+                    "inbound": "build the dataset",
+                    "parent_turn_id": None,
+                    "result_delivery": None,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": child_turn_id,
+                    "workspace_id": workspace_id,
+                    "conversation_id": child_conversation_id,
+                    "agent_id": agent_id,
+                    "seq": 1,
+                    "status": "running",
+                    "inbound": "research the records",
+                    "parent_turn_id": root_turn_id,
+                    "result_delivery": DELIVERY_PENDING,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ),
+        )
+
+    @dataclass(frozen=True)
+    class MissingOutcome:
+        workflow_wait_seconds = 1.0
+
+        async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
+            if turn_id != root_turn_id or not root_finishes:
+                return None
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="done",
+                        terminal={"status": "done", "text": "Research is running.", "model": MODEL},
+                        updated_at=sa.func.now(),
+                    )
+                    .where(tables.turn.c.id == root_turn_id)
+                )
+            return Trajectory(
+                conversation_id=root_conversation_id,
+                agent_id=agent_id,
+                agent_prompt=PROMPT,
+                agent_prompt_digest=prompt_digest(PROMPT),
+                messages=root_messages,
+            )
+
+        async def cancel(self, turn_id: UUID) -> bool:
+            async with workspace_tx() as connection:
+                updated = await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="cancelled",
+                        terminal={"status": "cancelled", "text": "", "model": ""},
+                        updated_at=sa.func.now(),
+                    )
+                    .where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                    )
+                )
+            return updated.rowcount == 1
+
+    target = InProcessTarget(
+        ctx=cast(ExtensionContext, object()),
+        agent_id=agent_id,
+        conversations=conversations,
+        outcome=MissingOutcome(),
+        blob=FilesystemBlobStore(root=tmp_path),
+    )
+
+    with ws(workspace_id):
+        settled = await target._settled_workflow(
+            root_conversation_id, root_turn_id, "build the dataset"
+        )
+        async with workspace_tx() as connection:
+            statuses = dict(
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.id, tables.turn.c.status).where(
+                            tables.turn.c.id.in_((root_turn_id, child_turn_id))
+                        )
+                    )
+                ).all()
+            )
+
+    assert settled.result.clean is False
+    assert settled.result.failure_reason == (
+        "background child did not finish" if root_finishes else WAIT_EXPIRED
+    )
+    assert statuses[root_turn_id] == ("done" if root_finishes else "cancelled")
+    assert statuses[child_turn_id] == "cancelled"
+    if root_finishes:
+        assert settled.result.output.response == "Research is running."
+        assert settled.result.output.own_tools == ("search_web",)
+        assert settled.result.output.tool_errors == (web_error,)
+        assert infra_error(settled.result.output.tool_errors) == web_error
+        assert settled.result.trajectory is not None
+        assert settled.result.trajectory.messages == root_messages
+
+
+async def test_capability_workflow_failed_turn_keeps_its_transcript_and_tool_errors(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversations = DbConversations(workspace_id)
+    conversation_id = await conversations.open("failed-workflow")
+    root_turn_id = uuid4()
+    web_error = "the browser host returned 503 Service Unavailable"
+    messages = (
+        Message(role="user", content="book the trip"),
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="browse-1",
+                    name="browser_task",
+                    input={"url": "https://example.com"},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="browse-1", content=web_error, is_error=True),),
+        ),
+        Message(role="assistant", content="The browser never answered."),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=root_turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="book the trip",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    @dataclass(frozen=True)
+    class FailedOutcome:
+        workflow_wait_seconds = 1.0
+
+        async def cancel(self, turn_id: UUID) -> bool:
+            raise AssertionError("a terminal workflow must not be cancelled")
+
+        async def settle(self, settled_conversation_id: UUID, turn_id: UUID) -> Trajectory:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="failed",
+                        terminal={
+                            "status": "failed",
+                            "text": "",
+                            "model": MODEL,
+                            "error_class": "APIConnectionError",
+                            "error_message": web_error,
+                        },
+                        updated_at=sa.func.now(),
+                    )
+                    .where(tables.turn.c.id == turn_id)
+                )
+            return Trajectory(
+                conversation_id=settled_conversation_id,
+                agent_id=agent_id,
+                agent_prompt=PROMPT,
+                agent_prompt_digest=prompt_digest(PROMPT),
+                messages=messages,
+            )
+
+    target = InProcessTarget(
+        ctx=cast(ExtensionContext, object()),
+        agent_id=agent_id,
+        conversations=conversations,
+        outcome=FailedOutcome(),
+        blob=FilesystemBlobStore(root=tmp_path),
+    )
+
+    with ws(workspace_id):
+        settled = await target._settled_workflow(conversation_id, root_turn_id, "book the trip")
+
+    assert settled.result.clean is False
+    assert settled.result.failure_reason == "turn ended with status failed (APIConnectionError)"
+    assert settled.result.error_class == "APIConnectionError"
+    assert settled.result.error_message == web_error
+    assert settled.result.output.response == "The browser never answered."
+    assert settled.result.output.own_tools == ("browser_task",)
+    assert infra_error(settled.result.output.tool_errors) == web_error
+    assert settled.result.trajectory is not None
+    assert settled.result.trajectory.status == "failed"
+    assert settled.result.trajectory.messages == messages
+
+
+async def test_capability_workflow_timeout_cancels_live_turns_and_retires_delivery(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversations = DbConversations(workspace_id)
+    root_conversation_id = await conversations.open("timed-out-workflow")
+    child_conversation_id = await conversations.open("timed-out-child")
+    root_turn_id = uuid4()
+    child_turn_id = uuid4()
+    resumed_turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn),
+            (
+                {
+                    "id": root_turn_id,
+                    "workspace_id": workspace_id,
+                    "conversation_id": root_conversation_id,
+                    "agent_id": agent_id,
+                    "seq": 1,
+                    "status": "running",
+                    "inbound": "build the dataset",
+                    "parent_turn_id": None,
+                    "result_delivery": None,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                },
+                {
+                    "id": child_turn_id,
+                    "workspace_id": workspace_id,
+                    "conversation_id": child_conversation_id,
+                    "agent_id": agent_id,
+                    "seq": 1,
+                    "status": "running",
+                    "inbound": "research the records",
+                    "parent_turn_id": root_turn_id,
+                    "result_delivery": DELIVERY_PENDING,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                },
+            ),
+        )
+
+    @dataclass(frozen=True)
+    class TimedOutOutcome:
+        workflow_wait_seconds = 0.01
+
+        async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def cancel(self, turn_id: UUID) -> bool:
+            async with workspace_tx() as connection:
+                updated = await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="cancelled",
+                        terminal={"status": "cancelled", "text": "", "model": ""},
+                        updated_at=sa.func.now(),
+                    )
+                    .where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.status.in_(("queued", "running")),
+                    )
+                )
+                if turn_id == child_turn_id and updated.rowcount == 1:
+                    await connection.execute(
+                        sa.insert(tables.turn).values(
+                            id=resumed_turn_id,
+                            workspace_id=workspace_id,
+                            conversation_id=root_conversation_id,
+                            agent_id=agent_id,
+                            seq=2,
+                            status="running",
+                            inbound="The research child was cancelled.",
+                            created_at=sa.func.now(),
+                            updated_at=sa.func.now(),
+                        )
+                    )
+            return updated.rowcount == 1
+
+    @dataclass(frozen=True)
+    class NoopDbos:
+        async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
+            return None
+
+    target = InProcessTarget(
+        ctx=cast(ExtensionContext, object()),
+        agent_id=agent_id,
+        conversations=conversations,
+        outcome=TimedOutOutcome(),
+    )
+    dbos = NoopDbos()
+    sweep = DeliverySweep(
+        invoker_for=lambda scoped: AdmissionInvoker(
+            admission=Admission(dbos=cast(DBOSClient, dbos), durable_surfaces=frozenset()),
+            workspace_id=scoped,
+        ),
+        registry=SubagentRegistry(()),
+    )
+
+    with ws(workspace_id):
+        result = await target._settled_workflow(
+            root_conversation_id, root_turn_id, "build the dataset"
+        )
+        await sweep.run()
+        async with workspace_tx() as connection:
+            statuses = dict(
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.id, tables.turn.c.status).where(
+                            tables.turn.c.id.in_((root_turn_id, child_turn_id, resumed_turn_id))
+                        )
+                    )
+                ).all()
+            )
+            delivery = (
+                await connection.execute(
+                    sa.select(tables.turn.c.result_delivery).where(
+                        tables.turn.c.id == child_turn_id
+                    )
+                )
+            ).scalar_one()
+            root_turns = tuple(
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.id).where(
+                            tables.turn.c.conversation_id == root_conversation_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    assert result.result.clean is False
+    assert result.result.failure_reason == WAIT_EXPIRED
+    assert statuses == {
+        root_turn_id: "cancelled",
+        child_turn_id: "cancelled",
+        resumed_turn_id: "cancelled",
+    }
+    assert delivery is None
+    assert set(root_turns) == {root_turn_id, resumed_turn_id}
+
+
+async def test_capability_workflow_cancellation_settles_deferred_delivery_before_return(
+    db: None,
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    conversations = DbConversations(workspace_id)
+    root_conversation_id = await conversations.open("deferred-delivery")
+    child_conversation_id = await conversations.open("deferred-child")
+    root_turn_id = uuid4()
+    child_turn_id = uuid4()
+    resumed_turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn),
+            (
+                {
+                    "id": root_turn_id,
+                    "workspace_id": workspace_id,
+                    "conversation_id": root_conversation_id,
+                    "agent_id": agent_id,
+                    "seq": 1,
+                    "status": "done",
+                    "inbound": "build the dataset",
+                    "terminal": {"status": "done", "text": "Research is running."},
+                    "parent_turn_id": None,
+                    "result_delivery": None,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                },
+                {
+                    "id": child_turn_id,
+                    "workspace_id": workspace_id,
+                    "conversation_id": child_conversation_id,
+                    "agent_id": agent_id,
+                    "seq": 1,
+                    "status": "cancelled",
+                    "inbound": "research the records",
+                    "terminal": {"status": "cancelled", "text": ""},
+                    "parent_turn_id": root_turn_id,
+                    "result_delivery": DELIVERY_PENDING,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                },
+            ),
+        )
+
+    @dataclass(frozen=True)
+    class DeferredInvoker:
+        async def invoke(
+            self,
+            conversation_id: UUID,
+            agent_id: UUID,
+            message: str,
+            idempotency_key: str,
+            *,
+            on_behalf_of_member_id: UUID | None = None,
+            holds_work_already_done: bool = False,
+            as_scheduled: bool = False,
+            unless_member_since: int | None = None,
+            unless_member_arrival_since: int | None = None,
+        ) -> UUID:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=resumed_turn_id,
+                        workspace_id=workspace_id,
+                        conversation_id=conversation_id,
+                        agent_id=agent_id,
+                        seq=2,
+                        status="queued",
+                        inbound=message,
+                        idempotency_key=idempotency_key,
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
+            return resumed_turn_id
+
+    invoker = DeferredInvoker()
+    sweep = DeliverySweep(
+        invoker_for=lambda scoped: invoker,
+        registry=SubagentRegistry(()),
+    )
+
+    @dataclass(frozen=True)
+    class DeferredOutcome:
+        workflow_wait_seconds = 1.0
+
+        async def settle(self, conversation_id: UUID, turn_id: UUID) -> None:
+            assert turn_id == child_turn_id
+            outstanding = await sweep._outstanding()
+            child = next(iter(outstanding.values()))[0]
+            assert child.parent_turn_id == root_turn_id
+            assert child.result_delivery == DELIVERY_PENDING
+            await SubagentResult(invoker=invoker, registry=SubagentRegistry(())).deliver(child)
+
+        async def cancel(self, turn_id: UUID) -> bool:
+            async with workspace_tx() as connection:
+                updated = await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="cancelled",
+                        terminal={"status": "cancelled", "text": ""},
+                        updated_at=sa.func.now(),
+                    )
+                    .where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.status.in_(("queued", "running")),
+                    )
+                )
+            return updated.rowcount == 1
+
+    target = InProcessTarget(
+        ctx=cast(ExtensionContext, object()),
+        agent_id=agent_id,
+        conversations=conversations,
+        outcome=DeferredOutcome(),
+    )
+
+    with ws(workspace_id):
+        await target._cancel_workflow(root_conversation_id, 1)
+        async with workspace_tx() as connection:
+            root_turns = tuple(
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.status)
+                        .where(tables.turn.c.conversation_id == root_conversation_id)
+                        .order_by(tables.turn.c.seq)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            delivery = (
+                await connection.execute(
+                    sa.select(tables.turn.c.result_delivery).where(
+                        tables.turn.c.id == child_turn_id
+                    )
+                )
+            ).scalar_one()
+            resumed = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id,
+                        tables.turn.c.status,
+                        tables.turn.c.conversation_id,
+                        tables.turn.c.idempotency_key,
+                    ).where(tables.turn.c.id == resumed_turn_id)
+                )
+            ).one_or_none()
+
+    assert resumed == (
+        resumed_turn_id,
+        "cancelled",
+        root_conversation_id,
+        f"{SPAWN_RESULT_KEY_PREFIX}{child_turn_id}",
+    )
+    assert root_turns == ("done", "cancelled")
+    assert delivery == DELIVERY_DELIVERED
 
 
 async def test_capability_merge_recovers_a_failed_childs_completed_steps(

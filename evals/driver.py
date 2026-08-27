@@ -46,6 +46,7 @@ from ufo.onboard.onboard_control import (
 )
 from ufo.schema import tables
 from ufo.schema.records import (
+    DELIVERY_PENDING,
     PENDING,
     ReasoningEffort,
     TerminalFrame,
@@ -834,16 +835,18 @@ class WorkspaceDriver:
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.turn.c.status, tables.turn.c.seq).where(
-                        tables.turn.c.id == turn_id
-                    )
+                    sa.select(
+                        tables.turn.c.status,
+                        tables.turn.c.seq,
+                        tables.turn.c.result_delivery,
+                    ).where(tables.turn.c.id == turn_id)
                 )
             ).one_or_none()
         if row is None:
             return None
-        if row.status in TERMINAL_STATUSES:
+        if row.status in TERMINAL_STATUSES and row.result_delivery != DELIVERY_PENDING:
             return await self._trajectory(conversation_id, row.seq)
-        if row.status not in WORKFLOW_STATUSES:
+        if row.status not in WORKFLOW_STATUSES and row.status not in TERMINAL_STATUSES:
             return None
         try:
             async with asyncio.timeout(self.workflow_wait_seconds):
@@ -852,19 +855,28 @@ class WorkspaceDriver:
                     try:
                         handle = await self.dbos.retrieve_workflow_async(str(turn_id))
                         break
-                    except dbos_error.DBOSNonExistentWorkflowError:
+                    except dbos_error.DBOSNonExistentWorkflowError as error:
                         async with workspace_tx() as connection:
                             row = (
                                 await connection.execute(
-                                    sa.select(tables.turn.c.status, tables.turn.c.seq).where(
-                                        tables.turn.c.id == turn_id
-                                    )
+                                    sa.select(
+                                        tables.turn.c.status,
+                                        tables.turn.c.seq,
+                                        tables.turn.c.result_delivery,
+                                    ).where(tables.turn.c.id == turn_id)
                                 )
                             ).one_or_none()
                         if row is None:
                             return None
-                        if row.status in TERMINAL_STATUSES:
+                        if (
+                            row.status in TERMINAL_STATUSES
+                            and row.result_delivery != DELIVERY_PENDING
+                        ):
                             return await self._trajectory(conversation_id, row.seq)
+                        if row.status in TERMINAL_STATUSES:
+                            raise RuntimeError(
+                                f"terminal child {turn_id} has no workflow to settle delivery"
+                            ) from error
                         if row.status not in WORKFLOW_STATUSES:
                             return None
                         if row.status == "running":
@@ -881,12 +893,18 @@ class WorkspaceDriver:
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
-                    sa.select(tables.turn.c.status, tables.turn.c.seq).where(
-                        tables.turn.c.id == turn_id
-                    )
+                    sa.select(
+                        tables.turn.c.status,
+                        tables.turn.c.seq,
+                        tables.turn.c.result_delivery,
+                    ).where(tables.turn.c.id == turn_id)
                 )
             ).one_or_none()
-        if row is None or row.status not in TERMINAL_STATUSES:
+        if (
+            row is None
+            or row.status not in TERMINAL_STATUSES
+            or row.result_delivery == DELIVERY_PENDING
+        ):
             return None
         return await self._trajectory(conversation_id, row.seq)
 
