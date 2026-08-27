@@ -34,7 +34,13 @@ class TaskInput(BaseModel):
 
 class ResultOutput(BaseModel):
     result: str = Field(
-        description="Freeform result governed by the shared delivery register.",
+        description=(
+            "Parent-visible result governed by the shared delivery register, at most 60 words. "
+            "Call finish as soon as work is complete; never write this result as assistant prose "
+            "first. For a required artifact, give the conclusion and absolute path without "
+            "restating its body. For a result-only task, give the result directly and create no "
+            "file."
+        ),
     )
 
 

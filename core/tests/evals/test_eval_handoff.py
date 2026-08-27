@@ -31,6 +31,48 @@ def test_a_regenerated_report_is_read_as_duplication() -> None:
     assert record.duplication == 1.0
 
 
+def test_the_persisted_terminal_answer_is_not_standing_prose() -> None:
+    terminal = '{"result":"done"}'
+    record = handoff_record(
+        CONVERSATION,
+        (Message(role="assistant", content=terminal),),
+        "done",
+        terminal_texts=(terminal,),
+    )
+
+    assert record.closing_chars == 0
+    assert record.duplication == 0.0
+
+
+def test_standing_prose_before_the_terminal_answer_is_measured() -> None:
+    terminal = '{"result":"' + REPORT + '"}'
+    record = handoff_record(
+        CONVERSATION,
+        (assistant(REPORT), Message(role="assistant", content=terminal)),
+        REPORT,
+        terminal_texts=(terminal,),
+    )
+
+    assert record.closing_chars == len(REPORT)
+    assert record.duplication == 1.0
+
+
+def test_a_followup_ending_on_a_lone_finish_stands_on_the_prose_before_both_payloads() -> None:
+    first = '{"result":"the first turn payload, long enough to shingle against the next one."}'
+    second = '{"result":"' + REPORT + '"}'
+    messages = (
+        assistant(NARRATION, tool="bash"),
+        Message(role="assistant", content=first),
+        Message(role="user", content="follow up"),
+        Message(role="assistant", content=second),
+    )
+
+    record = handoff_record(CONVERSATION, messages, REPORT, terminal_texts=(first, second))
+
+    assert record.closing_chars == len(NARRATION)
+    assert record.duplication == 0.0
+
+
 def test_a_handoff_records_whether_the_complete_result_is_one_json_object() -> None:
     clean = handoff_record(CONVERSATION, (), '{"complete": true}')
     trailing = handoff_record(CONVERSATION, (), '{"complete": true}\nDone.')

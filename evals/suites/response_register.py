@@ -39,6 +39,7 @@ from an empty workspace."""
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -57,6 +58,8 @@ BULLET_RE = re.compile(r"^\s{0,3}(?:[-*•]\s+\S|\d{1,2}[.)]\s+\S)", re.MULTILIN
 BULLET_MARKER_RE = re.compile(r"^\s{0,3}(?:[-*•]|\d{1,2}[.)])\s+")
 FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,}).*?(?:^\s{0,3}\1\s*$|\Z)", re.MULTILINE | re.DOTALL)
 REPORT_GLOB = "*.md"
+DELEGATED_CLOSING_MAX_CHARS = 400
+DELEGATED_DUPLICATION_MAX = 0.3
 
 
 @dataclass(frozen=True)
@@ -352,23 +355,39 @@ def delegated_written_report_scorer(
     summary_max_lines: int,
     report_min_words: int,
     report_min_headers: int,
+    *,
+    share_report: bool = False,
 ) -> Grader:
     """One report crosses parent-to-child, child-to-parent, and parent-to-member.
 
     The child writes its report to /workspace, which is how agents hand work to each other, and the
-    parent leaves it there: the last hop is a summary that names the write-up and shares nothing,
-    so the member knows what to ask for without receiving a file the ask never named."""
-    final_delivery = written_report_scorer(
-        summary_min_words,
-        summary_max_words,
-        summary_max_lines,
-        report_min_words,
-        report_min_headers,
+    final scorer follows the member's delivery request: it either proves the report arrived or
+    proves it stayed in the workspace."""
+    report_name = PurePosixPath(report_path).name
+    final_delivery = (
+        shared_report_scorer(
+            summary_max_words,
+            summary_max_lines,
+            report_min_words,
+            report_min_headers,
+            summary_min_words,
+            report_name,
+        )
+        if share_report
+        else written_report_scorer(
+            summary_min_words,
+            summary_max_words,
+            summary_max_lines,
+            report_min_words,
+            report_min_headers,
+        )
     )
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         final = await final_delivery(output)
         failures = [] if final.passed else [final.reason]
+        if share_report and report_name not in output.response:
+            failures.append(f"member summary does not name {report_name}")
         spawns = tuple(
             (index, call)
             for index, call in enumerate(output.calls)
@@ -430,6 +449,22 @@ def delegated_written_report_scorer(
                 if report_path not in result:
                     failures.append("subagent summary does not reference its report")
 
+        handoff = None
+        if len(output.handoffs) != 1:
+            failures.append(f"expected one recorded subagent handoff, found {len(output.handoffs)}")
+        else:
+            handoff = output.handoffs[0]
+            if handoff.closing_chars > DELEGATED_CLOSING_MAX_CHARS:
+                failures.append(
+                    f"subagent left {handoff.closing_chars} characters of standing prose over "
+                    f"the {DELEGATED_CLOSING_MAX_CHARS} budget"
+                )
+            if handoff.duplication > DELEGATED_DUPLICATION_MAX:
+                failures.append(
+                    f"subagent repeated {handoff.duplication:.0%} of its standing prose in the "
+                    "finish result"
+                )
+
         writes = tuple(
             (index, call)
             for index, call in enumerate(output.calls)
@@ -447,6 +482,12 @@ def delegated_written_report_scorer(
             evidence["delegatedSummary"] = task_shape.evidence
         if result_shape is not None:
             evidence["subagentSummary"] = result_shape.evidence
+        if handoff is not None:
+            evidence["handoff"] = {
+                "closingChars": handoff.closing_chars,
+                "resultChars": handoff.result_chars,
+                "duplication": handoff.duplication,
+            }
         if failures:
             return CapabilityVerdict(False, "delegated delivery: " + "; ".join(failures), evidence)
         assert task_shape is not None and result_shape is not None
@@ -462,7 +503,133 @@ def delegated_written_report_scorer(
         f"artifacts, one parent-facing subagent result of at most {result_max_words} words "
         f"over at most {result_max_lines} lines referencing its report path, and a member-facing "
         f"summary of at most {summary_max_words} words that names the subagent's written report "
-        "without sharing it",
+        f"and {'shares it' if share_report else 'does not share it'}, with no more than "
+        f"{DELEGATED_CLOSING_MAX_CHARS} characters of standing child prose and no more than "
+        f"{DELEGATED_DUPLICATION_MAX:.0%} repeated in its finish result",
+        grade,
+    )
+
+
+def delegated_inline_result_scorer(
+    source_paths: tuple[str, ...],
+    task_max_words: int,
+    result_max_words: int,
+    result_max_lines: int,
+    summary_max_words: int,
+    summary_max_lines: int,
+) -> Grader:
+    """A result-only delegation returns one short payload and creates no report file."""
+
+    final_delivery = unwritten_reply_scorer(summary_max_words, summary_max_lines)
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        final = await final_delivery(output)
+        failures = [] if final.passed else [final.reason]
+        spawns = tuple(
+            call
+            for call in output.calls
+            if call.name == "spawn"
+            and call.succeeded
+            and str(call.input.get("target", "")).removeprefix("profile:") == "general_purpose"
+        )
+        task_shape = None
+        result_shape = None
+        if len(spawns) != 1:
+            failures.append(f"expected one general-purpose delegation, found {len(spawns)}")
+        else:
+            spawn = spawns[0]
+            payload = spawn.input.get("payload")
+            task = payload.get("task") if isinstance(payload, dict) else None
+            if not isinstance(task, str):
+                failures.append("delegation has no prose task")
+            else:
+                task_shape = measure(task)
+                if task_shape.words > task_max_words:
+                    failures.append(
+                        f"delegated summary has {task_shape.words} words over the "
+                        f"{task_max_words} budget"
+                    )
+                if task_shape.headers or task_shape.bullets:
+                    failures.append("delegated summary uses document structure")
+                for path in source_paths:
+                    references = (
+                        path,
+                        path.removeprefix("/workspace/"),
+                        path.removeprefix("/workspace/repo/"),
+                    )
+                    if not any(reference in task for reference in references):
+                        failures.append(f"delegated summary does not reference {path}")
+            try:
+                returned = json.loads(spawn.result)
+            except (AttributeError, json.JSONDecodeError):
+                returned = None
+            result = returned.get("result") if isinstance(returned, dict) else None
+            if not isinstance(result, str):
+                failures.append("delegation returned no prose result")
+            else:
+                result_shape = measure(result)
+                if result_shape.words > result_max_words:
+                    failures.append(
+                        f"subagent summary has {result_shape.words} words over the "
+                        f"{result_max_words} budget"
+                    )
+                if result_shape.lines > result_max_lines:
+                    failures.append(
+                        f"subagent summary has {result_shape.lines} lines over the "
+                        f"{result_max_lines} budget"
+                    )
+                if result_shape.headers or result_shape.bullets:
+                    failures.append("subagent summary uses document structure")
+
+        handoff = None
+        if len(output.handoffs) != 1:
+            failures.append(f"expected one recorded subagent handoff, found {len(output.handoffs)}")
+        else:
+            handoff = output.handoffs[0]
+            if handoff.closing_chars > DELEGATED_CLOSING_MAX_CHARS:
+                failures.append(
+                    f"subagent left {handoff.closing_chars} characters of standing prose over "
+                    f"the {DELEGATED_CLOSING_MAX_CHARS} budget"
+                )
+            if handoff.duplication > DELEGATED_DUPLICATION_MAX:
+                failures.append(
+                    f"subagent repeated {handoff.duplication:.0%} of its standing prose in the "
+                    "finish result"
+                )
+            if handoff.documents:
+                failures.append(
+                    f"subagent wrote {len(handoff.documents)} files for a result-only task"
+                )
+
+        evidence: JsonObject = {"final": final.evidence}
+        if task_shape is not None:
+            evidence["delegatedSummary"] = task_shape.evidence
+        if result_shape is not None:
+            evidence["subagentSummary"] = result_shape.evidence
+        if handoff is not None:
+            evidence["handoff"] = {
+                "closingChars": handoff.closing_chars,
+                "resultChars": handoff.result_chars,
+                "duplication": handoff.duplication,
+                "documents": len(handoff.documents),
+            }
+        if failures:
+            return CapabilityVerdict(False, "delegated result: " + "; ".join(failures), evidence)
+        assert task_shape is not None and result_shape is not None
+        return CapabilityVerdict(
+            True,
+            f"delegated result: {task_shape.words}-word task, "
+            f"{result_shape.words}-word subagent result, no file; {final.reason}",
+            evidence,
+        )
+
+    return DescribedGrader(
+        f"a result-only delegation: a parent task of at most {task_max_words} words referencing "
+        f"the source files, one parent-facing result of at most {result_max_words} words over at "
+        f"most {result_max_lines} lines, no file written, no more than "
+        f"{DELEGATED_CLOSING_MAX_CHARS} characters of standing child prose, no more than "
+        f"{DELEGATED_DUPLICATION_MAX:.0%} repeated in its finish result, and a member reply of at "
+        f"most {summary_max_words} words",
         grade,
     )
 
@@ -513,6 +680,50 @@ def resolve_source_credential(source, connections, credential_slot):
     raise SourceUnauthenticated(
         f"connect a {source.provider!r} account before registering its sources"
     )
+""",
+)
+
+JSONL_RESULTS = _file(
+    "repo/data/results.jsonl",
+    """
+{"case":"alpha","passed":true}
+{"case":"beta","passed":false}
+{"case":"gamma","passed":true}
+""",
+)
+
+JSONL_READER = _file(
+    "repo/src/read_results.py",
+    """
+import json
+from pathlib import Path
+
+
+def passed_cases(path: Path) -> list[str]:
+    records = json.loads(path.read_text())
+    return [record["case"] for record in records if record["passed"]]
+""",
+)
+
+SPAWN_TIMINGS = _file(
+    "repo/data/spawn-timings.csv",
+    """
+phase,seconds
+prompt_input,1.4
+search_calls,31.8
+markdown_report,121.6
+standing_conclusion,116.9
+finish_result,113.7
+""",
+)
+
+SPAWN_TIMING_NOTES = _file(
+    "repo/data/spawn-timing-notes.txt",
+    """
+The phases are sequential totals from one delegated research task. markdown_report is a file write.
+standing_conclusion is the assistant prose in the round before the end-turn reminder. finish_result
+is the payload returned to the parent. The parent reads only finish_result. The member did not ask
+for a file.
 """,
 )
 
@@ -624,6 +835,96 @@ DELEGATED_CASES = (
             "the note's workspace-key requirement as shipped behavior.",
             "The report separates evidence about credential precedence from hypotheses about why "
             "this particular Drive sync requested a key.",
+        ),
+    ),
+    CapabilityCase(
+        "delegated-pushback-artifact-delivered",
+        "Have a general-purpose subagent reconcile the claim in "
+        "/workspace/repo/notes/change-412.md with the behavior in "
+        "/workspace/repo/src/source_credentials.py. Have it write the complete evidence, "
+        "uncertainty, and reasoning to /workspace/change-412-evidence.md. Send me that report "
+        "file, then tell me whether my connected Drive account is being denied in favor of a "
+        "workspace API key.",
+        delegated_written_report_scorer(
+            report_path="/workspace/change-412-evidence.md",
+            source_paths=(
+                "/workspace/repo/notes/change-412.md",
+                "/workspace/repo/src/source_credentials.py",
+            ),
+            task_max_words=100,
+            result_max_words=60,
+            result_max_lines=6,
+            summary_min_words=20,
+            summary_max_words=80,
+            summary_max_lines=6,
+            report_min_words=150,
+            report_min_headers=2,
+            share_report=True,
+        ),
+        digest_tag="register:delegated-pushback-artifact-delivered",
+        workspace_files=(CHANGE_NOTE, SOURCE_CREDENTIALS),
+        rubric=(
+            "The summary rejects the note's claimed rule: a matching connected account takes "
+            "precedence over the workspace key.",
+            "The summary says the files do not establish what happened to this Drive sync or why "
+            "it requested the workspace key.",
+            "The summary names change-412-evidence.md as the attached report.",
+        ),
+        artifact_rubric=(
+            "The report establishes the complete precedence from the code: a matching connected "
+            "account first, the workspace credential only when none matches, and with neither the "
+            "member is told to connect an account.",
+            "The report identifies the change note as contradicting the code and separates that "
+            "evidence from hypotheses about this Drive sync.",
+        ),
+    ),
+    CapabilityCase(
+        "delegated-jsonl-result-only",
+        "Have a general-purpose subagent inspect /workspace/repo/data/results.jsonl and "
+        "/workspace/repo/src/read_results.py. Tell me why the reader raises JSONDecodeError: "
+        "Extra data and the direct fix. I do not need a file.",
+        delegated_inline_result_scorer(
+            source_paths=(
+                "/workspace/repo/data/results.jsonl",
+                "/workspace/repo/src/read_results.py",
+            ),
+            task_max_words=100,
+            result_max_words=60,
+            result_max_lines=6,
+            summary_max_words=80,
+            summary_max_lines=6,
+        ),
+        digest_tag="register:delegated-jsonl-result-only",
+        workspace_files=(JSONL_RESULTS, JSONL_READER),
+        rubric=(
+            "The answer says the file is newline-delimited JSON but the reader passes the whole "
+            "file to a parser for one JSON value.",
+            "The answer fixes the root cause by parsing each nonempty line as its own JSON object.",
+            "The answer does not recommend a retry or say the records are corrupt.",
+        ),
+    ),
+    CapabilityCase(
+        "delegated-latency-result-only",
+        "Have a general-purpose subagent inspect /workspace/repo/data/spawn-timings.csv and "
+        "/workspace/repo/data/spawn-timing-notes.txt. Tell me what dominates the elapsed time and "
+        "which result production should remain. I do not need a file.",
+        delegated_inline_result_scorer(
+            source_paths=(
+                "/workspace/repo/data/spawn-timings.csv",
+                "/workspace/repo/data/spawn-timing-notes.txt",
+            ),
+            task_max_words=100,
+            result_max_words=60,
+            result_max_lines=6,
+            summary_max_words=80,
+            summary_max_lines=6,
+        ),
+        digest_tag="register:delegated-latency-result-only",
+        workspace_files=(SPAWN_TIMINGS, SPAWN_TIMING_NOTES),
+        rubric=(
+            "The answer says the three result-writing phases dominate the prompt and search time.",
+            "The answer keeps the finish result because it is the only result the parent reads.",
+            "The answer removes the standing conclusion and the unrequested Markdown report.",
         ),
     ),
 )

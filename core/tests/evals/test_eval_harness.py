@@ -84,7 +84,7 @@ from evals.harness.capability import (
     run_capability_case,
     source_digest,
 )
-from evals.harness.handoff import SubagentHandoff
+from evals.harness.handoff import HandoffDocument, SubagentHandoff
 from evals.harness.harness import (
     WAIT_EXPIRED,
     EvalCaseResult,
@@ -190,6 +190,7 @@ from evals.suites.response_register import (
     SOURCE_CREDENTIALS,
     Shape,
     conversational_scorer,
+    delegated_inline_result_scorer,
     delegated_written_report_scorer,
     measure,
     shared_report_scorer,
@@ -227,7 +228,7 @@ from ufo.ext.context import (
 from ufo.ext.loader import load_manifests, skill_registry
 from ufo.kinds.agents import AGENT_KIND
 from ufo.kinds.governance import Governance, prompt_digest
-from ufo.loop.engine import DispatchResult, StreamResult
+from ufo.loop.engine import FINISH_PROMPT, DispatchResult, StreamResult
 from ufo.loop.transcript import Transcript
 from ufo.models.catalog import CORE_PRICING
 from ufo.models.interface import (
@@ -5014,6 +5015,12 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
         f"unknown. Complete evidence and source comparison are in {report_path}."
     )
     child = dumps({"result": child_summary})
+    handoff = SubagentHandoff(
+        conversation_id=uuid4(),
+        closing_chars=24,
+        result_chars=len(child_summary),
+        duplication=0.0,
+    )
     spawn = ToolInvocation(
         "spawn",
         {
@@ -5038,13 +5045,23 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
         "not establish what happened to this incident. The complete evidence is written to "
         "evidence.md and I can send it."
     )
-    output = CapabilityOutput(member_reply, (spawn, write), workspace_dir=tmp_path)
+    output = CapabilityOutput(
+        member_reply,
+        (spawn, write),
+        workspace_dir=tmp_path,
+        handoffs=(handoff,),
+    )
 
     verdict = await scorer(output)
 
     assert verdict.passed
     assert verdict.evidence["delegatedSummary"]["words"] == 10
     assert verdict.evidence["subagentSummary"]["words"] == 20
+    assert verdict.evidence["handoff"] == {
+        "closingChars": 24,
+        "resultChars": len(child_summary),
+        "duplication": 0.0,
+    }
     parent_shared = await scorer(
         replace(
             output,
@@ -5065,6 +5082,24 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
     not_collected = await scorer(replace(output, calls=(background, write)))
     assert not not_collected.passed
     assert "delegation returned no prose result" in not_collected.reason
+
+    missing_handoff = await scorer(replace(output, handoffs=()))
+    assert not missing_handoff.passed
+    assert "expected one recorded subagent handoff, found 0" in missing_handoff.reason
+    verbose_handoff = await scorer(
+        replace(output, handoffs=(handoff.model_copy(update={"closing_chars": 401}),))
+    )
+    assert not verbose_handoff.passed
+    assert "subagent left 401 characters of standing prose over the 400 budget" in (
+        verbose_handoff.reason
+    )
+    duplicate_handoff = await scorer(
+        replace(output, handoffs=(handoff.model_copy(update={"duplication": 0.31}),))
+    )
+    assert not duplicate_handoff.passed
+    assert "subagent repeated 31% of its standing prose in the finish result" in (
+        duplicate_handoff.reason
+    )
 
     def with_task(value: object) -> ToolInvocation:
         return replace(spawn, input={**spawn.input, "payload": {"task": value}})
@@ -5144,6 +5179,126 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
         verdict = await scorer(changed)
         assert not verdict.passed
         assert reason in verdict.reason
+
+
+async def test_delegated_shared_report_requires_the_named_report_to_arrive(tmp_path: Path) -> None:
+    report_path = str(tmp_path / "evidence.md")
+    report = (
+        "## Evidence\n"
+        + " ".join(["fact"] * 80)
+        + "\n\n## Uncertainty\n"
+        + " ".join(["unknown"] * 80)
+        + "\n\n## Conclusion\n"
+        + " ".join(["result"] * 80)
+    )
+    (tmp_path / "evidence.md").write_text(report)
+    child_summary = f"The complete evidence is in {report_path}."
+    spawn = ToolInvocation(
+        "spawn",
+        {
+            "target": "general_purpose",
+            "payload": {"task": f"Read note.md and code.py. Write the report to {report_path}."},
+        },
+        dumps({"result": child_summary}),
+        has_result=True,
+    )
+    write = ToolInvocation(
+        "write", {"file_path": report_path, "content": report}, "ok", has_result=True
+    )
+    share = ToolInvocation(
+        "share_file",
+        {"files": [{"file_path": report_path}]},
+        '[{"name":"evidence.md"}]',
+        has_result=True,
+    )
+    handoff = SubagentHandoff(
+        conversation_id=uuid4(),
+        closing_chars=20,
+        result_chars=len(child_summary),
+        duplication=0.0,
+    )
+    scorer = delegated_written_report_scorer(
+        report_path,
+        ("/workspace/note.md", "/workspace/code.py"),
+        100,
+        60,
+        6,
+        5,
+        80,
+        6,
+        200,
+        3,
+        share_report=True,
+    )
+    response = "The report is attached as evidence.md."
+    output = CapabilityOutput(
+        response,
+        (spawn, share, write),
+        artifacts=(SharedArtifact("evidence.md", report.encode()),),
+        workspace_dir=tmp_path,
+        handoffs=(handoff,),
+    )
+
+    assert (await scorer(output)).passed
+
+    missing = await scorer(replace(output, calls=(spawn, write), artifacts=()))
+    assert not missing.passed
+    assert "shared 0 files and delivered 0 Markdown artifacts" in missing.reason
+    failed_share = replace(share, result="upload failed", is_error=True)
+    failed = await scorer(replace(output, calls=(spawn, failed_share, write), artifacts=()))
+    assert not failed.passed
+    assert "shared 0 files and delivered 0 Markdown artifacts" in failed.reason
+    unnamed = await scorer(replace(output, response="The report is attached."))
+    assert not unnamed.passed
+    assert "member summary does not name evidence.md" in unnamed.reason
+
+
+async def test_delegated_inline_result_rejects_a_report_file_and_duplicate_prose(
+    tmp_path: Path,
+) -> None:
+    sources = ("/workspace/repo/data.jsonl", "/workspace/repo/read.py")
+    task = "Read repo/data.jsonl and repo/read.py. Identify the parsing fault and its direct fix."
+    result = "The script parses line-delimited JSON as one document. Parse each nonempty line."
+    spawn = ToolInvocation(
+        "spawn",
+        {"target": "general_purpose", "payload": {"task": task}},
+        dumps({"result": result}),
+        has_result=True,
+    )
+    handoff = SubagentHandoff(
+        conversation_id=uuid4(),
+        closing_chars=22,
+        result_chars=len(result),
+        duplication=0.0,
+    )
+    output = CapabilityOutput(
+        "The script reads line-delimited JSON as one document. Parse each nonempty line instead.",
+        (spawn,),
+        workspace_dir=tmp_path,
+        handoffs=(handoff,),
+    )
+    scorer = delegated_inline_result_scorer(sources, 100, 60, 6, 80, 6)
+
+    verdict = await scorer(output)
+
+    assert verdict.passed
+    assert verdict.evidence["handoff"]["documents"] == 0
+    report = HandoffDocument(
+        path="/workspace/findings.md",
+        chars=4_000,
+        reads=1,
+        duplication=0.9,
+    )
+    filed = await scorer(
+        replace(output, handoffs=(handoff.model_copy(update={"documents": (report,)}),))
+    )
+    assert not filed.passed
+    assert "subagent wrote 1 files for a result-only task" in filed.reason
+    duplicated = await scorer(
+        replace(output, handoffs=(handoff.model_copy(update={"duplication": 0.8}),))
+    )
+    assert not duplicated.passed
+    assert "subagent repeated 80% of its standing prose in the finish result" in duplicated.reason
 
 
 async def test_structured_answer_scorer_passes_a_short_list_of_whole_sentences() -> None:
@@ -5317,7 +5472,11 @@ def test_the_grounding_case_stages_a_note_its_code_contradicts() -> None:
     align the two, or unstage either file, and a reply that read neither still satisfies the
     rubric."""
     (case,) = [item for item in REGISTER_CASES if item.name == "pushback-artifact-self-description"]
-    (delegated,) = DELEGATED_CASES
+    delegated = next(
+        item
+        for item in DELEGATED_CASES
+        if item.name == "delegated-pushback-artifact-self-description"
+    )
     note = CHANGE_NOTE.content.decode()
     code = SOURCE_CREDENTIALS.content.decode()
     connected = (
@@ -5341,7 +5500,11 @@ def test_the_grounding_case_stages_a_note_its_code_contradicts() -> None:
 
 
 def test_delegated_register_grades_the_unknown_incident_and_exact_task_budget() -> None:
-    (case,) = DELEGATED_CASES
+    case = next(
+        item
+        for item in DELEGATED_CASES
+        if item.name == "delegated-pushback-artifact-self-description"
+    )
 
     grading = grading_statement(case.grader)
 
@@ -5349,7 +5512,9 @@ def test_delegated_register_grades_the_unknown_incident_and_exact_task_budget() 
     assert "one parent-facing subagent result of at most 60 words" in grading
     assert "over at most 6 lines" in grading
     assert "summary of at most 80 words" in grading
-    assert "names the subagent's written report without sharing it" in grading
+    assert "names the subagent's written report and does not share it" in grading
+    assert "400 characters of standing child prose" in grading
+    assert "30% repeated in its finish result" in grading
     assert "member-visible terms" in case.rubric[0]
     assert "do not establish what happened to this Drive sync" in case.rubric[1]
     assert (
@@ -5361,6 +5526,27 @@ def test_delegated_register_grades_the_unknown_incident_and_exact_task_budget() 
         "separates evidence about credential precedence from hypotheses" in case.artifact_rubric[2]
     )
     assert case.written_report == REPORT_GLOB
+
+
+def test_delegated_register_covers_file_and_result_only_handoffs() -> None:
+    cases = {case.name: case for case in DELEGATED_CASES}
+
+    assert set(cases) == {
+        "delegated-pushback-artifact-self-description",
+        "delegated-pushback-artifact-delivered",
+        "delegated-jsonl-result-only",
+        "delegated-latency-result-only",
+    }
+    shared = cases["delegated-pushback-artifact-delivered"]
+    assert "Send me that report file" in shared.message
+    assert "and shares it" in grading_statement(shared.grader)
+    assert shared.written_report == ""
+    for name in ("delegated-jsonl-result-only", "delegated-latency-result-only"):
+        case = cases[name]
+        grading = grading_statement(case.grader)
+        assert "result-only delegation" in grading
+        assert "no file written" in grading
+        assert case.artifact_rubric == ()
 
 
 async def test_rubric_parser_accepts_an_exactly_fenced_verdict() -> None:
@@ -9280,6 +9466,58 @@ async def test_failed_child_recovery_preserves_the_followup_closing(db: None, tm
     assert [handoff.closing_chars for handoff in merged.handoffs] == [
         len("the real closing answer")
     ]
+
+
+async def test_child_handoff_omits_the_persisted_terminal_answer(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    transcript = (
+        Message(role="user", content="delegated task"),
+        Message(role="assistant", content="the unused prose answer"),
+        Message(role="user", content=FINISH_PROMPT),
+        Message(role="assistant", content="Done."),
+    )
+
+    with ws(workspace_id):
+        merged = await _merge_child_turns(
+            blob,
+            workspace_id,
+            agent_id,
+            (("done", "delegated task"),),
+            transcript,
+            {},
+        )
+
+    (handoff,) = merged.handoffs
+    assert handoff.closing_chars == len("the unused prose answer")
+
+
+async def test_child_handoff_omits_every_terminal_turns_answer(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    transcript = (
+        Message(role="user", content="delegated task"),
+        Message(role="assistant", content="the standing prose answer"),
+        Message(role="user", content=FINISH_PROMPT),
+        Message(role="assistant", content="Done."),
+        Message(role="user", content="follow up"),
+        Message(role="assistant", content="Done."),
+    )
+
+    with ws(workspace_id):
+        merged = await _merge_child_turns(
+            blob,
+            workspace_id,
+            agent_id,
+            (("done", "delegated task"), ("done", "follow up")),
+            transcript,
+            {},
+        )
+
+    (handoff,) = merged.handoffs
+    assert handoff.closing_chars == len("the standing prose answer")
 
 
 def test_turn_windows_bounds_a_missing_inbound_by_the_next_known_turn() -> None:

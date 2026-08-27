@@ -91,12 +91,16 @@ def _shingles(text: str) -> frozenset[tuple[str, ...]]:
 
 
 def handoff_record(
-    conversation_id: UUID, messages: tuple[Message, ...], result: str
+    conversation_id: UUID,
+    messages: tuple[Message, ...],
+    result: str,
+    *,
+    terminal_texts: tuple[str, ...] = (),
 ) -> SubagentHandoff:
     """One child conversation's handoff: its whole transcript against the payload its last terminal
     turn carried, so a conversation a `message_spawn` follow-up extended is counted once and
     whole rather than attributed to its final turn."""
-    closing = _last_assistant_text(messages)
+    closing = _last_assistant_text(messages, terminal_texts)
     return SubagentHandoff(
         conversation_id=conversation_id,
         closing_chars=len(closing),
@@ -184,19 +188,27 @@ def _written_text(args: JsonObject) -> str:
     return "\n".join(inserted)
 
 
-def _last_assistant_text(messages: tuple[Message, ...]) -> str:
+def _last_assistant_text(messages: tuple[Message, ...], terminal_texts: tuple[str, ...]) -> str:
     """The text of the last assistant message that carried any — the child's final standing prose.
-    Text blocks within that one message join, so a message split across blocks is measured whole."""
+    Text blocks within that one message join, so a message split across blocks is measured whole.
+    Every terminal turn persists its own payload as an assistant message, so each payload is
+    skipped once: a child a `message_spawn` follow-up extended, whose last turn ends on a lone
+    `finish` call, would otherwise stand on the payload of the turn before it."""
+    omit = [text.strip() for text in terminal_texts if text.strip()]
     for message in reversed(messages):
         if message.role != "assistant":
             continue
         if isinstance(message.content, str):
-            if message.content.strip():
-                return message.content.strip()
+            text = message.content.strip()
+        else:
+            text = "\n".join(
+                block.text
+                for block in message.content
+                if isinstance(block, TextBlock) and block.text
+            ).strip()
+        if text in omit:
+            omit.remove(text)
             continue
-        text = "\n".join(
-            block.text for block in message.content if isinstance(block, TextBlock) and block.text
-        ).strip()
         if text:
             return text
     return ""

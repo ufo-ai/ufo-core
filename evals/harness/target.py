@@ -688,7 +688,12 @@ class InProcessTarget:
             child = capability_output(child_messages)
             handoffs.append(
                 handoff_record(
-                    conversation_id, child_messages, _terminal_result(settled[-1].terminal)
+                    conversation_id,
+                    child_messages,
+                    _terminal_result(settled[-1].terminal),
+                    terminal_texts=tuple(
+                        _terminal_text(turn.terminal) for turn in settled if turn.status == "done"
+                    ),
                 )
             )
             for turn in turns:
@@ -901,9 +906,7 @@ def compaction_snapshots(records: tuple[CompactionRecord, ...]) -> tuple[StoredC
 def _terminal_result(terminal: Json) -> str:
     """The payload a finished child handed its parent: the `result` its terminal text carried, or
     that text whole when it is not the typed shape a profile's output model produces."""
-    if terminal is None:
-        return ""
-    text = TerminalFrame.model_validate(terminal).text
+    text = _terminal_text(terminal)
     try:
         decoded = json.loads(text)
     except json.JSONDecodeError:
@@ -913,6 +916,12 @@ def _terminal_result(terminal: Json) -> str:
             return result
         case _:
             return text
+
+
+def _terminal_text(terminal: Json) -> str:
+    if terminal is None:
+        return ""
+    return TerminalFrame.model_validate(terminal).text
 
 
 def capability_output(messages: tuple[Message, ...]) -> CapabilityOutput:

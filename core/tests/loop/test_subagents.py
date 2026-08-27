@@ -124,6 +124,13 @@ def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:
         "shared delivery register"
         in profile.output_model.model_json_schema()["properties"]["result"]["description"]
     )
+    result_description = profile.output_model.model_json_schema()["properties"]["result"][
+        "description"
+    ]
+    assert "at most 60 words" in result_description
+    assert "never write this result as assistant prose first" in result_description
+    assert "For a required artifact" in result_description
+    assert "For a result-only task" in result_description
     assert "maxLength" not in profile.input_model.model_json_schema()["properties"]["task"]
     assert "maxLength" not in profile.output_model.model_json_schema()["properties"]["result"]
     assert profile.input_model.model_validate({"task": "x" * 10_000}).task == "x" * 10_000
