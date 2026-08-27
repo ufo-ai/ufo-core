@@ -8,17 +8,23 @@ REPO = Path(__file__).parents[2]
 
 
 @pytest.mark.parametrize(
-    ("stack", "host", "postgres", "redis", "gateway", "serve"),
+    ("stack", "host", "postgres", "redis", "gateway", "serve", "ingress"),
     [
-        ("1", "ufo-1.localhost", "15541", "15543", "18080", "18710"),
-        ("2", "ufo-2.localhost", "15641", "15643", "18180", "18810"),
-        ("3", "ufo-3.localhost", "15741", "15743", "18280", "18910"),
-        ("4", "ufo-4.localhost", "15841", "15843", "18380", "19010"),
-        ("5", "ufo-5.localhost", "15941", "15943", "18480", "19110"),
+        ("1", "ufo-1.localhost", "15541", "15543", "18080", "18710", "18100"),
+        ("2", "ufo-2.localhost", "15641", "15643", "18180", "18810", "18200"),
+        ("3", "ufo-3.localhost", "15741", "15743", "18280", "18910", "18300"),
+        ("4", "ufo-4.localhost", "15841", "15843", "18380", "19010", "18400"),
+        ("5", "ufo-5.localhost", "15941", "15943", "18480", "19110", "18500"),
     ],
 )
 def test_stack_slot_selects_one_complete_compose_project(
-    stack: str, host: str, postgres: str, redis: str, gateway: str, serve: str
+    stack: str,
+    host: str,
+    postgres: str,
+    redis: str,
+    gateway: str,
+    serve: str,
+    ingress: str,
 ) -> None:
     result = subprocess.run(
         ["make", "--no-print-directory", "-n", "stack-down", f"STACK={stack}"],
@@ -29,12 +35,24 @@ def test_stack_slot_selects_one_complete_compose_project(
     )
 
     command = result.stdout.strip()
+    repository_root = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    ).parent
+    workspace_root = repository_root / ".local" / f"ufo-{stack}" / "workspaces"
     assert f"UFO_DEV_IMAGE=ufo-{stack}-dev" in command
     assert f"UFO_STACK_HOST={host}" in command
     assert f"UFO_PG_PORT={postgres}" in command
     assert f"UFO_REDIS_PORT={redis}" in command
     assert f"UFO_GATEWAY_PORT_HOST={gateway}" in command
     assert f"UFO_SERVE_PORT_HOST={serve}" in command
+    assert f"UFO_INGRESS_PORT_HOST={ingress}" in command
+    assert f'UFO_WORKSPACE_ROOT="{workspace_root}"' in command
     assert f"docker compose --project-name ufo-{stack} down" in command
 
 
@@ -42,15 +60,28 @@ def test_stack_origin_reaches_every_browser_callback() -> None:
     compose = yaml.safe_load((REPO / "compose.yaml").read_text())
     gateway = compose["services"]["gateway"]["environment"]
     serve = compose["services"]["serve"]["environment"]
+    ingress = compose["services"]["ingress"]
 
     gateway_origin = "http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}"
     serve_origin = "http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}"
+    ingress_origin = "http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}"
     assert gateway["UFO_PUBLIC_BASE_URL"] == gateway_origin
     assert gateway["UFO_WORKSPACE_BASE_URL"] == serve_origin
     assert gateway["WORKOS_REDIRECT_URI"] == f"{gateway_origin}/v1/onboard/auth/callback"
     assert serve["UFO_PUBLIC_BASE_URL"] == serve_origin
+    assert serve["UFO_INGRESS_PUBLIC_URL"] == ingress_origin
+    assert ingress["command"] == ["ingress"]
+    assert ingress["network_mode"] == "service:serve"
+    assert ingress["environment"]["UFO_PUBLIC_BASE_URL"] == serve_origin
+    assert ingress["environment"]["UFO_INGRESS_PUBLIC_URL"] == ingress_origin
+    assert "127.0.0.1:${UFO_INGRESS_PORT_HOST:-8100}:8100" in compose["services"]["serve"]["ports"]
     assert 'public_base_url = "__PUBLIC_BASE_URL__"' in (REPO / "dev/ufo.toml").read_text()
+    assert 'ingress_public_url = "__INGRESS_PUBLIC_URL__"' in (REPO / "dev/ufo.toml").read_text()
     assert "s#__PUBLIC_BASE_URL__#${PUBLIC_BASE_URL}#g" in (REPO / "dev/entrypoint.sh").read_text()
+    assert (
+        "s#__INGRESS_PUBLIC_URL__#${INGRESS_PUBLIC_URL}#g"
+        in (REPO / "dev/entrypoint.sh").read_text()
+    )
 
 
 def test_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> None:
@@ -58,9 +89,14 @@ def test_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> None:
     assert {".local", "**/.local", ".worktrees", "**/.worktrees"} <= ignored
 
     compose = yaml.safe_load((REPO / "compose.yaml").read_text())
-    volumes = compose["services"]["serve"]["volumes"]
-    assert "blobs:/data/blobs" in volumes
-    assert "./.local/${COMPOSE_PROJECT_NAME:-ufo}/workspaces:/data/workspaces" in volumes
+    serve_volumes = compose["services"]["serve"]["volumes"]
+    ingress_volumes = compose["services"]["ingress"]["volumes"]
+    workspace_mount = (
+        "${UFO_WORKSPACE_ROOT:-./.local/${COMPOSE_PROJECT_NAME:-ufo}/workspaces}:/data/workspaces"
+    )
+    assert "blobs:/data/blobs" in serve_volumes
+    assert workspace_mount in serve_volumes
+    assert workspace_mount in ingress_volumes
     assert "blobs" in compose["volumes"]
 
 

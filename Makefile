@@ -18,14 +18,20 @@ endif
 STACK_OFFSET := $(shell expr \( $(STACK) - 1 \) \* 100)
 STACK_NAME := ufo-$(STACK)
 STACK_HOST := $(STACK_NAME).localhost
+GIT_COMMON_DIR := $(shell git rev-parse --path-format=absolute --git-common-dir)
+REPOSITORY_ROOT := $(shell dirname "$(GIT_COMMON_DIR)")
 UFO_PG_PORT ?= $(shell expr 15541 + $(STACK_OFFSET))
 UFO_REDIS_PORT ?= $(shell expr 15543 + $(STACK_OFFSET))
 UFO_GATEWAY_PORT_HOST ?= $(shell expr 18080 + $(STACK_OFFSET))
 UFO_SERVE_PORT_HOST ?= $(shell expr 18710 + $(STACK_OFFSET))
+UFO_INGRESS_PORT_HOST ?= $(shell expr 18100 + $(STACK_OFFSET))
+UFO_WORKSPACE_ROOT ?= $(REPOSITORY_ROOT)/.local/$(STACK_NAME)/workspaces
 STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
 	UFO_PG_PORT=$(UFO_PG_PORT) UFO_REDIS_PORT=$(UFO_REDIS_PORT) \
 	UFO_GATEWAY_PORT_HOST=$(UFO_GATEWAY_PORT_HOST) \
-	UFO_SERVE_PORT_HOST=$(UFO_SERVE_PORT_HOST)
+	UFO_SERVE_PORT_HOST=$(UFO_SERVE_PORT_HOST) \
+	UFO_INGRESS_PORT_HOST=$(UFO_INGRESS_PORT_HOST) \
+	UFO_WORKSPACE_ROOT="$(UFO_WORKSPACE_ROOT)"
 COMPOSE := $(STACK_ENV) docker compose --project-name $(STACK_NAME)
 
 .PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs db \

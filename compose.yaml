@@ -5,6 +5,7 @@
 #   init ─────┤  ufoctl migrate → ufo-control migrate → ufo-control rls-bootstrap + egress CA (one-shot)
 #   gateway ──┤  ufo-control gateway   :8080   onboarding/login (WorkOS sign-in)
 #   serve ────┤  ufoctl serve          :8710   surfaces + DBOS workers + the egress-control RPC
+#   ingress ──┤  ufoctl ingress        :8100   hosted sites, in serve's netns
 #   egress ───┘  ufo-egress            :8888   the Rust egress data plane, in serve's netns
 #
 # Postgres keeps the ufo:ufo credentials the test/eval matrix expects; init creates the ufo_owner
@@ -60,6 +61,7 @@ services:
     environment:
       <<: *dev-env
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_GATEWAY_PORT_HOST:-8080}
+      UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
     volumes:
       - ./dev:/app/dev:ro
       - egress-ca:/egress-ca
@@ -116,6 +118,7 @@ services:
       UFO_CREDENTIAL_KEY: b2Adxpv2mSpXfvoBrALyxxePNw-h7N_1mgxzUFVMMFI=
       UFO_ARTIFACT_TOKEN_SECRET: ufo-local-dev-artifact-secret
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
+      UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
       AWS_REGION: us-east-1
       # Shared serve enumerates every workspace for job sweeps through the RLS-bypass owner role.
       UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
@@ -142,14 +145,35 @@ services:
       STRIPE_BILLING_PORTAL_CONFIGURATION_ID: ${STRIPE_BILLING_PORTAL_CONFIGURATION_ID:-}
     ports:
       - "127.0.0.1:${UFO_SERVE_PORT_HOST:-8710}:8710"
+      - "127.0.0.1:${UFO_INGRESS_PORT_HOST:-8100}:8100"
     volumes:
       - ./dev:/app/dev:ro
       - blobs:/data/blobs
-      - ./.local/${COMPOSE_PROJECT_NAME:-ufo}/workspaces:/data/workspaces
+      - ${UFO_WORKSPACE_ROOT:-./.local/${COMPOSE_PROJECT_NAME:-ufo}/workspaces}:/data/workspaces
       - egress-ca:/egress-ca:ro
     depends_on:
       postgres: {condition: service_healthy}
       init: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+  ingress:
+    image: ${UFO_DEV_IMAGE:-ufo-dev}
+    command: ["ingress"]
+    network_mode: "service:serve"
+    environment:
+      <<: *dev-env
+      UFO_TOKEN_SECRET: ufo-local-dev-token-secret
+      UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_SERVE_PORT_HOST:-8710}
+      UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
+      UFO_OWNER_DSN: postgresql://ufo:ufo@postgres:5432/ufo
+    volumes:
+      - ./dev:/app/dev:ro
+      - blobs:/data/blobs
+      - ${UFO_WORKSPACE_ROOT:-./.local/${COMPOSE_PROJECT_NAME:-ufo}/workspaces}:/data/workspaces
+    depends_on:
+      postgres: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
+      serve: {condition: service_started}
     restart: unless-stopped
 
   # The egress data plane (RFC 0035): a standalone Rust MITM proxy that holds no keys and no DB — it

@@ -59,6 +59,7 @@ Use this mode to run the full hosted topology on your machine. One command start
 - Postgres
 - the onboarding gateway (`/login`)
 - the serve fleet: surfaces, DBOS workers, and the egress-control RPC
+- the sandbox ingress for hosted sites
 - the ufo-egress data plane: the Rust egress proxy, in the network namespace of serve
 
 ```bash
@@ -66,7 +67,7 @@ make stack STACK=1             # http://ufo-1.localhost:18080/login
 make stack STACK=2             # http://ufo-2.localhost:18180/login
 ```
 
-One image (`dev/Dockerfile`) holds the whole workspace, through uv. It runs as three roles
+One image (`dev/Dockerfile`) holds the whole workspace, through uv. It runs as four roles
 (`dev/entrypoint.sh`):
 
 - `init` runs the migrations. It shapes the `ufo_control` gateway ledgers (`ufo-control migrate`).
@@ -75,6 +76,7 @@ One image (`dev/Dockerfile`) holds the whole workspace, through uv. It runs as t
   (`UFO_CONTROL_EMAIL_MODE=console`).
 - `serve` runs the shared fleet on :8710. It uses the `assistant` pack and local backends:
   filesystem blobs, the in-process hub, and the built-in `local` sandbox carrier.
+- `ingress` serves hosted sites on :8100 in the serve network namespace.
 
 ### Slots
 
@@ -82,9 +84,9 @@ One image (`dev/Dockerfile`) holds the whole workspace, through uv. It runs as t
 volumes, and ports. Each slot keeps its workspaces in `.local/ufo-N/workspaces`. Each slot has its
 own browser origin, `ufo-N.localhost`, so the session cookies of the slots stay separate.
 
-Slot 1 uses gateway :18080, serve :18710, Postgres :15541, and Redis :15543. Each slot after slot 1
-adds 100 to each port. To change the host ports, set `UFO_PG_PORT`, `UFO_GATEWAY_PORT_HOST`,
-`UFO_SERVE_PORT_HOST`, and `UFO_REDIS_PORT`.
+Slot 1 uses gateway :18080, serve :18710, ingress :18100, Postgres :15541, and Redis :15543. Each
+slot after slot 1 adds 100 to each port. To change the host ports, set `UFO_PG_PORT`,
+`UFO_GATEWAY_PORT_HOST`, `UFO_SERVE_PORT_HOST`, `UFO_INGRESS_PORT_HOST`, and `UFO_REDIS_PORT`.
 
 ### Commands
 

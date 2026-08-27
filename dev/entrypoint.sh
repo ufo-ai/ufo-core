@@ -11,6 +11,7 @@ PG_HOST="${PG_HOST:-postgres:5432}"
 APP_DB="${APP_DB:-ufo}"
 DEV_PACK="${UFO_DEV_PACK:-assistant}"
 PUBLIC_BASE_URL="${UFO_PUBLIC_BASE_URL:-http://localhost:8710}"
+INGRESS_PUBLIC_URL="${UFO_INGRESS_PUBLIC_URL:-http://ufo.localhost:8100}"
 RENDERED_CONFIG="/tmp/ufo.toml"
 # The one egress CA the local rig shares: serve hands the sandbox its cert (the trust anchor) and the
 # ufo-egress container signs leaves with its key. Minted once into the shared volume; both read it.
@@ -63,6 +64,7 @@ render_config() {
   dsn="$(ufo-control serve-dsn "${PG_HOST}" "${APP_DB}")"
   sed -e "s#__SERVE_DSN__#${dsn}#g" -e "s#__PACK__#${DEV_PACK}#g" \
     -e "s#__PUBLIC_BASE_URL__#${PUBLIC_BASE_URL}#g" \
+    -e "s#__INGRESS_PUBLIC_URL__#${INGRESS_PUBLIC_URL}#g" \
     /app/dev/ufo.toml > "$RENDERED_CONFIG"
   export UFO_CONFIG="$RENDERED_CONFIG"
 }
@@ -94,8 +96,12 @@ case "${1:-}" in
     export UFO_EGRESS_CONTROL_TOKEN="${UFO_EGRESS_CONTROL_TOKEN:-$DEV_EGRESS_CONTROL_TOKEN}"
     exec ufoctl serve
     ;;
+  ingress)
+    render_config
+    exec ufoctl ingress
+    ;;
   *)
-    echo "usage: entrypoint.sh {init|gateway|serve}" >&2
+    echo "usage: entrypoint.sh {init|gateway|serve|ingress}" >&2
     exit 2
     ;;
 esac

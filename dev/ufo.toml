@@ -37,11 +37,12 @@ backend = "in_process"
 # The built-in `local` carrier ships in every pack (the `docker` carrier is a separate extension not
 # in the assistant pack). Local means in-process sandboxes whose egress routes through the `egress`
 # compose service at 127.0.0.1:proxy_port (that container shares serve's network namespace); each
-# conversation's /workspace is a directory under workspace_root, on the same durable volume as the
-# blobs.
+# conversation's /workspace is a directory under the numbered stack's workspace_root, shared by
+# every worktree that runs that stack.
 [sandbox]
 backend = "local"
 workspace_root = "/data/workspaces"
+ingress_public_url = "__INGRESS_PUBLIC_URL__"
 
 # Where a provider sends the member's browser back after consent. The browser is on the host, which
 # reaches this container's serve on the published port.
