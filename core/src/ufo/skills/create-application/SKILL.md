@@ -9,10 +9,11 @@ otherwise an update, and would rewrite that application instead of making yours.
 
 ## Two ways in
 
-A member who named the job gets the interview straight away. A member who did not — `Build me a
-new app.` is the portal's `New application` act opening a conversation on their behalf — gets a
-guided build: propose first, then the interview, then the design of the app's homepage, then the
-create. The portal draws a progress bar over the todo board a guided build keeps.
+A member who named the job gets the interview straight away, then the design of the app's
+homepage, then the create. A member who did not — `Build me a new app.` is the portal's
+`New application` act opening a conversation on their behalf — gets a guided build: the same run
+with a proposal in front of it. The portal draws a progress bar over the todo board a guided build
+keeps.
 
 ## The board (guided build)
 
@@ -58,12 +59,11 @@ on who else uses it unless they named an audience: it is the answer that publish
 pressing through the form would publish an app they meant to keep.
 
 A member's ask for a new application is the go-ahead to open the interview: never ask whether to
-proceed, and never confirm a plan the conversation already holds. For a member who named the job,
-the interview is the conversation's only ask before the create; a guided build asks only what its
-phases order — the proposal, the design — and nothing else ahead of the form. A detail you still
-need — where the work lives, which account it reads — and a blocker the job raises — a dependency
-not yet cleared, a source to work from in the meantime — each ride the form as one more question,
-never a round of their own.
+proceed, and never confirm a plan the conversation already holds. The interview and the design are
+the conversation's two asks before the create, and a guided build's proposal is its third; nothing
+else is asked ahead of the form. A detail you still need — where the work lives, which account it
+reads — and a blocker the job raises — a dependency not yet cleared, a source to work from in the
+meantime — each ride the form as one more question, never a round of their own.
 
 Never ask about the model, reasoning, sandbox size, icon, when it runs, or how far it acts alone.
 
@@ -76,10 +76,9 @@ name `object_list(kind="agent")` already returned — a name the create refuses 
 watches fail for a reason they did not cause.
 
 Write the whole prompt. Address the application in the second person, and cover who it works for,
-the job, how it decides, where it stops and asks — and what its homepage reports, when a guided
-build designed one, so the page the application builds and keeps fresh is the page the member
-confirmed. Do not hand the member a blank prompt to fill in, and do not paste their own sentence
-back as the prompt.
+the job, how it decides, where it stops and asks — and what its homepage reports, so the page the
+application builds and keeps fresh is the page the member confirmed. Do not hand the member a
+blank prompt to fill in, and do not paste their own sentence back as the prompt.
 
 How it decides is settled for you: it works when the job needs it, takes the routine work of that
 job on its own, and asks before anything unusual. Write that boundary into the prompt in the
@@ -88,7 +87,7 @@ application's own terms — what counts as routine here, what counts as unusual.
 own words asked for it. Nobody picked that boundary, so the reply carrying the form states it in a
 line: what the application settles itself, what it brings to a person.
 
-## Design the homepage (guided build)
+## Design the homepage
 
 Every application builds a homepage: the page members open on the Apps screen, where it states
 what it is for, what it watches, its recent work, and what it needs. The design pass settles what
@@ -110,15 +109,14 @@ inspect the PNG, or share it again. After the renderer returns, end with `ask_us
 
 On `Change the design`, replace the whole contract and call the renderer once. Put the member's
 revision in the exact contract field it changes. One page and at most two previews are the whole
-design pass. Put every field from the accepted contract in the application prompt under `Homepage
-design`. The application builds and binds its live homepage on its first homepage turn.
+design pass. Put every field from the accepted contract in the application prompt under
+`Homepage design`. The application builds and binds its live homepage on its first homepage turn.
 
 ## Create it
 
-The answered interview is the member saying go — in a guided build with a design pass, `Build it`
-is. Do not ask again, and do not restate the name for approval — say what you are making in the
-reply that carries the form, so the words they are agreeing to are on screen when they submit it.
-Then:
+`Build it` on the design is the member saying go. Do not ask again, and do not restate the name for
+approval — say what you are making in the reply that carries the form, so the words they are
+agreeing to are on screen when they submit it. Then:
 
 ```yaml
 kind: agent

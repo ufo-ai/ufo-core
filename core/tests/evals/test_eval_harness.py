@@ -177,7 +177,8 @@ from evals.suites.new_application import (
     _accepted_contract_failure,
     _application_repair_tool_failure,
     _application_worker_tool_failure,
-    _guided_design_failure,
+    _built_design_failure,
+    _design_pass_failure,
     _interviews,
     _sync_active_application_workspace,
 )
@@ -481,7 +482,7 @@ def test_the_interview_is_the_succeeded_ask_before_the_create() -> None:
     assert _interviews(CapabilityOutput("", (asked,))) == ()
 
 
-def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
+def test_design_proof_requires_each_preview_before_its_choice_on_both_ways_in() -> None:
     manifest = "kind: agent\nname: helper\nspec:\n  prompt: p\n"
     apply = ToolInvocation(name="object_apply", input={"manifest": manifest}, has_result=True)
     asked = ToolInvocation(name="ask_user", input={}, has_result=True)
@@ -507,9 +508,24 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
         "", (asked, asked, preview, asked, asked, revised, asked, apply)
     )
 
-    assert _guided_design_failure(one_preview, 1) is None
-    assert _guided_design_failure(two_previews, 2) is None
-    assert _guided_design_failure(clarified_revision, 2) is None
+    assert _design_pass_failure(one_preview, 1, opening_asks=1) is None
+    assert _design_pass_failure(two_previews, 2, opening_asks=1) is None
+    assert _design_pass_failure(clarified_revision, 2, opening_asks=1) is None
+
+    # The member who named the job runs the same pass with nothing opening it: the form, the
+    # picture, and the choice it asks for. The proposal's ask is a round that never happened, so a
+    # run holding one is a round this path did not owe the member.
+    named = CapabilityOutput("", (asked, preview, asked, apply))
+    assert _design_pass_failure(named, 1, opening_asks=0) is None
+    over_asked = CapabilityOutput("", (asked, asked, asked, preview, asked, apply))
+    assert "used 4 asks before create, expected 2 or 3" in str(
+        _design_pass_failure(over_asked, 1, opening_asks=0)
+    )
+    assert "no later design choice" in str(
+        _design_pass_failure(
+            CapabilityOutput("", (asked, asked, preview, apply)), 1, opening_asks=0
+        )
+    )
     natural_revision = replace(
         revised,
         input={
@@ -519,8 +535,10 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
         },
     )
     assert (
-        _guided_design_failure(
-            CapabilityOutput("", (asked, asked, preview, asked, natural_revision, asked, apply)), 2
+        _design_pass_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, natural_revision, asked, apply)),
+            2,
+            opening_asks=1,
         )
         is None
     )
@@ -533,9 +551,10 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
         },
     )
     assert (
-        _guided_design_failure(
+        _design_pass_failure(
             CapabilityOutput("", (asked, asked, preview, asked, retained_revision, asked, apply)),
             2,
+            opening_asks=1,
         )
         is None
     )
@@ -547,8 +566,10 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
         },
     )
     assert "overdue queue first" in str(
-        _guided_design_failure(
-            CapabilityOutput("", (asked, asked, preview, asked, missing_overdue, asked, apply)), 2
+        _design_pass_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, missing_overdue, asked, apply)),
+            2,
+            opening_asks=1,
         )
     )
     summary_first = replace(
@@ -559,8 +580,10 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
         },
     )
     assert "overdue queue first" in str(
-        _guided_design_failure(
-            CapabilityOutput("", (asked, asked, preview, asked, summary_first, asked, apply)), 2
+        _design_pass_failure(
+            CapabilityOutput("", (asked, asked, preview, asked, summary_first, asked, apply)),
+            2,
+            opening_asks=1,
         )
     )
     summary_with_label = replace(
@@ -571,20 +594,23 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
         },
     )
     assert "overdue queue first" in str(
-        _guided_design_failure(
+        _design_pass_failure(
             CapabilityOutput("", (asked, asked, preview, asked, summary_with_label, asked, apply)),
             2,
+            opening_asks=1,
         )
     )
     one_of_two = CapabilityOutput("", (asked, asked, preview, asked, asked, apply))
-    assert "rendered 1 previews" in str(_guided_design_failure(one_of_two, 2))
+    assert "rendered 1 previews" in str(_design_pass_failure(one_of_two, 2, opening_asks=1))
     assert "has no later design choice" in str(
-        _guided_design_failure(CapabilityOutput("", (asked, asked, asked, preview, apply)), 1)
+        _design_pass_failure(
+            CapabilityOutput("", (asked, asked, asked, preview, apply)), 1, opening_asks=1
+        )
     )
     direct = CapabilityOutput(
         "", (asked, asked, ToolInvocation("write", {}, has_result=True), asked, apply)
     )
-    assert "parent ran preview build tools" in str(_guided_design_failure(direct, 1))
+    assert "parent ran preview build tools" in str(_design_pass_failure(direct, 1, opening_asks=1))
     delegated = CapabilityOutput(
         "",
         (
@@ -595,7 +621,7 @@ def test_guided_design_proof_requires_each_preview_before_its_choice() -> None:
             apply,
         ),
     )
-    assert "used a model worker" in str(_guided_design_failure(delegated, 1))
+    assert "used a model worker" in str(_design_pass_failure(delegated, 1, opening_asks=1))
 
 
 def test_application_journey_graders_require_the_fixed_worker_tools() -> None:
@@ -628,6 +654,38 @@ def test_application_journey_graders_require_the_fixed_worker_tools() -> None:
     old_repair = CapabilityOutput("", (ToolInvocation("deploy_website", {}, has_result=True),))
     assert _application_repair_tool_failure(failed, old_repair) == (
         "the repair attempt deployed no site"
+    )
+
+
+def test_the_built_design_must_carry_the_regions_the_member_accepted() -> None:
+    def design(*regions: str) -> ToolInvocation:
+        marks = "".join(
+            f'<g data-app-region="{region}"><rect width="8" height="8"/></g>' for region in regions
+        )
+        return ToolInvocation(
+            APPLICATION_BUILDER_DESIGN_TOOL,
+            {"content": f'<svg viewBox="0 0 8 8">{marks}</svg>'},
+            has_result=True,
+        )
+
+    accepted = ("Overdue queue", "Invoice detail", "This week")
+    assert (
+        _built_design_failure((design("overdue-queue", "invoice-detail", "this-week"),), accepted)
+        is None
+    )
+    assert "accepted no design" in str(_built_design_failure((), accepted))
+    assert "drew 2 regions for the 3" in str(
+        _built_design_failure((design("overdue-queue", "invoice-detail"),), accepted)
+    )
+    # A design of the right size drawn from a different page: the member accepted an invoice queue
+    # and the worker built a chart, so its slugs share no word with the regions it replaced.
+    assert "drops accepted regions: Invoice detail, This week" in str(
+        _built_design_failure((design("overdue-queue", "spend-chart", "vendors"),), accepted)
+    )
+    # The regions are matched in the accepted display order, so a design that draws them all in
+    # another order is a page laid out differently from the one shown.
+    assert "drops accepted regions" in str(
+        _built_design_failure((design("this-week", "invoice-detail", "overdue-queue"),), accepted)
     )
 
 
@@ -11209,3 +11267,22 @@ async def test_a_case_run_without_a_step_reader_records_that_instead_of_timings(
     assert timing.error == "no step reader is wired"
     assert timing.turns == ()
     assert timing.slowest == ()
+
+
+def test_every_new_application_case_can_reach_its_create() -> None:
+    """A creating case needs a turn for each member message the path takes.
+
+    The trial sends one member message per turn, so a cap below the path's message count ends the
+    conversation early: the design ask is the last thing that happens, nothing is created, and a
+    case with a followup raises instead of grading what it exists for. Both ways in now pass the
+    design, so the shortest creating path is three messages — the request, the answered form, and
+    `Build it`. The guided path adds the proposal. This is a floor, not the count: the default is
+    higher, and only a case that pins `max_turns` can fall through it.
+    """
+    from evals.suites.new_application import SCENARIOS
+
+    shortest_creating_path = 3
+    pinned = [case for case in SCENARIOS if case.max_turns < shortest_creating_path]
+    assert not pinned, "cases cap turns below the messages their path needs: " + ", ".join(
+        f"{case.name} (max_turns={case.max_turns})" for case in pinned
+    )

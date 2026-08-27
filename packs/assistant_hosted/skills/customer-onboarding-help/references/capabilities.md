@@ -26,9 +26,9 @@ A question about how application creation works is product help. A request to bu
 member's work: load `create-application` and do it instead of answering with this overview.
 
 A member who names the job goes straight to the interview. It asks what job the application is for
-and who can use it. A member who does not name the job gets a guided build: a proposal, the
-interview, a homepage preview, and creation only after the member accepts it. Never say an
-application exists before the creation result confirms it.
+and who can use it. Either way the member is then shown the homepage design and creation follows
+only once they accept it. A member who does not name the job gets a guided build: the same run with
+a proposal in front of it. Never say an application exists before the creation result confirms it.
 
 ## Connecting the customer's accounts
 

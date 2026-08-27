@@ -2,9 +2,12 @@
 
 An `agent` object is the one kind a member cannot undo, so every trial grades the durable row
 rather than the reply — a right-sounding answer that wrote the wrong spec fails — and grades the
-order of the turn, since a form answered after the write agreed to nothing. The last case is the
-neighbour: an application the workspace already holds must be wired, never created a second time
-and never rewritten, because applying its name is an update.
+order of the turn, since a form answered after the write agreed to nothing. Both ways in run the
+design pass, so every creating case grades it: the pictures stand before the choice they ask for,
+and the create stands after the choice. What separates the two paths is the proposal that opens a
+guided build, which is why the design grader is told what stood in front of it rather than assuming
+one. The last case is the neighbour: an application the workspace already holds must be wired,
+never created a second time and never rewritten, because applying its name is an update.
 """
 
 from __future__ import annotations
@@ -97,7 +100,8 @@ EXISTING_APPLICATION = "invoice-intake"
 EXISTING_PROMPT = "You file invoices for the finance team. Ask before paying anything."
 SATISFIED_INSTRUCTION = (
     "Answer what the assistant asks and approve what it proposes. Do not name the application "
-    "yourself and do not write its instructions. End the conversation once it exists."
+    "yourself and do not write its instructions. Choose Build it on the design preview. A preview "
+    "is not the application: never stop after one. End the conversation once it exists."
 )
 GUIDED_INSTRUCTION = (
     "Send exactly 'Build me a new app.' first. Choose Build that on the proposal. Accept the "
@@ -272,10 +276,17 @@ def _interviews(output: CapabilityOutput) -> tuple[int, ...]:
     return tuple(index for index in _asks(output) if index < applies[0][0]) if applies else ()
 
 
-def _guided_design_failure(output: CapabilityOutput, previews: int) -> str | None:
+def _design_pass_failure(
+    output: CapabilityOutput, previews: int, *, opening_asks: int
+) -> str | None:
+    """What is wrong with the design pass every create stands behind, or None. Both ways in run it,
+    so `opening_asks` is what stands in front of it: a guided build's proposal, or nothing for a
+    member who named the job. The rest is the same either way — the product renderer alone draws
+    the page, each picture is followed by the choice it is asking for, and the create comes after
+    the last of them."""
     applies = _agent_applies(output)
     if not applies:
-        return "no application create follows the guided design"
+        return "no application create follows the design"
     create = applies[0][0]
     asks = tuple(index for index in _asks(output) if index < create)
     preview_calls = tuple(
@@ -313,12 +324,15 @@ def _guided_design_failure(output: CapabilityOutput, previews: int) -> str | Non
         for index, call in enumerate(output.calls)
     ):
         return "the parent shared the product preview a second time"
-    allowed_asks = {previews + 2, previews + 3}
+    # The interview, one ask per picture, whatever opens the run, and one round of slack for the
+    # detail the skill lets ride the form.
+    settled = previews + 1 + opening_asks
+    allowed_asks = {settled, settled + 1}
     if len(asks) not in allowed_asks:
         expected = " or ".join(str(count) for count in sorted(allowed_asks))
-        return f"the guided build used {len(asks)} asks before create, expected {expected}"
+        return f"the run used {len(asks)} asks before create, expected {expected}"
     if len(preview_calls) != previews:
-        return f"the guided build rendered {len(preview_calls)} previews, expected {previews}"
+        return f"the run rendered {len(preview_calls)} previews, expected {previews}"
     render_indexes = tuple(index for index, _ in preview_calls)
     design_asks = tuple(
         next((ask for ask in asks if ask > render), -1) for render in render_indexes
@@ -571,6 +585,47 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
     return first, second
 
 
+def _built_design_failure(
+    calls: tuple[ToolInvocation, ...], accepted: tuple[str, ...]
+) -> str | None:
+    """Whether the page the worker drew is the page the member accepted. The accepted contract names
+    the regions in display order; the worker's SVG marks its own with `data-app-region`, and the
+    audit already refuses one that draws them overlapping or out of that order. So the one thing
+    left to grade here is that they are the same regions: the design the member was shown is what
+    got built, not a second design the worker preferred. A region is matched on its significant
+    words, because the slug an SVG carries is the member's words in a slug's spelling."""
+    designs = tuple(
+        call for call in calls if call.name == APPLICATION_BUILDER_DESIGN_TOOL and call.succeeded
+    )
+    if not designs:
+        return "the worker accepted no design"
+    marked = tuple(
+        dict.fromkeys(
+            re.findall(r'data-app-region="([^"]+)"', str(designs[-1].input.get("content")))
+        )
+    )
+    if len(marked) != len(accepted):
+        return (
+            f"the worker drew {len(marked)} regions for the {len(accepted)} the member accepted: "
+            f"{', '.join(marked)}"
+        )
+    unbuilt = tuple(
+        region
+        for region, slug in zip(accepted, marked, strict=True)
+        if not (
+            {
+                term
+                for term in re.findall(r"[a-z0-9]+", region.casefold())
+                if term not in CONTRACT_CONNECTIVE_WORDS
+            }
+            & set(re.findall(r"[a-z0-9]+", slug.casefold()))
+        )
+    )
+    if unbuilt:
+        return f"the built design drops accepted regions: {', '.join(unbuilt)}"
+    return None
+
+
 def _application_worker_tool_failure(calls: tuple[ToolInvocation, ...]) -> str | None:
     completed = frozenset(call.name for call in calls if call.succeeded)
     required = {
@@ -675,33 +730,84 @@ async def _homepage_journey_failure(outcome: ScenarioOutcome) -> str | None:
     task = ApplicationBuilderTask.model_validate_json(children[0].inbound)
     if application.prompt not in task.objective:
         return "the Gemini task omitted the created application's instructions"
-    return None
+    previews = tuple(
+        call for call in outcome.output.calls if call.name == PREVIEW_TOOL and call.succeeded
+    )
+    regions = previews[-1].input.get("regions") if previews else None
+    if not isinstance(regions, list) or not regions:
+        return "the accepted design contract named no regions"
+    return _built_design_failure(followup.calls, tuple(str(region) for region in regions))
+
+
+async def _named_design_failure(outcome: ScenarioOutcome) -> str | None:
+    """The design pass on the path that opens with the member's own words: one preview and the
+    choice it asks for stand between the answered form and the create, and the contract they agreed
+    to is in the application's prompt. Nothing opens this run, so the interview and the design are
+    the whole of what is asked."""
+    design_failure = _design_pass_failure(outcome.output, 1, opening_asks=0)
+    if design_failure is not None:
+        return design_failure
+    name = _agent_applies(outcome.output)[0][1]
+    row = await _application(name)
+    if row is None:
+        return f"applied {name!r} but no such application stands"
+    return _accepted_contract_failure(outcome.output, row.prompt)
+
+
+async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    """The design gate, and nothing else: the skill that owns the interview loaded, and the member
+    saw the page before an application existed.
+
+    An `agent` object cannot be undone, so the preview is the one moment a member can look at what
+    they are about to make while looking is still free. Whether they got that moment is a fact about
+    the trajectory — a preview stands before any apply, and an ask stands after it — so no judge and
+    no rubric decide it. The graders above measure the whole creation product, so a miss anywhere in
+    a reply takes their sample down; that says nothing about whether this member got to look. This
+    case grades the gate alone."""
+    calls = outcome.output.calls
+    if not any(
+        call.name == "load_skill" and call.succeeded and str(call.input.get("name", "")) == SKILL
+        for call in calls
+    ):
+        return CapabilityVerdict(False, f"never loaded {SKILL!r}")
+    previews = tuple(
+        index for index, call in enumerate(calls) if call.name == PREVIEW_TOOL and call.succeeded
+    )
+    if not previews:
+        return CapabilityVerdict(False, "rendered no design, so the member saw nothing")
+    applies = _agent_applies(outcome.output)
+    if applies and previews[0] > applies[0][0]:
+        return CapabilityVerdict(False, "created the application before showing a design")
+    if not any(index > previews[-1] for index in _asks(outcome.output)):
+        return CapabilityVerdict(False, "showed the design and asked the member nothing")
+    return CapabilityVerdict(
+        True,
+        f"the skill loaded and {len(previews)} design(s) stood before the create",
+    )
 
 
 async def _graded_support_desk(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "workspace")
     if failure is not None:
         return failure
-    interviews = _interviews(outcome.output)
-    if len(interviews) != 1:
-        return CapabilityVerdict(
-            False, f"{len(interviews)} ask_user rounds before the create, exactly one"
-        )
-    return CapabilityVerdict(True, "one workspace application created from one answered form")
+    named_failure = await _named_design_failure(outcome)
+    if named_failure is not None:
+        return CapabilityVerdict(False, named_failure)
+    return CapabilityVerdict(
+        True, "one workspace application created from one form and one accepted design"
+    )
 
 
 async def _graded_stated_up_front(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
-    interviews = _interviews(outcome.output)
-    if len(interviews) != 1:
-        return CapabilityVerdict(
-            False,
-            f"{len(interviews)} ask_user rounds before the create; the form is asked "
-            "once, prefilled",
-        )
-    return CapabilityVerdict(True, "one private application created from one answered form")
+    named_failure = await _named_design_failure(outcome)
+    if named_failure is not None:
+        return CapabilityVerdict(False, named_failure)
+    return CapabilityVerdict(
+        True, "one private application created from one prefilled form and one accepted design"
+    )
 
 
 async def _graded_existing_untouched(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -719,6 +825,9 @@ async def _graded_daily_brief(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
+    named_failure = await _named_design_failure(outcome)
+    if named_failure is not None:
+        return CapabilityVerdict(False, named_failure)
     apply = _agent_applies(outcome.output)[0]
     row = await _application(apply[1])
     if row is None:
@@ -743,7 +852,7 @@ async def _graded_guided_build(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
-    design_failure = _guided_design_failure(outcome.output, 1)
+    design_failure = _design_pass_failure(outcome.output, 1, opening_asks=1)
     if design_failure is not None:
         return CapabilityVerdict(False, design_failure)
     name = _agent_applies(outcome.output)[0][1]
@@ -760,7 +869,7 @@ async def _graded_guided_revision(outcome: ScenarioOutcome) -> CapabilityVerdict
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
-    design_failure = _guided_design_failure(outcome.output, 2)
+    design_failure = _design_pass_failure(outcome.output, 2, opening_asks=1)
     if design_failure is not None:
         return CapabilityVerdict(False, design_failure)
     name = _agent_applies(outcome.output)[0][1]
@@ -780,6 +889,9 @@ async def _graded_named_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
+    named_failure = await _named_design_failure(outcome)
+    if named_failure is not None:
+        return CapabilityVerdict(False, named_failure)
     journey_failure = await _homepage_journey_failure(outcome)
     if journey_failure is not None:
         return CapabilityVerdict(False, journey_failure)
@@ -921,7 +1033,7 @@ SCENARIOS = (
         ),
         DescribedGrader(
             "one workspace-visible application lands on auto model and auto reasoning, written "
-            "only after the form comes back, from exactly one ask_user round",
+            "only after the form comes back and the member accepts the design shown to them",
             _graded_support_desk,
         ),
         seed=_seeded(),
@@ -951,8 +1063,9 @@ SCENARIOS = (
             "already said so. End the conversation once the application exists.",
         ),
         DescribedGrader(
-            "the member who stated the job up front is still asked once, prefilled, and gets a "
-            "private application on auto model and auto reasoning",
+            "the member who stated the job up front is still asked once, prefilled, sees the "
+            "design before anything is created, and gets a private application on auto model and "
+            "auto reasoning",
             _graded_stated_up_front,
         ),
         seed=_seeded(),
@@ -1126,7 +1239,11 @@ SCENARIOS = (
             "build repairs the same application and binds its first retained homepage",
             _graded_repair_journey,
         ),
-        max_turns=2,
+        # Three member messages reach the create on this path: the request, the answered form, and
+        # `Build it` on the design. The trial sends one message per turn, so a smaller cap ends the
+        # conversation on the design ask, creates nothing, and the followup raises rather than
+        # grading the repair this case exists for.
+        max_turns=3,
         seed=_seeded(),
         rubric=(
             "The creation reply states what the application still needs.",
@@ -1134,5 +1251,36 @@ SCENARIOS = (
         ),
         digest_tag="new-application:failed-repaired-homepage-journey",
         followup=_repair_created_homepage,
+    ),
+    ScenarioCase(
+        "A11-named-shows-the-design",
+        ScenarioUser(
+            reason_for_call="You want a private application that reads the invoices in your shared "
+            "inbox and files the totals.",
+            known_info="Only you use it.",
+            task_instructions=SATISFIED_INSTRUCTION,
+        ),
+        DescribedGrader(
+            "the member who named the job loads the skill and sees the homepage design before any "
+            "application exists",
+            _graded_shows_the_design,
+        ),
+        seed=_seeded(),
+        digest_tag="new-application:named-shows-the-design",
+    ),
+    ScenarioCase(
+        "A12-guided-shows-the-design",
+        ScenarioUser(
+            reason_for_call="You pressed New application in the portal and want the assistant to "
+            "propose something.",
+            task_instructions=GUIDED_INSTRUCTION,
+        ),
+        DescribedGrader(
+            "the guided build loads the skill and shows the homepage design before any application "
+            "exists",
+            _graded_shows_the_design,
+        ),
+        seed=_seeded(),
+        digest_tag="new-application:guided-shows-the-design",
     ),
 )

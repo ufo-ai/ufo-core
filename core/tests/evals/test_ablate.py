@@ -829,3 +829,33 @@ def test_an_arm_that_lost_a_suite_keeps_its_worktree_and_says_which(
     assert result.kept_worktree == root
     assert (root / RUNS_DIR / "0.json").is_file()
     assert (tmp_path / "out" / "runs" / "knockout" / STACK_LOG).is_file()
+
+
+def test_every_committed_experiment_on_head_still_applies_to_the_tree() -> None:
+    """An arm on `base = "HEAD"` must match the file it edits exactly once, right now.
+
+    `_apply_arm` counts the `old` text in the worktree and raises when the count is not one, so a
+    replacement that has drifted from the file it names does not fail at preflight — it fails after
+    the control arm has already spent its budget, and the run exits with nothing to compare. The
+    drift arrives by ordinary editing: the text an arm reverts is the text under test, and cutting
+    or rewording it in the same branch leaves the arm pointing at a sentence that is gone. An arm
+    pinned to a revision instead of HEAD is excluded, because a pinned base is allowed to differ
+    from the tree.
+    """
+    repo = Path(__file__).resolve().parents[3]
+    checked = 0
+    for path in sorted((repo / "evals").glob("*.toml")):
+        spec = load_experiment(path)
+        if spec.base != "HEAD":
+            continue
+        for arm in spec.arm:
+            for replacement in arm.replacements:
+                target = repo / replacement.path
+                assert target.is_file(), f"{path.name} arm {arm.name!r}: {replacement.path} is gone"
+                count = target.read_text().count(replacement.old)
+                assert count == 1, (
+                    f"{path.name} arm {arm.name!r} matches {replacement.path} "
+                    f"{count} times, expected 1"
+                )
+                checked += 1
+    assert checked, "no HEAD-based experiment replacements were checked"

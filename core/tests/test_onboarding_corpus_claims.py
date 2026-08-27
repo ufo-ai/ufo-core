@@ -514,28 +514,26 @@ CLAIMS = (
     Claim(
         claim="a member who does not name the job gets the guided application build",
         corpus="references/capabilities.md",
-        phrase="A member who does not name the job gets a guided build",
+        phrase="the job gets a guided build: the same run with a proposal in front of it",
+        source=CREATE_APPLICATION_SKILL_MD,
+        pattern=(r"gets a guided build: the same run\nwith a proposal in front of it"),
+    ),
+    Claim(
+        claim="both ways into an application design its homepage before anything is created",
+        corpus="references/capabilities.md",
+        phrase="Either way the member is then shown the homepage design",
         source=CREATE_APPLICATION_SKILL_MD,
         pattern=(
-            r"A member who did not — `Build me a\nnew app\.` is the portal's `New application`"
+            r"A member who named the job gets the interview straight away, then the design of the "
+            r"app's\nhomepage, then the create\."
         ),
     ),
     Claim(
-        claim="a guided application build proposes, interviews, and previews its homepage",
+        claim="an application is created only after the member accepts its design",
         corpus="references/capabilities.md",
-        phrase="a proposal, the\ninterview, a homepage preview",
+        phrase="creation follows only once they accept it",
         source=CREATE_APPLICATION_SKILL_MD,
-        pattern=(
-            r"gets a\nguided build: propose first, then the interview, then the design of the "
-            r"app's homepage"
-        ),
-    ),
-    Claim(
-        claim="a guided application build creates only after the member accepts it",
-        corpus="references/capabilities.md",
-        phrase="creation only after the member accepts it",
-        source=CREATE_APPLICATION_SKILL_MD,
-        pattern=r"in a guided build with a design pass, `Build it`\nis",
+        pattern=r"`Build it` on the design is the member saying go\.",
     ),
     Claim(
         claim="a member reaches every workspace-visible agent and their own, not only shared ones",

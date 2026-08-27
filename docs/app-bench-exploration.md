@@ -737,10 +737,10 @@ Opus turn.
 
 Run four journeys through the accepted target, contract, substrate, and model route:
 
-1. A named application with enough detail gets one prefilled interview, one approval, one Gemini
-   build, and one accepted homepage.
-2. `Build me a new app.` gets one proposal, the standard interview, one design preview, one
+1. A named application with enough detail gets one prefilled interview, one design preview, one
    approval, one Gemini build, and one accepted homepage.
+2. `Build me a new app.` gets one proposal and then that same run, so it reaches the create a round
+   later.
 3. A member changes the design preview once. No application exists before `Build it`. The accepted
    design reaches the created application's prompt and homepage.
 4. A deterministic build failure retains its source and evidence and binds no homepage. A later
