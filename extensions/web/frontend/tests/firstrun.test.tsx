@@ -201,7 +201,7 @@ test("the goal is the whole first step", async () => {
   expect(screen.getByLabelText("Add context")).toBeTruthy();
   expect(commit().disabled).toBe(true);
   expect(screen.queryByRole("button", { name: "Slack" })).toBeNull();
-  expect(screen.queryByRole("heading", { name: "The app answers in Slack" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Add @ufo to Slack" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "Invite your team" })).toBeNull();
 });
 
@@ -246,6 +246,21 @@ test("free text can state another goal", async () => {
   await screen.findByRole("heading", { name: "What your team uses" });
 });
 
+test("the tools step names the agent, and the mention carries the strong weight", async () => {
+  open();
+
+  await userEvent.click((await screen.findAllByRole("radio"))[0]);
+  await userEvent.click(commit());
+
+  const tools = (await screen.findByRole("heading", { name: "What your team uses" })).parentElement!;
+  expect(tools.querySelector("p")!.textContent).toBe(
+    "Pick the ones your team works in, so @ufo knows where your work lives.",
+  );
+  expect([...tools.querySelectorAll("strong.font-strong")].map((at) => at.textContent)).toEqual([
+    "@ufo",
+  ]);
+});
+
 test("the picks are recorded through the intent lane, and only what was picked is asked for", async () => {
   const posted = recorder();
   open({ "/intents": posted.route });
@@ -253,7 +268,7 @@ test("the picks are recorded through the intent lane, and only what was picked i
   await record("Notion", "Slack");
 
   expect(intents(posted.calls)).toEqual([toolingIntent("notion", "slack")]);
-  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   // One step stands at a time: the answered step leaves the page rather than sitting above the
@@ -268,8 +283,11 @@ test("picking neither connector skips to the invite step", async () => {
 
   await record("Notion");
 
-  await screen.findByRole("heading", { name: "Invite your team" });
-  expect(screen.queryByRole("heading", { name: "The app answers in Slack" })).toBeNull();
+  const invite = (await screen.findByRole("heading", { name: "Invite your team" })).parentElement!;
+  expect(invite.querySelector("p")!.textContent).toBe(
+    "ufo.ai is best with a team, and we don't charge per seat.",
+  );
+  expect(screen.queryByRole("heading", { name: "Add @ufo to Slack" })).toBeNull();
 });
 
 test("each connector picked is its own step, in the order the tiles offer them", async () => {
@@ -279,18 +297,51 @@ test("each connector picked is its own step, in the order the tiles offer them",
   await record("GitHub", "Slack");
 
   // Slack leads because the catalog does, not because it was picked second.
-  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   expect(screen.getByRole("button", { name: "Connect Slack" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
-  await screen.findByRole("heading", { name: "The app works in your repositories" });
+  await screen.findByRole("heading", { name: "Add the ufo-ai bot to GitHub" });
   expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
   await screen.findByRole("heading", { name: "Invite your team" });
   expect(screen.getByRole("button", { name: "Invite" })).toBeTruthy();
+});
+
+/** Both connect steps name the agent the member is about to let in, and every mention of it stands
+ *  in the heavier weight the theme keeps for emphasis. */
+test("each connect step names the agent, and the mentions carry the strong weight", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("GitHub", "Slack");
+
+  const slack = (await screen.findByRole("heading", { name: "Add @ufo to Slack" }))
+    .parentElement!;
+  expect(slack.querySelector("p")!.textContent).toBe(
+    "Mention @ufo in a channel or send a direct message. @ufo replies, remembers, and works with your team.",
+  );
+  expect([...slack.querySelectorAll("strong.font-strong")].map((at) => at.textContent)).toEqual([
+    "@ufo",
+    "@ufo",
+    "@ufo",
+  ]);
+
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+
+  const github = (
+    await screen.findByRole("heading", { name: "Add the ufo-ai bot to GitHub" })
+  ).parentElement!;
+  expect(github.querySelector("p")!.textContent).toBe(
+    "ufo-ai reads code, reviews pull requests, and pushes changes. You pick which repositories on GitHub.",
+  );
+  expect([...github.querySelectorAll("strong.font-strong")].map((at) => at.textContent)).toEqual([
+    "ufo-ai",
+    "ufo-ai",
+  ]);
 });
 
 test("the foot carries only the acts the step has", async () => {
@@ -304,7 +355,7 @@ test("the foot carries only the acts the step has", async () => {
 
   await record("Slack");
 
-  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
@@ -322,7 +373,7 @@ test("continue is held closed until the install itself lands, not until the link
 
   await record("Slack", "GitHub");
 
-  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   expect(commit().disabled).toBe(true);
   await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
 
@@ -331,7 +382,7 @@ test("continue is held closed until the install itself lands, not until the link
   await screen.findByRole("link", { name: "Open the Slack install page" });
   await returning();
   expect(commit().disabled).toBe(true);
-  expect(screen.getByRole("heading", { name: "The app answers in Slack" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Add @ufo to Slack" })).toBeTruthy();
 });
 
 test("one press opens the consent window and lands the minted link in it", async () => {
@@ -341,7 +392,7 @@ test("one press opens the consent window and lands the minted link in it", async
   const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
 
   await record("Slack", "GitHub");
-  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
 
   // The window opens on the press, before the link exists — a window opened after the round trip
@@ -362,7 +413,7 @@ test("a browser that refuses the window still hands the member the link", async 
   const opened = vi.spyOn(window, "open").mockReturnValue(null);
 
   await record("Slack", "GitHub");
-  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
 
   const link = await screen.findByRole("link", { name: "Open the Slack install page" });
@@ -379,7 +430,7 @@ test("a refused connect closes the window it opened rather than parking it on no
   const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
 
   await record("Slack", "GitHub");
-  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
 
   await waitFor(() => expect(consent.close).toHaveBeenCalled());
@@ -396,7 +447,7 @@ test("the connect step passes itself when the install lands", async () => {
   });
 
   await record("Slack", "GitHub");
-  await screen.findByRole("heading", { name: "The app answers in Slack" });
+  await screen.findByRole("heading", { name: "Add @ufo to Slack" });
   await userEvent.click(screen.getByRole("button", { name: "Connect Slack" }));
   await screen.findByRole("link", { name: "Open the Slack install page" });
 
@@ -404,7 +455,7 @@ test("the connect step passes itself when the install lands", async () => {
   await returning();
 
   // Nothing was pressed: the member finished on Slack's pages and comes back to the next question.
-  await screen.findByRole("heading", { name: "The app works in your repositories" });
+  await screen.findByRole("heading", { name: "Add the ufo-ai bot to GitHub" });
   expect(commit().disabled).toBe(true);
 });
 
@@ -416,7 +467,7 @@ test("a connector the workspace already held waits to be read rather than passin
   await screen.findByText("Slack connected");
   await returning();
 
-  expect(screen.getByRole("heading", { name: "The app answers in Slack" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Add @ufo to Slack" })).toBeTruthy();
   expect(commit().disabled).toBe(false);
 });
 
@@ -433,7 +484,7 @@ test("a step passed by its own install is connected on the way back to it", asyn
   await screen.findByRole("link", { name: "Open the Slack install page" });
   landed = true;
   await returning();
-  await screen.findByRole("heading", { name: "The app works in your repositories" });
+  await screen.findByRole("heading", { name: "Add the ufo-ai bot to GitHub" });
   await userEvent.click(screen.getByRole("button", { name: "Back" }));
 
   // The step states what the workspace holds and stands still: passing it again would take the
@@ -471,7 +522,7 @@ test("a step passed while the tab stayed open is settled before the page's own r
   // is the only read that sees it: the page's own read is half a minute behind.
   landed = true;
   await act(async () => void (await vi.advanceTimersByTimeAsync(3_000)));
-  expect(screen.getByRole("heading", { name: "The app works in your repositories" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Add the ufo-ai bot to GitHub" })).toBeTruthy();
 
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
   await settle();

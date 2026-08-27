@@ -103,22 +103,45 @@ export const CONNECT_VERB: Record<string, string> = {
   github: "connect_github",
 };
 
-/** Each connector gets the whole step, and the step states what the workspace gains rather than
- *  naming the act twice: the button under it already says Connect, so a heading that said it too
- *  would ask the member to press a word they have just read. What they are deciding is whether they
- *  want the agent in that product at all, so that is what the step says. */
+/** The name a member types to reach the agent in that product, set apart from the sentence around
+ *  it so the handle itself is what the eye lands on. */
+function Mention({ children }: { children: ReactNode }) {
+  return <strong className="font-strong">{children}</strong>;
+}
+
+/** Each connector gets the whole step, and the step names the agent the member is about to let in
+ *  rather than calling it `the app`: what they are deciding is whether they want this agent in that
+ *  product, so the step says the handle they will type once it is there. */
 const CONNECT_COPY: Record<
   string,
-  { title: string; note: string; icon: typeof IconMessages }
+  { title: ReactNode; note: ReactNode; icon: typeof IconMessages }
 > = {
   slack: {
-    title: "The app answers in Slack",
-    note: "Mention it in a channel or send it a direct message, and it replies where your team already works.",
+    title: (
+      <>
+        Add <Mention>@ufo</Mention> to Slack
+      </>
+    ),
+    note: (
+      <>
+        Mention <Mention>@ufo</Mention> in a channel or send a direct message.{" "}
+        <Mention>@ufo</Mention> replies, remembers, and works with your team.
+      </>
+    ),
     icon: IconMessages,
   },
   github: {
-    title: "The app works in your repositories",
-    note: "It reads the code and pushes to the repositories the installation grants. You pick which ones.",
+    title: (
+      <>
+        Add the <Mention>ufo-ai</Mention> bot to GitHub
+      </>
+    ),
+    note: (
+      <>
+        <Mention>ufo-ai</Mention> reads code, reviews pull requests, and pushes changes. You pick
+        which repositories on GitHub.
+      </>
+    ),
     icon: IconPlugConnected,
   },
 };
@@ -139,18 +162,22 @@ const INVITE_ROWS = 3;
 
 /** What each step asks, keyed by the step's own name — which for a connector is the connector's
  *  slug, so a step and the copy over it cannot drift apart. */
-const STEP_COPY: Record<string, { title: string; note: string }> = {
+const STEP_COPY: Record<string, { title: ReactNode; note: ReactNode }> = {
   [GOAL_STEP]: {
     title: "What do you want an agent to do for you today?",
     note: "Pick one goal or describe another.",
   },
   [TOOLS_STEP]: {
     title: "What your team uses",
-    note: "Picks are recorded in memory, and the app reads them on every later turn.",
+    note: (
+      <>
+        Pick the ones your team works in, so <Mention>@ufo</Mention> knows where your work lives.
+      </>
+    ),
   },
   [TEAM_STEP]: {
     title: "Invite your team",
-    note: "Each address becomes a member of this workspace. They sign in with their work email.",
+    note: "ufo.ai is best with a team, and we don't charge per seat.",
   },
   [IMESSAGE_STEP]: {
     title: "Use this agent in iMessage",
@@ -172,8 +199,8 @@ function Frame({
   steps,
   children,
 }: {
-  title?: string;
-  note?: string;
+  title?: ReactNode;
+  note?: ReactNode;
   lead?: ReactNode;
   actions?: ReactNode;
   at?: number;
