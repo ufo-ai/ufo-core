@@ -42,6 +42,7 @@ from ufo.sdk.terminal import (
     OP_DEADLINE_SLACK_SECONDS,
     BlobNotFound,
     BlobStore,
+    TerminalAbsent,
     TerminalGone,
     TerminalOp,
     TerminalOpFailed,
@@ -351,7 +352,7 @@ class RedisTerminals:
         mid-flight only until that window and never re-runs on the member's machine."""
         bound = await self.arrived(conversation_id, ARRIVAL_GRACE_SECONDS)
         if bound is None:
-            raise TerminalGone("no terminal is connected to this conversation")
+            raise TerminalAbsent("no terminal is connected to this conversation")
         op = TerminalOp(
             op_id=uuid4().hex,
             kind=kind,

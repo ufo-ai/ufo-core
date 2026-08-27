@@ -18,6 +18,9 @@ from ufo.sandbox.terminal import (
     OP_DEADLINE_SLACK_SECONDS as OP_DEADLINE_SLACK_SECONDS,
 )
 from ufo.sandbox.terminal import (
+    TerminalAbsent as TerminalAbsent,
+)
+from ufo.sandbox.terminal import (
     TerminalGone as TerminalGone,
 )
 from ufo.sandbox.terminal import (

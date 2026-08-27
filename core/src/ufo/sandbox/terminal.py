@@ -167,6 +167,10 @@ class TerminalGone(RuntimeError):
     """No terminal is bound to this conversation, or the bound one stopped answering."""
 
 
+class TerminalAbsent(TerminalGone):
+    """No terminal reconnected before the arrival grace ended."""
+
+
 class TerminalOpFailed(RuntimeError):
     """The terminal answered that the op itself failed — a missing file, a refused rename. Carried
     apart from the reply body because a read's body is the file, so a failure cannot ride it."""
@@ -412,7 +416,7 @@ class Terminals:
         failing: the op ahead of it may run for its own full timeout, so the wait for a turn is
         bounded by that plus slack, not by this op's timeout alone."""
         if await self.arrived(conversation_id, ARRIVAL_GRACE_SECONDS) is None:
-            raise TerminalGone("no terminal is connected to this conversation")
+            raise TerminalAbsent("no terminal is connected to this conversation")
         loop = asyncio.get_running_loop()
         await self._take_turn(conversation_id, loop, timeout_s)
         waiter: asyncio.Future[object] = loop.create_future()
@@ -428,7 +432,7 @@ class Terminals:
             with self._lock:
                 slot = self.slots.get(conversation_id)
                 if slot is None:
-                    raise TerminalGone("the terminal disconnected before the op could run")
+                    raise TerminalAbsent("the terminal disconnected before the op could run")
                 slot.op = op
                 slot.delivered = False
                 slot.resolved = False
@@ -479,7 +483,7 @@ class Terminals:
             with self._lock:
                 slot = self.slots.get(conversation_id)
                 if slot is None:
-                    raise TerminalGone("no terminal is connected to this conversation")
+                    raise TerminalAbsent("no terminal is connected to this conversation")
                 if not slot.busy:
                     slot.busy = True
                     return
@@ -510,7 +514,7 @@ class Terminals:
         with self._lock:
             slot = self.slots.get(conversation_id)
             if slot is None:
-                raise TerminalGone("no terminal is connected to this conversation")
+                raise TerminalAbsent("no terminal is connected to this conversation")
             if slot.op is not None and not slot.delivered and slot.op.op_id != exclude_op_id:
                 slot.delivered = True
                 return slot.op
@@ -605,7 +609,7 @@ class TerminalCarrier:
         invariant that the proxy env carries the turn's token."""
         bound = await self.terminals.arrived(spec.conversation_id, ARRIVAL_GRACE_SECONDS)
         if bound is None:
-            raise TerminalGone(
+            raise TerminalAbsent(
                 f"this conversation's workspace is the terminal at {spec.workspace_host_path}, "
                 "which is not connected"
             )

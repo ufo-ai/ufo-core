@@ -29,7 +29,13 @@ from ufo_testsupport.plugin import integration_dependency_available
 
 from ufo.blob import BlobEntry, FilesystemBlobStore
 from ufo.sandbox.session import ProxyEndpoint, SandboxSpec
-from ufo.sandbox.terminal import TerminalCarrier, TerminalGone, TerminalOp, TerminalOpFailed
+from ufo.sandbox.terminal import (
+    TerminalAbsent,
+    TerminalCarrier,
+    TerminalGone,
+    TerminalOp,
+    TerminalOpFailed,
+)
 
 pytestmark = pytest.mark.docker
 
@@ -305,7 +311,7 @@ async def test_a_send_with_no_terminal_connected_raises_gone(
     pods: tuple[RedisTerminals, RedisTerminals],
 ) -> None:
     turn, _conn = pods
-    with pytest.raises(TerminalGone, match="no terminal is connected"):
+    with pytest.raises(TerminalAbsent, match="no terminal is connected"):
         await turn.send(uuid4(), "exec", 1)
 
 

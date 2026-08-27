@@ -114,6 +114,7 @@ from ufo.o11y import (
 )
 from ufo.object_name import ObjectRef
 from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME, Sandbox
+from ufo.sandbox.terminal import TerminalAbsent, TerminalGone
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
@@ -2430,6 +2431,11 @@ class TurnEngine:
                 self.tools, call, started, "step_failed", type(error).__name__, self.profile
             )
             raise
+        except TerminalAbsent as error:
+            _meter_dispatch(
+                self.tools, call, started, "step_failed", TerminalGone.__name__, self.profile
+            )
+            raise TerminalGone(str(error)) from error
         except Exception as error:
             return _RejectedToolCall(
                 call=call,
@@ -2582,7 +2588,8 @@ class TurnEngine:
         is no validated input to police). Then
         pre_tool_use may Deny
         (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
-        with the folded args (a raising handler is an is_error result). A non-error result over
+        with the folded args (a raising handler is an is_error result unless no terminal returned
+        within its reconnect grace, which ends the turn). A non-error result over
         MAX_TOOL_RESULT_CHARS is offloaded — its full text written to the run's `tool-output`
         file and only a TOOL_RESULT_PREVIEW_CHARS preview plus that path kept in context, so no
         single result is re-ingested whole on every later round of the turn. The cap is a context
@@ -2699,6 +2706,8 @@ class TurnEngine:
                     is_error = result.is_error
                     untrusted = tool.untrusted or result.untrusted
                     outcome, error_class = ("handler_error" if is_error else "ok"), None
+                except TerminalAbsent as error:
+                    raise TerminalGone(str(error)) from error
                 except Exception as error:
                     content, is_error = f"{type(error).__name__}: {error}", True
                     untrusted = tool.untrusted or isinstance(error, UntrustedContentError)

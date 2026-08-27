@@ -144,7 +144,7 @@ from ufo.sandbox.session import (
     SandboxSession,
     SandboxSpec,
 )
-from ufo.sandbox.terminal import TerminalCarrier, Terminals
+from ufo.sandbox.terminal import TerminalAbsent, TerminalCarrier, TerminalGone, Terminals
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
@@ -2200,6 +2200,113 @@ async def test_each_end_a_tool_call_has_is_metered_apart(
         (1, "denied_tool", "hook_denied"),
         (1, UNREGISTERED_TOOL, "invalid_call"),
     }
+
+
+@pytest.mark.parametrize("at_bind", (False, True))
+async def test_a_lost_terminal_fails_the_turn_without_another_model_round(
+    db: None, tmp_path: Path, at_bind: bool
+) -> None:
+    @dataclass
+    class TerminalLossModel:
+        rounds: int = 0
+
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            self.rounds += 1
+            if self.rounds > 1:
+                raise AssertionError("terminal loss reached another model round")
+            yield ToolCallStart(id="c1", name="terminal_tool")
+            yield ToolCallDelta(id="c1", partial_json="{}")
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    async def lost(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        if not at_bind:
+            raise TerminalAbsent("no terminal is connected to this conversation")
+        return ToolResult(content=(TextContent(text="unreachable"),))
+
+    async def absent(member_id: UUID | None) -> SandboxSession:
+        raise TerminalAbsent("no terminal is connected to this conversation")
+
+    turn = await _seed_turn("queued", None)
+    model = TerminalLossModel()
+    engine = replace(
+        _engine(turn, model, tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="terminal_tool",
+                    description="d",
+                    input_model=_NoArgs,
+                    handler=lost,
+                ),
+            )
+        ),
+        sandbox_for=absent if at_bind else None,
+    )
+
+    with pytest.raises(TerminalGone, match="no terminal is connected"):
+        await engine.run()
+
+    assert model.rounds == 1
+    async with workspace_tx() as connection:
+        terminal = (
+            await connection.execute(
+                sa.select(tables.turn.c.terminal).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
+    frame = TerminalFrame.model_validate(terminal)
+    assert frame.status == "failed"
+    assert frame.error_class == "TerminalGone"
+
+
+async def test_a_connected_terminals_operation_error_remains_recoverable(
+    db: None, tmp_path: Path
+) -> None:
+    @dataclass
+    class TerminalBusyModel:
+        rounds: int = 0
+
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            self.rounds += 1
+            results = [
+                block
+                for message in request.messages
+                if isinstance(message.content, tuple)
+                for block in message.content
+                if isinstance(block, ToolResultBlock)
+            ]
+            if results:
+                assert results[0].is_error
+                assert "did not free up" in str(results[0].content)
+                yield TextDelta(text="done")
+                yield Usage(input_tokens=1, output_tokens=1)
+                return
+            yield ToolCallStart(id="c1", name="terminal_tool")
+            yield ToolCallDelta(id="c1", partial_json="{}")
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    async def busy(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        raise TerminalGone("the terminal did not free up within 120s")
+
+    turn = await _seed_turn("queued", None)
+    model = TerminalBusyModel()
+    engine = replace(
+        _engine(turn, model, tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="terminal_tool",
+                    description="d",
+                    input_model=_NoArgs,
+                    handler=busy,
+                ),
+            )
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame is not None and frame.status == "done"
+    assert model.rounds == 2
 
 
 def _dispatch_context(engine: TurnEngine) -> ToolContext:

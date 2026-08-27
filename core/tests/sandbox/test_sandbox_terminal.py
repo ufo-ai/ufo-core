@@ -27,6 +27,7 @@ from ufo.sandbox.session import (
 )
 from ufo.sandbox.terminal import (
     EXEC_TIMEOUT_CODE,
+    TerminalAbsent,
     TerminalCarrier,
     TerminalGone,
     TerminalOp,
@@ -83,7 +84,7 @@ async def test_send_without_a_connected_terminal_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(terminal, "ARRIVAL_GRACE_SECONDS", 0.05)
-    with pytest.raises(TerminalGone):
+    with pytest.raises(TerminalAbsent):
         await Terminals().send(uuid4(), "exec", 1)
 
 
@@ -224,7 +225,7 @@ async def test_create_refuses_without_a_binding_and_names_a_mismatch(
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
     conversation_id = uuid4()
-    with pytest.raises(TerminalGone):
+    with pytest.raises(TerminalAbsent):
         await carrier.create(_spec(conversation_id, "/Users/member/proj"))
     terminals.connect(conversation_id, "/Users/member/elsewhere", None)
     with pytest.raises(TerminalGone) as refusal:
