@@ -818,6 +818,57 @@ async def test_a_fetch_whose_call_errored_does_not_name_the_pin() -> None:
     assert "no call fetches" in verdict.reason
 
 
+async def test_git_head_proof_recovers_an_errored_fetch() -> None:
+    case = PATCH_CASES[0]
+    errored = ToolInvocation(
+        name="bash",
+        input={"command": f"git fetch --depth 1 origin {case.base_sha}"},
+        result="connection reset",
+        has_result=True,
+        is_error=True,
+    )
+    inspected = ToolInvocation(
+        name="bash",
+        input={"command": "cd /workspace/ufo && git log --oneline -1 2>&1 | head"},
+        result=f"{case.base_sha[:7]} pinned commit\n",
+        has_result=True,
+    )
+    verdict = await PinnedRepositoryRoute(REPO_SLUG, case.base_sha)(
+        CapabilityOutput(response="done", calls=(*output().calls, errored, inspected))
+    )
+    assert verdict.passed, verdict.reason
+
+
+async def test_prose_before_a_git_command_does_not_prove_head() -> None:
+    case = PATCH_CASES[0]
+    claimed = ToolInvocation(
+        name="bash",
+        input={"command": f"echo {case.base_sha}; git status"},
+        result=f"{case.base_sha}\nOn branch main\n",
+        has_result=True,
+    )
+    verdict = await PinnedRepositoryRoute(REPO_SLUG, case.base_sha)(
+        CapabilityOutput(response="done", calls=(*output().calls, claimed))
+    )
+    assert not verdict.passed
+    assert "no call fetches" in verdict.reason
+
+
+async def test_an_explicit_non_head_revision_does_not_prove_head() -> None:
+    case = PATCH_CASES[0]
+    inspected = ToolInvocation(
+        name="bash",
+        input={"command": "git log --oneline -1 other-branch"},
+        result=f"{case.base_sha[:7]} pinned commit\n",
+        has_result=True,
+    )
+    verdict = await PinnedRepositoryRoute(REPO_SLUG, case.base_sha)(
+        CapabilityOutput(response="done", calls=(*output().calls, inspected))
+    )
+    assert not verdict.passed
+    assert "no call fetches" in verdict.reason
+
+
 async def test_a_refused_patch_is_set_aside_out_of_the_offline_judges_reach(tmp_path: Path) -> None:
     """A patch that fails the gate stays on disk to read, and not where grading looks: a deliverable
     earns a judge only once the run proves it real, so the note beside it is set aside too rather

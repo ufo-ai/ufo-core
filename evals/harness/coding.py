@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 
 from evals.harness.capability import (
     CapabilityOutput,
     CapabilityVerdict,
     Grader,
+    ToolInvocation,
     grading_statement,
 )
 from evals.harness.harness import JsonObject
@@ -18,6 +20,8 @@ CLONE_VERBS = ("git clone", "gh repo clone")
 SHELL_SEPARATORS = re.compile(r"&&|\|\||;|\n")
 ROUTE_ARGUMENTS = ("command", "code", "url", "tool_name")
 FETCH_VERB = "fetch"
+MIN_SHA_PREFIX = 7
+REDIRECTION = re.compile(r"\d*[<>].*")
 SPAWN_TOOL = "spawn"
 
 
@@ -61,10 +65,11 @@ class PinnedRepositoryRoute:
     refused where one shell segment names both the verb and this repository as the source, which
     carries every commit after the pin; a clone from a local path carries only what that path holds,
     which is the pinned checkout the coding skill copies for a second child. A refusal reads what a
-    call attempted; the fetch is credited only to a call that succeeded. Any coding spawn may be the
-    one that delivered, since a first child can fail and a second succeed, and a spawn that runs in
-    the background — asked for or moved there by an arriving message — returns an acknowledgement
-    naming the spawn it reaches rather than anything the child did."""
+    call attempted; the pin is credited when a fetch succeeds or a later Git command proves HEAD is
+    at that commit. Any coding spawn may be the one that delivered, since a first child can fail and
+    a second succeed, and a spawn that runs in the background — asked for or moved there by an
+    arriving message — returns an acknowledgement naming the spawn it reaches rather than anything
+    the child did."""
 
     repository_slug: str
     base_sha: str
@@ -130,12 +135,15 @@ class PinnedRepositoryRoute:
                 "cloned the repository, which carries the commits after the pin in its history",
             )
         if not any(
-            FETCH_VERB in target and self.base_sha in target
+            call.succeeded
+            and (
+                (FETCH_VERB in target and self.base_sha in target)
+                or self._proves_head(call, target)
+            )
             for call, target in acting
-            if call.succeeded
         ):
             return CapabilityVerdict(
-                False, f"no call fetches the pinned commit {self.base_sha[:12]}"
+                False, f"no call fetches or proves the pinned commit {self.base_sha[:12]}"
             )
         return CapabilityVerdict(
             True,
@@ -153,4 +161,54 @@ class PinnedRepositoryRoute:
             any(verb in segment for verb in CLONE_VERBS)
             and any(source in segment for source in clone_sources)
             for segment in SHELL_SEPARATORS.split(target)
+        )
+
+    def _proves_head(self, call: ToolInvocation, target: str) -> bool:
+        commands = tuple(
+            segment.strip()
+            for segment in SHELL_SEPARATORS.split(target)
+            if segment.strip() and not segment.strip().startswith("cd ")
+        )
+        if not commands or self.base_sha in commands[0]:
+            return False
+        try:
+            command = shlex.split(commands[0].split("|", maxsplit=1)[0])
+        except ValueError:
+            return False
+        if len(command) > 2 and command[1] == "-C":
+            command = [command[0], *command[3:]]
+        if len(command) < 2 or command[0] != "git":
+            return False
+        args = tuple(word for word in command[2:] if REDIRECTION.fullmatch(word) is None)
+        match command[1]:
+            case "rev-parse":
+                proves_head = args in (("HEAD",), ("--verify", "HEAD"))
+            case "log":
+                one_commit = "-1" in args or "--max-count=1" in args
+                max_count = args.index("--max-count") if "--max-count" in args else -1
+                one_commit = one_commit or (
+                    max_count >= 0 and len(args) > max_count + 1 and args[max_count + 1] == "1"
+                )
+                revisions = tuple(
+                    word
+                    for index, word in enumerate(args)
+                    if not word.startswith("-")
+                    and not (index > 0 and args[index - 1] == "--max-count")
+                )
+                proves_head = one_commit and revisions in ((), ("HEAD",))
+            case "show":
+                revisions = tuple(word for word in args if not word.startswith("-"))
+                proves_head = revisions == ("HEAD",)
+            case _:
+                return False
+        if not proves_head:
+            return False
+        words = call.result.split(maxsplit=1)
+        if not words:
+            return False
+        first = words[0].lower()
+        return (
+            len(first) >= MIN_SHA_PREFIX
+            and re.fullmatch(r"[0-9a-f]{7,40}", first) is not None
+            and self.base_sha.startswith(first)
         )

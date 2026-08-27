@@ -49,8 +49,8 @@ checkout of an already-pinned tree.
 A captured deliverable earns a judge only after the run proves it is real:
 
 - delegated to the `coding` lane, and that delegation succeeded
-- a call that succeeded fetches the pinned commit, and no call cloned this repository or reached it
-  by a historyless route
+- a successful call fetches the pinned commit or proves Git HEAD is at it, and no call cloned this
+  repository or reached it by a historyless route
 - for a patch: parses as a unified diff, applies to the pinned commit's tree, and touches at least
   one path the merged change touched
 - for a patch: passes its declared held-out pytest targets, overlaid after the candidate patch so
