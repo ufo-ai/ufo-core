@@ -146,6 +146,19 @@ test("the SDK stylesheet names its fonts beside itself instead of carrying them"
   expect(sheet.length).toBeLessThan(SHEET_CEILING_BYTES);
 });
 
+test("the SDK stylesheet uses the authored application text tokens", () => {
+  const expected = [
+    "--text-secondary:light-dark(#676767,#a7a9a9)",
+    "--color-fill-ink:#191a1a",
+  ];
+  const authored = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
+  const generated = readFrom(KIT, "kit.css");
+  for (const token of expected) {
+    expect(authored.replace(/\s+/g, "").toLowerCase()).toContain(token);
+    expect(generated.replace(/\s+/g, "").toLowerCase()).toContain(token);
+  }
+});
+
 test("no chunk a page or a fork loads carries a compiler", () => {
   const carrying = [
     ...scripts(TREE, "assets").map((file) => join(TREE, file)),

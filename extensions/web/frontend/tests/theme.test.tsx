@@ -82,7 +82,7 @@ const AUTHORED = new RegExp(
 );
 
 const PALETTE_STEP =
-  /--(?:bkgd-\d+|text-(?:primary|secondary)|accent-(?:primary|secondary)):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
+  /--(?:bkgd-\d+|text-(?:primary|secondary)|accent-(?:primary|secondary)|color-fill-ink):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
 
 const authoredColours = (css: string) =>
   css.replace(PROBES, "").replace(HUELESS, "").match(AUTHORED) ?? [];
@@ -105,7 +105,7 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--bkgd-200": "light-dark(#f4f3f2,#262929)",
     "--bkgd-300": "light-dark(#ebeae9,#323535)",
     "--text-primary": "light-dark(#191a1a,#f5f5f5)",
-    "--text-secondary": "light-dark(#919090,#a7a9a9)",
+    "--text-secondary": "light-dark(#676767,#a7a9a9)",
     "--accent-primary": "#0095ff",
     "--accent-secondary": "#ff6700",
   };
@@ -119,6 +119,7 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--color-field": String.raw`var\(--bkgd-200\)`,
     "--color-edge": String.raw`var\(--bkgd-300\)`,
     "--color-fill": String.raw`var\(--bkgd-200\)`,
+    "--color-fill-ink": "#191a1a",
     "--color-link": String.raw`color-mix\(in srgb, var\(--accent-primary\) 70%, var\(--text-primary\)\)`,
     "--color-attention-ink": String.raw`color-mix\(in srgb, var\(--accent-secondary\) 70%, var\(--text-primary\)\)`,
     "--color-live": String.raw`var\(--accent-primary\)`,

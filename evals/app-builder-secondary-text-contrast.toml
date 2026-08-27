@@ -1,0 +1,30 @@
+name = "app-builder-secondary-text-contrast"
+base = "HEAD"
+suites = ["ufo-app-bench"]
+cases = ["pre-meeting-briefs", "meeting-tasks", "issue-owner"]
+repeats = 1
+concurrency = 3
+max_stacks = 2
+budget_usd = 40.0
+est_usd_per_case = 3.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+[[arm]]
+name = "low-secondary-text"
+
+[[arm.replacements]]
+path = "extensions/web/frontend/src/theme.css"
+old = '--text-secondary: light-dark(#676767, #A7A9A9);'
+new = '--text-secondary: light-dark(#919090, #A7A9A9);'
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/page/kit/kit.css"
+old = '--text-secondary:light-dark(#676767,#a7a9a9)'
+new = '--text-secondary:light-dark(#919090,#a7a9a9)'

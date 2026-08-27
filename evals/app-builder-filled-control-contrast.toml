@@ -1,0 +1,44 @@
+name = "app-builder-filled-control-contrast"
+base = "HEAD"
+suites = ["ufo-app-bench"]
+cases = ["pre-meeting-briefs", "meeting-tasks", "issue-owner"]
+repeats = 1
+concurrency = 3
+max_stacks = 2
+budget_usd = 40.0
+est_usd_per_case = 3.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+[[arm]]
+name = "missing-fill-ink"
+
+[[arm.replacements]]
+path = "extensions/web/frontend/src/theme.css"
+old = '''  --color-fill: var(--bkgd-200);
+  --color-fill-strong: var(--bkgd-300);
+  --color-fill-ink: #191A1A;'''
+new = '''  --color-fill: var(--bkgd-200);
+  --color-fill-strong: var(--bkgd-300);'''
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/page/kit/kit.css"
+old = '--color-fill:var(--bkgd-200);--color-fill-strong:var(--bkgd-300);--color-fill-ink:#191a1a;--color-scrim:'
+new = '--color-fill:var(--bkgd-200);--color-fill-strong:var(--bkgd-300);--color-scrim:'
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
+old = '''provides `--accent-primary`, `--color-fill-ink`, `--color-surface`, `--color-ink`,
+`--color-ink-soft`, `--color-field`, `--color-edge`, `--color-link`, `--color-attention`,
+`--color-attention-ink`, `--font-sans`, and `--font-mono`. Filled primary controls pair an
+`--accent-primary` background with `--color-fill-ink` text; `--color-link` is text, not a fill.
+Keep required facts'''
+new = '''provides `--color-surface`, `--color-ink`, `--color-ink-soft`, `--color-field`, `--color-edge`,
+`--color-link`, `--color-attention`, `--color-attention-ink`, `--font-sans`, and `--font-mono`.
+Keep required facts'''

@@ -4,6 +4,7 @@
    sheet must carry their classes the way it carries every view's — a utility only an app page
    uses would otherwise vanish from the build no bundler ever sees them in. */
 @source "../../../app_*/ufo_ext_*/skills/*/app.tsx";
+@source inline("text-fill-ink");
 
 
 @font-face {
@@ -99,7 +100,7 @@
   --bkgd-200: light-dark(#F4F3F2, #262929);
   --bkgd-300: light-dark(#EBEAE9, #323535);
   --text-primary: light-dark(#191A1A, #F5F5F5);
-  --text-secondary: light-dark(#919090, #A7A9A9);
+  --text-secondary: light-dark(#676767, #A7A9A9);
   --accent-primary: #0095FF;
   --accent-secondary: #FF6700;
 }
@@ -161,6 +162,7 @@
 
   --color-fill: var(--bkgd-200);
   --color-fill-strong: var(--bkgd-300);
+  --color-fill-ink: #191A1A;
   --color-scrim: color-mix(in srgb, var(--text-primary) 50%, transparent);
 
   /* What the scrim does to the screen behind it, beyond dimming: enough to put the page out of

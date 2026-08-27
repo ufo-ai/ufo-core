@@ -565,6 +565,7 @@ class Ablation:
             self._remove_worktree(root)
         root.parent.mkdir(parents=True, exist_ok=True)
         self._git("worktree", "add", "--detach", str(root), base)
+        self._carry_build_output(root)
         self._apply_arm(arm, root)
         self._sync(root)
         binary = root / EGRESS_BINARY
@@ -576,7 +577,6 @@ class Ablation:
             carried_client.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(remote_client, carried_client)
             carried_client.chmod(0o755)
-        self._carry_build_output(root)
         config = root / "ablate-template.toml"
         config.write_text(tomli_w.dumps(self.spec.template))
         (root / "ablate-matrix.toml").write_text(tomli_w.dumps(self.matrix(arm, config)))

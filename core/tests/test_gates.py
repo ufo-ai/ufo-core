@@ -502,6 +502,10 @@ def test_portal_style_gate_reaches_the_source_it_judges() -> None:
     assert gates._portal_style_failures() == []
 
 
+def test_palette_gate_matches_the_aa_safe_portal_secondary_step() -> None:
+    assert gates._skill_palette_failures() == []
+
+
 def test_portal_style_gate_names_a_missing_source_rather_than_passing() -> None:
     """The failure this gate cannot afford is silence, so an absent root is itself a failure."""
     original = gates.PORTAL_SOURCE

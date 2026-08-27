@@ -9,6 +9,7 @@ from hashlib import sha256
 from io import BytesIO
 from json import dumps, loads
 from pathlib import Path
+from shutil import copy as copy_file
 from tarfile import TarInfo
 from tarfile import open as open_tar
 from uuid import UUID, uuid4
@@ -42,6 +43,7 @@ from ufo_ext_sites.application_builder import (
     ApplicationBuilderResult,
 )
 
+from evals.ablate import EGRESS_BINARY, Ablation, ArmSpec, load_experiment
 from evals.harness.artifact_checks import (
     JPEG_MAGIC,
     JPEG_TRAILER,
@@ -175,6 +177,311 @@ TESTING_APP_SOURCES = {
     "account-health": (),
     "candidate-review": (),
 }
+
+
+def _stub_egress_binary_copy(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
+    def copy_with_placeholder(
+        source: str | Path,
+        destination: str | Path,
+        *,
+        follow_symlinks: bool = True,
+    ) -> str:
+        if Path(source) == repo / EGRESS_BINARY:
+            Path(destination).write_bytes(b"test egress")
+            return str(destination)
+        return copy_file(source, str(destination), follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr("evals.ablate.shutil.copy", copy_with_placeholder)
+
+
+def test_secondary_text_regression_materializes_one_matched_token_difference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Path(__file__).parents[3]
+    reference = load_experiment(repo / "evals/app-builder-filled-control-contrast.toml")
+    spec = load_experiment(repo / "evals/app-builder-secondary-text-contrast.toml")
+    builder_path = "extensions/sites/ufo_ext_sites/application_builder.py"
+    prompt_path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
+    theme_path = "extensions/web/frontend/src/theme.css"
+    kit_path = "extensions/sites/ufo_ext_sites/page/kit/kit.css"
+    source = {
+        path: (repo / path).read_text()
+        for path in (builder_path, prompt_path, theme_path, kit_path)
+    }
+    assert tuple(replacement.path for replacement in spec.arm[0].replacements) == (
+        theme_path,
+        kit_path,
+    )
+    base = subprocess.run(
+        ("git", "-C", str(repo), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    arms = (
+        ArmSpec.model_construct(
+            name="control",
+            files={},
+            replacements=(),
+        ),
+        spec.arm[0],
+    )
+    patches = {arm.name: arm for arm in arms}
+    materialized = {}
+    roots: list[Path] = []
+    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
+    _stub_egress_binary_copy(monkeypatch, repo)
+    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
+
+    try:
+        tracked = subprocess.run(
+            ("git", "-C", str(repo), "ls-tree", "-r", "--name-only", base),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        assert kit_path not in tracked
+        for name, patch in patches.items():
+            assert patch.files == {}
+            root = tmp_path / name
+            roots.append(root)
+            ablation._materialize(patch, base, root, None)
+            assert (root / "ablate-matrix.toml").is_file()
+            files = {path: (root / path).read_text() for path in source}
+            compile(files[builder_path], builder_path, "exec")
+            materialized[name] = files
+    finally:
+        for root in roots:
+            ablation._remove_worktree(root)
+
+    control = materialized["control"]
+    regression = materialized["low-secondary-text"]
+    assert control == source
+    assert {path for path in source if regression[path] != control[path]} == {
+        theme_path,
+        kit_path,
+    }
+    for replacement in spec.arm[0].replacements:
+        assert (
+            regression[replacement.path].replace(replacement.new, replacement.old)
+            == control[replacement.path]
+        )
+    assert "--text-secondary: light-dark(#676767, #A7A9A9);" in control[theme_path]
+    assert "--text-secondary:light-dark(#676767,#a7a9a9)" in control[kit_path]
+    assert "--text-secondary: light-dark(#919090, #A7A9A9);" in regression[theme_path]
+    assert "--text-secondary:light-dark(#919090,#a7a9a9)" in regression[kit_path]
+
+    assert 'APPLICATION_BUILDER_MODEL = "google/gemini-3.7-flash"' in control[builder_path]
+    assert 'APPLICATION_BUILDER_REASONING: Literal["medium"] = "medium"' in control[builder_path]
+
+    def luminance(value: str) -> float:
+        channels = tuple(int(value[index : index + 2], 16) / 255 for index in (1, 3, 5))
+        red, green, blue = (
+            channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        )
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+    surface = luminance("#FAF9F7")
+    safe_ratio = (surface + 0.05) / (luminance("#676767") + 0.05)
+    regression_ratio = (surface + 0.05) / (luminance("#919090") + 0.05)
+    assert regression_ratio < 4.5 <= safe_ratio
+    assert safe_ratio == pytest.approx(5.4, abs=0.1)
+    assert spec.cases == reference.cases
+    assert spec.suites == reference.suites
+    assert spec.repeats == reference.repeats == 1
+    assert spec.concurrency == reference.concurrency == 3
+    assert spec.max_stacks == len(patches) == 2
+    assert spec.template == reference.template
+    assert spec.model is reference.model is None
+    assert spec.reasoning is reference.reasoning is None
+
+
+def test_filled_control_regression_materializes_the_application_runtime_prompt_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Path(__file__).parents[3]
+    reference = load_experiment(repo / "evals/app-builder-secondary-text-contrast.toml")
+    spec = load_experiment(repo / "evals/app-builder-filled-control-contrast.toml")
+    builder_path = "extensions/sites/ufo_ext_sites/application_builder.py"
+    prompt_path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
+    theme_path = "extensions/web/frontend/src/theme.css"
+    kit_path = "extensions/sites/ufo_ext_sites/page/kit/kit.css"
+    paths = (builder_path, prompt_path, theme_path, kit_path)
+    source = {path: (repo / path).read_text() for path in paths}
+    replacements = spec.arm[0].replacements
+    assert tuple(replacement.path for replacement in replacements) == (
+        theme_path,
+        kit_path,
+        prompt_path,
+    )
+    base = subprocess.run(
+        ("git", "-C", str(repo), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    arms = (
+        ArmSpec.model_construct(name="control", files={}, replacements=()),
+        spec.arm[0],
+    )
+    materialized: dict[str, dict[str, str]] = {}
+    roots: list[Path] = []
+    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
+    _stub_egress_binary_copy(monkeypatch, repo)
+    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
+
+    try:
+        tracked = subprocess.run(
+            ("git", "-C", str(repo), "ls-tree", "-r", "--name-only", base),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        assert kit_path not in tracked
+        for arm in arms:
+            root = tmp_path / arm.name
+            roots.append(root)
+            ablation._materialize(arm, base, root, None)
+            assert (root / "ablate-matrix.toml").is_file()
+            files = {path: (root / path).read_text() for path in paths}
+            compile(files[builder_path], builder_path, "exec")
+            materialized[arm.name] = files
+    finally:
+        for root in roots:
+            ablation._remove_worktree(root)
+
+    control = materialized["control"]
+    regression = materialized["missing-fill-ink"]
+    assert control == source
+    assert {path for path in paths if regression[path] != control[path]} == {
+        theme_path,
+        kit_path,
+        prompt_path,
+    }
+    for replacement in replacements:
+        assert (
+            regression[replacement.path].replace(replacement.new, replacement.old)
+            == control[replacement.path]
+        )
+    assert control[theme_path].count("--color-fill-ink: #191A1A;") == 1
+    assert control[kit_path].count("--color-fill-ink:#191a1a;") == 1
+    assert control[prompt_path].count("--accent-primary") == 2
+    assert control[prompt_path].count("--color-fill-ink") == 2
+    assert control[prompt_path].count("`--color-link` is text, not a fill") == 1
+    assert "--color-fill-ink: #191A1A;" not in regression[theme_path]
+    assert "--color-fill-ink:#191a1a;" not in regression[kit_path]
+    assert "--color-fill-ink" not in regression[prompt_path]
+    assert "--text-secondary: light-dark(#676767, #A7A9A9);" in control[theme_path]
+    assert "--text-secondary:light-dark(#676767,#a7a9a9)" in control[kit_path]
+    assert 'APPLICATION_BUILDER_MODEL = "google/gemini-3.7-flash"' in control[builder_path]
+    assert 'APPLICATION_BUILDER_REASONING: Literal["medium"] = "medium"' in control[builder_path]
+
+    def luminance(value: str) -> float:
+        channels = tuple(int(value[index : index + 2], 16) / 255 for index in (1, 3, 5))
+        red, green, blue = (
+            channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        )
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+    fill = luminance("#0095FF")
+    ink = luminance("#191A1A")
+    ratio = (max(fill, ink) + 0.05) / (min(fill, ink) + 0.05)
+    assert ratio >= 4.5
+    assert ratio == pytest.approx(5.6, abs=0.1)
+    assert spec.cases == reference.cases
+    assert spec.suites == reference.suites
+    assert spec.repeats == reference.repeats == 1
+    assert spec.concurrency == reference.concurrency == 3
+    assert spec.max_stacks == len(arms) == 2
+    assert spec.template == reference.template
+    assert spec.model is reference.model is None
+    assert spec.reasoning is reference.reasoning is None
+
+
+def test_style_divergence_regression_materializes_one_wording_difference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Path(__file__).parents[3]
+    reference = load_experiment(repo / "evals/app-builder-secondary-text-contrast.toml")
+    spec = load_experiment(repo / "evals/app-builder-style-divergence-wording.toml")
+    skill_path = "core/src/ufo/skills/ufo-style/SKILL.md"
+    tokens_path = "core/src/ufo/skills/ufo-style/references/tokens.css"
+    paths = (skill_path, tokens_path)
+    source = {path: (repo / path).read_text() for path in paths}
+    base = subprocess.run(
+        ("git", "-C", str(repo), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    arms = (
+        ArmSpec.model_construct(name="control", files={}, replacements=()),
+        spec.arm[0],
+    )
+    monkeypatch.setattr(Ablation, "_sync", lambda self, root: None)
+    _stub_egress_binary_copy(monkeypatch, repo)
+    ablation = Ablation(repo=repo, spec=spec, out=tmp_path / "out")
+    roots: dict[str, Path] = {}
+    materialized: dict[str, dict[str, str]] = {}
+
+    try:
+        for arm in arms:
+            root = tmp_path / arm.name
+            roots[arm.name] = root
+            ablation._materialize(arm, base, root, None)
+            changed = subprocess.run(
+                ("git", "-C", str(root), "diff", "--name-only"),
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+            assert changed == ([] if arm.name == "control" else list(paths))
+            materialized[arm.name] = {path: (root / path).read_text() for path in paths}
+    finally:
+        for root in roots.values():
+            ablation._remove_worktree(root)
+
+    control = materialized["control"]
+    regression = materialized["false-divergence"]
+    assert control == source
+    assert {path for path in paths if regression[path] != control[path]} == set(paths)
+    for replacement in spec.arm[0].replacements:
+        assert (
+            regression[replacement.path].replace(replacement.new, replacement.old)
+            == control[replacement.path]
+        )
+    assert tuple(replacement.path for replacement in spec.arm[0].replacements) == paths
+    assert "description:" in control[skill_path]
+    stale_claim = "portal's own `theme.css` keeps `#919090`"
+    assert stale_claim not in " ".join(control[skill_path].split())
+    assert stale_claim in " ".join(regression[skill_path].split())
+    assert "diverges from the portal's `theme.css`" not in control[tokens_path]
+    assert "diverges from the portal's `theme.css`" in regression[tokens_path]
+    assert "--color-mark-soft` carries `#919090`" in control[skill_path]
+    assert "`--mark-secondary` stays `#919090`" in control[tokens_path]
+    assert "--text-secondary: light-dark(#676767, #A7A9A9);" in control[tokens_path]
+    assert "--mark-secondary: light-dark(#919090, #A7A9A9);" in control[tokens_path]
+    assert (
+        spec.cases
+        == reference.cases
+        == (
+            "pre-meeting-briefs",
+            "meeting-tasks",
+            "issue-owner",
+        )
+    )
+    assert spec.suites == reference.suites == ("ufo-app-bench",)
+    assert spec.repeats == reference.repeats == 1
+    assert spec.concurrency == reference.concurrency == 3
+    assert spec.max_stacks == len(arms) == 2
+    assert spec.budget_usd == 40.0
+    assert spec.template == reference.template
+    assert spec.model is reference.model is None
+    assert spec.reasoning is reference.reasoning is None
+
+
 READER_REWRITES = {
     "pre-meeting-briefs": "Confirm the SSO date before the renewal call.",
     "meeting-tasks": "Create the agreed tasks and confirm their owners and dates.",

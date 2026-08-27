@@ -37,10 +37,8 @@ Paths are relative to this skill's directory (`$UFO_HOME/skills/ufo-style/`).
   Every other colour is one step or a mix of two.
 - **A word takes a text step, a mark takes the mark step.** Secondary words are set in
   `--color-ink-soft`, which is the derived AA-safe pair (`#676767` light, `#A7A9A9` dark).
-  `--color-mark-soft` carries the portal's raw `#919090` for a hairline, a rule or a dot — it
-  measures 3.0:1 on the light surface, so no word is ever set in it. The portal's own `theme.css`
-  keeps `#919090` as its `--text-secondary`; this file diverges there on purpose, so do not "fix"
-  either file to match the other.
+  `--color-mark-soft` carries `#919090` for a hairline, a rule or a dot — it measures 3.0:1 on
+  the light surface, so no word is ever set in it.
 - **Type.** Inter for text, Roboto Mono for code, Georgia for display, as `tokens.css` writes them.
   The portal's own display face is licensed to the portal alone: it is not in this stack, and a build
   of ours never adds it or loads it with an `@font-face` rule.

@@ -1,0 +1,38 @@
+name = "app-builder-style-divergence-wording"
+base = "HEAD"
+suites = ["ufo-app-bench"]
+cases = ["pre-meeting-briefs", "meeting-tasks", "issue-owner"]
+repeats = 1
+concurrency = 3
+max_stacks = 2
+budget_usd = 40.0
+est_usd_per_case = 3.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+[[arm]]
+name = "false-divergence"
+
+[[arm.replacements]]
+path = "core/src/ufo/skills/ufo-style/SKILL.md"
+old = '''  `--color-mark-soft` carries `#919090` for a hairline, a rule or a dot — it measures 3.0:1 on
+  the light surface, so no word is ever set in it.'''
+new = '''  `--color-mark-soft` carries the portal's raw `#919090` for a hairline, a rule or a dot — it
+  measures 3.0:1 on the light surface, so no word is ever set in it. The portal's own `theme.css`
+  keeps `#919090` as its `--text-secondary`; this file diverges there on purpose, so do not "fix"
+  either file to match the other.'''
+
+[[arm.replacements]]
+path = "core/src/ufo/skills/ufo-style/references/tokens.css"
+old = '''   * `--text-secondary` is the word step: `#676767` measures 5.4:1 on `#FAF9F7`.
+   * `--mark-secondary` stays `#919090`, for a hairline or a mark and never a word. */'''
+new = '''   * `--text-secondary` diverges from the portal's `theme.css` on purpose: the portal writes
+   * `#919090`, which measures 3.0:1 on `#FAF9F7` and carries no word at body size, so the step for
+   * words here is the derived `#676767` (5.4:1 on `#FAF9F7`) that `design-foundations` declares.
+   * The raw portal value stays as `--mark-secondary`, for a hairline or a mark and never a word. */'''

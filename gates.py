@@ -1770,16 +1770,14 @@ def _ratio_failures(pairings: list[tuple[str, str, str, float]]) -> list[str]:
 
 
 def _skill_palette_failures() -> list[str]:
-    """The portal theme is the palette, and a generated deck, page or chart resolves no CSS
-    variable — so `color.md` restates those steps as hexes, and every skill that repeats the
-    palette repeats it from there. Two ways that drifts, both silent: a step that no longer matches
-    the theme paints an artifact in a colour the product stopped using, and a pairing below AA
-    ships text a reader cannot read. So the steps are compared to the theme declaration for
-    declaration, every ratio the file prints is recomputed from its own two hexes, and a doc that
-    restates the palette may write no hex `color.md` has not declared."""
-    theme, palette = ROOT / PORTAL_THEME, ROOT / DESIGN_PALETTE
-    if not theme.is_file() or not palette.is_file():
-        return [f"{DESIGN_PALETTE}: the theme or the palette reference is missing"]
+    """The portal theme follows the artifact palette, except body-size secondary text follows the
+    AA-safe ufo-style step. Every printed ratio is recomputed, and a palette restatement may write
+    no hex the design reference has not declared."""
+    theme = ROOT / PORTAL_THEME
+    palette = ROOT / DESIGN_PALETTE
+    house = ROOT / HOUSE_STYLE_TOKENS
+    if not theme.is_file() or not palette.is_file() or not house.is_file():
+        return [f"{DESIGN_PALETTE}: the theme or a palette reference is missing"]
     painted = {
         step: (light.upper(), dark.upper()) if light else (single.upper(), single.upper())
         for step, light, dark, single in PALETTE_DECLARATION.findall(theme.read_text())
@@ -1789,10 +1787,16 @@ def _skill_palette_failures() -> list[str]:
         step: (light.upper(), (dark or light).upper())
         for step, light, dark in PALETTE_ROW.findall(text)
     }
+    house_steps = {
+        step: (light.upper(), dark.upper()) if light else (single.upper(), single.upper())
+        for step, light, dark, single in PALETTE_DECLARATION.findall(house.read_text())
+    }
+    expected = {**restated, "text-secondary": house_steps.get("text-secondary")}
     failures = [
-        f"{DESIGN_PALETTE}: --{step} is {restated.get(step)}, the theme paints {painted[step]}"
+        f"{HOUSE_STYLE_TOKENS if step == 'text-secondary' else DESIGN_PALETTE}: "
+        f"--{step} is {expected.get(step)}, the theme paints {painted[step]}"
         for step in sorted(painted)
-        if restated.get(step) != painted[step]
+        if expected.get(step) != painted[step]
     ]
     failures.extend(
         f"{DESIGN_PALETTE}: --{step} is not a step {PORTAL_THEME} declares"

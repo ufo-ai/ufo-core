@@ -1720,6 +1720,9 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
     assert profile.max_rounds == 35
     assert profile.isolated_tools is True
     assert profile.connector_read_only is True
+    assert profile.prompt.count("--accent-primary") == 2
+    assert profile.prompt.count("--color-fill-ink") == 2
+    assert "`--color-link` is text, not a fill" in profile.prompt
     assert set(profile.tool_names) == {
         "list_external_tools",
         "describe_external_tools",

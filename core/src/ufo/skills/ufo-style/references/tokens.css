@@ -26,10 +26,8 @@
    * `light-dark()` picks the pair from the scheme, so a scheme is these eight declarations and no
    * rule is written twice.
    *
-   * `--text-secondary` diverges from the portal's `theme.css` on purpose: the portal writes
-   * `#919090`, which measures 3.0:1 on `#FAF9F7` and carries no word at body size, so the step for
-   * words here is the derived `#676767` (5.4:1 on `#FAF9F7`) that `design-foundations` declares.
-   * The raw portal value stays as `--mark-secondary`, for a hairline or a mark and never a word. */
+   * `--text-secondary` is the word step: `#676767` measures 5.4:1 on `#FAF9F7`.
+   * `--mark-secondary` stays `#919090`, for a hairline or a mark and never a word. */
   --bkgd-100: light-dark(#FAF9F7, #191A1A);
   --bkgd-200: light-dark(#F4F3F2, #262929);
   --bkgd-300: light-dark(#EBEAE9, #323535);

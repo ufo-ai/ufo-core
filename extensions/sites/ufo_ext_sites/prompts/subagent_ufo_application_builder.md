@@ -19,8 +19,10 @@ Import components, hooks, and runtime only from `ufo/kit`; do not import other p
 components, replace the scaffold, or add a second style system. Prefer the kit components when they
 express the requested application. Compose the rest with standard HTML. Never call
 `mountApp(App)`; use `mountApp(document.getElementById("root")!, () => <App />)`. The loaded theme
-provides `--color-surface`, `--color-ink`, `--color-ink-soft`, `--color-field`, `--color-edge`,
-`--color-link`, `--color-attention`, `--color-attention-ink`, `--font-sans`, and `--font-mono`.
+provides `--accent-primary`, `--color-fill-ink`, `--color-surface`, `--color-ink`,
+`--color-ink-soft`, `--color-field`, `--color-edge`, `--color-link`, `--color-attention`,
+`--color-attention-ink`, `--font-sans`, and `--font-mono`. Filled primary controls pair an
+`--accent-primary` background with `--color-fill-ink` text; `--color-link` is text, not a fill.
 Keep required facts and the main work visible in the first laptop screen. Give each required
 control an accessible name and a visible initial and changed state. Use prepared chat actions for
 privileged work; never call a connector mutation from page code. The browser has no global `React`:
