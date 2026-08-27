@@ -9667,6 +9667,219 @@ async def test_capability_workflow_waits_for_child_delivery_resumed_turn_and_art
     }
 
 
+async def test_failed_capability_workflow_keeps_an_earlier_root_artifact(
+    db: None, tmp_path
+) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    root_turn_id = uuid4()
+    child_conversation_id = uuid4()
+    child_turn_id = uuid4()
+    artifact_turn_id = uuid4()
+    latest_turn_id = uuid4()
+    artifact_key = f"artifacts/{uuid4()}/results.jsonl"
+    artifact = b'{"item": "railway"}\n'
+    root_messages = (
+        Message(role="user", content="build the dataset"),
+        Message(role="assistant", content="Research is running."),
+    )
+    artifact_messages = (
+        *root_messages,
+        Message(role="user", content="The results file was shared."),
+        Message(role="assistant", content="The artifact is ready."),
+    )
+    latest_messages = (
+        *artifact_messages,
+        Message(role="user", content="One research child finished."),
+        Message(role="assistant", content="Done."),
+    )
+    messages_by_turn = {
+        root_turn_id: root_messages,
+        artifact_turn_id: artifact_messages,
+        latest_turn_id: latest_messages,
+    }
+
+    @dataclass
+    class WorkflowWorker:
+        async def admit(
+            self,
+            conversation_id: UUID,
+            message: str,
+            idempotency_key: str | None = None,
+            speaker_key: str | None = None,
+        ) -> UUID:
+            now = datetime.now(UTC)
+            await blob.put(artifact_key, artifact)
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.conversation).values(
+                        id=child_conversation_id,
+                        workspace_id=workspace_id,
+                        agent_id=agent_id,
+                        surface="eval",
+                        queue_key=str(child_conversation_id),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                await connection.execute(
+                    sa.insert(tables.turn),
+                    (
+                        {
+                            "id": root_turn_id,
+                            "workspace_id": workspace_id,
+                            "conversation_id": conversation_id,
+                            "agent_id": agent_id,
+                            "seq": 1,
+                            "status": "done",
+                            "inbound": message,
+                            "terminal": {
+                                "status": "done",
+                                "text": "Research is running.",
+                                "model": MODEL,
+                            },
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                        {
+                            "id": artifact_turn_id,
+                            "workspace_id": workspace_id,
+                            "conversation_id": conversation_id,
+                            "agent_id": agent_id,
+                            "seq": 2,
+                            "status": "done",
+                            "inbound": "The results file was shared.",
+                            "terminal": {
+                                "status": "done",
+                                "text": "The artifact is ready.",
+                                "model": MODEL,
+                            },
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                        {
+                            "id": latest_turn_id,
+                            "workspace_id": workspace_id,
+                            "conversation_id": conversation_id,
+                            "agent_id": agent_id,
+                            "seq": 3,
+                            "status": "done",
+                            "inbound": "One research child finished.",
+                            "terminal": {"status": "done", "text": "Done.", "model": MODEL},
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                    ),
+                )
+                await connection.execute(
+                    sa.insert(tables.turn).values(
+                        id=child_turn_id,
+                        workspace_id=workspace_id,
+                        conversation_id=child_conversation_id,
+                        agent_id=agent_id,
+                        seq=1,
+                        status="running",
+                        inbound="research the records",
+                        parent_turn_id=root_turn_id,
+                        result_delivery=DELIVERY_PENDING,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                await connection.execute(
+                    sa.insert(tables.shared_artifact).values(
+                        turn_id=artifact_turn_id,
+                        blob_key=artifact_key,
+                        workspace_id=workspace_id,
+                        filename="results.jsonl",
+                        subject=None,
+                        media_type="application/jsonl",
+                        size_bytes=len(artifact),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            await Transcript(blob=blob, conversation_id=conversation_id).write(
+                Conversation(seq=3, messages=latest_messages)
+            )
+            return root_turn_id
+
+    @dataclass(frozen=True)
+    class WorkflowOutcome:
+        workflow_wait_seconds = 1.0
+
+        async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
+            if turn_id == child_turn_id:
+                return None
+            return Trajectory(
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                agent_prompt=PROMPT,
+                agent_prompt_digest=prompt_digest(PROMPT),
+                messages=messages_by_turn[turn_id],
+            )
+
+        async def cancel(self, turn_id: UUID) -> bool:
+            async with workspace_tx() as connection:
+                updated = await connection.execute(
+                    sa.update(tables.turn)
+                    .values(
+                        status="cancelled",
+                        terminal={"status": "cancelled", "text": "", "model": ""},
+                        updated_at=sa.func.now(),
+                    )
+                    .where(
+                        tables.turn.c.id == turn_id,
+                        tables.turn.c.status.in_(NON_TERMINAL_STATUSES),
+                    )
+                )
+            return updated.rowcount == 1
+
+    worker = WorkflowWorker()
+    target = InProcessTarget(
+        ctx=_context(blob, cast(StubWorker, worker)),
+        agent_id=agent_id,
+        conversations=DbConversations(workspace_id, cast(StubWorker, worker)),
+        outcome=WorkflowOutcome(),
+        blob=blob,
+    )
+    case = CapabilityCase(
+        "failed-logical-workflow",
+        "build the dataset",
+        shared_artifact_scorer(".jsonl"),
+        wait_for_background=True,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(case)
+        async with workspace_tx() as connection:
+            statuses = dict(
+                (
+                    await connection.execute(
+                        sa.select(tables.turn.c.id, tables.turn.c.status).where(
+                            tables.turn.c.id.in_(
+                                (root_turn_id, artifact_turn_id, latest_turn_id, child_turn_id)
+                            )
+                        )
+                    )
+                ).all()
+            )
+
+    assert result.clean is False
+    assert result.failure_reason == "background child did not finish"
+    assert result.output.response == "Done."
+    assert [(item.name, item.content) for item in result.output.artifacts] == [
+        ("results.jsonl", artifact)
+    ]
+    assert statuses == {
+        root_turn_id: "done",
+        artifact_turn_id: "done",
+        latest_turn_id: "done",
+        child_turn_id: "cancelled",
+    }
+
+
 async def test_capability_workflow_reads_only_the_latest_resumed_turn_transcript(
     db: None, tmp_path
 ) -> None:

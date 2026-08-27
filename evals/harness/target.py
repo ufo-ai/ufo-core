@@ -343,19 +343,7 @@ class InProcessTarget:
         )
         wall_ms = round((perf_counter() - started) * 1_000)
         result = await self._record_timing(settled, turn_id, wall_ms)
-        if not result.clean:
-            if self.logs is not None:
-                await self.logs.discard(turn_id)
-            return result
-        output = replace(
-            result.output,
-            workspace_dir=self.conversations.workspace_path(conversation_id, ""),
-        )
-        if self.logs is not None:
-            log = await self.logs.read(turn_id)
-            if log is None:
-                raise RuntimeError("turn produced no required log")
-            output = replace(output, log=log)
+        output = result.output
         if self.blob is not None:
             collected = await self._shared_artifacts((turn_id, *settled.descendant_ids))
             records = await read_compaction_records(self.blob, conversation_id)
@@ -367,6 +355,20 @@ class InProcessTarget:
                 compactions=len(records),
                 compaction_records=compaction_snapshots(records),
             )
+            result = replace(result, output=output)
+        if not result.clean:
+            if self.logs is not None:
+                await self.logs.discard(turn_id)
+            return result
+        output = replace(
+            output,
+            workspace_dir=self.conversations.workspace_path(conversation_id, ""),
+        )
+        if self.logs is not None:
+            log = await self.logs.read(turn_id)
+            if log is None:
+                raise RuntimeError("turn produced no required log")
+            output = replace(output, log=log)
         if case.artifact_probe is not None:
             output = await self.capture_artifacts(conversation_id, output, case.artifact_probe)
         return replace(result, output=output)
