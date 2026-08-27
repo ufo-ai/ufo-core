@@ -352,6 +352,11 @@ jobs:
           python infra/secret_sync.py \
             "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
+      - name: Wait for prior rollout drains
+        run: |
+          NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          .github/scripts/await_drained.sh "$NAMESPACE" ufo-sandbox-proxy ufo-ingress ufo-serve
+
       - name: Terraform apply
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false "$RUNNER_TEMP/production.tfplan"

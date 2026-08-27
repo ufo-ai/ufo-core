@@ -510,6 +510,12 @@ jobs:
           python infra/secret_sync.py \
             "$NAMESPACE" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 
+      - name: Wait for prior rollout drains
+        if: github.event_name != 'pull_request'
+        run: |
+          NAMESPACE="$(terraform -chdir="$TF_DIR" output -raw system_namespace)"
+          .github/scripts/await_drained.sh "$NAMESPACE" ufo-sandbox-proxy ufo-ingress ufo-serve
+
       - name: Terraform apply
         if: github.event_name != 'pull_request'
         working-directory: ${{ env.TF_DIR }}

@@ -25,6 +25,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 TEMPLATE_DIRECTIVE = r"(?m)^%\{ [^}]*\}\n?"
 PRODUCTION_PREREQUISITES = ROOT / ".github" / "scripts" / "production_prerequisites.sh"
 AWAIT_ROLLOUT = ".github/scripts/await_rollout.sh"
+AWAIT_DRAINED = ".github/scripts/await_drained.sh"
 DEPLOY_ENVIRONMENTS = ("testing", "prod")
 TESTED_TEMPLATES = "small=ufo-sbx-small:b1,medium=ufo-sbx-medium:b2,large=ufo-sbx-large:b3"
 MONITORS = {
@@ -3425,6 +3426,75 @@ def test_runtime_rollout_drains_before_the_proxy_gate(workflow: str, job_name: s
     assert os.access(ROOT / AWAIT_ROLLOUT, os.X_OK)
     # The 15m wall the per-Deployment `rollout status` calls carried now lives in the script.
     assert "DEADLINE=$((SECONDS + 900))" in (ROOT / AWAIT_ROLLOUT).read_text()
+
+
+@pytest.mark.parametrize(
+    ("workflow", "job_name", "refresh"),
+    [
+        ("deploy.yml", "rollout", "Refresh testing runtime secrets"),
+        ("deploy-production.yml", "deploy", "Refresh production runtime secrets"),
+    ],
+)
+def test_runtime_apply_waits_for_prior_drains(workflow: str, job_name: str, refresh: str) -> None:
+    job = _workflow(WORKFLOWS / workflow)["jobs"][job_name]
+    assert isinstance(job, dict)
+    steps = job["steps"]
+    assert isinstance(steps, list)
+    names = [step.get("name") for step in steps if isinstance(step, dict)]
+    wait = names.index("Wait for prior rollout drains")
+    assert names.index(refresh) < wait < names.index("Terraform apply")
+    step = steps[wait]
+    assert isinstance(step, dict)
+    assert step.get("if") == (
+        "github.event_name != 'pull_request'" if workflow == "deploy.yml" else None
+    )
+    script = step["run"]
+    assert isinstance(script, str)
+    assert "output -raw system_namespace" in script
+    assert shlex.split(script.splitlines()[-1]) == [
+        AWAIT_DRAINED,
+        "$NAMESPACE",
+        "ufo-sandbox-proxy",
+        "ufo-ingress",
+        "ufo-serve",
+    ]
+    assert os.access(ROOT / AWAIT_DRAINED, os.X_OK)
+
+
+def test_await_drained_waits_for_terminating_pods(tmp_path: Path) -> None:
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        "  'get namespace/system --ignore-not-found -o name') printf 'namespace/system\\n' ;;\n"
+        "  *'get pods -l app=ufo-sandbox-proxy -o json')\n"
+        '    count=$(cat "$DRAIN_POLLS" 2>/dev/null || printf 0)\n'
+        "    printf '%s\\n' $((count + 1)) > \"$DRAIN_POLLS\"\n"
+        '    if [ "$count" = 0 ]; then\n'
+        '      printf \'{"items":[{"metadata":{"deletionTimestamp":"now"}}]}\\n\'\n'
+        "    else\n"
+        "      printf '{\"items\":[]}\\n'\n"
+        "    fi ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
+    kubectl.chmod(0o755)
+    sleep = tmp_path / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    polls = tmp_path / "polls"
+    run = subprocess.run(
+        ["bash", str(ROOT / AWAIT_DRAINED), "system", "ufo-sandbox-proxy"],
+        env={
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "DRAIN_POLLS": str(polls),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert run.returncode == 0, run.stderr
+    assert polls.read_text().strip() == "2"
 
 
 def test_await_rollout_answers_on_the_newest_replicaset(tmp_path: Path) -> None:
