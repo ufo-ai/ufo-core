@@ -398,6 +398,66 @@ test("the pool's record states what the row gave up, and attaches to the agent n
   expect(posted[0]).toContain("/agents/" + SECOND_ID + "/intents");
 });
 
+test("the pool's record states every stream and the errors for its account once sources load", async () => {
+  location.hash = sectionHash("connectors");
+  let answer: (response: Response) => void = () => {};
+  const names = [
+    "commits",
+    "deployments",
+    "discussions",
+    "issues",
+    "pulls",
+    "releases",
+    "workflows",
+  ];
+  wire({
+    "/connections": () => json({ connections: [grant("github", false, "g1")] }),
+    "/workspace/sources": () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve;
+      }),
+    "/github/coverage": () => json({ api: true, git_push: false, sources: true }),
+    "/workspace/first-run": () => json(BARE),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  await pressItem("github");
+
+  expect(await screen.findByText("You")).toBeTruthy();
+  expect(screen.queryByText("Streams")).toBeNull();
+  expect(screen.queryByText("Errors")).toBeNull();
+
+  await act(async () =>
+    answer(
+      json({
+        sources: names
+          .map((stream) => ({
+            backend: "github",
+            account_id: "acct",
+            stream,
+            consecutive_errors: stream === "issues" ? 2 : 0,
+            parked_reason: stream === "workflows" ? "Reconnect GitHub." : null,
+          }))
+          .concat({
+            backend: "slack",
+            account_id: "other",
+            stream: "messages",
+            consecutive_errors: 9,
+            parked_reason: null,
+          }),
+      }),
+    ),
+  );
+  const said = names.join(", ");
+  const value = await screen.findByText(said);
+  expect(fact("Streams")).toBe(said);
+  expect(fact("Errors")).toBe("2 · 1 parked");
+  expect(screen.getByTitle("Reconnect GitHub.")).toBeTruthy();
+  expect(value.className).toContain("whitespace-pre-wrap");
+  expect(value.className).not.toContain("truncate");
+});
+
 test("the pool's record shares and revokes into the lane of the agent already holding the grant", async () => {
   const posted: string[] = [];
   location.hash = sectionHash("connectors");

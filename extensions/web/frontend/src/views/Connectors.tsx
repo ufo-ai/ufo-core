@@ -64,6 +64,7 @@ import {
   WATCH_MS,
   type FirstRunPayload,
 } from "@/views/FirstRun";
+import type { SourcesPayload } from "@/views/Sources";
 
 type Connection = {
   provider: string;
@@ -102,12 +103,34 @@ function connectionName(entry: Connection): string {
   return entry.account_label ?? entry.account_id ?? entry.provider;
 }
 
-/** What the record states about the connection it heads: who holds it, and when it was made. Both
- *  are facts about that one connection, read by the member who opened it. */
-function connectionFacts(entry: Connection, viewer: string | null): Fact[] {
-  return [
+function connectionFacts(
+  entry: Connection,
+  viewer: string | null,
+  sources: SourcesPayload | null,
+): Fact[] {
+  const facts = [
     { label: "Owner", value: ownerLabel(entry.owner_email, viewer) },
     { label: "Connected", value: <Moment at={entry.connected_at} /> },
+  ];
+  if (sources === null) return facts;
+  const streams = sources.sources.filter(
+    (source) => source.backend === entry.provider && source.account_id === entry.account_id,
+  );
+  const errors = streams.reduce((total, one) => total + one.consecutive_errors, 0);
+  const parked = streams.filter((one) => one.parked_reason !== null);
+  return [
+    ...facts,
+    { label: "Streams", value: streams.map((one) => one.stream).sort().join(", ") || "\u2014", block: true },
+    {
+      label: "Errors",
+      value: parked.length ? (
+        <span title={parked.map((one) => one.parked_reason).join(" ")}>
+          {errors} · {parked.length} parked
+        </span>
+      ) : (
+        String(errors)
+      ),
+    },
   ];
 }
 
@@ -803,6 +826,7 @@ function ConnectionRecord({
 }) {
   const [targetAgent, setTargetAgent] = useState("");
   const holder = holders[0];
+  const sources = usePanelRead<SourcesPayload>("/workspace/sources");
 
   async function act(lane: string, envelope: unknown) {
     onDone(outcomeNotice(await postIntent(lane, envelope)));
@@ -810,7 +834,13 @@ function ConnectionRecord({
 
   return (
     <Sheet open title={connectionName(entry)} onClose={onClose}>
-      <Facts rows={connectionFacts(entry, viewer)} />
+      <Facts
+        rows={connectionFacts(
+          entry,
+          viewer,
+          sources.phase === "ready" ? sources.payload : null,
+        )}
+      />
       {entry.own ? (
         <>
           {attachTo.length ? (
