@@ -6,7 +6,6 @@ export const WORKSPACE_TABS = [
   "tasks",
   "skills",
   "memory",
-  "connectors",
   "credentials",
   "usage",
   "billing",
@@ -364,29 +363,6 @@ const AGENT = row(
     AGENT_PREFIX + agentId + serializePlace(place),
 );
 
-/* A tab renamed keeps the address it carried before as its one spelling, because the name it
-   carries now is a section's name and that section answers at that address for the links members
-   already hold. The member reads the tab's label, which is the new name; the address is the tab's
-   durable id, exactly as a section name outlives who renders it. */
-const TAB_ADDRESSES: { [Name in WorkspaceTab]?: string } = { connectors: "sources" };
-
-/** The one spelling of a tab under the workspace prefix. */
-function tabAddress(view: WorkspaceTab): string {
-  return TAB_ADDRESSES[view] ?? view;
-}
-
-/** The tab an address names, over the tab list itself, so a name the list does not hold answers
- *  nothing — a tab segment naming an inherited property of a lookup object is a name no tab
- *  carries. */
-function tabAt(name: string): WorkspaceTab | undefined {
-  return WORKSPACE_TABS.find((tab) => tabAddress(tab) === name);
-}
-
-/* Every screen that ships as an app today stood on a workspace tab once, so links to those
-   addresses exist outside this code. The address keeps answering with the section that holds the
-   same screen, which is why this one row reads to either kind. A section holds its name here first:
-   the screen a held link named is the screen the link still lands on, and a tab renamed onto that
-   name is read and written at the address it carried before. */
 const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
   "workspace",
   new RegExp(`^${WORKSPACE_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),
@@ -394,12 +370,14 @@ const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
     const name = match[1];
     const place = parsePlace(match[2]);
     if (!place) return null;
-    if (isSection(name)) return { kind: "section", section: name, place };
-    const tab = tabAt(name);
+    if (isSection(name) && name !== "connectors") {
+      return { kind: "section", section: name, place };
+    }
+    const tab = WORKSPACE_TABS.find((candidate) => candidate === name);
     return tab === undefined ? null : { kind: "workspace", view: tab, place };
   },
   (view: WorkspaceTab, place: WorkspacePlace = {}) =>
-    WORKSPACE_PREFIX + tabAddress(view) + serializePlace(place),
+    WORKSPACE_PREFIX + view + serializePlace(place),
 );
 
 /* The door swings the other way too: tasks stood as its own section, shipped as an app, and links
@@ -478,9 +456,7 @@ export function routeIs<Kind extends RouteKind>(
  *  It is a column of the table rather than a second list of kinds held beside it. The record is typed
  *  over every kind the table declares, so a route the table gains states here whether a frame may
  *  reach it, and one that states nothing is a compile error rather than a fence that quietly admits
- *  it. A row reading to two kinds — the workspace prefix, which answers a section at the address that
- *  screen used to have — is answered by the kind it read, so the legacy address reaches exactly what
- *  its own screen reaches. */
+ *  it. */
 const FRAMED: { [Kind in RouteKind]: boolean } = {
   home: false,
   "first-run": false,

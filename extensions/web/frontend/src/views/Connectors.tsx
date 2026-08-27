@@ -64,7 +64,16 @@ import {
   WATCH_MS,
   type FirstRunPayload,
 } from "@/views/FirstRun";
-import type { SourcesPayload } from "@/views/Sources";
+
+type SourcesPayload = {
+  sources: {
+    backend: string;
+    account_id: string | null;
+    stream: string;
+    consecutive_errors: number;
+    parked_reason: string | null;
+  }[];
+};
 
 type Connection = {
   provider: string;

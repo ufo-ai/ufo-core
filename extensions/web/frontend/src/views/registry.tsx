@@ -7,7 +7,6 @@ import { WorkspaceConnectors } from "@/views/Connectors";
 import { Apps } from "@/views/Apps";
 import { Memory } from "@/views/Memory";
 import { Tasks } from "@/views/Tasks";
-import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { WorkspaceSkills } from "@/views/WorkspaceSkills";
 import { CREDENTIALS } from "@/views/WorkspaceCredentials";
@@ -71,7 +70,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     search: "Search memory",
     render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
-  connectors: declared("Connectors", SOURCES),
   credentials: declared("Credentials", CREDENTIALS),
   usage: {
     label: "Usage",

@@ -753,64 +753,6 @@ test("a conversation nobody shared is never named, and the half stands on the co
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
 });
 
-test("the sources listing groups a binding's streams and acts on the main agent's lane", async () => {
-  const posted: { url: string; body: unknown }[] = [];
-  wire({
-    "/workspace/sources": () =>
-      json({
-        sources: [
-          {
-            name: "notion-main",
-            backend: "notion",
-            stream: "pages",
-            account_id: "acct",
-            base_url: null,
-            owner_email: "member@example.com",
-            shared: false,
-            own: true,
-            consecutive_errors: 1,
-            next_sync_at: "2026-08-01T06:00:00",
-          },
-          {
-            name: "notion-main",
-            backend: "notion",
-            stream: "databases",
-            account_id: "acct",
-            base_url: null,
-            owner_email: "member@example.com",
-            shared: false,
-            own: true,
-            consecutive_errors: 2,
-            next_sync_at: "2026-08-01T07:00:00",
-          },
-        ],
-      }),
-    "/intents": (url, init) => {
-      posted.push({ url, body: JSON.parse(String(init?.body)) });
-      return json({ applied: false, message: "Refused." });
-    },
-  });
-  render(
-    <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="connectors" />
-    </MainAgentProvider>,
-  );
-
-  expect(await screen.findByText("databases, pages")).toBeTruthy();
-  expect(screen.getByText("3")).toBeTruthy();
-  expect(screen.getByText("Aug 1 2026")).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("button", { name: "Resync" }));
-  await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0].body).toMatchObject({
-    verb: "apply",
-    kind: "source",
-    name: "notion-main",
-    spec: { resync: true, streams: ["databases", "pages"] },
-  });
-  expect(await screen.findByText("Refused.")).toBeTruthy();
-});
-
 test("a workspace usage read shows the member's own spend and the admin rollup when present", async () => {
   const usageWire = wire({
     "/workspace/usage": () =>

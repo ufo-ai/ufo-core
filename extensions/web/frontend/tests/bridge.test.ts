@@ -96,7 +96,7 @@ test("navigation admits conversations, apps, new chats, and sections, and refuse
   expect(framedNavigation("#/connectors")).toBe(true);
   expect(framedNavigation("#/wiki?open=run%2Fabc")).toBe(true);
   expect(framedNavigation("#/workspace/artifacts")).toBe(true);
-  expect(framedNavigation("#/workspace/connectors")).toBe(true);
+  expect(framedNavigation("#/workspace/connectors")).toBe(false);
   expect(framedNavigation("#/admin")).toBe(false);
   expect(framedNavigation("#/workspace/team")).toBe(false);
   expect(framedNavigation("#/workspace/sources")).toBe(false);
