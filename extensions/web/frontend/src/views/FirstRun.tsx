@@ -104,6 +104,7 @@ const CONNECT_COPY: Record<
 const TOOLS_STEP = "tools";
 const TEAM_STEP = "team";
 const IMESSAGE_STEP = "imessage";
+const US_PHONE_PATTERN = /^[2-9][0-9]{2}[2-9][0-9]{6}$/;
 
 /** The invite step's form, named so the act that submits it can stand in the page's head with the
  *  other acts rather than inside the fields it commits. */
@@ -335,8 +336,8 @@ export function FirstRun({
           if (busy) return;
           const stated = phone.trim();
           const digits = stated.replace(/\D/g, "");
-          const foreign = stated.startsWith("+") && !digits.startsWith("1");
-          if (foreign || digits.length !== 10) {
+          const foreign = stated.includes("+") && !digits.startsWith("1");
+          if (foreign || !US_PHONE_PATTERN.test(digits)) {
             setNotice({
               text: "Enter a 10-digit US phone number.",
               refused: true,
@@ -485,14 +486,14 @@ export function FirstRun({
                   <>
                     <Notice>
                       {imessageLink ? (
-                        <ConsentLink
-                          url={imessageLink}
+                        <a
+                          href={imessageLink}
                           className="text-inherit underline underline-offset-2 hover:text-ink"
                         >
                           {imessageLinkEnd < 0
                             ? imessageMessage
                             : imessageMessage.slice(0, imessageLinkEnd)}
-                        </ConsentLink>
+                        </a>
                       ) : (
                         imessageMessage
                       )}
@@ -501,15 +502,15 @@ export function FirstRun({
                         : null}
                     </Notice>
                     {imessageLink ? (
-                      <ConsentLink
-                        url={imessageLink}
+                      <a
+                        href={imessageLink}
                         className={cn(
                           buttonVariants({ variant: "send", size: "bar" }),
                           "h-10 w-full",
                         )}
                       >
                         Text code to UFO
-                      </ConsentLink>
+                      </a>
                     ) : null}
                     <Button variant="outline" size="bar" className="h-10 w-full" onClick={finish}>
                       Nevermind
@@ -531,10 +532,10 @@ export function FirstRun({
                       onChange={(event) => {
                         const printed = event.target.value;
                         const stated = printed.replace(/\D/g, "");
-                        // A number that states a country code outside +1 stands as printed, so
-                        // the step refuses it. Reformatting it as ten US digits would claim a
-                        // different real US number.
-                        if (printed.trimStart().startsWith("+") && !stated.startsWith("1")) {
+                        if (
+                          (printed.includes("+") && !stated.startsWith("1")) ||
+                          (stated.length > 10 && !(stated.length === 11 && stated.startsWith("1")))
+                        ) {
                           setPhone(printed);
                           return;
                         }

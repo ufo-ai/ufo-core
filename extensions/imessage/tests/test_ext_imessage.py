@@ -908,8 +908,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
         "state": "pending",
         "instruction": (
             f'Text "{opt_in_text}" to (408) 555-0123 from that phone within '
-            f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
-            "Scan the attached image with that phone to open the message."
+            f"{PHONE_CLAIM_MINUTES} minutes."
         ),
         "assigned_phone_number": "+14085550123",
         "opt_in_text": opt_in_text,
@@ -1022,9 +1021,8 @@ async def test_the_pending_result_shares_the_opt_in_as_a_qr(db: None, tmp_path: 
         expected, kind="png", scale=OPT_IN_QR_SCALE, border=OPT_IN_QR_BORDER
     )
     assert answered["state"] == "pending"
-    assert answered["instruction"].endswith(
-        "Scan the attached image with that phone to open the message."
-    )
+    assert answered["instruction"].endswith(f"within {PHONE_CLAIM_MINUTES} minutes.")
+    assert "Scan" not in answered["instruction"]
     assert [row[:3] for row in shared] == [(OPT_IN_QR_FILENAME, "image/png", OPT_IN_QR_CAPTION)]
     assert image.startswith(b"\x89PNG")
     assert image == expected.getvalue()
@@ -1051,8 +1049,7 @@ async def test_an_expired_claim_can_move_to_another_member(db: None, tmp_path: P
         "state": "pending",
         "instruction": (
             f'Text "{opt_in_text}" to (408) 555-0123 from that phone within '
-            f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
-            "Scan the attached image with that phone to open the message."
+            f"{PHONE_CLAIM_MINUTES} minutes."
         ),
         "assigned_phone_number": "+14085550123",
         "opt_in_text": opt_in_text,

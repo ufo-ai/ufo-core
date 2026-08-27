@@ -754,6 +754,12 @@ test("the iMessage offer starts the phone claim through the intent lane", async 
   expect(screen.getByRole("link", { name: "Text code to UFO" }).getAttribute("href")).toBe(
     IMESSAGE_LINK,
   );
+  const textCode = screen.getByRole("link", { name: "Text code to UFO" });
+  const openSpy = vi.spyOn(window, "open");
+  textCode.addEventListener("click", (event) => event.preventDefault(), { once: true });
+  fireEvent.click(textCode);
+  expect(openSpy).not.toHaveBeenCalled();
+  expect(textCode.getAttribute("target")).toBeNull();
   expect(intents(posted.calls).at(-1)).toEqual({
     verb: "connect_imessage",
     phone_number: "+15594259991",
@@ -778,6 +784,10 @@ test("an invalid iMessage phone stays on the form with one instruction", async (
   expect(
     screen.getByText("Enter a 10-digit US phone number."),
   ).toBeTruthy();
+  await userEvent.clear(screen.getByLabelText("iMessage phone number"));
+  await userEvent.type(screen.getByLabelText("iMessage phone number"), "000-000-0000");
+  await userEvent.click(screen.getByRole("button", { name: "Connect iMessage" }));
+  expect(screen.getByText("Enter a 10-digit US phone number.")).toBeTruthy();
   expect(intents(posted.calls)).toEqual([toolingIntent("notion")]);
 });
 
@@ -792,6 +802,12 @@ test("an iMessage phone that states another country code is refused, not cut to 
   });
   expect((screen.getByLabelText("iMessage phone number") as HTMLInputElement).value).toBe(
     "+44 7911 123456",
+  );
+  fireEvent.change(screen.getByLabelText("iMessage phone number"), {
+    target: { value: "(+45) 12 34 56 78" },
+  });
+  expect((screen.getByLabelText("iMessage phone number") as HTMLInputElement).value).toBe(
+    "(+45) 12 34 56 78",
   );
   await userEvent.click(screen.getByRole("button", { name: "Connect iMessage" }));
 

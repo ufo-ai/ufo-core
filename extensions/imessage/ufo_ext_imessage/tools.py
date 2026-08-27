@@ -95,8 +95,7 @@ def _opt_in_result(assigned_phone_number: str, opt_in_code: str) -> ToolResult:
     return _result(
         "pending",
         f'Text "{opt_in_text}" to {_display_phone(assigned_phone_number)} from that phone within '
-        f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
-        "Scan the attached image with that phone to open the message.",
+        f"{PHONE_CLAIM_MINUTES} minutes.",
         assigned_phone_number=assigned_phone_number,
         opt_in_text=opt_in_text,
         opt_in_link=opt_in_link(assigned_phone_number, opt_in_code),

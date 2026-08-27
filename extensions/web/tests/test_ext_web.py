@@ -28,6 +28,7 @@ from ufo_ext_app_chat.manifest import manifest as app_chat_manifest
 from ufo_ext_app_radar.manifest import manifest as app_radar_manifest
 from ufo_ext_composio.client import BANNED
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
+from ufo_ext_imessage.manifest import manifest as imessage_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MEMORY_BODY_MAX_CHARS, recall_subjects
 from ufo_ext_pipedream.client import CONNECTORS as PIPEDREAM_CONNECTORS
@@ -1117,6 +1118,7 @@ def dbos_runtime(
             manifests=(
                 web_manifest(),
                 connectors_manifest(),
+                imessage_manifest(),
                 SCHEDULED_TASK_KIND_ONLY,
                 skill_create_manifest(),
                 slack_manifest(),
@@ -1205,11 +1207,13 @@ async def web(
     app = FastAPI()
     app.state.blob = blob
     app.state.artifact_token_secret = SECRET
+    app.state.instance_id = uuid4()
     app.include_router(artifacts_router)
     _mount_shared_surfaces(
         app,
         (
             web_manifest(),
+            imessage_manifest(),
             todos.manifest(),
             SCHEDULED_TASK_KIND_ONLY,
             SOURCE_TRIGGER_KIND_ONLY,
@@ -3267,7 +3271,7 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     bare = await client.get(path, headers=cookie)
     assert bare.status_code == 200
     payload = bare.json()
-    assert payload["imessage"] is False
+    assert payload["imessage"] is True
     assert {"gmail", "notion", "linear", "slack", "github"} <= {
         tile["name"] for tile in payload["providers"]
     }
@@ -6261,6 +6265,7 @@ async def test_admin_view_reads_the_workspace_shape(
         (entry["name"], entry["version"], entry["sandbox_internet"])
         for entry in payload["deploy"]["extensions"]
     ] == [
+        ("imessage", "0.1.0", False),
         ("report_digest", "0.1.0", False),
         ("scheduled_tasks", "0.1.0", False),
         ("sites", "0.1.0", False),
@@ -10670,6 +10675,29 @@ def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> 
         "url": link,
         "turn_id": str(turn_id),
     }
+    connected = json.loads(
+        _imessage_outcome(
+            TerminalFrame(
+                status="done",
+                text=wall(
+                    "imessage_connect",
+                    json.dumps(
+                        {
+                            "state": "connected",
+                            "instruction": "That phone is connected. Text (408) 555-0123 from it.",
+                        }
+                    ),
+                ),
+            ),
+            turn_id,
+        ).body
+    )
+    assert connected == {
+        "applied": True,
+        "message": "That phone is connected. Text (408) 555-0123 from it.",
+        "url": None,
+        "turn_id": str(turn_id),
+    }
     refused = json.loads(
         _imessage_outcome(
             TerminalFrame(
@@ -10728,6 +10756,23 @@ async def test_the_slack_step_mints_an_install_link_for_an_admin_and_no_one_else
     assert outcome["message"] == ""
     assert outcome["url"].startswith(SLACK_OAUTH_AUTHORIZE_URL)
     assert "client_id=slack-client" in outcome["url"]
+
+
+async def test_the_imessage_step_dispatches_the_phone_tool(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    response = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={"verb": "connect_imessage", "phone_number": "+14155550123"},
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert response.status_code == 200
+    outcome = response.json()
+    assert outcome["applied"] is False
+    assert outcome.get("url") is None
+    assert outcome["message"] == "This deploy has no iMessage provider credentials."
 
 
 async def test_connect_pairs_with_the_connection_kind_exactly(
