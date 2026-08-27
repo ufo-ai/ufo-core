@@ -1182,7 +1182,8 @@ def turn() -> None:
 
 @turn.command(name="cancel")
 @click.argument("turn_id")
-def turn_cancel(turn_id: str) -> None:
+@click.option("--workspace-id", default="")
+def turn_cancel(turn_id: str, workspace_id: str) -> None:
     """Cancel one turn: cancel its durable workflow, then commit its cancelled terminal.
 
     The operator's only end for a turn no member can end — one waiting in-turn on work that will not
@@ -1191,30 +1192,42 @@ def turn_cancel(turn_id: str) -> None:
     Descendants are the cancel reconciler's, as they are for every other cancel path.
     """
     config = load_config()
-    cancelled = asyncio.run(_cancel_turn(config, UUID(turn_id)))
+    cancelled = asyncio.run(_cancel_turn(config, UUID(turn_id), workspace_id))
     click.echo(f"cancelled {turn_id}" if cancelled else f"{turn_id} was already terminal")
 
 
-async def _cancel_turn(config: Config, turn_id: UUID) -> bool:
-    """The turn's workspace is read through `owner_tx` and nothing else is: a cancel names one turn
-    by id, and finding which tenant owns it is exactly the identifier that path exists to yield.
-    The cancel itself runs bound to that workspace, so it goes through the same RLS every other
-    write does."""
+async def _cancel_turn(config: Config, turn_id: UUID, named_workspace: str) -> bool:
     init_db(config.database.url)
     owner_dsn = os.environ.get(OWNER_DSN_ENV) or config.database.owner_url
-    if owner_dsn:
-        init_owner_db(owner_dsn)
     try:
-        async with owner_tx() as connection:
-            workspace_id = (
-                await connection.execute(
-                    sa.select(tables.turn.c.workspace_id).where(tables.turn.c.id == turn_id)
+        if named_workspace:
+            workspace_id = UUID(named_workspace)
+        else:
+            if owner_dsn is None:
+                raise click.ClickException(
+                    "owner database is unavailable; name the turn's workspace with --workspace-id"
                 )
-            ).scalar_one_or_none()
-        if workspace_id is None:
-            raise click.ClickException(f"no turn {turn_id}")
+            init_owner_db(owner_dsn)
+            async with owner_tx() as connection:
+                resolved_workspace = (
+                    await connection.execute(
+                        sa.select(tables.turn.c.workspace_id).where(tables.turn.c.id == turn_id)
+                    )
+                ).scalar_one_or_none()
+            if resolved_workspace is None:
+                raise click.ClickException(f"no turn {turn_id}")
+            workspace_id = resolved_workspace
         client = replay_safe_client(config.database.system_url)
         with ws(workspace_id):
+            if named_workspace:
+                async with workspace_tx() as connection:
+                    found = (
+                        await connection.execute(
+                            sa.select(tables.turn.c.id).where(tables.turn.c.id == turn_id)
+                        )
+                    ).scalar_one_or_none()
+                if found is None:
+                    raise click.ClickException(f"no turn {turn_id} in workspace {workspace_id}")
             return await cancel_one_turn(client, turn_id) is not None
     finally:
         await dispose_db()

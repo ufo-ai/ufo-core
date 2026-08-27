@@ -932,6 +932,27 @@ def test_balance_verbs_initialize_the_owner_database_before_reading_across_works
         assert owner_urls == ["postgresql://ufo_owner@rds/ufo"], argv
 
 
+def test_turn_cancel_requires_a_workspace_when_the_owner_database_is_unavailable(
+    cli_home: CliRunner,
+) -> None:
+    _init(cli_home)
+    config = Path("ufo.toml")
+    config.write_text(config.read_text().replace('owner_url = "sqlite+aiosqlite:///ufo.db"\n', ""))
+    turn_id = uuid4()
+
+    bare = cli_home.invoke(cli.main, ["turn", "cancel", str(turn_id)])
+    assert bare.exit_code != 0
+    assert "--workspace-id" in bare.output
+
+    workspace_id = _second_workspace()
+    scoped = cli_home.invoke(
+        cli.main,
+        ["turn", "cancel", str(turn_id), "--workspace-id", str(workspace_id)],
+    )
+    assert scoped.exit_code != 0
+    assert f"no turn {turn_id} in workspace {workspace_id}" in scoped.output
+
+
 async def _noop_dispose() -> None:
     return None
 
