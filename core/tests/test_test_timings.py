@@ -165,7 +165,7 @@ def test_a_session_fixture_records_what_it_cost(pytester: pytest.Pytester) -> No
 
 
 def test_xdist_workers_never_share_a_file(pytester: pytest.Pytester) -> None:
-    """Six shards each run `-n auto`, so the writers are the workers: each must own its own file, or
+    """Ten shards each run `-n auto`, so the writers are the workers: each must own its own file, or
     the shard's data is whatever the last worker to close happened to hold. The controller writes
     the one summary and no rows of its own, so no test is counted twice."""
     pytester.makepyfile(inner_session=MIXED_SESSION)

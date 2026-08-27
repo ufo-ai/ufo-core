@@ -124,7 +124,7 @@ check: ## Run every static gate CI runs — ruff, gates.py, mypy, control
 fmt: ## Format the tree
 	uv run ruff format
 
-test: ## Run the parallel suite; T=<paths> narrows it; SHARD=1/6 runs one slice
+test: ## Run the parallel suite; T=<paths> narrows it; SHARD=1/10 runs one slice
 	uv run pytest $(if $(T),,-n auto) $(if $(SHARD),--shard $(SHARD)) \
 		--timeout $(PYTEST_TIMEOUT_SECONDS) --timeout-method thread \
 		-m "not serial and not integration and not docker" -q $(T)

@@ -1146,7 +1146,7 @@ WIKI_OVERVIEW_CASES = (
             "18681839 (not classic branch protection, so /branches/main/protection returns 404) "
             'requiring five contexts — test, checks, rls, deployment, and "ufo review". The '
             'first four are GitHub Actions check runs; "test" is an aggregator that only posts '
-            "after all six test shards AND the three integration jobs finish, so a head with six "
+            "after all ten test shards AND the three integration jobs finish, so a head with ten "
             "green shards is not yet mergeable.",
         ),
     ),

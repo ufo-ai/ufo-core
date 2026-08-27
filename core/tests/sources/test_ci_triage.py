@@ -163,6 +163,11 @@ def test_test_shards_run_the_one_client_ci_built() -> None:
     )
 
 
+def test_python_suite_runs_in_ten_shards() -> None:
+    shards = _jobs()["test-shard"]["strategy"]["matrix"]["shard"]
+    assert shards == [f"{index}/10" for index in range(1, 11)]
+
+
 def test_test_shards_do_not_build_the_workflow_linter() -> None:
     steps = _jobs()["test-shard"]["steps"]
     assert any(step.get("run") == "uv sync --no-install-package actionlint-py" for step in steps)
