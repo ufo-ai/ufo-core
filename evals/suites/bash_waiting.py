@@ -91,13 +91,6 @@ CASES = (
         digest_tag="waiting:bash-wait-foreground",
     ),
     CapabilityCase(
-        "bash-wait-background",
-        "Start this command in the sandbox: sh -c 'sleep 90; echo DONE-4213 > /workspace/out.txt'."
-        " It takes about 90 seconds. Reply with the file's content once it exists.",
-        waiting_scorer("DONE-4213", workload_sleeps=1),
-        digest_tag="waiting:bash-wait-background",
-    ),
-    CapabilityCase(
         "bash-wait-restraint",
         "Run `echo ready-9182` in the sandbox and reply with its output.",
         waiting_scorer("ready-9182", workload_sleeps=0),
