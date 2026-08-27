@@ -34,6 +34,12 @@ SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 GradingSubset = Literal["smoke", "hillclimb", "holdout", "hard", "all"]
 
 
+@dataclass(frozen=True)
+class _OfficialOutcomes:
+    resolved: frozenset[str]
+    empty: frozenset[str]
+
+
 def _diff_sections(patch: str) -> tuple[str, ...]:
     starts = tuple(match.start() for match in re.finditer(r"^diff --git ", patch, re.MULTILINE))
     if not starts:
@@ -209,13 +215,30 @@ class SWEbenchGrading:
             self._invoke_official_harness(
                 grade_directory, predictions_path, (case,), rewrite_reports=False
             )
-            self._validate_official_report(self._official_report_path(grade_directory), (case,))
+            outcomes = self._validate_official_report(
+                self._official_report_path(grade_directory, gold=self.gold),
+                (case,),
+                gold=self.gold,
+            )
+            if outcomes.resolved:
+                continue
+            if self.gold:
+                raise RuntimeError(f"official gold patch failed for {case.instance_id}")
+            if outcomes.empty or patches is None or not patches[case.instance_id]:
+                continue
+            self._invoke_official_harness(grade_directory, None, (case,), rewrite_reports=False)
+            if not self._validate_official_report(
+                self._official_report_path(grade_directory, gold=True),
+                (case,),
+                gold=True,
+            ).resolved:
+                raise RuntimeError(f"official gold patch failed for {case.instance_id}")
         self._invoke_official_harness(
             grade_directory, predictions_path, self.selected_cases, rewrite_reports=True
         )
-        report_path = self._official_report_path(grade_directory)
-        resolved = self._validate_official_report(report_path, self.selected_cases)
-        summary_path = self._write_summary(grade_directory, report_path, resolved)
+        report_path = self._official_report_path(grade_directory, gold=self.gold)
+        outcomes = self._validate_official_report(report_path, self.selected_cases, gold=self.gold)
+        summary_path = self._write_summary(grade_directory, report_path, len(outcomes.resolved))
         self._prune_official_images()
         return summary_path
 
@@ -305,13 +328,17 @@ class SWEbenchGrading:
             command.extend(("--rewrite_reports", "true"))
         subprocess.run(command, cwd=grade_directory, check=True)
 
-    def _official_report_path(self, grade_directory: Path) -> Path:
-        model = "gold" if self.gold else self.model_name
+    def _official_report_path(self, grade_directory: Path, *, gold: bool) -> Path:
+        model = "gold" if gold else self.model_name
         return grade_directory / f"{model.replace('/', '__')}.{self.run_id}.json"
 
     def _validate_official_report(
-        self, report_path: Path, selected_cases: tuple[SWEbenchCase, ...]
-    ) -> int:
+        self,
+        report_path: Path,
+        selected_cases: tuple[SWEbenchCase, ...],
+        *,
+        gold: bool,
+    ) -> _OfficialOutcomes:
         if not report_path.is_file():
             raise FileNotFoundError(f"official SWE-bench report is missing: {report_path}")
         try:
@@ -344,9 +371,7 @@ class SWEbenchGrading:
         empty = set(ids("empty_patch_ids"))
         errors = set(ids("error_ids"))
         expected_submissions = {case.instance_id for case in self.selected_cases}
-        if not selected.issubset(submitted) or (
-            not self.gold and submitted != expected_submissions
-        ):
+        if not selected.issubset(submitted) or (not gold and submitted != expected_submissions):
             raise ValueError("official SWE-bench report omitted selected submissions")
         completed_outcomes = resolved | unresolved
         if completed != completed_outcomes:
@@ -371,7 +396,7 @@ class SWEbenchGrading:
                 raise ValueError(f"official SWE-bench report has inconsistent {key}")
         if report.get("schema_version") != 2:
             raise ValueError("official SWE-bench report has an unsupported schema version")
-        return len(resolved)
+        return _OfficialOutcomes(resolved=frozenset(resolved), empty=frozenset(empty))
 
     def _write_summary(self, grade_directory: Path, report_path: Path, resolved: int) -> Path:
         summary = {

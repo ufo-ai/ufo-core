@@ -89,8 +89,10 @@ applicable, native `logs/run_evaluation/`, the official aggregate report, and `s
 official output files are not moved or rewritten. Grading runs on the official prebuilt evaluation
 images from the `swebench` Docker Hub namespace — the harness's stock source. The wrapper verifies
 an exact `linux/amd64` image with an official repository digest or pulls it, grades that case, then
-aggregates the native reports. Prediction generation omits candidate changes to files owned by the
-case's official test patch, so agent-authored tests cannot prevent the grader tests from applying;
+aggregates the native reports. An unresolved nonempty prediction runs the official gold patch in
+the same image; if gold also fails, grading stops without a summary. Prediction generation omits
+candidate changes to files owned by the case's official test patch, so agent-authored tests cannot
+prevent the grader tests from applying;
 the captured patch remains unchanged. Local builds are not an option: the pinned specs have drifted from the world
 (sympy's deleted `1.7` branch, pip 25.3 dropping `--no-use-pep517`), while the prebuilt images were
 frozen before that drift.

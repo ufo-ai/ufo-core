@@ -455,6 +455,56 @@ def test_gold_mode_uses_official_gold_predictions(
     assert not (workflow.grade_directory / "predictions.jsonl").exists()
 
 
+def test_an_unresolved_prediction_is_rejected_when_the_gold_patch_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_value = snapshot(tmp_path / "snapshot")
+    case_id = SMOKE_CASE_IDS[0]
+    workflow = grading_workflow(tmp_path, snapshot_value, case_ids=(case_id,))
+    accept_test_source(monkeypatch)
+
+    def run(
+        command: Sequence[str], *, cwd: Path | None = None, check: bool
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert check
+        if cwd is None:
+            return subprocess.CompletedProcess(command, 0)
+        model = "gold" if command[command.index("--predictions_path") + 1] == "gold" else "ufo"
+        report = report_with_submissions(official_report((case_id,)), (case_id,))
+        (cwd / f"{model}.official-smoke.json").write_text(json.dumps(report))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(grading.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match=f"official gold patch failed for {case_id}"):
+        workflow.run()
+    assert not (workflow.grade_directory / "summary.json").exists()
+
+
+def test_an_unresolved_gold_run_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_value = snapshot(tmp_path / "snapshot")
+    case_id = SMOKE_CASE_IDS[0]
+    workflow = grading_workflow(tmp_path, snapshot_value, case_ids=(case_id,), gold=True)
+    accept_test_source(monkeypatch)
+
+    def run(
+        command: Sequence[str], *, cwd: Path | None = None, check: bool
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert check
+        if cwd is not None:
+            report = report_with_submissions(official_report((case_id,)), (case_id,))
+            (cwd / "gold.official-smoke.json").write_text(json.dumps(report))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(grading.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match=f"official gold patch failed for {case_id}"):
+        workflow.run()
+    assert not (workflow.grade_directory / "summary.json").exists()
+
+
 def test_workflow_revalidates_parquet_before_invoking_harness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -579,23 +629,29 @@ def test_workflow_accepts_empty_patch_as_an_explicit_denominator_outcome(
     ) -> subprocess.CompletedProcess[bytes]:
         assert check
         if cwd is not None:
+            gold = command[command.index("--predictions_path") + 1] == "gold"
             graded = (
                 SMOKE_CASE_IDS
                 if "--rewrite_reports" in command
                 else (command[command.index("--instance_ids") + 1],)
             )
-            resolved_ids = tuple(case_id for case_id in graded if case_id == SMOKE_CASE_IDS[0])
+            resolved_ids = (
+                graded
+                if gold
+                else tuple(case_id for case_id in graded if case_id == SMOKE_CASE_IDS[0])
+            )
             graded_report = report_with_submissions(
                 official_report(graded, resolved_ids=resolved_ids), SMOKE_CASE_IDS
             )
-            if empty_id in graded:
+            if empty_id in graded and not gold:
                 graded_report["completed_instances"] -= 1
                 graded_report["completed_ids"].remove(empty_id)
                 graded_report["unresolved_instances"] -= 1
                 graded_report["unresolved_ids"].remove(empty_id)
                 graded_report["empty_patch_instances"] = 1
                 graded_report["empty_patch_ids"] = [empty_id]
-            (cwd / "ufo.official-smoke.json").write_text(json.dumps(graded_report, indent=1))
+            model = "gold" if gold else "ufo"
+            (cwd / f"{model}.official-smoke.json").write_text(json.dumps(graded_report, indent=1))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(grading.subprocess, "run", run)
@@ -672,18 +728,26 @@ def test_cli_grades_one_subset_into_its_own_directory_and_prunes_after_the_summa
     ) -> subprocess.CompletedProcess[bytes]:
         assert check
         if cwd is not None:
+            gold = command[command.index("--predictions_path") + 1] == "gold"
             graded = (
                 SUBSETS.hillclimb
                 if "--rewrite_reports" in command
                 else (command[command.index("--instance_ids") + 1],)
             )
-            (cwd / "ufo.official-hillclimb.json").write_text(
+            model = "gold" if gold else "ufo"
+            (cwd / f"{model}.official-hillclimb.json").write_text(
                 json.dumps(
                     report_with_submissions(
                         official_report(
                             graded,
-                            resolved_ids=tuple(
-                                case_id for case_id in graded if case_id in SUBSETS.hillclimb[:3]
+                            resolved_ids=(
+                                graded
+                                if gold
+                                else tuple(
+                                    case_id
+                                    for case_id in graded
+                                    if case_id in SUBSETS.hillclimb[:3]
+                                )
                             ),
                         ),
                         SUBSETS.hillclimb,
@@ -728,18 +792,24 @@ def test_cli_all_grades_the_complete_pinned_roster_once(
     ) -> subprocess.CompletedProcess[bytes]:
         assert check
         if cwd is not None:
+            gold = command[command.index("--predictions_path") + 1] == "gold"
             graded = (
                 SUBSETS.all_ids
                 if "--rewrite_reports" in command
                 else (command[command.index("--instance_ids") + 1],)
             )
-            (cwd / "ufo.official-all.json").write_text(
+            model = "gold" if gold else "ufo"
+            (cwd / f"{model}.official-all.json").write_text(
                 json.dumps(
                     report_with_submissions(
                         official_report(
                             graded,
-                            resolved_ids=tuple(
-                                case_id for case_id in graded if case_id in SUBSETS.all_ids[:5]
+                            resolved_ids=(
+                                graded
+                                if gold
+                                else tuple(
+                                    case_id for case_id in graded if case_id in SUBSETS.all_ids[:5]
+                                )
                             ),
                         ),
                         SUBSETS.all_ids,
