@@ -21,7 +21,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0018](0018-model-spec-single-source.md) | Model spec — one record per model, the single source of truth | accepted |
 | [0019](0019-shared-brain.md) | Shared brain — scope and audience | proposed |
 | [0020](0020-hosted-sites.md) | Hosted sites — sandbox ingress and the access-controlled frame | proposed |
-| [0022](0022-self-describing-actions.md) | Self-describing actions — one declaration a panel, a form, and a model all read | proposed |
+| [0022](0022-self-describing-actions.md) | Self-describing actions — one declaration a panel, a form, and a model all read | withdrawn |
 | [0023](0023-portal-architecture.md) | Portal architecture — a view kernel, declared views, and one design system | proposed |
 | [0024](0024-conversation-slots.md) | Conversation slots — extension details beside a thread | proposed |
 | [0026](0026-terminal-as-sandbox.md) | Terminal as sandbox — the CLI member's own directory is the workspace | proposed |
@@ -40,6 +40,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0039](0039-first-class-apps.md) | First-class apps | proposed |
 | [0040](0040-daytona-carrier.md) | Daytona carrier — a second cloud backend, provider-routed | superseded |
 | [0041](0041-core-rust-port.md) | Core in Rust, extensions as components | proposed |
+| [0042](0042-object-bound-actions.md) | Object-bound actions — progressive capability discovery through workspace objects | proposed |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working

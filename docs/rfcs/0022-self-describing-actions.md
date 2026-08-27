@@ -1,11 +1,15 @@
 ---
 rfc: 0022
 title: "Self-describing actions — one declaration a panel, a form, and a model all read"
-status: proposed
+status: withdrawn
 date: 2026-07-30
 ---
 
 # Self-describing actions — one declaration a panel, a form, and a model all read
+
+> Withdrawn in favor of [RFC 0042](0042-object-bound-actions.md). Object actions now carry the one
+> executable declaration consumed by model discovery and prepared intents; a separate member-action
+> registry would duplicate it.
 
 > A tool or object kind declares once that a member may invoke it outside chat, in what shape, and
 > with what label; the intent lane resolves that declaration instead of a hand-maintained union
