@@ -1410,6 +1410,37 @@ async def test_usage_export_growth_mints_frozen_top_ups(db: None) -> None:
     assert await _pending(workspace_id) == ()
 
 
+async def test_recovered_turn_usage_growth_mints_a_frozen_top_up(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=1000),
+            "same-attempt",
+        )
+    (first,) = await _pending(workspace_id)
+    assert (first.from_amount, first.amount) == (0, 1000)
+
+    async with workspace_tx() as connection:
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            turn_id,
+            "claude-opus-4-8",
+            Usage(input_tokens=1500),
+            "same-attempt",
+        )
+    frozen, top_up = sorted(await _pending(workspace_id), key=lambda export: export.from_amount)
+    assert (frozen.from_amount, frozen.amount) == (0, 1000)
+    assert (top_up.from_amount, top_up.amount) == (1000, 500)
+    assert frozen.priced_micro_usd + top_up.priced_micro_usd == CORE_PRICING.micro_usd(
+        "claude-opus-4-8", Usage(input_tokens=1500)
+    )
+
+
 async def test_usage_export_floor_consumer_and_workspace_scoping(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, _ = await _seed_turn(connection)
@@ -1790,6 +1821,39 @@ async def test_a_recovery_of_one_attempt_bills_the_key_that_served_it(db: None) 
     )
     assert first is False
     assert recovered is False
+
+
+async def test_a_recovery_uses_the_model_and_prices_that_started_the_attempt(db: None) -> None:
+    async with workspace_tx() as connection:
+        _, turn_id = await _seed_turn(connection)
+    first = loop_queue._BillingIdentity(
+        attempt="attempt-1",
+        model="claude-opus-4-8",
+        price_digest="prices-1",
+        input=1,
+        output=2,
+        cache_read=3,
+        cache_write_5m=4,
+        cache_write_30m=5,
+        cache_write_1h=6,
+    )
+    changed = first.model_copy(
+        update={
+            "model": "claude-sonnet-5",
+            "price_digest": "prices-2",
+            "input": 10,
+        }
+    )
+
+    frozen = await loop_queue._frozen_billing_identity(turn_id, first)
+    recovered = await loop_queue._frozen_billing_identity(turn_id, changed)
+    resumed = await loop_queue._frozen_billing_identity(
+        turn_id, changed.model_copy(update={"attempt": "attempt-2"})
+    )
+
+    assert frozen == first
+    assert recovered == first
+    assert resumed == changed.model_copy(update={"attempt": "attempt-2"})
 
 
 async def test_a_resumed_attempt_decides_against_the_key_that_will_serve_it(db: None) -> None:

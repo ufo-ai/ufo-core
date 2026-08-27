@@ -53,6 +53,10 @@ CAP_PRESENCE_CACHE_MAX = 4096
 _no_applicable_caps: dict[tuple[UUID, UUID | None, UUID], float] = {}
 
 
+class TurnUsageConflict(RuntimeError):
+    """One attempt presented cumulative usage that cannot safely advance its ledger row."""
+
+
 def applicable_caps_absent(workspace_id: UUID, member_id: UUID | None, agent_id: UUID) -> bool:
     """Connectionless fast-path: True only when a recent decision found no cap applies to this
     (workspace, member, agent), within a short TTL. The per-round enforcement then skips its DB
@@ -124,10 +128,15 @@ async def record_turn_usage(
     pricing: Pricing = CORE_PRICING,
     byok: bool = False,
 ) -> None:
-    """One billing write per turn per run attempt; select-then-insert is replay-safe because DBOS
-    re-executes a given attempt sequentially, never concurrently with itself. A turn parked mid-run
-    and resumed spends under a fresh attempt (workflow id), so each partial burn is billed once and
-    the ledger reflects the true total the provider charged — never a lost burn, never a double.
+    """One cumulative billing row per turn run attempt. A rolling shutdown bills the completed
+    rounds before cancellation; DBOS recovery replays those same steps under the same attempt and
+    may then complete more rounds, so a later snapshot advances that row to the larger cumulative
+    usage and debits only its price delta. An equal or older replay prefix changes nothing. Two
+    snapshots whose token-class totals cross are not one cumulative history and fail loud.
+
+    A parked turn resumes under a fresh attempt (workflow id), so its new partial burn gets another
+    row and turn cost sums both. The attempt id is therefore both the replay key and the boundary
+    between additive runs: within it snapshots replace monotonically; across it rows add.
 
     The row carries the burn's prompt split beside its total, so a terminal frame's cache share is a
     read of the same row the tokens, cost and model come off rather than a second account of the
@@ -146,12 +155,79 @@ async def record_turn_usage(
     if total == 0:
         return
     ledger_id = ledger_id_for(workspace_id, turn_id, TOKENS_DIMENSION, attempt)
-    already = await connection.execute(
-        sa.select(tables.ledger.c.id).where(tables.ledger.c.id == ledger_id)
-    )
-    if already.one_or_none() is not None:
-        return
     priced = pricing.micro_usd(model, usage)
+    current = (
+        (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.input_tokens,
+                    tables.ledger.c.output_tokens,
+                    tables.ledger.c.cache_read_tokens,
+                    tables.ledger.c.cache_write_5m_tokens,
+                    tables.ledger.c.cache_write_30m_tokens,
+                    tables.ledger.c.cache_write_1h_tokens,
+                    tables.ledger.c.byok,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.debited_micro_usd,
+                    tables.ledger.c.model,
+                    tables.ledger.c.price_digest,
+                )
+                .where(tables.ledger.c.id == ledger_id)
+                .with_for_update()
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if current is not None:
+        if (
+            current["model"] != model
+            or current["price_digest"] != pricing.digest
+            or current["byok"] != byok
+        ):
+            raise TurnUsageConflict("one turn attempt changed its billing identity")
+        previous = (
+            int(current["input_tokens"]),
+            int(current["output_tokens"]),
+            int(current["cache_read_tokens"]),
+            int(current["cache_write_5m_tokens"]),
+            int(current["cache_write_30m_tokens"]),
+            int(current["cache_write_1h_tokens"]),
+        )
+        incoming = (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_5m_tokens,
+            usage.cache_write_30m_tokens,
+            usage.cache_write_1h_tokens,
+        )
+        if all(new <= old for new, old in zip(incoming, previous, strict=True)):
+            return
+        if not all(new >= old for new, old in zip(incoming, previous, strict=True)):
+            raise TurnUsageConflict("one turn attempt reported incomparable usage snapshots")
+        priced_delta = priced - int(current["priced_micro_usd"])
+        if priced_delta < 0:
+            raise TurnUsageConflict("one turn attempt's cumulative price decreased")
+        taken = await debit(connection, workspace_id, 0 if byok else priced_delta)
+        await connection.execute(
+            sa.update(tables.ledger)
+            .where(tables.ledger.c.id == ledger_id)
+            .values(
+                amount=total,
+                prompt_tokens=_prompt_tokens(usage),
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_5m_tokens=usage.cache_write_5m_tokens,
+                cache_write_30m_tokens=usage.cache_write_30m_tokens,
+                cache_write_1h_tokens=usage.cache_write_1h_tokens,
+                priced_micro_usd=priced,
+                debited_micro_usd=int(current["debited_micro_usd"]) + taken,
+                updated_at=sa.func.now(),
+            )
+        )
+        return
     billed = 0 if byok else priced
     taken = await debit(connection, workspace_id, billed)
     await connection.execute(
@@ -529,12 +605,12 @@ async def mint_usage_exports(
     key_slot_for: Callable[[str], str | None],
 ) -> None:
     """Freeze the consumer's unshipped usage growth into `ledger_export` intent rows. This is the
-    export seam's settlement knowledge, kept beside the writers that define it: a `tokens` row is
-    insert-once and settles at creation; a `sandbox_tokens`, `images` or `videos` row accumulates
-    until its turn is terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only
-    bounds how often a late egress-proxy write costs an extra top-up intent — a row that grows
-    after minting mints a further intent from the prior high-water mark, so no growth is ever lost
-    to timing.
+    export seam's settlement knowledge, kept beside the writers that define it: a `tokens` row
+    normally lands once at terminal, but a cancelled workflow may write a partial cumulative
+    snapshot that recovery later advances, so any growth mints a further intent from the prior
+    high-water mark. A `sandbox_tokens`, `images` or `videos` row accumulates until its turn is
+    terminal, and `EXPORT_SETTLE_MARGIN_SECONDS` past `turn.updated_at` only bounds how often a late
+    egress-proxy write costs an extra top-up intent. No growth is lost to timing.
     Egress rows (a zero-priced request count) never export. Usage settling before `floor` never
     mints — the consumer's backfill bound. Idempotent: an intent's `(consumer, ledger_id,
     from_amount)` key makes concurrent or replayed mints collapse onto one frozen row.

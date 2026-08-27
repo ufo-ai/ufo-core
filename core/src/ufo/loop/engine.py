@@ -15,6 +15,7 @@ import json
 import time
 from base64 import b64decode, b64encode
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from html import escape
@@ -39,6 +40,7 @@ from ufo.billing.accounting import (
     BalanceGate,
     SpendEvaluator,
     TurnCost,
+    TurnUsageConflict,
     applicable_caps_absent,
     read_turn_cost,
     record_turn_usage,
@@ -498,13 +500,18 @@ class DispatchResult(BaseModel):
     parts — the text (already bounded), the error flag, and any image blocks replaced by blob
     references. Keeping images out of `content` keeps the step log bounded even for a
     screenshot-heavy browser turn; the workflow reassembles the `ToolResultBlock` (rehydrating the
-    referenced images) after the step returns."""
+    referenced images) after the step returns. `usages` preserves every external find call the step
+    consumed. A preempted body returns `interrupted=True` so DBOS records that partial usage before
+    the live caller re-raises cancellation; recovery replays it, then advances to a fresh dispatch
+    step with the same tool call and idempotency key."""
 
     tool_use_id: str
     text: str
     is_error: bool
     activity: bool = False
     image_refs: tuple[ImageRef, ...] = ()
+    usages: tuple[Usage, ...] = ()
+    interrupted: bool = False
 
 
 class ModelStreamError(Exception):
@@ -1034,6 +1041,12 @@ class TurnEngine:
     output_model: Contract | None = None
     adoption: AdoptionReplay = field(default_factory=AdoptionReplay)
     _activity: _ActivityState = field(default_factory=_ActivityState, init=False, repr=False)
+    _find_usages: ContextVar[list[Usage] | None] = field(
+        default_factory=lambda: ContextVar("find_usages", default=None),
+        init=False,
+        repr=False,
+    )
+    _live_dispatches: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if any(context.audience != self.audience for context in self.tool_ext.values()):
@@ -1097,6 +1110,10 @@ class TurnEngine:
                         parts.append(text)
                     case Usage():
                         usage_events.append(event)
+                        find_usages = self._find_usages.get()
+                        if find_usages is None:
+                            raise RuntimeError("find completion ran outside a tool dispatch")
+                        find_usages.append(event)
             return "".join(parts)
 
         context = ToolContext(
@@ -1341,7 +1358,7 @@ class TurnEngine:
                 )
             else:
                 bound = resolved
-            result = await self._dispatch_step(bound)
+            result = await self._dispatch_step_recovering(bound, usage_events)
             if result.is_error:
                 frame = await self._commit(
                     "failed", usage_events, meter, error=IntentRefused(result.text)
@@ -1638,7 +1655,7 @@ class TurnEngine:
                         elif not isinstance(item, BaseException):
                             bound.append(item)
                     dispatched = await asyncio.gather(
-                        *(self._dispatch(item) for item in bound),
+                        *(self._dispatch(item, usage_events) for item in bound),
                         return_exceptions=True,
                     )
                     results = (
@@ -2444,11 +2461,18 @@ class TurnEngine:
                 error_class=type(error).__name__,
             )
 
-    def _dispatch(self, bound: _DispatchInput) -> Awaitable[ToolResultBlock]:
-        return self._dispatch_result(self._dispatch_step(bound))
+    async def _dispatch(
+        self,
+        bound: _DispatchInput,
+        usage_events: list[Usage] | None = None,
+    ) -> ToolResultBlock:
+        result = await self._dispatch_step_recovering(bound, usage_events)
+        return await self._dispatch_result(result)
 
-    async def _dispatch_result(self, step: Awaitable[DispatchResult]) -> ToolResultBlock:
-        result = await step
+    async def _dispatch_result(
+        self,
+        result: DispatchResult,
+    ) -> ToolResultBlock:
         if not result.image_refs:
             block = ToolResultBlock(
                 tool_use_id=result.tool_use_id,
@@ -2478,6 +2502,29 @@ class TurnEngine:
             )
         self._activity.results.add(id(block))
         return block
+
+    async def _dispatch_step_recovering(
+        self,
+        bound: _DispatchInput,
+        usage_events: list[Usage] | None,
+    ) -> DispatchResult:
+        while True:
+            result = await self._dispatch_step(bound)
+            if self._accept_dispatch_result(result, usage_events):
+                return result
+
+    def _accept_dispatch_result(
+        self,
+        result: DispatchResult,
+        usage_events: list[Usage] | None,
+    ) -> bool:
+        live = result.tool_use_id in self._live_dispatches
+        self._live_dispatches.discard(result.tool_use_id)
+        if usage_events is not None and not live:
+            usage_events.extend(result.usages)
+        if result.interrupted and live:
+            raise asyncio.CancelledError
+        return not result.interrupted
 
     async def _bind_requester(
         self,
@@ -2582,10 +2629,11 @@ class TurnEngine:
     async def _dispatch_step(self, bound: _DispatchInput) -> DispatchResult:
         """Run one resolved binding in the DBOS step claimed for it in model order. A rejected bind
         claims the same step and records its error, so bind latency or outcome cannot change step
-        order or count on recovery. The recorded `DispatchResult` replays without rebinding or
-        re-invoking the handler, so a side-effecting tool's external write is never re-applied. A
-        bad requester, name, or arguments becomes an is_error result before any hook fires (there
-        is no validated input to police). Then
+        order or count on recovery. A completed `DispatchResult` replays without rebinding or
+        re-invoking the handler. An interrupted result checkpoints partial find usage; recovery
+        consumes it and advances to a fresh step whose identical idempotency key deduplicates any
+        side effect the interrupted handler applied. A bad requester, name, or arguments becomes an
+        is_error result before any hook fires (there is no validated input to police). Then
         pre_tool_use may Deny
         (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
         with the folded args (a raising handler is an is_error result unless no terminal returned
@@ -2626,6 +2674,8 @@ class TurnEngine:
         is not read as policy. Inside the step is where it counts: the recorded result replays on a
         crash-recovery re-run without re-entering the body, so a replayed turn re-counts nothing."""
         call = bound.call
+        self._live_dispatches.add(call.id)
+        find_usages: list[Usage] = []
         started = time.monotonic()
         outcome, error_class = "ok", None
         with span("tool.dispatch", tool=call.name):
@@ -2692,7 +2742,11 @@ class TurnEngine:
                     handler_context = replace(
                         context, ext=self.tool_ext.get(call.name), idempotency_key=key
                     )
-                    result = await tool.handler(handler_context, args)
+                    find_usage_token = self._find_usages.set(find_usages)
+                    try:
+                        result = await tool.handler(handler_context, args)
+                    finally:
+                        self._find_usages.reset(find_usage_token)
                     text_parts: list[str] = []
                     for block in result.content:
                         match block:
@@ -2759,8 +2813,19 @@ class TurnEngine:
                     is_error=is_error,
                     activity=True,
                     image_refs=tuple(image_refs),
+                    usages=tuple(find_usages),
                 )
-            except (Exception, asyncio.CancelledError) as error:
+            except asyncio.CancelledError:
+                outcome, error_class = "step_failed", "CancelledError"
+                return DispatchResult(
+                    tool_use_id=call.id,
+                    text="",
+                    is_error=False,
+                    activity=True,
+                    usages=tuple(find_usages),
+                    interrupted=True,
+                )
+            except Exception as error:
                 outcome, error_class = "step_failed", type(error).__name__
                 raise
             finally:
@@ -2966,16 +3031,23 @@ class TurnEngine:
                         absorbed=len(absorbed),
                     )
                     return None, False
-            await record_turn_usage(
-                connection,
-                self.turn.workspace_id,
-                self.turn.id,
-                self.agent.model,
-                usage,
-                self.attempt,
-                pricing=self.pricing,
-                byok=self.byok,
-            )
+            try:
+                await record_turn_usage(
+                    connection,
+                    self.turn.workspace_id,
+                    self.turn.id,
+                    self.agent.model,
+                    usage,
+                    self.attempt,
+                    pricing=self.pricing,
+                    byok=self.byok,
+                )
+            except TurnUsageConflict as conflict:
+                log_error(
+                    "turn.billing_conflict",
+                    turn_id=str(self.turn.id),
+                    error_class=type(conflict).__name__,
+                )
             cost = await read_turn_cost(connection, self.turn.id, TOKENS_DIMENSION)
             spend = cost if cost is not None else _NOTHING_SPENT
             match error:

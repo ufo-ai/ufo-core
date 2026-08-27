@@ -44,7 +44,7 @@ from ufo.access.grants import (
     OAuthAccount,
     install_connect_flow,
 )
-from ufo.billing.accounting import record_turn_usage
+from ufo.billing.accounting import TurnUsageConflict, record_turn_usage
 from ufo.billing.balance import credit, debit, set_reserve
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
@@ -2340,6 +2340,54 @@ async def _dispatch_step(
     return await engine._dispatch_step(bound)
 
 
+async def test_dispatch_records_find_usage_for_recovery(db: None, tmp_path: Path) -> None:
+    find_usage = Usage(
+        input_tokens=3,
+        output_tokens=5,
+        cache_write_5m_tokens=7,
+    )
+
+    live_usage: list[Usage] = []
+
+    async def complete(system: str, user: str) -> str:
+        assert (system, user) == ("system", "user")
+        live_usage.append(find_usage)
+        collected = engine._find_usages.get()
+        assert collected is not None
+        collected.append(find_usage)
+        return "ranked"
+
+    async def find(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        assert ctx.find is not None
+        return ToolResult(content=(TextContent(text=await ctx.find("system", "user")),))
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="find", description="d", input_model=_NoArgs, handler=find),)
+        ),
+    )
+    context = replace(_dispatch_context(engine), find=complete)
+    recorded = await _dispatch_step(
+        engine,
+        context,
+        ToolUseBlock(id="c1", name="find", input={}),
+    )
+
+    first: list[Usage] = []
+    recovered: list[Usage] = []
+    assert engine._accept_dispatch_result(recorded, first)
+    assert (await engine._dispatch_result(recorded)).content == "ranked"
+    recovered_engine = replace(engine)
+    assert recovered_engine._accept_dispatch_result(recorded, recovered)
+    assert (await recovered_engine._dispatch_result(recorded)).content == "ranked"
+    assert recorded.usages == (find_usage,)
+    assert live_usage == [find_usage]
+    assert first == []
+    assert recovered == [find_usage]
+
+
 async def test_a_call_whose_requester_will_not_bind_counts_as_an_unusable_call(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2543,9 +2591,9 @@ async def test_a_dispatch_that_raises_past_its_handler_counts_the_step_it_failed
 async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The step is preemptible, so DBOS cancels its task and the handler raises `CancelledError`
-    inside this body — which `except Exception` would miss, leaving the finally to record the call
-    that died at its `ok` initializer."""
+    """The DBOS step returns its interrupted result before the caller re-raises cancellation, so
+    the result and its partial usage reach the operation log first. Its metric names the failed
+    step rather than the `ok` initializer."""
     reader = _metric_capture(monkeypatch)
 
     async def cancelled(ctx: ToolContext, args: BaseModel) -> ToolResult:
@@ -2558,10 +2606,13 @@ async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
             (ToolDef(name="ok_tool", description="d", input_model=_NoArgs, handler=cancelled),)
         ),
     )
-    with ws(turn.workspace_id), pytest.raises(asyncio.CancelledError):
-        await _dispatch_step(
+    with ws(turn.workspace_id):
+        interrupted = await _dispatch_step(
             engine, _dispatch_context(engine), ToolUseBlock(id="c1", name="ok_tool", input={})
         )
+    assert interrupted.interrupted
+    with pytest.raises(asyncio.CancelledError):
+        engine._accept_dispatch_result(interrupted, [])
     assert [
         dict(point.attributes) for point in _exported_metrics(reader)["ufo.tool_call_total"]
     ] == [
@@ -2572,6 +2623,31 @@ async def test_a_cancelled_dispatch_records_the_cancellation_and_not_a_success(
             "error_class": "CancelledError",
         }
     ]
+
+
+async def test_a_durable_cancel_does_not_retry_the_tool(db: None, tmp_path: Path) -> None:
+    calls = 0
+
+    async def cancelled(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        nonlocal calls
+        calls += 1
+        raise DBOSWorkflowCancelledError("cancelled")
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="write", description="d", input_model=_NoArgs, handler=cancelled),)
+        ),
+    )
+    bound = await engine._bind_or_error(
+        _dispatch_context(engine),
+        ToolUseBlock(id="c1", name="write", input={}),
+        {},
+    )
+    with ws(turn.workspace_id), pytest.raises(DBOSWorkflowCancelledError):
+        await engine._dispatch_step_recovering(bound, [])
+    assert calls == 1
 
 
 async def test_a_handler_raising_untrusted_content_keeps_its_own_series(
@@ -6251,6 +6327,180 @@ async def test_find_ranking_keeps_5m_cache_inside_a_main_turn(db: None, tmp_path
     assert model.seen_conversation_cache_ttl == ["1h", "5m", "1h"]
 
 
+async def test_cancelled_find_dispatch_bills_the_live_completer_usage(
+    db: None, tmp_path: Path
+) -> None:
+    async def rank(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        if ctx.find is None:
+            raise RuntimeError("find is not wired")
+        await ctx.find("rank", "page")
+        raise asyncio.CancelledError
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, FindCallingModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="rank", description="d", input_model=_NoArgs, handler=rank),)
+        ),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await engine.run()
+
+    async with workspace_tx() as connection:
+        billed = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.input_tokens,
+                    tables.ledger.c.output_tokens,
+                    tables.ledger.c.amount,
+                ).where(tables.ledger.c.turn_id == turn.id)
+            )
+        ).one()
+    assert tuple(billed) == (2, 2, 4)
+
+
+async def test_recovered_find_dispatch_preserves_the_cancelled_cache_write(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn = await _seed_turn("running", None)
+    engine = replace(_engine(turn, object(), tmp_path), attempt="same-attempt")
+    written = Usage(input_tokens=3, output_tokens=5, cache_write_5m_tokens=700)
+    read = Usage(input_tokens=7, output_tokens=11, cache_read_tokens=700)
+    interrupted = DispatchResult(
+        tool_use_id="c1",
+        text="",
+        is_error=False,
+        usages=(written,),
+        interrupted=True,
+    )
+    completed = DispatchResult(
+        tool_use_id="c1",
+        text="ranked",
+        is_error=False,
+        usages=(read,),
+    )
+    live_usage = [written]
+    engine._live_dispatches.add("c1")
+    with pytest.raises(asyncio.CancelledError):
+        engine._accept_dispatch_result(interrupted, live_usage)
+    async with workspace_tx() as connection:
+        await credit(connection, turn.workspace_id, 100_000_000, 100_000_000, "seed")
+    with ws(turn.workspace_id):
+        await engine._bill_cancelled(live_usage)
+
+    recovered = replace(engine)
+    recovered_usage: list[Usage] = []
+    results = [interrupted, completed]
+
+    async def replay_then_retry(dispatching: TurnEngine, bound: object) -> DispatchResult:
+        result = results.pop(0)
+        if result is completed:
+            recovered_usage.append(read)
+            dispatching._live_dispatches.add("c1")
+        return result
+
+    monkeypatch.setattr(TurnEngine, "_dispatch_step", replay_then_retry)
+    bound = await recovered._bind_or_error(
+        _dispatch_context(recovered),
+        ToolUseBlock(id="c1", name="rank", input={}),
+        {},
+    )
+    assert await recovered._dispatch_step_recovering(bound, recovered_usage) is completed
+    assert results == []
+    total = Usage(
+        input_tokens=10,
+        output_tokens=16,
+        cache_read_tokens=700,
+        cache_write_5m_tokens=700,
+    )
+    expected_cost = recovered.pricing.micro_usd(recovered.agent.model, total)
+    with ws(turn.workspace_id):
+        async with asyncio.timeout(2):
+            frame = await recovered._commit(
+                "done",
+                recovered_usage,
+                _TurnMeter(started=0.0, profile="main"),
+                answer="done",
+            )
+
+    assert frame is not None
+    assert frame.tokens == 1426
+    assert frame.cost_micro_usd == expected_cost
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.input_tokens,
+                    tables.ledger.c.output_tokens,
+                    tables.ledger.c.cache_read_tokens,
+                    tables.ledger.c.cache_write_5m_tokens,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.debited_micro_usd,
+                ).where(tables.ledger.c.turn_id == turn.id)
+            )
+        ).one()
+    assert tuple(row) == (10, 16, 700, 700, expected_cost, expected_cost)
+
+
+async def test_interrupted_side_effecting_dispatch_retries_with_the_same_idempotency_key(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys: list[str | None] = []
+
+    async def write(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        keys.append(ctx.idempotency_key)
+        if len(keys) == 1:
+            raise asyncio.CancelledError
+        return ToolResult(content=(TextContent(text="written"),))
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="write",
+                    description="d",
+                    input_model=_NoArgs,
+                    handler=write,
+                    side_effecting=True,
+                ),
+            )
+        ),
+    )
+    bound = await engine._bind_or_error(
+        _dispatch_context(engine),
+        ToolUseBlock(id="c1", name="write", input={}),
+        {},
+    )
+    with ws(turn.workspace_id):
+        interrupted = await engine._dispatch_step(bound)
+    assert interrupted.interrupted
+    with pytest.raises(asyncio.CancelledError):
+        engine._accept_dispatch_result(interrupted, [])
+
+    original_dispatch_step = TurnEngine._dispatch_step
+    replayed = False
+
+    async def replay_then_retry(dispatching: TurnEngine, retry_bound: object) -> DispatchResult:
+        nonlocal replayed
+        if not replayed:
+            replayed = True
+            return interrupted
+        return await original_dispatch_step(dispatching, retry_bound)
+
+    monkeypatch.setattr(TurnEngine, "_dispatch_step", replay_then_retry)
+    recovered = replace(engine)
+    with ws(turn.workspace_id):
+        result = await recovered._dispatch_step_recovering(bound, [])
+
+    expected_key = f"{turn.id}/write/c1"
+    assert result.text == "written"
+    assert replayed
+    assert keys == [expected_key, expected_key]
+
+
 async def test_done_turn_persists_the_system_string_and_injected_context(
     db: None, tmp_path: Path
 ) -> None:
@@ -7255,6 +7505,189 @@ async def test_commit_retries_a_transient_failure_and_keeps_the_error(
     assert frame is not None
     assert frame.error_class == "APIStatusError"
     assert frame.error_message == "boom"
+
+
+async def test_billing_conflict_does_not_retry_the_terminal_commit(
+    db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    turn = await _seed_turn("running", None)
+    engine = _engine(turn, object(), tmp_path)
+    prior = Usage(input_tokens=3, output_tokens=5, cache_write_5m_tokens=7)
+    async with workspace_tx() as connection:
+        await credit(connection, turn.workspace_id, 1_000_000, 1_000_000, "seed")
+        await record_turn_usage(
+            connection,
+            turn.workspace_id,
+            turn.id,
+            engine.agent.model,
+            prior,
+            engine.attempt,
+            pricing=engine.pricing,
+        )
+        before_row = tuple(
+            (
+                await connection.execute(
+                    sa.select(
+                        tables.ledger.c.input_tokens,
+                        tables.ledger.c.output_tokens,
+                        tables.ledger.c.cache_write_5m_tokens,
+                        tables.ledger.c.priced_micro_usd,
+                        tables.ledger.c.debited_micro_usd,
+                    ).where(tables.ledger.c.turn_id == turn.id)
+                )
+            ).one()
+        )
+        before_balance = (
+            await connection.execute(
+                sa.select(tables.workspace_balance.c.balance_micro_usd).where(
+                    tables.workspace_balance.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+    calls = 0
+
+    async def conflicting_record_turn_usage(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise TurnUsageConflict("crossed snapshots")
+
+    monkeypatch.setattr("ufo.loop.engine.record_turn_usage", conflicting_record_turn_usage)
+    with ws(turn.workspace_id), caplog.at_level(logging.ERROR, logger="ufo"):
+        async with asyncio.timeout(2):
+            frame = await engine._commit(
+                "done",
+                [Usage(input_tokens=10)],
+                _TurnMeter(started=0.0, profile="main"),
+                answer="done",
+            )
+
+    assert calls == 1
+    assert frame is not None
+    assert frame.status == "done"
+    assert frame.tokens == 15
+    conflicts = [
+        record for record in caplog.records if record.getMessage() == "turn.billing_conflict"
+    ]
+    assert len(conflicts) == 1
+    assert conflicts[0].ufo == {
+        "workspace_id": str(turn.workspace_id),
+        "turn_id": str(turn.id),
+        "error_class": "TurnUsageConflict",
+    }
+    assert "crossed snapshots" not in conflicts[0].getMessage()
+    async with workspace_tx() as connection:
+        after_row = tuple(
+            (
+                await connection.execute(
+                    sa.select(
+                        tables.ledger.c.input_tokens,
+                        tables.ledger.c.output_tokens,
+                        tables.ledger.c.cache_write_5m_tokens,
+                        tables.ledger.c.priced_micro_usd,
+                        tables.ledger.c.debited_micro_usd,
+                    ).where(tables.ledger.c.turn_id == turn.id)
+                )
+            ).one()
+        )
+        after_balance = (
+            await connection.execute(
+                sa.select(tables.workspace_balance.c.balance_micro_usd).where(
+                    tables.workspace_balance.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+    assert after_row == before_row
+    assert after_balance == before_balance
+
+
+async def test_recovered_attempt_advances_the_partial_cancellation_bill(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("running", None)
+    engine = replace(_engine(turn, object(), tmp_path), attempt="same-attempt")
+    first = Usage(
+        input_tokens=3,
+        output_tokens=5,
+        cache_read_tokens=7,
+        cache_write_1h_tokens=11,
+    )
+    second = Usage(
+        input_tokens=13,
+        output_tokens=17,
+        cache_read_tokens=19,
+        cache_write_5m_tokens=23,
+        cache_write_30m_tokens=29,
+    )
+    total = Usage(
+        input_tokens=16,
+        output_tokens=22,
+        cache_read_tokens=26,
+        cache_write_5m_tokens=23,
+        cache_write_30m_tokens=29,
+        cache_write_1h_tokens=11,
+    )
+    expected_cost = engine.pricing.micro_usd(engine.agent.model, total)
+    async with workspace_tx() as connection:
+        await credit(connection, turn.workspace_id, 100_000_000, 100_000_000, "seed")
+    with ws(turn.workspace_id):
+        await engine._bill_cancelled([first])
+        frame = await engine._commit(
+            "done",
+            [first, second],
+            _TurnMeter(started=0.0, profile="main"),
+            answer="done",
+        )
+    assert frame is not None
+    assert frame.tokens == 127
+    assert frame.cost_micro_usd == expected_cost
+    async with workspace_tx() as connection:
+        await record_turn_usage(
+            connection,
+            turn.workspace_id,
+            turn.id,
+            engine.agent.model,
+            total,
+            engine.attempt,
+            pricing=engine.pricing,
+        )
+        await record_turn_usage(
+            connection,
+            turn.workspace_id,
+            turn.id,
+            engine.agent.model,
+            first,
+            engine.attempt,
+            pricing=engine.pricing,
+        )
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.ledger.c.amount,
+                    tables.ledger.c.input_tokens,
+                    tables.ledger.c.output_tokens,
+                    tables.ledger.c.cache_read_tokens,
+                    tables.ledger.c.cache_write_5m_tokens,
+                    tables.ledger.c.cache_write_30m_tokens,
+                    tables.ledger.c.cache_write_1h_tokens,
+                    tables.ledger.c.priced_micro_usd,
+                    tables.ledger.c.debited_micro_usd,
+                ).where(tables.ledger.c.turn_id == turn.id)
+            )
+        ).all()
+        balance = (
+            await connection.execute(
+                sa.select(tables.workspace_balance.c.balance_micro_usd).where(
+                    tables.workspace_balance.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+    assert [tuple(row) for row in rows] == [
+        (127, 16, 22, 26, 23, 29, 11, expected_cost, expected_cost)
+    ]
+    assert balance == 100_000_000 - expected_cost
 
 
 async def test_a_depleted_balance_parks_the_running_turn(db: None, tmp_path: Path) -> None:

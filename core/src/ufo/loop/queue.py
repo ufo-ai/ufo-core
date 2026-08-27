@@ -9,6 +9,7 @@ from uuid import UUID
 
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, EnqueueOptions, Queue
+from pydantic import BaseModel
 
 from ufo.access.connectors import CliCredential, ConnectorRegistry
 from ufo.access.credentials import (
@@ -60,6 +61,7 @@ from ufo.loop.transcript import Transcript
 from ufo.media.site_previewer import SitePreviewer
 from ufo.memory import MemorySearch
 from ufo.models.interface import AUTO_MODEL
+from ufo.models.pricing import ModelPrice, Pricing
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import (
     emit_metric,
@@ -140,6 +142,18 @@ FAILED_TERMINAL_RETRY_MAX_SECONDS = 30.0
 SKILL_OWNER_KIND = "skill"
 SKILL_SUBJECT = "workspace"
 SKILL_SHADOW_TIMEOUT_SECONDS = 4.0
+
+
+class _BillingIdentity(BaseModel):
+    attempt: str
+    model: str
+    price_digest: str
+    input: int
+    output: int
+    cache_read: int
+    cache_write_5m: int
+    cache_write_30m: int
+    cache_write_1h: int
 
 
 async def _without_workspace_skills(name: str) -> None:
@@ -606,17 +620,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             member_skill_block = _member_skill_block(turn, view, runtime.config.skills.member_block)
             if _member_skill_turn(turn) and cards and not view.catalog_fits:
                 _fire_shadow_selection(runtime.index, runtime.embed, turn, cards)
-            system_prompt = render_system_prompt(
-                agent.prompt,
-                sections,
-                skills=_prompt_skill_index(skills, runtime.config.skills.member_block),
-                knowledge_cutoff=runtime.registry.spec(resolved.model).knowledge_cutoff,
-            )
             max_rounds = MAIN_ROUND_LIMIT
             output_model: Contract | None = None
             if turn.spawned:
                 output_model = output_contract(agent.output_schema)
-                system_prompt = rendered_prompt(f"{system_prompt.content}\n\n{FINISH_CONTRACT}")
         else:
             profile = _resolve_profile(runtime.subagents, turn_id, turn.subagent_profile)
             payload = json.loads(turn.inbound) if turn.seq == 1 else {}
@@ -648,7 +655,45 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
             output_model = profile.output_model
             connector_read_only = profile.connector_read_only
+        current_price = runtime.registry.pricing.prices[resolved.model]
+        billing = await _frozen_billing_identity(
+            turn.id,
+            _BillingIdentity(
+                attempt=attempt,
+                model=resolved.model,
+                price_digest=runtime.registry.pricing.digest,
+                input=current_price.input,
+                output=current_price.output,
+                cache_read=current_price.cache_read,
+                cache_write_5m=current_price.cache_write_5m,
+                cache_write_30m=current_price.cache_write_30m,
+                cache_write_1h=current_price.cache_write_1h,
+            ),
+        )
+        resolved = resolved.model_copy(update={"model": billing.model})
+        if turn.subagent_profile is None:
+            system_prompt = render_system_prompt(
+                agent.prompt,
+                sections,
+                skills=_prompt_skill_index(skills, runtime.config.skills.member_block),
+                knowledge_cutoff=runtime.registry.spec(resolved.model).knowledge_cutoff,
+            )
+            if turn.spawned:
+                system_prompt = rendered_prompt(f"{system_prompt.content}\n\n{FINISH_CONTRACT}")
         model = await runtime.registry.client_for(resolved.model)
+        pricing = Pricing(
+            prices={
+                billing.model: ModelPrice(
+                    input=billing.input,
+                    output=billing.output,
+                    cache_read=billing.cache_read,
+                    cache_write_5m=billing.cache_write_5m,
+                    cache_write_30m=billing.cache_write_30m,
+                    cache_write_1h=billing.cache_write_1h,
+                )
+            },
+            digest=billing.price_digest,
+        )
         byok = await _frozen_byok(
             turn.workspace_id,
             turn.id,
@@ -761,7 +806,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             site_previewer=runtime.site_previewer,
             grants=grants,
             previous_turn_ended_at=previous_turn_ended_at,
-            pricing=runtime.registry.pricing,
+            pricing=pricing,
             attempt=attempt,
             max_rounds=max_rounds,
             skills=skills,
@@ -993,6 +1038,30 @@ async def _previous_turn_ended_at(turn: Turn) -> datetime | None:
             )
         ).scalar_one()
     return ended_at if ended_at.tzinfo is not None else ended_at.replace(tzinfo=UTC)
+
+
+async def _frozen_billing_identity(turn_id: UUID, candidate: _BillingIdentity) -> _BillingIdentity:
+    async with workspace_tx() as connection:
+        stored = (
+            await connection.execute(
+                sa.select(tables.turn.c.billing_identity)
+                .where(tables.turn.c.id == turn_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if stored is not None:
+            identity = _BillingIdentity.model_validate(stored)
+            if identity.attempt == candidate.attempt:
+                return identity
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(
+                billing_identity=candidate.model_dump(mode="json"),
+                updated_at=sa.func.now(),
+            )
+        )
+    return candidate
 
 
 async def _frozen_byok(
