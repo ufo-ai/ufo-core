@@ -41,7 +41,7 @@ from ufo.models.interface import (
     ToolUseBlock,
 )
 from ufo.models.spec import ReasoningSupport
-from ufo.o11y import emit_metric, log, warn
+from ufo.o11y import emit_metric, log, log_error, warn
 from ufo.sandbox.session import TOOL_OUTPUT_DIRNAME, UFO_HOME_ENV
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.skills.runtime import LoadedSkills
@@ -189,15 +189,31 @@ class _CompactionRequest:
         )
 
 
+class _InvalidSummary(RuntimeError):
+    def __init__(self, error_class: str, message: str, usage: Usage) -> None:
+        super().__init__(error_class, message, usage)
+        self.error_class = error_class
+        self.usage = usage
+
+    def __str__(self) -> str:
+        return str(self.args[1])
+
+
+@dataclass
+class _CompactionState:
+    automatic_suppressed: bool = False
+
+
 @dataclass(frozen=True, repr=False)
 class Compaction:
     """The compaction workflow: decide on the window, run the compression pipeline over the head,
     persist before/after/summary, and hand back the window the turn should actually send to the
-    model. When compaction actually occurs it fires the observe-only `pre_compact` (before the
-    summarize call) and `post_compact` (after) turn hooks off the turn's chain — fired here, not in
-    the engine, because only this flow knows past every compactibility guard that compaction will
-    truly happen. The trigger derives from the model's real window less the summary's own output
-    reserve and a buffer; `trigger_tokens` overrides the derivation for a test or an operator.
+    model. When compaction actually occurs it fires the observe-only `pre_compact` after the model
+    has produced a valid summary but before installing it, and `post_compact` after installation —
+    fired here, not in the engine, because only this flow knows past every compactibility guard that
+    compaction will truly happen. The trigger derives from the model's real window less the
+    summary's own output reserve and a buffer; `trigger_tokens` overrides the derivation for a test
+    or an operator.
     `loaded_skills` is the turn's skill-load tracker, shared with the tool context: the boundary
     drops the workflow bodies the head held, so this flow drains the tracker into the summary and
     leaves it empty — the one summary field the pipeline knows and the model does not."""
@@ -219,6 +235,7 @@ class Compaction:
     reasoning: ReasoningSupport = field(
         default_factory=lambda: ReasoningSupport(supported=True, tools_with_reasoning=True)
     )
+    _state: _CompactionState = field(default_factory=_CompactionState, init=False, compare=False)
 
     def __repr__(self) -> str:
         return f"Compaction(conversation_id={self.conversation_id}, model={self.model})"
@@ -232,18 +249,25 @@ class Compaction:
         """Compact when the window crosses the trigger, or unconditionally when `force` — the
         reactive path after a provider context-overflow. Either way the compactibility guards hold:
         a window at or under `keep_messages`, or one with no assistant boundary to split on, has
-        nothing to summarize and is returned unchanged, so a forced call still no-ops safely."""
+        nothing to summarize and is returned unchanged, so a forced call still no-ops safely. An
+        unusable automatic summary suppresses further automatic attempts for this turn; a forced
+        recovery still runs because the provider has proven the unchanged window cannot proceed."""
         if len(messages) <= self.keep_messages:
+            return messages, ()
+        if not force and self._state.automatic_suppressed:
             return messages, ()
         if not force and self._tokens(messages) <= self._trigger():
             return messages, ()
-        return await self._compact(
+        compacted, usages = await self._compact(
             _CompactionRequest(
                 messages=messages,
                 reason="force" if force else "auto",
                 active_requests=active_requests,
             )
         )
+        if not force and usages and compacted == messages:
+            self._state.automatic_suppressed = True
+        return compacted, usages
 
     def _trigger(self) -> int:
         """The window size a compaction fires at, and the size its replacement has to come back
@@ -278,6 +302,19 @@ class Compaction:
             return request.messages, ()
         head_rounds, tail = selection
         before_tokens = self._tokens(request.messages)
+        try:
+            summary, usages = await self._summarize(head_rounds)
+        except _InvalidSummary as error:
+            if request.reason == "force":
+                raise
+            log_error(
+                "compaction.summary_invalid",
+                conversation_id=str(self.conversation_id),
+                reason=request.reason,
+                error_class=error.error_class,
+            )
+            return request.messages, (error.usage,)
+        index = await self._next_index()
         await self.hooks.fire(
             "pre_compact",
             PreCompact(reason=request.reason, before_tokens=before_tokens),
@@ -285,8 +322,6 @@ class Compaction:
             self.agent,
             self.speaker_member_id,
         )
-        index = await self._next_index()
-        summary, usages = await self._summarize(head_rounds)
         drained = self.loaded_skills.drain()
         boundary = _Boundary(
             tail=tail,
@@ -308,6 +343,9 @@ class Compaction:
                     head_rounds, candidate.verification.missing
                 )
             except Exception as error:
+                match error:
+                    case _InvalidSummary():
+                        usages = (*usages, error.usage)
                 verification = candidate.verification.model_copy(update={"retried": True})
                 candidate = replace(
                     candidate,
@@ -374,9 +412,10 @@ class Compaction:
         """One metered model call turning the head rounds into a validated CompactionSummary. When
         the summarize request itself overflows the provider context, drop the oldest head rounds and
         retry, up to `max_ptl_retries` — every successful attempt's usage is returned to meter.
-        Exhausting the retries (or an empty/unparseable summary) raises: a compaction that cannot
-        shrink fails the turn loud rather than looping, the circuit breaker in this system's shape.
-        The retry is legitimate — it is against a model call's proven external uncertainty.
+        Exhausting prompt-too-long retries raises. An unusable model-authored summary carries its
+        usage to the caller: an automatic attempt can keep the accepted transcript, while a forced
+        recovery has no valid fallback and raises. The retry is legitimate — it is against a model
+        call's proven external uncertainty.
 
         `missed` names the anchors a first summary of this same head dropped. They ride the input,
         so a second attempt can carry a literal whose round the prompt-too-long ladder already
@@ -417,7 +456,13 @@ class Compaction:
                     usage = event
         if usage is None:
             raise RuntimeError("compaction produced no usage")
-        return self._parse_summary("".join(parts)), usage
+        try:
+            return self._parse_summary("".join(parts)), usage
+        except RuntimeError as error:
+            cause = error.__cause__
+            raise _InvalidSummary(
+                type(cause if cause is not None else error).__name__, str(error), usage
+            ) from error
 
     def _prepare(self, rounds: tuple[tuple[Message, ...], ...], missed: tuple[Anchor, ...]) -> str:
         """Render the head rounds to the summarizer's input: one `role: content` block per message,
@@ -469,10 +514,9 @@ class Compaction:
         """Validate the summarize call's output into the typed CompactionSummary. The model is asked
         for a single JSON object; the first balanced object is extracted (tolerating a stray fence,
         surrounding prose, and trailing characters) and validated. An empty, unparseable, or
-        schema-invalid summary raises the module's own RuntimeError (never pydantic's) — a
-        compaction that cannot produce a usable summary fails the turn loud rather than swapping in
-        a degraded window, and every failure mode of this method shares one exception type an
-        operator can filter on."""
+        schema-invalid summary raises the module's own RuntimeError (never pydantic's). The caller
+        decides whether the accepted source window is still a valid fallback, and every failure
+        mode of this method shares one exception type an operator can filter on."""
         start = text.find("{")
         if start == -1:
             raise RuntimeError("compaction produced no JSON summary")

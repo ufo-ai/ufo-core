@@ -430,8 +430,8 @@ class Stop:
 
 @dataclass(frozen=True)
 class PreCompact:
-    """The turn's context window is about to be compacted (its head summarized). `reason` is `auto`
-    when the window crossed the trigger or `force` when a provider overflow forced it;
+    """The turn's context window has a validated summary and is about to replace its head. `reason`
+    is `auto` when the window crossed the trigger or `force` when a provider overflow forced it;
     `before_tokens` is the pre-compaction window estimate. Observe-only, fired only when compaction
     will occur."""
 

@@ -10,6 +10,9 @@ import pytest
 from connector_payload import CONNECTOR_WINDOW_TOKENS, connector_window
 
 from ufo.blob import FilesystemBlobStore
+from ufo.ext.context import context_for
+from ufo.ext.loader import BoundHook, HookChain
+from ufo.ext.manifest import HookContext, HookSpec
 from ufo.loop.compaction import (
     ANCHOR_RETRY_INSTRUCTION,
     AUTOCOMPACT_BUFFER_TOKENS,
@@ -166,13 +169,15 @@ class FailingAnchorRetryModel:
         yield Usage(input_tokens=9, output_tokens=4)
 
 
-@dataclass(frozen=True)
+@dataclass
 class RawTextModel:
-    """Returns fixed raw text (not JSON) so a test can prove an unparseable summary fails loud."""
+    """Returns fixed raw text so tests can exercise unusable summary output."""
 
     text: str
+    calls: int = 0
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        self.calls += 1
         yield TextDelta(text=self.text)
         yield Usage(input_tokens=1, output_tokens=1)
 
@@ -847,29 +852,114 @@ async def test_summarize_gives_up_loud_when_the_overflow_never_clears(tmp_path: 
     assert model.calls == 4
 
 
-async def test_an_empty_summary_fails_loud(tmp_path: Path) -> None:
+async def test_an_empty_summary_fails_open(tmp_path: Path) -> None:
     model = SummaryModel(summary=CompactionSummary(intent="  ", current_work="w", next_step="n"))
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
-    with pytest.raises(RuntimeError, match="empty summary"):
-        await compaction.maybe_compact(_history())
+    messages = _history()
+
+    result, usage = await compaction.maybe_compact(messages)
+
+    assert result == messages
+    assert usage == (Usage(input_tokens=11, output_tokens=3),)
+    assert await compaction.read_record(1) is None
 
 
-async def test_an_unparseable_summary_fails_loud(tmp_path: Path) -> None:
+async def test_an_unparseable_summary_fails_open(tmp_path: Path) -> None:
     compaction = _compaction(
         tmp_path, model=RawTextModel(text="not json at all"), trigger_tokens=1, keep_messages=2
     )
-    with pytest.raises(RuntimeError, match="no JSON summary"):
-        await compaction.maybe_compact(_history())
+    messages = _history()
+
+    result, usage = await compaction.maybe_compact(messages)
+
+    assert result == messages
+    assert usage == (Usage(input_tokens=1, output_tokens=1),)
+    assert await compaction.read_record(1) is None
 
 
-async def test_a_summary_missing_required_fields_fails_loud(tmp_path: Path) -> None:
-    """A model that answers with well-formed JSON that isn't the CompactionSummary shape (e.g. it
-    echoed a tool call's arguments instead of the requested schema) must fail with the module's own
-    RuntimeError, not a raw pydantic ValidationError leaking past this boundary."""
+async def test_a_summary_missing_required_fields_fails_open(tmp_path: Path) -> None:
     model = RawTextModel(text='{"query": "create issue in the repo", "source_id": "github"}')
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
+    messages = _history()
+
+    result, usage = await compaction.maybe_compact(messages)
+
+    assert result == messages
+    assert usage == (Usage(input_tokens=1, output_tokens=1),)
+    assert await compaction.read_record(1) is None
+
+
+async def test_a_malformed_automatic_summary_fails_open_and_logs_the_fault(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    model = RawTextModel(
+        text='{"intent":"continue","current_work":"batch","next_step":"finish",'
+        '"pending":["unfinished"}'
+    )
+    skill = RuntimeSkill(name="loaded", description="d", instructions="BODY")
+    tracker = LoadedSkills()
+    tracker.reseed((SkillRegistry({"loaded": skill}).closure("loaded"),))
+    hook_events: list[object] = []
+
+    async def record_hook(context: HookContext) -> None:
+        hook_events.append(context.payload)
+
+    ext = context_for("probe", frozenset())
+    hooks = HookChain(
+        hooks={
+            "pre_compact": (
+                BoundHook(spec=HookSpec(event="pre_compact", handler=record_hook), ext=ext),
+            ),
+            "post_compact": (
+                BoundHook(spec=HookSpec(event="post_compact", handler=record_hook), ext=ext),
+            ),
+        }
+    )
+    compaction = _compaction(
+        tmp_path,
+        model=model,
+        trigger_tokens=1,
+        keep_messages=2,
+        loaded_skills=tracker,
+        hooks=hooks,
+    )
+    messages = _history()
+    repeated_messages = (*messages, Message(role="assistant", content="continue"))
+
+    with caplog.at_level(logging.ERROR, logger="ufo"):
+        result, usage = await compaction.maybe_compact(messages)
+        repeated, repeated_usage = await compaction.maybe_compact(repeated_messages)
+
+    assert result == messages
+    assert usage == (Usage(input_tokens=1, output_tokens=1),)
+    assert repeated == repeated_messages
+    assert repeated_usage == ()
+    assert model.calls == 1
+    assert hook_events == []
+    assert tracker.in_context == {"loaded"}
+    assert tracker.asked_for == {"loaded"}
+    assert await compaction.read_record(1) is None
+    (fault,) = [
+        record for record in caplog.records if record.message == "compaction.summary_invalid"
+    ]
+    assert fault.ufo["reason"] == "auto"
+    assert fault.ufo["error_class"] == "ValidationError"
+
+
+async def test_a_malformed_forced_summary_bypasses_automatic_suppression_and_fails_loud(
+    tmp_path: Path,
+) -> None:
+    model = RawTextModel(
+        text='{"intent":"continue","current_work":"batch","next_step":"finish",'
+        '"pending":["unfinished"}'
+    )
+    compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
+    await compaction.maybe_compact(_history())
+
     with pytest.raises(RuntimeError, match="invalid summary"):
-        await compaction.maybe_compact(_history())
+        await compaction.maybe_compact(_history(), force=True)
+
+    assert model.calls == 2
 
 
 async def test_a_summary_with_trailing_characters_still_parses(tmp_path: Path) -> None:
