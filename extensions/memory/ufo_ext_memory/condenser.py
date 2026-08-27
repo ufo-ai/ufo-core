@@ -111,7 +111,30 @@ class ExtractedFact(BaseModel):
 
     page_id: str
     body: str
-    memory_kind: MemoryKind = KIND_FACT
+    memory_kind: MemoryKind = Field(
+        default=KIND_FACT,
+        description=(
+            "Which part of the workspace's wiki this fact is written into. "
+            "`decision` — a choice this workspace settled, which stands until someone changes it. "
+            "`task` — work this workspace took on and still has to carry. "
+            "`event` — something that already happened and is finished. "
+            "`preference` — how this workspace has said it wants things done. "
+            "`fact` — what is durably true of a person, a thing, or the workspace. "
+            "A completed action is `event`, never `task`: a review that was requested, a branch "
+            "that was merged and a payment that cleared are all finished. Choose `task` only where "
+            "the work is still owed. "
+            "`decision`, `task` and `preference` speak for this workspace, so a row takes one "
+            "only where this workspace is the party that settled it, took it on, or wants it. "
+            "A due date does not make a row `task`. A requirement that arrived from outside — a "
+            "supplier's cut-off, a regulator's deadline, a platform's end of support — is a "
+            "`fact` about the party that set it, however much work it makes here; it is this "
+            "workspace's `task` only where someone here said this workspace would do it."
+        ),
+    )
+    """The kind is not a label on the row — it is the band the wiki files it under, and three of
+    those bands speak for the workspace. It reaches the model as this description and nowhere else:
+    scoping `preference` alone moved its cases while `task` stayed at zero, on the same commit and
+    the same model, which is what says the schema carries this and the prompt does not."""
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
 
     @field_validator("body")
