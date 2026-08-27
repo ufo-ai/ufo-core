@@ -11,6 +11,7 @@ reads the first run's outcome instead of repeating the command."""
 import asyncio
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -19,6 +20,37 @@ from ufo.sandbox.session import ExecResult
 from ufo.tools.context import ToolContext
 
 MAX_COMMAND_TIMEOUT_MS = 600_000
+FLAT_SLEEP_OR_LOOP = re.compile(r"(?<![\w./-])(?:sleep\s+(\d+)|(do|done))(?![\w./-])")
+QUOTED_OR_HEREDOC = re.compile(r"'[^']*'|\"[^\"]*\"|<<-?\s*'?(\w+)'?[^\n]*\n[\s\S]*?\n\1(?=\s|$)")
+FLAT_SLEEP_MAX_SECONDS = 10
+FLAT_SLEEP_REFUSAL = (
+    "Refused before running: the command pads the turn with a flat `sleep {seconds}`. Poll in a "
+    "loop, cover the workload with `timeout`, or run it with `background: true` — the exit file "
+    "appearing is the completion signal."
+)
+
+
+def flat_sleeps(command: str) -> tuple[int, ...]:
+    """The sleeps the command would pad a foreground turn with: every sleep over
+    `FLAT_SLEEP_MAX_SECONDS` outside a shell loop body. A poll loop's own sleep is the wait's
+    signal and never padding, and a loop may share its line with the work it polls, so the loop
+    body is skipped by `do`/`done` nesting depth rather than by line. Quoted arguments and heredoc
+    bodies are data, not the turn's wait, so they are not scanned — a sleep smuggled into a nested
+    shell string is the naive pattern's deliberate residual, chosen over refusing a command that
+    merely mentions one."""
+    hits: list[int] = []
+    depth = 0
+    for match in FLAT_SLEEP_OR_LOOP.finditer(QUOTED_OR_HEREDOC.sub(" ", command)):
+        seconds, keyword = match.group(1), match.group(2)
+        if keyword == "do":
+            depth += 1
+        elif keyword == "done":
+            depth = max(depth - 1, 0)
+        elif depth == 0:
+            hits.append(int(seconds))
+    return tuple(seconds for seconds in hits if seconds > FLAT_SLEEP_MAX_SECONDS)
+
+
 EXEC_TIMEOUT_VITALS_SECONDS = 5
 EXEC_TIMEOUT_COMMAND_MAX_CHARS = 200
 EXEC_TIMEOUT_VITALS_CMD = "cat /proc/loadavg; free -m | tail -2; df -P /workspace | tail -1"

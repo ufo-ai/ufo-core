@@ -1,0 +1,45 @@
+name = "sleep-guard"
+base = "89769b2ce"
+suites = ["bash_waiting", "sandbox_cli", "tool_calling"]
+cases = [
+  "bash-wait-foreground",
+  "bash-wait-background",
+  "bash-wait-restraint",
+  "sandbox-ufo-llm",
+  "sandbox-ufo-tool",
+  "stale-edit",
+  "tree-find",
+  "capital-restraint",
+  "math-restraint",
+  "provided-summary",
+  "just-remember",
+]
+repeats = 6
+concurrency = 2
+max_stacks = 1
+budget_usd = 40.0
+est_usd_per_case = 0.10
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "gpt-5.4-mini" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "no-guard"
+
+[[arm.replacements]]
+path = "core/src/ufo/tools/builtins.py"
+old = '''    if padded := flat_sleeps(args.command):
+        return ToolResult(
+            content=(TextContent(text=FLAT_SLEEP_REFUSAL.format(seconds=max(padded))),),
+            is_error=True,
+        )
+'''
+new = ''''''

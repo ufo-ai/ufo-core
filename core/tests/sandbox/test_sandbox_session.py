@@ -1189,7 +1189,9 @@ async def test_a_moved_command_is_reported_as_any_detached_one(tmp_path: Path) -
     ctx = await _live_ctx(tmp_path)
 
     asked = await bash_handler(ctx, BashInput(command="sleep 30", background=True))
-    moved = await bash_handler(ctx, BashInput(command="sleep 30", timeout=1000))
+    moved = await bash_handler(
+        ctx, BashInput(command='python3 -c "import time; time.sleep(30)"', timeout=1000)
+    )
 
     assert not asked.is_error and not moved.is_error
     assert (
@@ -1211,7 +1213,8 @@ async def test_a_moved_commands_stop_line_reaches_its_descendants(tmp_path: Path
     result = await bash_handler(
         ctx,
         BashInput(
-            command=f'sleep 30 & echo $! > "{WORKSPACE_DIR}/moved.pid"; wait',
+            command=f'python3 -c "import time; time.sleep(30)" & '
+            f'echo $! > "{WORKSPACE_DIR}/moved.pid"; wait',
             timeout=1000,
         ),
     )

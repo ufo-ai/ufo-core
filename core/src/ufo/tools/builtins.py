@@ -79,6 +79,8 @@ from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 from ufo.tools.registry import ToolDef
 from ufo.tools.tasks import (
     BACKGROUND_TASKS_DIR,
+    FLAT_SLEEP_REFUSAL,
+    flat_sleeps,
     run_task,
     task_handles,
     task_id,
@@ -353,6 +355,11 @@ async def bash_handler(ctx: ToolContext, args: BashInput) -> ToolResult:
     the sandbox does — a caller reading the code alone cannot tell which fired."""
     if args.background:
         return await _bash_background(ctx, args.command)
+    if padded := flat_sleeps(args.command):
+        return ToolResult(
+            content=(TextContent(text=FLAT_SLEEP_REFUSAL.format(seconds=max(padded))),),
+            is_error=True,
+        )
     run = await run_task(ctx, args.command, args.timeout)
     if (applied_s := run.result.timed_out_after_s) is not None:
         if run.pid is None:
