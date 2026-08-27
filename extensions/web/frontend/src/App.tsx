@@ -701,7 +701,7 @@ function WorkspaceSidebar({
     <nav
       aria-label="Workspace"
       className={cn(
-        "flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-2xl",
+        "flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-xl",
         "max-narrow:flex-1 max-narrow:border-r-0 max-narrow:py-0",
       )}
     >
