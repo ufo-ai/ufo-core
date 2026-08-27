@@ -1,4 +1,10 @@
-import { IconCheck, IconMessages, IconPlugConnected, IconPlus } from "@tabler/icons-react";
+import {
+  IconCheck,
+  IconCircleCheck,
+  IconMessages,
+  IconPlugConnected,
+  IconPlus,
+} from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -71,6 +77,22 @@ export const FIRST_RUN_READ = "/workspace/first-run";
  *  seconds they spend over there rather than in the half-minute a pane showing records can hold a
  *  stale answer for. */
 export const WATCH_MS = 3_000;
+
+/** One member's claim on the phone the iMessage step reserved: `pending` while the reservation
+ *  still waits for the code, `connected` once the phone proved itself, and `expired` once the
+ *  window lapsed without a proof. `expired` is carried by the read rather than derived from a
+ *  timestamp, so the page and the surface agree on which side of the window a poll landed on. */
+type ImessageClaim = { state: "pending" | "connected" | "expired" };
+
+/** The claim one member holds on the surface_address rows the iMessage step writes. The address is
+ *  the member's own stated phone, so the read answers only about the reader's claim and holds no
+ *  other member's. */
+const IMESSAGE_CLAIM_READ = "/workspace/imessage-claim";
+
+/** How often the pending iMessage step re-reads the claim, on the same rhythm a waiting connector
+ *  selector holds. The proof happens on the phone, so the wait is the member's and the page cannot
+ *  be told when it lands — it asks. */
+export const IMESSAGE_WATCH_MS = 3_000;
 
 /** The intent a workspace install dispatches, keyed by the connector that takes one. The named
  *  tool mints the install link inside the turn and the outcome carries it back, so installing
@@ -226,6 +248,11 @@ export function FirstRun({
   const [imessageLink, setImessageLink] = useState<string | null>(null);
   const [imessageMessage, setImessageMessage] = useState("");
   const [imessageReady, setImessageReady] = useState(false);
+  const imessageClaim = usePanelRead<ImessageClaim>(
+    imessageReady ? IMESSAGE_CLAIM_READ : null,
+    0,
+    IMESSAGE_WATCH_MS,
+  );
   const [at, setAt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
@@ -359,7 +386,15 @@ export function FirstRun({
           setImessageMessage(outcome.message);
           setImessageReady(true);
         };
+        /** What the lapsed notice points the member at. Clearing the readiness draws the phone form
+         *  again, holding the number they already wrote, so one press mints another code where the
+         *  first one was minted. */
+        const connectAgain = () => setImessageReady(false);
         const imessageLinkEnd = imessageMessage.indexOf(" from ");
+        const imessageClaimed =
+          imessageClaim.phase === "ready" && imessageClaim.payload.state === "connected";
+        const imessageLapsed =
+          imessageClaim.phase === "ready" && imessageClaim.payload.state === "expired";
         return (
           <Frame
             title={STEP_COPY[step].title}
@@ -483,39 +518,62 @@ export function FirstRun({
             {step === IMESSAGE_STEP ? (
               <div className="flex w-full max-w-(--container-connect) flex-col gap-2xl px-2xl">
                 {imessageReady ? (
-                  <>
-                    <Notice>
-                      {imessageLink ? (
+                  imessageClaimed ? (
+                    <>
+                      <div className="flex items-center justify-center gap-sm text-ink">
+                        <IconCircleCheck className="size-(--size-glyph)" aria-hidden />
+                        <p className="m-0 text-label">Phone connected — you can now message UFO from iMessage.</p>
+                      </div>
+                      <Button variant="send" size="bar" className="h-10 w-full" onClick={finish}>
+                        Start chatting
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Notice>
+                        {imessageLapsed ? (
+                            "That code expired. Connect iMessage again for a new one."
+                          ) : imessageLink ? (
+                            <a
+                              href={imessageLink}
+                              className="text-inherit underline underline-offset-2 hover:text-ink"
+                            >
+                              {imessageLinkEnd < 0
+                                ? imessageMessage
+                                : imessageMessage.slice(0, imessageLinkEnd)}
+                            </a>
+                          ) : (
+                            imessageMessage
+                          )}
+                          {imessageLink && !imessageLapsed && imessageLinkEnd >= 0
+                            ? imessageMessage.slice(imessageLinkEnd)
+                            : null}
+                      </Notice>
+                      {imessageLapsed ? (
+                        <Button
+                          variant="send"
+                          size="bar"
+                          className="h-10 w-full"
+                          onClick={connectAgain}
+                        >
+                          Connect iMessage again
+                        </Button>
+                      ) : imessageLink ? (
                         <a
                           href={imessageLink}
-                          className="text-inherit underline underline-offset-2 hover:text-ink"
+                          className={cn(
+                            buttonVariants({ variant: "send", size: "bar" }),
+                            "h-10 w-full",
+                          )}
                         >
-                          {imessageLinkEnd < 0
-                            ? imessageMessage
-                            : imessageMessage.slice(0, imessageLinkEnd)}
+                          Text code to UFO
                         </a>
-                      ) : (
-                        imessageMessage
-                      )}
-                      {imessageLink && imessageLinkEnd >= 0
-                        ? imessageMessage.slice(imessageLinkEnd)
-                        : null}
-                    </Notice>
-                    {imessageLink ? (
-                      <a
-                        href={imessageLink}
-                        className={cn(
-                          buttonVariants({ variant: "send", size: "bar" }),
-                          "h-10 w-full",
-                        )}
-                      >
-                        Text code to UFO
-                      </a>
-                    ) : null}
-                    <Button variant="outline" size="bar" className="h-10 w-full" onClick={finish}>
-                      Nevermind
-                    </Button>
-                  </>
+                      ) : null}
+                      <Button variant="outline" size="bar" className="h-10 w-full" onClick={finish}>
+                        Nevermind
+                      </Button>
+                    </>
+                  )
                 ) : (
                   <form
                     onSubmit={connectImessage}

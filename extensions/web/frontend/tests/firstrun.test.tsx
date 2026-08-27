@@ -5,6 +5,7 @@ import { beforeEach, expect, onTestFinished, test, vi } from "vitest";
 import { App } from "@/App";
 
 import { AGENT, AGENT_ID, chatsOnWire, CONVO_ID, json, MEMBER, TURN_ID, type Route, useStreamFake, wire } from "./harness";
+import { IMESSAGE_WATCH_MS } from "@/views/FirstRun";
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -770,6 +771,120 @@ test("the iMessage offer starts the phone claim through the intent lane", async 
       "I just set up this workspace. I want to develop products faster, and we use Notion.",
     ]),
   );
+});
+
+test("the pending iMessage step confirms once the phone proves its code", async () => {
+  const sent: string[] = [];
+  let claim = { state: "pending" };
+  const posted = recorder({
+    connect_imessage: {
+      applied: true,
+      message: 'Text "UFO ABC123" to (408) 555-0123 from that phone within 30 minutes.',
+      url: IMESSAGE_LINK,
+    },
+  });
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    open({
+      "/intents": posted.route,
+      "/workspace/imessage-claim": () => json(claim),
+      "/chat": (_url, init) => {
+        sent.push(String(init?.body));
+        return json(OPENED);
+      },
+    });
+
+    await record("Notion");
+    await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+    await userEvent.type(screen.getByLabelText("iMessage phone number"), "(559) 425-9991");
+    await userEvent.click(await screen.findByRole("button", { name: "Connect iMessage" }));
+
+    await screen.findByRole("link", { name: "Text code to UFO" });
+    expect(
+      screen.queryByText("Phone connected — you can now message UFO from iMessage."),
+    ).toBeNull();
+
+    claim = { state: "connected" };
+    for (const state of ["hidden", "visible"]) {
+      Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+    }
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(IMESSAGE_WATCH_MS);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await screen.findByText("Phone connected — you can now message UFO from iMessage.");
+    expect(screen.queryByRole("link", { name: "Text code to UFO" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Start chatting" }));
+    await waitFor(() =>
+      expect(sent).toEqual([
+        "I just set up this workspace. I want to develop products faster, and we use Notion.",
+      ]),
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("the pending iMessage step states the lapsed window when the claim expires", async () => {
+  const posted = recorder({
+    connect_imessage: {
+      applied: true,
+      message: 'Text "UFO ABC123" to (408) 555-0123 from that phone within 30 minutes.',
+      url: IMESSAGE_LINK,
+    },
+  });
+  open({
+    "/intents": posted.route,
+    "/workspace/imessage-claim": () => json({ state: "expired" }),
+  });
+
+  await record("Notion");
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+  await userEvent.type(screen.getByLabelText("iMessage phone number"), "(559) 425-9991");
+  await userEvent.click(await screen.findByRole("button", { name: "Connect iMessage" }));
+
+  await screen.findByText("That code expired. Connect iMessage again for a new one.");
+  expect(screen.queryByRole("link", { name: "Text code to UFO" })).toBeNull();
+});
+
+test("the lapsed iMessage step mints another code from the same page", async () => {
+  let claim = { state: "expired" };
+  const posted = recorder({
+    connect_imessage: {
+      applied: true,
+      message: 'Text "UFO ABC123" to (408) 555-0123 from that phone within 30 minutes.',
+      url: IMESSAGE_LINK,
+    },
+  });
+  open({
+    "/intents": posted.route,
+    "/workspace/imessage-claim": () => json(claim),
+  });
+
+  await record("Notion");
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+  await userEvent.type(screen.getByLabelText("iMessage phone number"), "(559) 425-9991");
+  await userEvent.click(await screen.findByRole("button", { name: "Connect iMessage" }));
+
+  await screen.findByText("That code expired. Connect iMessage again for a new one.");
+  claim = { state: "pending" };
+  await userEvent.click(screen.getByRole("button", { name: "Connect iMessage again" }));
+
+  const field = (await screen.findByLabelText("iMessage phone number")) as HTMLInputElement;
+  expect(field.value).toBe("(559) 425-9991");
+  await userEvent.click(screen.getByRole("button", { name: "Connect iMessage" }));
+
+  await screen.findByRole("link", { name: "Text code to UFO" });
+  expect(screen.queryByText("That code expired. Connect iMessage again for a new one.")).toBeNull();
+  expect(intents(posted.calls)).toEqual([
+    toolingIntent("notion"),
+    { verb: "connect_imessage", phone_number: "+15594259991" },
+    { verb: "connect_imessage", phone_number: "+15594259991" },
+  ]);
 });
 
 test("an invalid iMessage phone stays on the form with one instruction", async () => {

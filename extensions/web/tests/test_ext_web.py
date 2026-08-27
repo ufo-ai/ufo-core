@@ -3399,6 +3399,172 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     assert set(payload) == {"providers", "connectors", "imessage"}
 
 
+async def test_imessage_claim_reads_the_member_s_own_phone_claim(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The first run's iMessage watch: the claim the reading member holds on the phone the step
+    reserved, as `pending` while the reservation stands, `connected` once the phone proved the
+    code, and `expired` once the window lapsed without a proof. A member who reserved nothing —
+    including a member whose teammate reserved their own phone — reads `expired`, since no
+    reservation of theirs stands, and a member's claim never answers for another's. Refused
+    without a session."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    other_id, other_token = await _seed_member(workspace_id, "n@example.com")
+    path = "/surface/web/workspace/imessage-claim"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    other_cookie = {"cookie": f"{SESSION_COOKIE}={other_token}"}
+
+    assert (await client.get(path, headers=cookie)).json() == {"state": "expired"}
+    assert (await client.get(path, headers=other_cookie)).json() == {"state": "expired"}
+
+    now = datetime.now(UTC)
+
+    async def _claim(member: UUID, *, expires_at: datetime | None, proved_by: str | None) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.surface_address).values(
+                    surface="imessage",
+                    address=f"+1559425999{member.int % 10}",
+                    workspace_id=workspace_id,
+                    member_id=member,
+                    claim_expires_at=expires_at,
+                    proved_by=proved_by,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+    await _claim(member_id, expires_at=now + timedelta(minutes=30), proved_by=None)
+    held = await client.get(path, headers=cookie)
+    assert held.json() == {"state": "pending"}
+
+    await _claim(other_id, expires_at=None, proved_by="turn-1")
+    teammate = await client.get(path, headers=cookie)
+    assert teammate.json() == {"state": "pending"}
+    proven = await client.get(path, headers=other_cookie)
+    assert proven.json() == {"state": "connected"}
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.surface_address)
+            .where(
+                tables.surface_address.c.surface == "imessage",
+                tables.surface_address.c.member_id == member_id,
+            )
+            .values(
+                claim_expires_at=now - timedelta(minutes=1),
+                updated_at=sa.func.now(),
+            )
+        )
+    lapsed = await client.get(path, headers=cookie)
+    assert lapsed.json() == {"state": "expired"}
+
+    anonymous = await client.get(path)
+    assert anonymous.status_code == 401
+
+
+async def test_imessage_claim_answers_the_strongest_of_a_members_rows(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A member holds one row per phone they stated, so a corrected typo or a second device leaves
+    the lapsed row beside the proved one. The read answers the strongest row — connected once any
+    phone proved the code — rather than failing on the pair, and a member holding two reservations
+    reads the later one."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "two@example.com")
+    path = "/surface/web/workspace/imessage-claim"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    now = datetime.now(UTC)
+
+    async def _claim(address: str, *, expires_at: datetime | None, proved_by: str | None) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.surface_address).values(
+                    surface="imessage",
+                    address=address,
+                    workspace_id=workspace_id,
+                    member_id=member_id,
+                    claim_expires_at=expires_at,
+                    proved_by=proved_by,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+    await _claim("+15594259001", expires_at=now - timedelta(minutes=10), proved_by=None)
+    lapsed = await client.get(path, headers=cookie)
+    assert lapsed.status_code == 200
+    assert lapsed.json() == {"state": "expired"}
+
+    await _claim("+15594259002", expires_at=now + timedelta(minutes=30), proved_by=None)
+    reserved = await client.get(path, headers=cookie)
+    assert reserved.status_code == 200
+    assert reserved.json() == {"state": "pending"}
+
+    await _claim("+15594259003", expires_at=None, proved_by="turn-2")
+    proved = await client.get(path, headers=cookie)
+    assert proved.status_code == 200
+    assert proved.json() == {"state": "connected"}
+
+
+async def test_imessage_claim_reads_a_released_row_as_expired_rather_than_pending(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The iMessage surface releases the row — `release_address` deletes it — when the phone texts
+    a lapsed code or an opt-out word. The watch reads on every three seconds, so a deleted row that
+    read as a reservation would take the page back from the lapsed notice to the opt-in link, and
+    that link admits nothing: the surface answers no message from an address no row claims. A
+    member holding no row reads `expired`, whether the row lapsed first or stood when it went."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "released@example.com")
+    path = "/surface/web/workspace/imessage-claim"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    async def _claim(expires_at: datetime) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.surface_address).values(
+                    surface="imessage",
+                    address="+15594259004",
+                    workspace_id=workspace_id,
+                    member_id=member_id,
+                    claim_expires_at=expires_at,
+                    proved_by=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+    async def _release() -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.surface_address).where(
+                    tables.surface_address.c.surface == "imessage",
+                    tables.surface_address.c.address == "+15594259004",
+                    tables.surface_address.c.workspace_id == workspace_id,
+                )
+            )
+
+    await _claim(datetime.now(UTC) - timedelta(minutes=1))
+    lapsed = await client.get(path, headers=cookie)
+    assert lapsed.json() == {"state": "expired"}
+
+    await _release()
+    released = await client.get(path, headers=cookie)
+    assert released.status_code == 200
+    assert released.json() == {"state": "expired"}
+
+    await _claim(datetime.now(UTC) + timedelta(minutes=30))
+    reserved = await client.get(path, headers=cookie)
+    assert reserved.json() == {"state": "pending"}
+
+    await _release()
+    opted_out = await client.get(path, headers=cookie)
+    assert opted_out.status_code == 200
+    assert opted_out.json() == {"state": "expired"}
+
+
 async def test_connector_catalog_searches_the_live_broker_namespace(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

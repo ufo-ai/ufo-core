@@ -3389,6 +3389,39 @@ class ConnectorCatalogTile(BaseModel):
     label: str
 
 
+class ImessageClaim(BaseModel):
+    """The reader's own claim on the phone the iMessage step reserved, as the first run's watch
+    reads it. `connected` once the phone proved the code, `pending` while a reservation stands,
+    `expired` once none does — the reservation lapsed in place, or the surface released it when the
+    phone answered a lapsed code or opted out. The state, never the claim's rows."""
+
+    state: Literal["pending", "connected", "expired"]
+
+
+async def workspace_imessage_claim(ctx: SurfaceContext, request: Request) -> Response:
+    """The web claim the member the request authenticates holds on one iMessage address. The claim
+    is keyed by the member the code proves rather than the phone they stated, so the read answers
+    for the reader's own claim and no other member's. A member who holds no row reads `expired`
+    rather than `pending`: the step reserves the phone before it answers the member, so a row that
+    is not there is a reservation the surface released — the phone proved a lapsed code, or it
+    opted out — and `pending` would draw the opt-in link again for a claim no row admits."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, _audience = resolved
+    claim = await ctx.member_surface_claim("imessage", member_id)
+    state: Literal["pending", "connected", "expired"]
+    if claim is None:
+        state = "expired"
+    elif claim.proved_by is not None:
+        state = "connected"
+    elif claim.claim_expires_at is not None and claim.claim_expires_at <= datetime.now(UTC):
+        state = "expired"
+    else:
+        state = "pending"
+    return JSONResponse(ImessageClaim(state=state).model_dump(mode="json"))
+
+
 async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response:
     """The connector catalog, read by the first run's selector and the Connect page: the tools a
     team can say it uses, and the two of them the pages install themselves, beside whether the
@@ -4754,6 +4787,7 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/first-run", handler=workspace_first_run),
+    SurfaceRoute(method="GET", path="workspace/imessage-claim", handler=workspace_imessage_claim),
     SurfaceRoute(method="GET", path="workspace/starters", handler=workspace_starters),
     SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),
