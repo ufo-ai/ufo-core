@@ -157,7 +157,7 @@ from ufo.sandbox.cache import (
     CACHE_PKG_HOSTS,
     parse_cache_daemon,
 )
-from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
+from ufo.sandbox.conversation import ConversationSandbox
 from ufo.sandbox.exec_env import ProbeEnv
 from ufo.sandbox.preview import parse_preview_service
 from ufo.sandbox.select import select_carriers
@@ -302,7 +302,7 @@ def run() -> None:
             backend=config.sandbox.backend,
             off_cluster=carrier_spec.off_cluster,
             resume_carriers=carriers.resume,
-            image_ref=SANDBOX_IMAGE_REF,
+            image_ref=config.sandbox.image_ref,
             proxy=_proxy_endpoint(
                 app,
                 config,

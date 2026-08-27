@@ -253,6 +253,7 @@ class FakeSandbox:
     scripted_programs: dict[str, ExecResult] = field(default_factory=dict)
     scripted_paths: dict[str, ExecResult] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
+    tasks: list[tuple[str, str, bool, int | None]] = field(default_factory=list)
     budgets: dict[str, int | None] = field(default_factory=dict)
     programs: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     shells: list[tuple[str, tuple[str, ...], int | None]] = field(default_factory=list)
@@ -286,6 +287,15 @@ class FakeSandbox:
             if needle in command:
                 return result
         return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        self.tasks.append((command, base, detach, timeout_s))
+        for needle, result in self.scripted.items():
+            if needle in command:
+                return result
+        return ExecResult(stdout="123\n", stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         self.programs.append((program, args))
@@ -359,6 +369,30 @@ class FakeSandbox:
     async def write_runtime_path(self, path: str, content: bytes) -> None:
         self.runtime_writes.append(path)
         self.writes[path] = content
+
+
+@dataclass
+class JournalSandbox(FakeSandbox):
+    """The sandbox with `ufo run --task`'s journal in it: a base that already holds a run is
+    reattached to and launches nothing, and a cleared base launches. `launches` is therefore the
+    servers that really started, which the recorded `tasks` alone cannot tell apart."""
+
+    journaled: set[str] = field(default_factory=set)
+    launches: list[str] = field(default_factory=list)
+
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        result = await super().bash_task(command, base, detach=detach, timeout_s=timeout_s)
+        if detach and base not in self.journaled:
+            self.journaled.add(base)
+            self.launches.append(base)
+        return result
+
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        if script == sites_tools.SERVER_TASK_RESET:
+            self.journaled.discard(args[0])
+        return await super().sh(script, *args, timeout_s=timeout_s)
 
 
 @dataclass
@@ -861,11 +895,12 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
     sandbox.scripted_paths["/application-audit/"] = ExecResult(_report(False), "", 0)
     report = await _audit_builder_application(ctx, "/workspace/ufo-app")
     assert isinstance(report, ApplicationAuditReport)
-    assert len(sandbox.shells) == 2
+    audits = [script for script, _args, _timeout in sandbox.shells if script.startswith("node ")]
+    assert len(audits) == 2
     server_path = f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-server.py"
     assert sandbox.writes[server_path] == APPLICATION_AUDIT_SERVER
-    launches = [command for command in sandbox.commands if "nohup" in command]
-    assert launches and all(server_path in command for command in launches)
+    assert len(sandbox.tasks) == 2
+    assert all(server_path in command for command, _base, _detach, _timeout in sandbox.tasks)
     port_stops = [program for program, _args in sandbox.programs if program == PORT_STOP_PROG]
     assert len(port_stops) == 4
 
@@ -2676,9 +2711,9 @@ async def test_application_audit_uses_the_turns_accepted_design_after_shared_ove
 
     assert isinstance(audited, ApplicationAuditReport)
     assert audited.design_regions == first_regions
-    launches = [command for command in sandbox.commands if "nohup" in command]
-    assert first_accepted in launches[-1]
-    assert second_accepted not in launches[-1]
+    launch = sandbox.tasks[-1][0]
+    assert first_accepted in launch
+    assert second_accepted not in launch
     assert sandbox.shells[-1][1][-1].endswith("/accepted-design.svg")
 
 
@@ -3573,7 +3608,7 @@ async def test_website_build_failure_fails_loud(tmp_path: Path) -> None:
 async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path) -> None:
     sandbox = FakeSandbox(
         scripted={
-            "nohup": ExecResult(stdout="", stderr="", exit_code=1),
+            "exec env PORT": ExecResult(stdout="", stderr="", exit_code=1),
             "tail -n 20": ExecResult(stdout="Traceback: port in use", stderr="", exit_code=0),
         }
     )
@@ -3583,6 +3618,54 @@ async def test_start_server_reports_a_serve_failure_from_the_log(tmp_path: Path)
             ctx,
             StartServerInput(command="python3 app.py", project_path="/workspace"),
         )
+
+
+async def test_start_server_stops_its_task_when_readiness_fails(tmp_path: Path) -> None:
+    sandbox = FakeSandbox(
+        scripted={"deadline = time.time()": ExecResult(stdout="", stderr="not ready", exit_code=1)}
+    )
+    ctx = _context(sandbox, tmp_path)
+
+    with pytest.raises(RuntimeError, match="not ready"):
+        await start_server(
+            ctx,
+            StartServerInput(command="python3 app.py", project_path="/workspace"),
+        )
+
+    started, stopped = sandbox.tasks
+    assert started[1] == stopped[1]
+    assert started[2] is True
+    assert stopped[2] is False
+    assert sandbox.shells == [
+        (
+            sites_tools.SERVER_TASK_RESET,
+            (started[1], str(sites_tools.APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS)),
+            sites_tools.APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS + 5,
+        ),
+        (
+            sites_tools.SERVER_TASK_STOP,
+            ("123", started[1]),
+            sites_tools.APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS,
+        ),
+    ]
+
+
+async def test_a_second_start_in_one_turn_starts_its_own_server(tmp_path: Path) -> None:
+    """One turn starts a server on the same port and log more than once — three product audits are
+    permitted, and each one starts the audit server again — so the task identity repeats by design.
+    `ufo run --task` reattaches to a journal that holds a pid and launches nothing, and the port is
+    free by then, so the second start serves only because the journal it lands on is cleared."""
+    sandbox = JournalSandbox()
+    ctx = _context(sandbox, tmp_path)
+    args = StartServerInput(command="python3 app.py", project_path="/workspace", port=5173)
+
+    first = json.loads((await start_server(ctx, args)).content[0].text)
+    second = json.loads((await start_server(ctx, args)).content[0].text)
+
+    base = sandbox.tasks[0][1]
+    assert [task[1] for task in sandbox.tasks] == [base, base]
+    assert sandbox.launches == [base, base]
+    assert first["url"] == second["url"] == "http://localhost:5173"
 
 
 async def test_start_server_serves_a_static_folder_without_a_command(tmp_path: Path) -> None:
@@ -3599,8 +3682,18 @@ async def test_start_server_serves_a_static_folder_without_a_command(tmp_path: P
 
     payload = json.loads(result.content[0].text)
     assert payload["url"] == "http://localhost:5173"
-    launch = next(command for command in sandbox.commands if "nohup" in command)
-    assert "nohup env PORT=5173 python3 -m http.server 5173 --bind 0.0.0.0" in launch
+    assert sandbox.tasks == [
+        (
+            "cd /workspace/site\n"
+            "set -C\n"
+            "exec env PORT=5173 bash -lc 'python3 -m http.server 5173 --bind 0.0.0.0' "
+            f">{RUNTIME_ROOT}/tool-output/server-5173.log 2>&1",
+            f"{RUNTIME_ROOT}/tool-output/server-tasks/"
+            f"{sha256(f'{ctx.turn.id}:5173:{RUNTIME_ROOT}/tool-output/server-5173.log'.encode()).hexdigest()[:16]}",
+            True,
+            READINESS_TIMEOUT_SECONDS + 5,
+        )
+    ]
 
 
 async def test_application_builder_start_server_returns_the_framed_preview(tmp_path: Path) -> None:
@@ -3656,7 +3749,7 @@ async def test_the_failure_log_tail_states_its_own_budget(tmp_path: Path) -> Non
     report."""
     sandbox = FakeSandbox(
         scripted={
-            "nohup": ExecResult(stdout="", stderr="", exit_code=1),
+            "exec env PORT": ExecResult(stdout="", stderr="", exit_code=1),
             "tail -n 20": ExecResult(stdout="Traceback: port in use", stderr="", exit_code=0),
         }
     )
@@ -3678,7 +3771,7 @@ async def test_a_start_the_sandbox_killed_names_the_deadline_when_the_log_is_emp
     and say the log holds nothing."""
     sandbox = FakeSandbox(
         scripted={
-            "nohup": ExecResult(
+            "exec env PORT": ExecResult(
                 stdout="",
                 stderr="",
                 exit_code=124,
@@ -3739,16 +3832,18 @@ async def test_a_server_log_defaults_into_the_runs_own_offload_dir(tmp_path: Pat
         (LOG_CLEAR_PROG, (log, RUNTIME_ROOT)),
         (PORT_STOP_PROG, ("5173",)),
     ]
-    launch = next(command for command in sandbox.commands if f">{log}" in command)
+    launch = next(
+        command for command, _base, _detach, _timeout in sandbox.tasks if f">{log}" in command
+    )
     redirect = launch.index(f">{log}")
     assert "set -C\n" in launch[:redirect], "the redirect must create the log, never truncate it"
-    assert "set +C\n" in launch[redirect:], "noclobber must not outlive the log's own redirect"
+    assert "exec env PORT=5173 bash -lc" in launch[:redirect]
 
 
 async def test_the_log_name_is_freed_through_the_guard_before_the_redirect_creates_it(
     tmp_path: Path,
 ) -> None:
-    """`nohup … >log` follows a link and truncates what it points at, and the log's name is a
+    """`exec … >log` follows a link and truncates what it points at, and the log's name is a
     predictable one in a directory the agent writes. So the name is emptied through the containment
     guard first and the redirect runs under `set -C`, which creates the file `O_CREAT|O_EXCL`: a
     link replanted between the two commands fails the launch rather than steering it. A clear the

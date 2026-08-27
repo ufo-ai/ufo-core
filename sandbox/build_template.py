@@ -40,6 +40,7 @@ from pathlib import Path
 
 from e2b import Sandbox, Template
 from e2b.sandbox.commands.command_handle import CommandExitException
+from e2b.template.main import TemplateBuilder, TemplateFinal
 
 from ufo.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
 from ufo.sdk.sandbox import (
@@ -372,7 +373,7 @@ def build_definition_digest(sizing: Sizing | None) -> str:
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
-def apply_layers(builder: object, digest: str) -> object:
+def apply_layers(builder: TemplateBuilder, digest: str) -> TemplateFinal:
     builder.set_user(BUILD_USER)
     builder.run_cmd(
         "apt-get update && apt-get install -y --no-install-recommends "
@@ -420,7 +421,7 @@ def apply_layers(builder: object, digest: str) -> object:
     return builder.set_start_cmd(START_COMMAND, SANDBOX_TEMPLATE_READY_COMMAND)
 
 
-def e2b_template(size: str) -> object:
+def e2b_template(size: str) -> TemplateFinal:
     builder = Template(file_context_path=ROOT).from_template(E2B_BASE_TEMPLATE)
     return apply_layers(builder, build_definition_digest(SANDBOX_TIERS[size]))
 

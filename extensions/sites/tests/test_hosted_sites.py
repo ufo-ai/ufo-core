@@ -196,6 +196,14 @@ class FakeSandbox:
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        return ExecResult(stdout="123\n" if detach else "", stderr="", exit_code=0)
+
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         if program is ENUMERATE_PROG:
             return _listed_source()
@@ -232,6 +240,14 @@ class WorkingSandbox:
         if command.startswith("cat "):
             held = self.files.get(shlex.split(command)[1], b"")
             return ExecResult(stdout=held.decode(), stderr="", exit_code=0)
+        return ExecResult(stdout="", stderr="", exit_code=0)
+
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        return ExecResult(stdout="123\n" if detach else "", stderr="", exit_code=0)
+
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
@@ -288,6 +304,14 @@ class ShootingSandbox:
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout=str(len(self.png)), stderr="", exit_code=0)
+
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        return ExecResult(stdout="123\n" if detach else "", stderr="", exit_code=0)
+
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         if program is ENUMERATE_PROG:
@@ -2237,6 +2261,14 @@ class FailingSandbox:
 
     async def bash(self, command: str, timeout_s: int = 120) -> ExecResult:
         return ExecResult(stdout="", stderr="port never opened", exit_code=1)
+
+    async def bash_task(
+        self, command: str, base: str, *, detach: bool, timeout_s: int | None = None
+    ) -> ExecResult:
+        return ExecResult(stdout="123\n" if detach else "", stderr="", exit_code=0)
+
+    async def sh(self, script: str, *args: str, timeout_s: int | None = None) -> ExecResult:
+        return ExecResult(stdout="", stderr="", exit_code=0)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
         if program is ENUMERATE_PROG:

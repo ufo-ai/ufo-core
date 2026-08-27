@@ -13,10 +13,11 @@ link.
 
 Each tool runs through `ctx.sandbox`, so the container's mount and egress scoping hold. `website`
 runs a build command and lists what it produced. `start_server`, `deploy_website`, and
-`publish_website` bring a server up in the background: they free the port, launch the command under
-`nohup`, and poll until the port is listening before returning — so the tool returns a running,
-reachable server rather than a race. The served URL is `http://localhost:<port>` inside the sandbox,
-which the browser tools and js_repl reach to validate the page.
+`publish_website` bring a server up in the background: they free the port and the task journal of
+the start before them, launch an owned detached task, and poll until the port is listening before
+returning — so the tool returns a running, reachable server rather than a race. The served URL is
+`http://localhost:<port>` inside the sandbox, which the browser tools and js_repl reach to validate
+the page.
 
 `deploy_website` and `publish_website` then register that port as a hosted site, returning its
 `site_url` — the frame a member opens, gated on the site's visibility — and ask the preview service
@@ -194,6 +195,27 @@ for pid in pids:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass"""
+SERVER_TASK_STOP = """pid="$1"
+base="$2"
+recorded=$(cat "$base.pid") || exit 1
+[ "$recorded" = "$pid" ] || exit 1
+if [ -e "$base.exit" ]; then exit 0; fi
+kill "$pid" 2>/dev/null || [ -e "$base.exit" ]
+"""
+SERVER_TASK_RESET = """base="$1"
+grace="$2"
+pid=$(cat "$base.pid" 2>/dev/null) || pid=
+if [ -n "$pid" ] && [ ! -e "$base.exit" ]; then
+  kill "$pid" 2>/dev/null || true
+  waited=0
+  while [ ! -e "$base.exit" ] && kill -0 "$pid" 2>/dev/null; do
+    [ "$waited" -lt "$grace" ] || exit 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+fi
+rm -f "$base.pid" "$base.log" "$base.exit" "$base.lock"
+"""
 
 
 READINESS_TIMEOUT_SECONDS = 30
@@ -460,11 +482,56 @@ async def _stop_server(ctx: ToolContext, port: int) -> None:
         raise RuntimeError(result.stderr.strip() or f"cannot free port {port}")
 
 
+async def _stop_server_task(ctx: ToolContext, command: str, base: str, pid: str) -> None:
+    stopped = await ctx.sandbox.sh(
+        SERVER_TASK_STOP,
+        pid,
+        base,
+        timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS,
+    )
+    if stopped.exit_code != 0:
+        raise RuntimeError(stopped.stderr.strip() or "cannot stop the server task")
+    waited = await ctx.sandbox.bash_task(
+        command,
+        base,
+        detach=False,
+        timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS,
+    )
+    if waited.timed_out_after_s is not None:
+        raise RuntimeError("the server task did not stop")
+
+
+async def _reset_server_task(ctx: ToolContext, base: str) -> None:
+    """Leave the task journal at `base` holding nothing, so the launch below starts a server rather
+    than adopting the run before it.
+
+    `ufo run --task` reattaches to a journal that holds a pid and never launches, and the identity
+    this base is built from is deliberately the same across calls a resume must not double: one
+    turn's three permitted audits and a cross-attempt retry of one call all land here. The port and
+    the log are already freed above, so a run recorded at this base is over or is being taken over —
+    it is stopped, and every one of its files goes, since `ufo run` reads the pid and the sweep only
+    reaches an hour-old journal. Stopping before the removal is what keeps the ended supervisor from
+    writing its exit code back over the fresh journal."""
+    reset = await ctx.sandbox.sh(
+        SERVER_TASK_RESET,
+        base,
+        str(APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS),
+        timeout_s=APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS + 5,
+    )
+    if reset.exit_code != 0:
+        raise RuntimeError(reset.stderr.strip() or f"cannot clear the server task at {base}")
+
+
 async def _serve(
     ctx: ToolContext, command: str, project: str, port: int, log_path: str
 ) -> dict[str, object]:
     await _free_log(ctx, log_path)
     await _stop_server(ctx, port)
+    task_identity = f"{ctx.idempotency_key or ctx.turn.id}:{port}:{log_path}"
+    task_base = await ctx.sandbox.runtime_path(
+        f"{TOOL_OUTPUT_DIR}/server-tasks/{sha256(task_identity.encode()).hexdigest()[:16]}"
+    )
+    await _reset_server_task(ctx, task_base)
     readiness_probe = (
         "python3 - <<'PY'\n"
         "import socket\n"
@@ -486,14 +553,29 @@ async def _serve(
         "sys.exit(1)\n"
         "PY"
     )
-    result = await ctx.sandbox.bash(
+    server_command = (
         f"cd {shlex.quote(project)}\n"
         f"set -C\n"
-        f"nohup env PORT={port} {command} >{shell_path(log_path)} 2>&1 &\n"
-        f"set +C\n"
-        f"{readiness_probe}",
+        f"exec env PORT={port} bash -lc {shlex.quote(command)} "
+        f">{shell_path(log_path)} 2>&1"
+    )
+    result = await ctx.sandbox.bash_task(
+        server_command,
+        task_base,
+        detach=True,
         timeout_s=READINESS_TIMEOUT_SECONDS + 5,
     )
+    if result.exit_code == 0:
+        task_pid = result.stdout.strip()
+        try:
+            result = await ctx.sandbox.bash(
+                readiness_probe, timeout_s=READINESS_TIMEOUT_SECONDS + 5
+            )
+        except BaseException:
+            await _stop_server_task(ctx, server_command, task_base, task_pid)
+            raise
+        if result.exit_code != 0:
+            await _stop_server_task(ctx, server_command, task_base, task_pid)
     if result.exit_code != 0:
         tail = await ctx.sandbox.bash(
             f"tail -n {LOG_TAIL_LINES} {shell_path(log_path)} 2>/dev/null || true",

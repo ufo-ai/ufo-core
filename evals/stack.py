@@ -33,6 +33,7 @@ from httpx import AsyncClient, HTTPError
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from evals.harness.viewer import load_runs, write_viewer
+from evals.sandbox_image import SandboxImagePlan, sandbox_image_plan
 from ufo.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.config import Config, ConnectConfig, DatabaseConfig, O11yConfig
 from ufo.proxy_serve import OWNER_DSN_ENV
@@ -231,6 +232,7 @@ class EvalStack:
     egress_log: IO[bytes]
     eval_log: IO[bytes]
     process_log: IO[str]
+    sandbox_image: SandboxImagePlan | None = None
 
     @classmethod
     def provision(cls, spec: RunSpec, root: Path, out: Path, repo_root: Path) -> Self:
@@ -269,6 +271,16 @@ class EvalStack:
                 update={
                     "serve": config.serve.model_copy(
                         update={"disabled_jobs": CREATION_DISABLED_JOBS}
+                    )
+                }
+            )
+        sandbox_image = None
+        if not APP_SUITES.isdisjoint(selected_suites) and config.sandbox.backend == DOCKER_BACKEND:
+            sandbox_image = sandbox_image_plan(repo_root, root / "sandbox.Dockerfile")
+            config = config.model_copy(
+                update={
+                    "sandbox": config.sandbox.model_copy(
+                        update={"image_ref": sandbox_image.reference}
                     )
                 }
             )
@@ -315,12 +327,14 @@ class EvalStack:
             egress_log=(root / "egress.log").open("wb"),
             eval_log=(root / "eval.log").open("wb"),
             process_log=(root / "process.log").open("w"),
+            sandbox_image=sandbox_image,
         )
 
     async def run(self, creation: asyncio.Lock) -> StackResult:
         try:
             self._require_application_build_products()
             egress_binary = _egress_binary(self.repo_root)
+            await self._prepare_sandbox_image()
             async with creation:
                 await self._create_databases()
             await self._checked(await self._ufoctl("migrate", log=self.seed_log), "seed")
@@ -358,6 +372,23 @@ class EvalStack:
             root=self.root,
             database_url=self.config.database.url,
         )
+
+    async def _prepare_sandbox_image(self) -> None:
+        if self.sandbox_image is None:
+            return
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "evals.sandbox_image",
+            str(self.sandbox_image.dockerfile),
+            self.sandbox_image.reference,
+            self.sandbox_image.definition_digest,
+            cwd=self.repo_root,
+            env=self.env,
+            stdout=self.seed_log,
+            stderr=self.seed_log,
+        )
+        await self._checked(process, "seed")
 
     def _require_application_build_products(self) -> None:
         selected = argparse.ArgumentParser(add_help=False)

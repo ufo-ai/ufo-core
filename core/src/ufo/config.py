@@ -192,6 +192,10 @@ class SandboxConfig(BaseModel):
     component by component without following a link, so a link planted inside the root is still
     refused.
 
+    `image_ref` is the exact sandbox image an image-backed carrier starts. A content-addressed
+    reference lets an eval or deploy bind the runtime tools it validated instead of resolving a
+    mutable local tag after validation.
+
     `proxy_port` is the stable port the egress proxy binds. `proxy_public_url` is the externally
     reachable base a remote sandbox carrier such as E2B dials; local carriers leave it unset and
     reach the process-local proxy directly. `serve` fails loud when a remote carrier has no public
@@ -206,6 +210,7 @@ class SandboxConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     backend: str = "local"
+    image_ref: str = Field(default="ufo-sandbox:latest", min_length=1)
     resume_backends: tuple[str, ...] = ()
     """Backends kept live only for the stored handles bearing their scheme — a conversation whose
     sandbox another provider still holds keeps resuming there, while new sandboxes always open on

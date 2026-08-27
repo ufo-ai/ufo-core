@@ -17,6 +17,7 @@ from ufo_testsupport.migrations import apply_cached_migrations
 from ufo_testsupport.plugin import POSTGRES_TEST_URL, postgres_reachable
 
 import evals.stack as eval_stack
+from evals.sandbox_image import SandboxImagePlan
 from evals.stack import (
     APPLICATION_BUILD_PRODUCTS,
     CREATION_DISABLED_JOBS,
@@ -411,6 +412,32 @@ def test_app_eval_uses_the_template_parent_agent_and_rejects_matrix_model_knobs(
         )
 
 
+def test_docker_app_eval_pins_the_current_sandbox_image_before_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "template.toml"
+    template.write_text(DOCKER_TEMPLATE)
+    plan = SandboxImagePlan(
+        tmp_path / "sandbox.Dockerfile",
+        "ufo-sandbox-eval:0123456789abcdef",
+        "sha256:source",
+    )
+    monkeypatch.setattr(eval_stack, "sandbox_image_plan", lambda *_: plan)
+
+    stack = EvalStack.provision(
+        RunSpec(label="app-image", config=template, args=("--only", "ufo-app-bench")),
+        root=tmp_path / "app-image",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    persisted = Config.model_validate(tomllib.loads(stack.config_file.read_text()))
+    _close(stack)
+
+    assert stack.sandbox_image == plan
+    assert stack.config.sandbox.image_ref == plan.reference
+    assert persisted.sandbox.image_ref == plan.reference
+
+
 def test_provision_strips_an_ambient_owner_dsn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -688,7 +715,13 @@ async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     template = tmp_path / "template.toml"
-    template.write_text(SQLITE_TEMPLATE)
+    template.write_text(DOCKER_TEMPLATE)
+    image = SandboxImagePlan(
+        tmp_path / "sandbox.Dockerfile",
+        "ufo-sandbox-eval:0123456789abcdef",
+        "sha256:source",
+    )
+    monkeypatch.setattr(eval_stack, "sandbox_image_plan", lambda *_: image)
     stack = EvalStack.provision(
         RunSpec(label="app", config=template, args=("--only", "ufo-app-copy")),
         root=tmp_path / "app",
@@ -700,6 +733,9 @@ async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("built")
     events: list[str] = []
+
+    async def prepare_image(self: EvalStack) -> None:
+        events.append("image")
 
     async def no_databases(self: EvalStack) -> None:
         return None
@@ -742,6 +778,7 @@ async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(
         return None
 
     monkeypatch.setattr(eval_stack, "_egress_binary", lambda _: tmp_path / "ufo-egress")
+    monkeypatch.setattr(EvalStack, "_prepare_sandbox_image", prepare_image)
     monkeypatch.setattr(EvalStack, "_create_databases", no_databases)
     monkeypatch.setattr(EvalStack, "_ufoctl", done_ufoctl)
     monkeypatch.setattr(EvalStack, "_preflight", preflight)
@@ -757,7 +794,7 @@ async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(
     result = await stack.run(asyncio.Lock())
 
     assert result.passed
-    assert events == ["seed", "prepare", "serve"]
+    assert events == ["image", "seed", "prepare", "serve"]
 
 
 async def test_app_stack_rejects_missing_build_products_before_seed(
