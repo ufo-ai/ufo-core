@@ -16,6 +16,7 @@ from ufo.db import workspace_tx
 from ufo.ext.loader import skill_registry
 from ufo.ext.manifest import SubagentProfile
 from ufo.loop.subagents import SubagentRegistry, Subagents
+from ufo.models.interface import Message, ToolResultBlock, ToolUseBlock
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import (
     ExecResult,
@@ -38,10 +39,17 @@ from ufo.tools.context import (
     Spawn,
     SpawnResult,
     SubagentStatus,
+    TextContent,
     ToolContext,
     ToolResult,
 )
-from ufo.tools.registry import REQUESTED_BY, ToolDef, ToolRegistry
+from ufo.tools.registry import (
+    DIRECT_TOOL_LIMIT,
+    REQUESTED_BY,
+    TOOL_SEARCH,
+    ToolDef,
+    ToolRegistry,
+)
 from ufo.turns.audience import (
     SHARED_AUDIENCE,
     Audience,
@@ -240,6 +248,7 @@ def test_registry_schemas_cover_every_tool() -> None:
         "request_credentials",
         "load_skill",
         "skill_search",
+        "tool_search",
         "connect_account",
         "cancel_spawn",
         "message_spawn",
@@ -260,6 +269,133 @@ def test_builtin_tool_schema_has_no_user_description() -> None:
     schema = REGISTRY.get("bash").schema().input_schema
 
     assert "user_description" not in schema["properties"]
+
+
+def test_small_registry_offers_every_work_tool_without_catalog_search() -> None:
+    schemas = REGISTRY.model_schemas(())
+    assert {schema.name for schema in schemas} == {
+        tool.name for tool in BUILTIN_TOOLS if tool.name != TOOL_SEARCH
+    }
+
+
+def test_large_registry_loads_only_successful_catalog_matches() -> None:
+    class Input(BaseModel):
+        topic: str = ""
+
+    async def handler(ctx: ToolContext, args: Input) -> ToolResult:
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    tools = (
+        ToolDef(
+            name="memory_search",
+            description="Find durable team facts from prior conversations.",
+            input_model=Input,
+            handler=handler,
+        ),
+        ToolDef(
+            name="memory_update",
+            description="Record durable team facts for later conversations.",
+            input_model=Input,
+            handler=handler,
+        ),
+        *tuple(
+            ToolDef(
+                name="archive_records" if index == 0 else f"filler_{index}",
+                description=(
+                    "Archive records after a retention review."
+                    if index == 0
+                    else f"Operate synthetic fixture {index}."
+                ),
+                input_model=Input,
+                handler=handler,
+            )
+            for index in range(DIRECT_TOOL_LIMIT + 1)
+        ),
+    )
+    registry = ToolRegistry(tools).with_catalog()
+    first = registry.model_schemas(())
+    assert [schema.name for schema in first] == ["memory_search", "memory_update", TOOL_SEARCH]
+    assert registry.find_tools(("durable team facts",)) == ()
+    search_result = registry.find_tools_json(("archive records retention",))
+    messages = (
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="search-1",
+                    name=TOOL_SEARCH,
+                    input={"queries": ["archive records retention"]},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="search-1", content=search_result),),
+        ),
+    )
+    loaded = registry.model_schemas(messages)
+    assert [schema.name for schema in loaded] == [
+        "memory_search",
+        "memory_update",
+        "archive_records",
+        TOOL_SEARCH,
+    ]
+    speakerless = registry.model_schemas(messages, include_requested_by=False)
+    assert all(REQUESTED_BY not in schema.input_schema["properties"] for schema in speakerless)
+    failed = (
+        *messages[:-1],
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="search-1", content="failed", is_error=True),),
+        ),
+    )
+    assert [schema.name for schema in registry.model_schemas(failed)] == [
+        "memory_search",
+        "memory_update",
+        TOOL_SEARCH,
+    ]
+
+
+def test_catalog_search_and_replay_do_not_build_input_schemas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Input(BaseModel):
+        retention_policy: str = ""
+
+    async def handler(ctx: ToolContext, args: Input) -> ToolResult:
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    tool = ToolDef(
+        name="archive_records",
+        description="Archive records after a retention review.",
+        input_model=Input,
+        handler=handler,
+    )
+    registry = ToolRegistry((tool,))
+    result = registry.find_tools_json(("retention policy",))
+
+    def fail_schema(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("catalog search rebuilt an input schema")
+
+    monkeypatch.setattr(Input, "model_json_schema", fail_schema)
+    assert registry.find_tools(("retention policy",)) == (tool,)
+    messages = (
+        Message(
+            role="assistant",
+            content=(
+                ToolUseBlock(
+                    id="search-1",
+                    name=TOOL_SEARCH,
+                    input={"queries": ["unused"]},
+                ),
+            ),
+        ),
+        Message(
+            role="user",
+            content=(ToolResultBlock(tool_use_id="search-1", content=result),),
+        ),
+    )
+    assert registry.loaded_names(messages) == frozenset({"archive_records"})
 
 
 def test_registry_reserves_the_message_authority_field() -> None:

@@ -1,5 +1,5 @@
 """The builtin tool set: bash, read, write, edit, glob, grep, share_file, spawn,
-ask_user, request_credentials, load_skill, skill_search, connect_account,
+ask_user, request_credentials, load_skill, skill_search, tool_search, connect_account,
 cancel_spawn, message_spawn.
 
 Each file/shell handler reaches files only through `ctx.sandbox`, so the carrier's path and egress
@@ -30,6 +30,8 @@ under `$UFO_HOME/skills`, and returns each one's workflow followed by one tree o
 system prompt's `<available_skills>` block indexes the deploy tier and a member turn's
 `<saved_skills>` block the agent's saved skills. `skill_search` ranks every loadable skill's
 routing card by keyword and returns matching lines, the reach into whatever neither block shows.
+`tool_search` retrieves deferred definitions from the turn's already-authorized registry; it adds
+no authority and dispatch still reaches the original definition.
 `cancel_spawn` and `message_spawn` reach `ctx.subagents`, the same
 Subagents workflow that backs `spawn`, to cancel a running child or queue it a follow-up message
 that runs as its next turn — scoped to the children this turn
@@ -76,7 +78,7 @@ from ufo.tools.context import (
     UnknownSpawnTarget,
 )
 from ufo.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
-from ufo.tools.registry import ToolDef
+from ufo.tools.registry import TOOL_SEARCH_DEF, ToolDef
 from ufo.tools.tasks import (
     BACKGROUND_TASKS_DIR,
     FLAT_SLEEP_REFUSAL,
@@ -1241,6 +1243,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         handler=skill_search_handler,
         parallel_safe=True,
     ),
+    TOOL_SEARCH_DEF,
     ToolDef(
         name="connect_account",
         description=(

@@ -72,7 +72,7 @@ from ufo.schema.records import Agent, TerminalFrame, Turn
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult
-from ufo.tools.registry import ToolRegistry
+from ufo.tools.registry import TOOL_SEARCH, ToolRegistry
 from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.turns.transcript import CompactionSummary
@@ -461,12 +461,23 @@ class BashThenAnswerModel:
 
 @dataclass(frozen=True)
 class EchoAndBashModel:
-    """Round 1: the sample's sentinel echo call (denied by its pre hook) and a bash call (which
-    dispatches); round 2: answer once both tool results return."""
+    """Loads the sample's sentinel echo tool, then calls it beside bash before answering."""
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        if _answered(request):
+        results = {
+            block.tool_use_id
+            for message in request.messages
+            if isinstance(message.content, tuple)
+            for block in message.content
+            if isinstance(block, ToolResultBlock)
+        }
+        if {"c1", "c2"} <= results:
             yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        if "catalog" not in results:
+            yield ToolCallStart(id="catalog", name=TOOL_SEARCH)
+            yield ToolCallDelta(id="catalog", partial_json='{"queries":["sample echo message"]}')
             yield Usage(input_tokens=1, output_tokens=1)
             return
         yield ToolCallStart(id="c1", name=sample.TOOL_NAME)
@@ -684,10 +695,15 @@ async def test_sample_pre_deny_short_circuits_and_post_captures_the_other(
 
     stored = await engine.transcript.read()
     assert stored is not None
-    results = stored.messages[2].content
-    assert isinstance(results, tuple)
-    assert results[0].is_error is True and results[0].content == sample.HOOK_DENY_REASON
-    assert results[1].is_error is False
+    results = {
+        block.tool_use_id: block
+        for message in stored.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    }
+    assert results["c1"].is_error is True and results["c1"].content == sample.HOOK_DENY_REASON
+    assert results["c2"].is_error is False
 
 
 async def test_stop_fires_with_the_final_answer(db: None, tmp_path: Path) -> None:

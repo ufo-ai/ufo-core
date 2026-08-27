@@ -281,6 +281,7 @@ class ToolContext:
     connectors: ConnectorRegistry | None = None
     connector_read_only: bool = False
     find: FindCompleter | None = None
+    find_tools: Callable[[tuple[str, ...]], str] | None = None
     requestable_credentials: CredentialRequests | None = None
     models: tuple[str, ...] = ()
     """The model ids this deploy serves, `auto` first — the closed set a write that stores a
