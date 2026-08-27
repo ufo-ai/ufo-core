@@ -1,6 +1,13 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { IconChevronDown, IconPin, IconPinFilled, IconX } from "@tabler/icons-react";
+import {
+  IconChevronDown,
+  IconCirclePlus,
+  IconDots,
+  IconPin,
+  IconPinFilled,
+  IconX,
+} from "@tabler/icons-react";
 
 import {
   Breadcrumb,
@@ -15,15 +22,16 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Ticker } from "@/components/ui/ticker";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ObjectPane } from "@/kernel/objects";
-import { Empty, usePanelRead } from "@/kernel/panel";
+import { Empty } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
+import { useAppStatus, type AgentStatus } from "@/lib/appStatusStore";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
-import { friendlyMoment } from "@/lib/moments";
 import { openAgents } from "@/lib/router";
 import {
   AgentPane,
@@ -36,7 +44,7 @@ import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
-import type { ChatRow } from "@/lib/rail";
+import { appOrder, appRun, type ChatRow } from "@/lib/rail";
 import type { Agent, Member } from "@/lib/types";
 
 export type AgentsProps = {
@@ -59,25 +67,9 @@ export type AgentsProps = {
   buildWanted: boolean;
 };
 
-const MAIN = "Main";
-
-/** One app's live picture: the liveest turn it holds, what that turn is doing when the engine
- *  said so, and the marks that place a resting app in time. */
-export type AgentStatus = {
-  agent_id: string;
-  turn: "running" | "queued" | "parked" | null;
-  activity: string | null;
-  next_run_at: string | null;
-  last_active_at: string | null;
-  last_failed: boolean;
-};
+const NEW_APP = "New app";
 
 const RESPONDING = "Responding";
-
-/** How often the index asks what its apps are doing: at the rate a step changes while any of them
- *  is working, and at the panel's own resting rate when none is. */
-export const WORKING_STATUS_MS = 4_000;
-const RESTING_STATUS_MS = 30_000;
 
 /** The line a green row prints under its name, and how it is drawn: the engine's own word for the
  *  work in flight shimmers while that work moves, and a turn still waiting for its slot states so
@@ -87,19 +79,6 @@ function activeLine(status: AgentStatus | undefined): { text: string; shimmer: b
   if (status.turn === "running") return { text: status.activity ?? RESPONDING, shimmer: true };
   if (status.turn === "queued") return { text: "Queued", shimmer: false };
   return null;
-}
-
-/** The fact the dot cannot state, held at the pointer the way the chat rail holds a row's facts:
- *  where a resting app sits in time. A row the read has not answered for triggers nothing and
- *  draws no tooltip. */
-export function statusLine(status: AgentStatus | undefined): string | null {
-  if (status === undefined) return null;
-  const now = new Date();
-  if (status.turn === "parked") return "Paused";
-  if (status.last_failed) return "Last run failed";
-  if (status.next_run_at) return "Next run " + friendlyMoment(status.next_run_at, now);
-  if (status.last_active_at) return "Active " + friendlyMoment(status.last_active_at, now);
-  return "Idle";
 }
 
 /** What an app is doing, drawn so a change to it is seen: the words that replace the line are cut
@@ -113,14 +92,17 @@ export function statusLine(status: AgentStatus | undefined): string | null {
  *
  *  A screen reader is read the line once, whole: a character per element is a spelling, not a
  *  sentence. */
-function ActivityLine({ text, shimmer }: { text: string; shimmer: boolean }) {
+function ActivityLine({
+  asks,
+  text,
+  shimmer,
+}: {
+  asks: number;
+  text: string;
+  shimmer: boolean;
+}) {
   return (
-    <span
-      className={cn(
-        "block w-full truncate font-mono text-small text-ink-soft",
-        shimmer && "shimmer",
-      )}
-    >
+    <Ticker asks={asks} className={cn("font-mono text-small text-ink-soft", shimmer && "shimmer")}>
       <span className="sr-only">{text}</span>
       <span aria-hidden>
         {Array.from(text, (character, at) => (
@@ -129,16 +111,22 @@ function ActivityLine({ text, shimmer }: { text: string; shimmer: boolean }) {
           </span>
         ))}
       </span>
-    </span>
+    </Ticker>
   );
 }
 
-/** The dot the avatar wears, read before any words: the live tone while the app holds work in
- *  flight, the blocked tone when that work stopped wanting the member, and nothing otherwise. */
-function statusDot(status: AgentStatus | undefined): string | null {
-  if (status === undefined) return null;
-  if (status.turn === "running" || status.turn === "queued") return "bg-live";
-  if (status.turn === "parked" || status.last_failed) return "bg-blocked";
+/** The dot the mark wears, read before any words: the live tone while the app holds work in
+ *  flight, and the blocked tone while it is waiting on the member.
+ *
+ *  An app that is paused, whose last run failed, or that was installed and never set up are one
+ *  state to a member scanning a column — none of them is going to do anything until they act. They
+ *  differ in what to do next, which is the row's own screen to say, not a second colour's.
+ *
+ *  Work outranks the rest: an app that is running is telling the member something is happening now,
+ *  and that is true whether or not its setup is finished. */
+function statusDot(status: AgentStatus | undefined, setupDue: boolean): string | null {
+  if (status?.turn === "running" || status?.turn === "queued") return "bg-live";
+  if (setupDue || status?.turn === "parked" || status?.last_failed) return "bg-blocked";
   return null;
 }
 
@@ -152,11 +140,28 @@ function statusDot(status: AgentStatus | undefined): string | null {
  *  that closed it stays drawn behind the fold, since a track collapsing over nothing collapses
  *  instantly. A resting app's mark is held at the pointer instead, where the row costs nothing to
  *  read. */
+/** One app's row: the whole row is the one control, and it opens the app. What acts on the open app
+ *  is worn by that app's own pane, beside its name.
+ *
+ *  The row states what it knows in the row itself. An app's work is the fact the sidebar exists to
+ *  carry, and a fact held at the pointer is a fact the member has to go asking for — so the name
+ *  takes the first line and what the app is doing takes the second, in the resting tone under it.
+ *  The slot is a grid track rather than a line that appears, so the row's height is a number the
+ *  browser can move between; the line that closed it stays drawn behind the fold, since a track
+ *  collapsing over nothing collapses instantly.
+ *
+ *  That second line is for work in flight and nothing else. A column whose every row printed a
+ *  standing line would state the app doing something and the app doing nothing in the same weight,
+ *  and the row that matters would stop being the one that catches the eye. What a resting app has
+ *  to say — paused, or its last run failed — is said by the dot, which costs the column no height.
+ *  Both lines are held to the column and state their tails by travelling while the member is on the
+ *  row, the way a conversation's title does. */
 function AgentRow({
   agent,
   status,
   open,
   pinned,
+  collapsed,
   onPin,
   onOpen,
 }: {
@@ -164,112 +169,112 @@ function AgentRow({
   status: AgentStatus | undefined;
   open: boolean;
   pinned: boolean;
+  /** Whether the sidebar stands folded to its glyph rail, where the row is its mark and its dot. */
+  collapsed: boolean;
   onPin: () => void;
   onOpen: () => void;
 }) {
-  const active = activeLine(status);
+  const [asks, setAsks] = useState(0);
+  /* The app the member is standing in states its own work, in the pane, at length. The row saying
+     it again under the name is the same fact twice on one screen — so the open row keeps the dot,
+     which is the part the pane's own words cannot carry, and drops the line. */
+  const said = open ? null : activeLine(status);
   /** The line the fold closes over. A track collapsing over nothing collapses instantly, so the
    *  words that were there stay drawn until the fold has shut — and are then dropped, because a
    *  line nobody can see is a line that must not still be animating. */
-  const [held, setHeld] = useState(active);
-  if (active !== null && (held === null || held.text !== active.text || held.shimmer !== active.shimmer)) {
-    setHeld(active);
+  const [held, setHeld] = useState(said);
+  if (said !== null && (held === null || held.text !== said.text || held.shimmer !== said.shimmer)) {
+    setHeld(said);
   }
-  const dot = statusDot(status);
-  const line = active === null ? statusLine(status) : null;
+  const dot = statusDot(status, agent.setup_due === true);
   const row = (
-    <button
-      type="button"
-      aria-current={open}
-      onClick={onOpen}
-      className={cn(
-        "flex min-h-(--size-row) min-w-0 flex-1 items-center gap-sm border-0 bg-transparent",
-        "px-sm py-2xs text-left text-inherit",
-      )}
-    >
-      {/* The mark is the glyph a sidebar row draws, bare in the row's own ink, so the list reads
-          as the sidebar the pin act puts a row into. */}
-      <span className="relative shrink-0">
-        <AgentIcon name={agent.icon} className="size-(--size-glyph)" />
-        {/* The dot is always drawn and scales away when the app has nothing to say, so a change of
-            state is a mark growing or turning rather than one appearing out of nothing. */}
-        <span
-          aria-hidden
-          className={cn(
-            "absolute -right-2xs -bottom-2xs size-sm rounded-full transition duration-200 ease-control",
-            dot ?? "scale-0",
-          )}
-        />
-      </span>
-      <span className="flex min-w-0 flex-1 flex-col">
-        <span className="flex w-full items-baseline gap-sm">
-          <span className="min-w-0 truncate text-label">{agentName(agent.name)}</span>
-          {agent.main ? <span className="shrink-0 text-small">{MAIN}</span> : null}
-        </span>
-        <span
-          className={cn(
-            "grid transition-[grid-template-rows] duration-200 ease-control",
-            active === null ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
-          )}
-          onTransitionEnd={() => {
-            if (active === null) setHeld(null);
-          }}
-        >
-          <span className="min-h-0 min-w-0 overflow-hidden">
-            {held === null ? null : <ActivityLine text={held.text} shimmer={held.shimmer} />}
-          </span>
-        </span>
-      </span>
-    </button>
-  );
-  return (
-    /* The whole row wears the tooltip — anchored on the row, the fact opens past the list's edge
-       instead of over the pin act at the row's end, where it would stand between the pointer and
-       the control. The row is worn by the same tooltip whether or not it has a fact to hold,
-       because an app gains and loses one as it works and a row swapped for another element takes
-       the member's focus down with it. A row with nothing to say draws no content and so opens
-       nothing — which now takes an app with no purpose and nothing to report, because a shipped
-       app always states what it is for. */
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <li
-          className={cn("group/row flex items-center rounded-row hover:bg-fill", open && "bg-fill")}
-        >
-          {row}
-          {/* Pinning puts the app's row in the sidebar; the act rests until the pointer is on the
-              row, except where it is already done — an unmarked pinned row could only be unpinned
-              by a member who already remembered it was pinned. */}
-          <button
-            type="button"
-            aria-label={(pinned ? "Unpin " : "Pin ") + agentName(agent.name)}
-            aria-pressed={pinned}
-            onClick={onPin}
+    <li className={cn("group/row flex items-center rounded-row hover:bg-fill", open && "bg-fill")}>
+      <button
+        type="button"
+        aria-current={open}
+        aria-label={collapsed ? agentName(agent.name) : undefined}
+        onClick={onOpen}
+        onPointerEnter={() => setAsks((asked) => asked + 1)}
+        onPointerLeave={() => setAsks(0)}
+        onFocus={() => setAsks((asked) => asked + 1)}
+        onBlur={() => setAsks(0)}
+        className={cn(
+          "flex min-h-(--size-row) min-w-0 flex-1 items-center gap-md border-0 bg-transparent",
+          "px-sm py-2xs text-left text-inherit",
+          collapsed && "justify-center gap-0 px-0",
+        )}
+      >
+        {/* The mark is the glyph a sidebar row draws, bare in the row's own ink, so the list reads
+            as the sidebar the pin act puts a row into. */}
+        <span className="relative shrink-0">
+          <AgentIcon name={agent.icon} className="size-(--size-glyph)" />
+          {/* The dot is always drawn and scales away when the app has nothing to say, so a change of
+              state is a mark growing or turning rather than one appearing out of nothing. */}
+          <span
+            aria-hidden
             className={cn(
-              "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
-              pinned
-                ? undefined
-                : "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
+              "absolute -right-2xs -bottom-2xs size-sm rounded-full transition duration-200 ease-control",
+              dot ?? "scale-0",
             )}
-          >
-            {pinned ? (
-              <IconPinFilled className="size-icon" aria-hidden />
-            ) : (
-              <IconPin className="size-icon" aria-hidden />
-            )}
-          </button>
-        </li>
-      </TooltipTrigger>
-      {agent.purpose || line ? (
-        <TooltipContent>
-          {/* What the app is for, over what it is doing. A member meeting an app they did not
-              install asks the first question before the second, and the row itself has room for
-              neither — the name and the activity line are what it holds. */}
-          <span className="flex max-w-hint flex-col gap-2xs">
-            {agent.purpose ? <span>{agent.purpose}</span> : null}
-            {line ? <span className="text-ink-soft">{line}</span> : null}
+          />
+        </span>
+        {collapsed ? null : (
+          <span className="flex min-w-0 flex-1 flex-col">
+            <Ticker asks={asks} className="text-label">
+              {agentName(agent.name)}
+            </Ticker>
+            <span
+              className={cn(
+                "grid transition-[grid-template-rows] duration-200 ease-control",
+                said === null ? "grid-rows-[0fr]" : "grid-rows-[1fr]",
+              )}
+              onTransitionEnd={(event) => {
+                /* The line inside this track travels on its own transition, and that one bubbles
+                   here too. Only the track's own end means the fold has shut. */
+                if (event.target !== event.currentTarget) return;
+                if (said === null) setHeld(null);
+              }}
+            >
+              <span className="min-h-0 min-w-0 overflow-hidden">
+                {held === null ? null : (
+                  <ActivityLine asks={asks} text={held.text} shimmer={held.shimmer} />
+                )}
+              </span>
+            </span>
           </span>
-        </TooltipContent>
-      ) : null}
+        )}
+      </button>
+      {/* Pinning moves the app up the sidebar's order. The act rests until the pointer is on the
+          row whether or not it is already done: a mark standing on every pinned row is a column of
+          controls nobody is using, and where the pinned rows lead the column that is most of it.
+          What the pin did is read off the order, which is the thing it changed. */}
+      {collapsed ? null : (
+        <button
+          type="button"
+          aria-label={(pinned ? "Unpin " : "Pin ") + agentName(agent.name)}
+          aria-pressed={pinned}
+          onClick={onPin}
+          className={cn(
+            "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
+            "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
+          )}
+        >
+          {pinned ? (
+            <IconPinFilled className="size-icon" aria-hidden />
+          ) : (
+            <IconPin className="size-icon" aria-hidden />
+          )}
+        </button>
+      )}
+    </li>
+  );
+  if (!collapsed) return row;
+  /* On the glyph rail a row is its mark, so the name it cannot draw is held at the pointer — the
+     same bargain every other folded row in the sidebar makes. */
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{row}</TooltipTrigger>
+      <TooltipContent side="right">{agentName(agent.name)}</TooltipContent>
     </Tooltip>
   );
 }
@@ -373,19 +378,27 @@ function AppSettings({
   );
 }
 
-/** The apps index: one row per app under the New application act, the wizard's run in flight at
- *  the head while one is live. The apps screen carried it as a column once; it is the sidebar's
- *  Applications flyout now, mounted only while that flyout is open, which is what scopes the
- *  status polling to the moments the rows are read. */
+/** The apps index: the workspace's apps as the sidebar draws them, the wizard's run in flight at
+ *  the head while one is live. What each app is doing comes from `appStatusStore`, which every
+ *  reader of the rows shares.
+ *
+ *  The column is shared with the member's conversations, so the list states a run of itself and
+ *  holds the rest behind the `More` row. It takes what the sidebar can spare and scrolls inside
+ *  that, opened or not: a list that grew with the workspace would push the conversations off the
+ *  screen entirely, and a member who pinned thirty apps did that to the column just as surely as
+ *  one who opened the tail. The row that opens the tail stands outside the scroll, so the way to
+ *  close the list again never scrolls away from the member who opened it. */
 export function AppsIndex({
   agents,
   openId,
   building,
   pinned,
+  expanded,
+  collapsed,
+  onExpand,
   onPin,
   onOpen,
   onBuild,
-  children,
 }: {
   agents: Agent[];
   /** The agent whose pane the page is showing, or null when no app holds it. */
@@ -393,42 +406,32 @@ export function AppsIndex({
   /** Whether the wizard holds the pane, which draws its row as the place the member already is. */
   building: boolean;
   pinned: string[];
+  /** Whether the member has opened the list past the run it draws on its own. */
+  expanded: boolean;
+  /** Whether the sidebar stands folded to its glyph rail. */
+  collapsed: boolean;
+  onExpand: (expanded: boolean) => void;
   onPin: (agentId: string) => void;
   onOpen: (agentId: string) => void;
   onBuild: () => void;
-  /** Rows the caller lists after the apps — the fixed destinations the sidebar files under
-   *  Applications, so the flyout carries the whole section. */
-  children?: React.ReactNode;
 }) {
   const mainAgent = useMainAgent();
-  const [statusRate, setStatusRate] = useState(RESTING_STATUS_MS);
-  const statusRead = usePanelRead<{ statuses: AgentStatus[] }>(
-    "/api/agents/status",
-    0,
-    statusRate,
-  );
-  const statuses: Record<string, AgentStatus> =
-    statusRead.phase === "ready"
-      ? Object.fromEntries(statusRead.payload.statuses.map((status) => [status.agent_id, status]))
-      : {};
-  /** A step an app takes is over in seconds, so a line naming one is only true if it is re-read at
-   *  that rate — but a screen of resting apps says the same thing every time it is asked, so the
-   *  rate rides on whether anything is working at all. */
-  const working = Object.values(statuses).some(
-    (status) => status.turn === "running" || status.turn === "queued",
-  );
-  const wanted = working ? WORKING_STATUS_MS : RESTING_STATUS_MS;
-  if (statusRead.phase === "ready" && statusRate !== wanted) setStatusRate(wanted);
-  /** The index reads most-recent-first: an app holding work in flight sorts as now, a resting one
-   *  by its last activity, and the sort is stable, so rows the read has not placed keep the order
-   *  the boot read served. */
-  const recency = (agent: Agent): number => {
-    const status = statuses[agent.id];
-    if (status === undefined) return 0;
-    if (status.turn === "running" || status.turn === "queued") return Number.MAX_SAFE_INTEGER;
-    return status.last_active_at ? Date.parse(status.last_active_at) : 0;
+  const { statuses } = useAppStatus();
+  /** Where an app stands in time — what it last did, and nothing about what it is doing now. Work
+   *  in flight lifts a row to the top of the list rather than moving it through this ladder: an app
+   *  that sorted as `now` while it worked would drop back down the column the moment it stopped,
+   *  and take every row it passed with it. */
+  const lastActiveAt = (agentId: string): number | null => {
+    const at = statuses[agentId]?.last_active_at;
+    return at ? Date.parse(at) : null;
   };
-  const ordered = [...agents].sort((a, b) => recency(b) - recency(a));
+  const working = (agentId: string): boolean => {
+    const status = statuses[agentId];
+    return status?.turn === "running" || status?.turn === "queued";
+  };
+  const ordered = appOrder(agents, pinned, lastActiveAt);
+  const run = appRun(ordered, working);
+  const shown = expanded ? run.shown.concat(run.more) : run.shown;
   // The run lives on the wizard's own store key — busy or spoken before it founds, a forwarding
   // record after — so it survives every unmount of this list; a reload clears the store, so no
   // phantom row survives one.
@@ -440,15 +443,40 @@ export function AppsIndex({
     (held.busy || (held.messages ?? []).length > 0 || held.founded !== null);
   const runTitle = held.founded?.title ?? null;
   return (
-    <nav aria-label="Apps" className="flex min-h-0 flex-1 flex-col gap-sm">
-      <div className="flex min-h-0 flex-1 flex-col gap-lg overflow-y-auto">
-        <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
+    <nav aria-label="Apps" className="flex min-h-0 flex-col">
+      <div className="flex min-h-0 max-h-(--size-apps-open) flex-col overflow-y-auto">
+        <ul className="m-0 flex list-none flex-col gap-px p-0">
+          {/* Building an app is the one act this list carries, so it stands as the list's first row
+              rather than behind a mark on the heading: a member who has not built one yet has no
+              reason to go looking under a control for it. Every member is offered it — the `agent`
+              kind admits a create from any speaking member and stamps them the owner — and the
+              wizard rides the main agent's own chat, so a workspace with no main agent offers
+              nothing to ride. */}
+          {mainAgent ? (
+            <li>
+              <button
+                type="button"
+                onClick={onBuild}
+                className={cn(
+                  "flex h-(--size-row) w-full items-center gap-md rounded-full border-0",
+                  "bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
+                  collapsed && "justify-center gap-0 px-0",
+                )}
+                aria-label={collapsed ? NEW_APP : undefined}
+              >
+                <IconCirclePlus className="size-(--size-glyph) shrink-0" aria-hidden />
+                <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>
+                  {NEW_APP}
+                </span>
+              </button>
+            </li>
+          ) : null}
           {/* The run in flight, named the way the wizard's own pane is until the conversation has
               a title of its own. While the pane shows it states where the member already is;
               while an app holds the pane instead, the row is the way back to the run. It is not
               an app: nothing here opens one, and the app's real row arrives from the apps read
               when it lands. */}
-          {building || running ? (
+          {(building || running) && !collapsed ? (
             <li className={cn("flex items-center gap-xs rounded-row", building && "bg-fill")}>
               {building ? (
                 <div
@@ -481,33 +509,48 @@ export function AppsIndex({
               )}
             </li>
           ) : null}
-          {ordered.map((agent) => (
+          {shown.map((agent) => (
             <AgentRow
               key={agent.id}
               agent={agent}
               status={statuses[agent.id]}
               open={!building && agent.id === openId}
               pinned={pinned.includes(agent.id)}
+              collapsed={collapsed}
               onPin={() => onPin(agent.id)}
               onOpen={() => onOpen(agent.id)}
             />
           ))}
-          {children}
         </ul>
       </div>
-      {/* Every member is offered the act: the `agent` kind admits a create from any speaking
-          member and stamps them the owner, and the wizard rides the main agent's own chat. */}
-      {mainAgent ? (
-        <Button variant="send" size="bar" className="mx-sm shrink-0" onClick={onBuild}>
-          New application
-        </Button>
+      {/* The rest of the workspace's apps, behind one row. It states what it does rather than how
+          many it holds: a count is read as a badge of things wanting attention, and these are
+          only the apps nobody pinned. The row stands while there is a tail to open or a run to
+          close, so the member who opened the list can put it back. */}
+      {run.more.length || expanded ? (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-label={expanded ? "Less applications" : "More applications"}
+          onClick={() => onExpand(!expanded)}
+          className={cn(
+            "flex h-(--size-row) w-full shrink-0 items-center gap-md rounded-full border-0",
+            "bg-transparent px-sm text-left text-label text-ink-soft hover:bg-fill",
+            collapsed && "justify-center gap-0 px-0",
+          )}
+        >
+          <IconDots className="size-(--size-glyph) shrink-0" aria-hidden />
+          <span className={cn("min-w-0 flex-1 truncate", collapsed && "hidden")}>
+            {expanded ? "Less" : "More"}
+          </span>
+        </button>
       ) : null}
     </nav>
   );
 }
 
 /** The apps screen: the selected app's pane whole — the main app on the bare route — or the
- *  app-building wizard at its own address; switching apps is the sidebar's Applications flyout. */
+ *  app-building wizard at its own address; switching apps is the sidebar's own list. */
 export function Agents({
   member,
   selected,

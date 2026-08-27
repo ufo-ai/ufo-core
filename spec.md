@@ -648,11 +648,11 @@ with the grant list inside it the admin's), which hold its connector accounts as
 own and whose facts link to the workspace usage view: spend is read there and nowhere else, per
 agent inside the admin's rollup. Beside the per-agent reads,
 `api/agents/status` answers the apps index one row per agent that member's audience holds — the
-liveest turn on it, what a running one is doing, when it last moved, whether its most recent
-terminal turn failed, and the soonest unpaused scheduled task where no turn state stands in front
-of it — with every turn fact on that row computed only from conversations the reader reads, so a
-workspace-visible agent tells each member their own picture of it and never a colleague's private
-turn.
+liveest turn on it, what a running one is doing, when it last moved, and whether its most recent
+terminal turn failed — with every fact on that row computed only from conversations the reader
+reads, so a workspace-visible agent tells each member their own picture of it and never a
+colleague's private turn. Every open tab polls it for as long as it is open, so it costs one turn
+aggregate for all the agents at once and no per-agent read of a resting one.
 `workspace/starters` answers the start screen what this member can ask for before they have asked
 anything: two applications, one check-in drawn from their own memory, and one unlock. The ranking is
 made where it is read, by the read that finds none fresh, and cached under that member's own

@@ -399,11 +399,22 @@ export async function openRow(name: string): Promise<void> {
   await pressRow(name);
 }
 
-/** The apps index, which the sidebar's Applications flyout holds while it is open. The caller
- *  raises the flyout first — with `fireEvent.click` on the "Applications" header button, because
- *  `userEvent`'s hover opens the flyout and its click then toggles it shut again. */
+/** The apps index: the sidebar's own list of the workspace's apps, which stands on every screen
+ *  rather than behind a flyout the caller has to raise. */
 export function agentIndex(): Promise<HTMLElement> {
   return screen.findByRole("navigation", { name: "Apps" });
+}
+
+/** Open the list past the run it draws on its own, where an app nobody pinned stands. Asked of a
+ *  list already whole, it does nothing. */
+export async function expandApps(): Promise<void> {
+  const more = screen.queryByRole("button", { name: "More applications" });
+  if (more) await userEvent.click(more);
+}
+
+/** The act that builds an app, which stands as the first row of the apps list. */
+export async function openNewApplication(): Promise<void> {
+  await userEvent.click(await screen.findByRole("button", { name: "New app" }));
 }
 
 /** What the app pane's conversation half is headed by before a conversation names it. */
@@ -430,9 +441,9 @@ export async function heldConversation(app = "Assistant"): Promise<string> {
 
 export async function openAgentRow(name: string): Promise<void> {
   const index = await agentIndex();
-  await userEvent.click(
-    await within(index).findByRole("button", { name: new RegExp("^" + name) }),
-  );
+  const row = new RegExp("^" + name);
+  if (!within(index).queryByRole("button", { name: row })) await expandApps();
+  await userEvent.click(await within(index).findByRole("button", { name: row }));
 }
 
 /** An agent's three reads, which stand in a panel over the screen rather than on a tab of the

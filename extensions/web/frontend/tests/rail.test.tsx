@@ -8,9 +8,13 @@ import { beforeEach, expect, test } from "vitest";
 import { App, NARROW } from "@/App";
 import { agentName } from "@/lib/agentName";
 import {
+  appOrder,
+  appRun,
   bumpChat,
+  heldAppsExpanded,
   heldRailShown,
   heldRailShut,
+  holdAppsExpanded,
   holdRailShown,
   holdRailShut,
   holdRailSort,
@@ -20,6 +24,8 @@ import {
   stampIso,
   type ChatRow,
 } from "@/lib/rail";
+import { pickAppsExpanded, railState, resetRailStore } from "@/lib/railStore";
+import type { Agent } from "@/lib/types";
 
 import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
@@ -166,7 +172,7 @@ const TERMINAL_CHAT = {
  *  menu is dismissed afterwards so a later `filterBy` starts shut. A surface is a choice turned on
  *  and off, so its row is a menu checkbox rather than a button. */
 async function filterBy(label: string) {
-  await userEvent.click(await screen.findByRole("button", { name: "Conversations" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Chats options" }));
   await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: label }));
   await userEvent.keyboard("{Escape}");
 }
@@ -231,7 +237,7 @@ test("the drawer holds the rail at a phone width, and a pick shuts it", async ()
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
   const rail = within(drawer).getByRole("navigation", { name: "Workspace" });
-  expect(within(rail).getByRole("button", { name: "Conversations" })).toBeTruthy();
+  expect(within(rail).getByRole("button", { name: "Chats options" })).toBeTruthy();
 
   await userEvent.click(await within(rail).findByRole("button", { name: /Pick one thread/ }));
 
@@ -243,11 +249,11 @@ test("a tick leaves the filter open, so both surfaces are named in one visit", a
   wire({ ...chatsOnWire([CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Conversations" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Chats options" }));
   await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Slack" }));
   await userEvent.click(screen.getByRole("menuitemcheckbox", { name: "Terminal" }));
 
-  expect(screen.getByRole("button", { name: "Conversations" }).getAttribute("aria-expanded")).toBe(
+  expect(screen.getByRole("button", { name: "Chats options" }).getAttribute("aria-expanded")).toBe(
     "true",
   );
   expect(
@@ -298,6 +304,119 @@ test("a browser keeps which groups are shut, and holding none is not holding an 
 test("an agent name carrying a comma survives the round trip", () => {
   holdRailShut(["Reyes, Pat", "Other members"]);
   expect(heldRailShut()).toEqual(["Reyes, Pat", "Other members"]);
+});
+
+function app(id: string, name: string): Agent {
+  return { ...AGENT, id, name, main: false };
+}
+
+function ids(apps: Agent[]): string[] {
+  return apps.map((one) => one.id);
+}
+
+const WORKED_AT: Record<string, number> = { radar: 300, wiki: 200, brief: 100 };
+
+function worked(agentId: string): number | null {
+  return WORKED_AT[agentId] ?? null;
+}
+
+test("pinned apps stand in the order the member pinned them, whatever their names", () => {
+  const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
+  expect(ids(appOrder(apps, ["wiki", "brief", "radar"], worked))).toEqual([
+    "wiki",
+    "brief",
+    "radar",
+  ]);
+  expect(ids(appOrder(apps, ["brief"], worked))).toEqual(["brief", "radar", "wiki"]);
+});
+
+test("an unpinned app that worked more recently stands above one that worked longer ago", () => {
+  const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
+  expect(ids(appOrder(apps, [], worked))).toEqual(["radar", "wiki", "brief"]);
+});
+
+test("an app that has never worked lands under the ones that have, by name", () => {
+  const apps = [app("zed", "Zed"), app("radar", "Radar"), app("apollo", "Apollo")];
+  expect(ids(appOrder(apps, [], worked))).toEqual(["radar", "apollo", "zed"]);
+});
+
+test("apps sharing a moment keep the order they arrived in", () => {
+  const apps = [app("zed", "Zed"), app("apollo", "Apollo"), app("brief", "Brief")];
+  expect(ids(appOrder(apps, [], () => 500))).toEqual(["zed", "apollo", "brief"]);
+});
+
+test("a pin no live app answers draws nothing", () => {
+  const apps = [app("radar", "Radar")];
+  expect(ids(appOrder(apps, ["removed", "radar"], worked))).toEqual(["radar"]);
+});
+
+test("the collapsed run is the same length whatever the workspace is doing", () => {
+  const many = "abcdefghij".split("").map((id) => app(id, id.toUpperCase()));
+
+  const idle = appRun(many, () => false);
+  expect(ids(idle.shown)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
+  expect(ids(idle.more)).toEqual(["i", "j"]);
+
+  /* One app starts working: it rises to the top and the run keeps its length, so the column does
+     not collapse around whatever happens to be busy. */
+  const busy = appRun(many, (agentId) => agentId === "i");
+  expect(ids(busy.shown)).toEqual(["i", "a", "b", "c", "d", "e", "f", "g"]);
+  expect(ids(busy.more)).toEqual(["h", "j"]);
+});
+
+test("the tail behind More holds every app the run did not, however many there are", () => {
+  const many = Array.from({ length: 30 }, (_, at) => app("a" + at, "A" + at));
+  const run = appRun(many, () => false);
+  /* An app the list refused to draw is one the member has no way to reach: the open list scrolls
+     rather than ending, so nothing past the run's length is dropped. */
+  expect(run.shown.length).toBe(8);
+  expect(run.more.length).toBe(22);
+  expect(ids(run.shown.concat(run.more))).toEqual(ids(many));
+});
+
+test("a working app rises to the top and leaves the order under it alone", () => {
+  const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
+
+  const run = appRun(apps, (agentId) => agentId === "radar");
+  expect(ids(run.shown)).toEqual(["radar", "brief", "wiki"]);
+  expect(ids(run.more)).toEqual([]);
+
+  /* The work ends and the app falls back to where the ladder already had it — the two rows it
+     passed are in the same order they were before it rose. */
+  const rested = appRun(apps, () => false);
+  expect(ids(rested.shown)).toEqual(["brief", "radar", "wiki"]);
+});
+
+test("pinning moves an app up the order and draws the same number of rows", () => {
+  const many = "abcdefghij".split("").map((id) => app(id, id.toUpperCase()));
+  const unpinned = appRun(appOrder(many, [], () => null), () => false);
+  expect(ids(unpinned.shown)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
+
+  const pinned = appRun(appOrder(many, ["i"], () => null), () => false);
+  expect(ids(pinned.shown)).toEqual(["i", "a", "b", "c", "d", "e", "f", "g"]);
+  expect(pinned.more.length).toBe(2);
+});
+
+test("the apps list opens collapsed, and the expansion the member asked for holds", () => {
+  expect(heldAppsExpanded()).toBe(false);
+
+  holdAppsExpanded(true);
+  expect(heldAppsExpanded()).toBe(true);
+
+  holdAppsExpanded(false);
+  expect(heldAppsExpanded()).toBe(false);
+});
+
+test("the store opens on the expansion this browser holds, and a pick writes it back", () => {
+  localStorage.setItem("apps-expanded", "expanded");
+  expect(railState().appsExpanded).toBe(true);
+
+  pickAppsExpanded(false);
+  expect(railState().appsExpanded).toBe(false);
+  expect(heldAppsExpanded()).toBe(false);
+
+  resetRailStore();
+  expect(railState().appsExpanded).toBe(false);
 });
 
 test("the recency rail heads its own conversations with nothing at all", async () => {
@@ -1055,28 +1174,28 @@ test("a rail row lands in the chat app when one is shipped", async () => {
   expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=" + CONVO_ID);
 });
 
-test("new conversation opens the chat app at its start screen when one is shipped", async () => {
+test("the ask row opens the chat app at its start screen when one is shipped", async () => {
   location.hash = "#/";
   wire({});
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(rail.getByRole("button", { name: "Ask assistant" }));
 
   expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
 });
 
-test("the new-conversation control targets the main agent, and offers no other", async () => {
+test("the ask control targets the main agent, and offers no other", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   single.unmount();
 
   location.hash = "";
   wire({});
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
@@ -1085,28 +1204,27 @@ test("the new-conversation control targets the main agent, and offers no other",
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
-test("the applications flyout opens the agent's page, and the sidebar starts the conversation", async () => {
+test("the apps list opens the agent's page, and the sidebar starts the conversation", async () => {
   location.hash = "#/";
   wire({ "/settings": () => json(SETTINGS), "/connections": () => json({ connections: [] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("main");
 
-  await userEvent.click(screen.getByRole("button", { name: "Applications" }));
   await openAgentRow("Assistant");
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull();
+  expect(screen.getByRole("navigation", { name: "Apps" })).toBeTruthy();
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(rail.getByRole("button", { name: "Ask assistant" }));
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
-test("resting on an app's row states what it is for, over what it is doing", async () => {
-  /** The first question a member has about an app they did not install is what it is for, and the
-   *  row itself has no space for the answer — it holds the name and the activity line. So the fact
-   *  the pointer opens carries both, the purpose over the state. */
+test("an app with nothing in flight states nothing under its name", async () => {
+  /** The second line is for work in flight. A column of apps that each printed a standing line
+   *  would state the ones doing something and the ones doing nothing in the same weight, and the
+   *  row that matters would stop being the one that catches the eye. */
   location.hash = "#/";
   wire({
     "/settings": () => json(SETTINGS),
@@ -1117,14 +1235,14 @@ test("resting on an app's row states what it is for, over what it is doing", asy
   const purposeful = { ...AGENT, purpose: "Answers from what this workspace has recorded." };
   render(<App agents={[purposeful]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("main");
+  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
 
-  await userEvent.click(screen.getByRole("button", { name: "Applications" }));
   const index = within(await screen.findByRole("navigation", { name: "Apps" }));
-  await userEvent.hover(await index.findByRole("button", { name: /^Assistant/ }));
-  const fact = await screen.findByText("Answers from what this workspace has recorded.");
-  const state = await screen.findByText("Idle");
-  // The purpose stands first: it is the question asked before the app is opened at all.
-  expect(fact.compareDocumentPosition(state) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const row = await index.findByRole("button", { name: /^Assistant/ });
+  expect(within(row).queryByText("Answers from what this workspace has recorded.")).toBeNull();
+  expect(index.queryByText(/Idle|Active/)).toBeNull();
+  // The name is all the row states, so it is the whole of what the row reads as.
+  expect(row.textContent).toBe("Assistant");
 });
 
 test("the conversations rail stands in the sidebar whatever the destination", async () => {
@@ -1138,12 +1256,12 @@ test("the conversations rail stands in the sidebar whatever the destination", as
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   expect(await rail.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  expect(rail.getByRole("button", { name: "New conversation" })).toBeTruthy();
+  expect(rail.getByRole("button", { name: "Ask assistant" })).toBeTruthy();
 
   await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
   expect(await screen.findByRole("heading", { name: "Team" })).toBeTruthy();
   expect(rail.getByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  expect(rail.getByRole("button", { name: "New conversation" })).toBeTruthy();
+  expect(rail.getByRole("button", { name: "Ask assistant" })).toBeTruthy();
 });
 
 test("the chat header names the agent holding the conversation and what it is called, never the model", async () => {
@@ -1240,11 +1358,11 @@ test("the sidebar marks the destination the member is in and leaves the others o
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   const marked = () =>
-    ["New conversation", "Connectors", "Workspace"].filter(
+    ["Ask assistant", "Connectors", "Workspace"].filter(
       (name) => rail.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
-  expect(marked()).toEqual(["New conversation"]);
+  expect(marked()).toEqual(["Ask assistant"]);
 
   await userEvent.click(rail.getByRole("button", { name: "Workspace" }));
   await waitFor(() => expect(marked()).toEqual(["Workspace"]));
@@ -1253,10 +1371,9 @@ test("the sidebar marks the destination the member is in and leaves the others o
   await userEvent.click(rail.getByRole("button", { name: "Connectors" }));
   await waitFor(() => expect(marked()).toEqual(["Connectors"]));
 
-  await userEvent.click(rail.getByRole("button", { name: "Applications" }));
   const index = within(await screen.findByRole("navigation", { name: "Apps" }));
-  expect(index.getByText("Assistant")).toBeTruthy();
-  expect(index.getByText("Second")).toBeTruthy();
+  expect(index.getByRole("button", { name: "Assistant" })).toBeTruthy();
+  expect(index.getByRole("button", { name: "Second" })).toBeTruthy();
 });
 
 test("a failed rail read states it and retries on demand", async () => {

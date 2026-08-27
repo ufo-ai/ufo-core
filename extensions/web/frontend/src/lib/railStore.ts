@@ -5,15 +5,19 @@ import { getJson } from "@/lib/api";
 import { isPortalChat } from "@/lib/audience";
 import {
   bumpChat,
+  heldAppsExpanded,
   heldPinned,
   heldRailShown,
   heldRailShut,
   heldRailSort,
+  heldSectionsShut,
   heldSidebar,
+  holdAppsExpanded,
   holdPinned,
   holdRailShown,
   holdRailShut,
   holdRailSort,
+  holdSectionsShut,
   holdSidebar,
   chatRows,
   mergeChats,
@@ -56,6 +60,9 @@ export type RailState = {
   shut: string[] | null;
   collapsed: boolean;
   pinned: string[] | null;
+  appsExpanded: boolean;
+  /** The sections the member has folded shut, by name. */
+  sectionsShut: string[];
 };
 
 /** The state a browser opens on: nothing read yet, and every choice as this browser holds it. Built
@@ -72,6 +79,8 @@ function fresh(): RailState {
     shut: heldRailShut(),
     collapsed: heldSidebar(),
     pinned: heldPinned(),
+    appsExpanded: heldAppsExpanded(),
+    sectionsShut: heldSectionsShut(),
   };
 }
 
@@ -219,6 +228,20 @@ export function foldSidebar(collapsed: boolean): void {
 export function pickPinned(pinned: string[]): void {
   holdPinned(pinned);
   update((held) => ({ ...held, pinned }));
+}
+
+/** Fold a section shut, or open it again. Held by name, so a section the sidebar has stopped
+ *  drawing keeps its answer and governs nothing until it is drawn again. */
+export function pickSectionShut(label: string, shut: boolean): void {
+  const held = railState().sectionsShut.filter((name) => name !== label);
+  const next = shut ? held.concat(label) : held;
+  holdSectionsShut(next);
+  update((state) => ({ ...state, sectionsShut: next }));
+}
+
+export function pickAppsExpanded(appsExpanded: boolean): void {
+  holdAppsExpanded(appsExpanded);
+  update((held) => ({ ...held, appsExpanded }));
 }
 
 export function resetRailStore(): void {

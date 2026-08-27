@@ -2385,6 +2385,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
                 "mine": False,
                 "hidden": False,
                 "homepage": {"state": "none"},
+                "setup_due": False,
             }
         ],
     }
@@ -2474,6 +2475,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "mine": False,
             "hidden": False,
             "homepage": {"state": "none"},
+            "setup_due": False,
             "web_audience": [],
         },
         {
@@ -2487,6 +2489,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "mine": False,
             "hidden": False,
             "homepage": {"state": "none"},
+            "setup_due": False,
             "web_audience": ["member@example.com"],
         },
     ]
@@ -2769,7 +2772,6 @@ async def test_agents_status_reports_the_liveest_turn_and_last_activity(
         "agent_id": str(agent_id),
         "turn": "running",
         "activity": None,
-        "next_run_at": None,
         "last_active_at": (base + timedelta(minutes=5)).isoformat(),
         "last_failed": False,
     }
@@ -2780,7 +2782,6 @@ async def test_agents_status_reports_the_liveest_turn_and_last_activity(
         "agent_id": str(still),
         "turn": None,
         "activity": None,
-        "next_run_at": None,
         "last_active_at": None,
         "last_failed": False,
     }
@@ -2825,7 +2826,6 @@ async def test_agents_status_fences_the_turn_aggregate_to_the_readers_conversati
             "agent_id": str(agent_id),
             "turn": "running",
             "activity": "Checking the private notes.",
-            "next_run_at": None,
             "last_active_at": (base + timedelta(minutes=5)).isoformat(),
             "last_failed": True,
         }
@@ -2838,7 +2838,6 @@ async def test_agents_status_fences_the_turn_aggregate_to_the_readers_conversati
             "agent_id": str(agent_id),
             "turn": None,
             "activity": None,
-            "next_run_at": None,
             "last_active_at": None,
             "last_failed": False,
         }
@@ -2900,47 +2899,6 @@ async def test_agents_status_marks_the_latest_terminal_failure_until_a_later_run
     assert cleared["last_active_at"] == (base + timedelta(hours=1)).isoformat()
 
 
-async def test_agents_status_surfaces_the_soonest_unpaused_scheduled_task(
-    web: tuple[AsyncClient, UUID, UUID],
-) -> None:
-    client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "m@example.com")
-    conversation = await _seed_agent_conversation(
-        workspace_id, agent_id, queue_key="web/tasks", audience=str(SHARED_AUDIENCE), member_id=None
-    )
-    soonest = datetime(2026, 8, 19, 7, 0, tzinfo=UTC)
-    await _seed_radar_task(
-        workspace_id,
-        agent_id,
-        conversation,
-        name="later",
-        created_by_member_id=member_id,
-        next_run_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
-    )
-    await _seed_radar_task(
-        workspace_id,
-        agent_id,
-        conversation,
-        name="sooner",
-        created_by_member_id=member_id,
-        next_run_at=soonest,
-    )
-    await _seed_radar_task(
-        workspace_id,
-        agent_id,
-        conversation,
-        name="stopped",
-        created_by_member_id=member_id,
-        next_run_at=datetime(2026, 8, 18, 6, 0, tzinfo=UTC),
-        paused=True,
-    )
-    payload = (
-        await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
-    ).json()
-    row = next(entry for entry in payload["statuses"] if entry["agent_id"] == str(agent_id))
-    assert row["next_run_at"] == soonest.isoformat()
-
-
 @contextmanager
 def _executed_statements() -> Iterator[list[str]]:
     """Every statement this loop's pool sends to the database while the block runs, read off the
@@ -2970,12 +2928,13 @@ def _executed_statements() -> Iterator[list[str]]:
             sa.event.remove(engine.sync_engine, "before_cursor_execute", record)
 
 
-async def test_agents_status_leaves_the_task_store_alone_for_an_agent_holding_a_turn(
+async def test_agents_status_never_reads_the_task_store(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The scheduled-task read is skipped for an agent whose turn state already fills its row, not
-    taken and discarded: the poll sends the database no `scheduled_task` statement at all while the
-    turn runs, and sends one the moment that turn ends and the row has nothing else to say."""
+    """Every open tab polls this for as long as it is open, so the read costs one turn aggregate
+    and nothing per agent in the object registry: an agent standing still beside an unpaused
+    scheduled task sends the database no `scheduled_task` statement, and neither does the same
+    agent once a turn is running on it."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "m@example.com")
     conversation = await _seed_agent_conversation(
@@ -2989,7 +2948,17 @@ async def test_agents_status_leaves_the_task_store_alone_for_an_agent_holding_a_
         created_by_member_id=member_id,
         next_run_at=datetime(2026, 8, 20, 9, 0, tzinfo=UTC),
     )
-    turn_id = await _seed_status_turn(
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    with _executed_statements() as idle:
+        resting = (await client.get(STATUS_PATH, headers=headers)).json()
+
+    row = next(entry for entry in resting["statuses"] if entry["agent_id"] == str(agent_id))
+    assert row["turn"] is None
+    assert "next_run_at" not in row
+    assert [statement for statement in idle if "scheduled_task" in statement] == []
+
+    await _seed_status_turn(
         workspace_id,
         agent_id,
         conversation,
@@ -2997,31 +2966,12 @@ async def test_agents_status_leaves_the_task_store_alone_for_an_agent_holding_a_
         status="running",
         at=datetime(2026, 8, 19, 6, 0, tzinfo=UTC),
     )
-
     with _executed_statements() as busy:
-        payload = (
-            await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
-        ).json()
+        working = (await client.get(STATUS_PATH, headers=headers)).json()
 
-    row = next(entry for entry in payload["statuses"] if entry["agent_id"] == str(agent_id))
+    row = next(entry for entry in working["statuses"] if entry["agent_id"] == str(agent_id))
     assert row["turn"] == "running"
-    assert row["next_run_at"] is None
     assert [statement for statement in busy if "scheduled_task" in statement] == []
-
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == turn_id)
-            .values(status="done", terminal=TerminalFrame(status="done", text="ended").model_dump())
-        )
-    with _executed_statements() as idle:
-        settled = (
-            await client.get(STATUS_PATH, headers={"cookie": f"{SESSION_COOKIE}={token}"})
-        ).json()
-
-    row = next(entry for entry in settled["statuses"] if entry["agent_id"] == str(agent_id))
-    assert row["next_run_at"] == datetime(2026, 8, 20, 9, 0, tzinfo=UTC).isoformat()
-    assert [statement for statement in idle if "scheduled_task" in statement]
 
 
 async def test_agents_status_answers_only_the_member_audience(
@@ -12009,6 +11959,36 @@ async def test_an_agent_no_extension_shipped_declares_nothing_at_all(
         "instructions": "",
         "own_page": False,
     }
+
+
+async def test_the_boot_read_says_which_app_still_owes_its_member_setup(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The rail draws one row per app, and the row for an app that cannot work yet says so from the
+    boot read — the poll beside it re-reads every four seconds and would pay for this per agent
+    every tick.
+
+    It is a fact about the declaration, never about the column: every provision writes one, and an
+    app that needs nothing writes an empty one. A row reading `setup` as present-means-unfinished
+    would mark most of the rail unfinished for good. An agent a member built declares nothing at
+    all and owes nothing."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    quiet = await _seed_app_agent(workspace_id, "radar")
+    wired = await _seed_app_agent(workspace_id, "meetings")
+    await _declare_setup(quiet, AgentSetup())
+    await _declare_setup(wired, AgentSetup(connectors=("acme",), instructions="Connect ACME."))
+
+    async def due() -> dict[str, bool]:
+        read = await client.get("/surface/web/api/agents", headers=cookie)
+        return {agent["name"]: agent["setup_due"] for agent in read.json()["agents"]}
+
+    assert await due() == {"assistant": False, "radar": False, "meetings": True}
+
+    account = await _seed_account(workspace_id, wired, member_id, "acme")
+    await _grant_account(workspace_id, wired, account)
+    assert await due() == {"assistant": False, "radar": False, "meetings": False}
 
 
 def test_an_app_that_a_clock_wakes_offers_the_cadences_that_arm_it() -> None:

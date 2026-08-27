@@ -8,15 +8,10 @@ import { agentHash } from "@/lib/route";
 import { agentCrumb } from "@/lib/title";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 
-import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, agentIndex, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 beforeEach(() => {
   useStreamFake();
 });
-
-function toggleApplications(): Promise<void> {
-  return userEvent.click(screen.getByRole("button", { name: "Applications" }));
-}
-
 
 function usageDetails(totalMicroUsd: number, tokens: number = 1_200) {
   return {
@@ -339,9 +334,9 @@ test("the agents index states a row's name alone, and leaves the address list to
     />,
   );
 
-  await toggleApplications();
-  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
-  expect(index.getByText("Main")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  const index = within(await agentIndex());
+  expect(index.getByText("Assistant")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
   expect(index.getByText("Private")).toBeTruthy();
   expect(index.queryByText("opus")).toBeNull();
@@ -356,9 +351,9 @@ test("a non-admin reads the same index rows", async () => {
     <App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  await toggleApplications();
-  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
-  expect(index.getByText("Main")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  const index = within(await agentIndex());
+  expect(index.getByText("Assistant")).toBeTruthy();
   expect(index.getByText("Second")).toBeTruthy();
   expect(screen.queryByText("Every member")).toBeNull();
   expect(screen.queryByText("No member grants — admins only")).toBeNull();

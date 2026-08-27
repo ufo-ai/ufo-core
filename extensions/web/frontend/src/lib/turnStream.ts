@@ -1,4 +1,5 @@
 import { BASE, getJson } from "@/lib/api";
+import { wakeAppStatus } from "@/lib/appStatusStore";
 import { money } from "@/lib/money";
 import {
   chatState,
@@ -646,6 +647,7 @@ export async function sendMessage(
     return "refused";
   }
   bumpEpoch(chatKey);
+  wakeAppStatus();
   const token = String(++SENDS);
   updateChat(chatKey, (state) => ({
     ...state,
@@ -747,6 +749,7 @@ export async function answerQuestions(
   const state = chatState(chatKey);
   if (!answers.length || state.busy || state.messages === null) return;
   bumpEpoch(chatKey);
+  wakeAppStatus();
   updateChat(chatKey, (current) => ({ ...current, busy: true, live: liveTurn() }));
   for (const { index, body } of answers) {
     let res: Response;

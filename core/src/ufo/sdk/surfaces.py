@@ -150,6 +150,9 @@ from ufo.ext.surface import (
 from ufo.ext.surface import (
     record_transcript_access as record_transcript_access,
 )
+from ufo.kinds.agent_setup import (
+    SetupState as SetupState,
+)
 from ufo.sandbox.conversation import (
     WORKSPACE_WRITE_MAX_BYTES as WORKSPACE_WRITE_MAX_BYTES,
 )

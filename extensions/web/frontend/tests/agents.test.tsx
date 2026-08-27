@@ -7,9 +7,13 @@ import { App } from "@/App";
 import { Portal } from "@/Portal";
 import { AGENT_ICONS } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
+import {
+  RESTING_STATUS_MS,
+  WORKING_STATUS_MS,
+  type AgentStatus,
+} from "@/lib/appStatusStore";
 import { chatState } from "@/lib/chatStore";
 import { sendMessage } from "@/lib/turnStream";
-import { WORKING_STATUS_MS, statusLine, type AgentStatus } from "@/views/Agents";
 
 import {
   AGENT,
@@ -24,10 +28,12 @@ import {
   TURN_ID,
   agentIndex,
   atPhoneWidth,
+  expandApps,
   json,
   objectIndex,
   openAgentRow,
   openAgentSettings,
+  openNewApplication,
   openRow,
   owned,
   saying,
@@ -107,16 +113,17 @@ const ASKED = {
   cost_micro_usd: 2_000_000,
 };
 
-async function raisedIndex(): Promise<HTMLElement> {
-  if (!screen.queryByRole("navigation", { name: "Apps" })) {
-    await userEvent.click(await screen.findByRole("button", { name: "Applications" }));
-  }
+/** The apps index with the sidebar standing open. A folded rail draws each app as its mark alone,
+ *  so a row's own words — its name, the work under it, the pin act — are read only once the member
+ *  has unfolded the column the index lives in. A sidebar already open is left as it stands. */
+async function shownIndex(): Promise<HTMLElement> {
+  const unfold = screen.queryByRole("button", { name: "Expand sidebar" });
+  if (unfold) await userEvent.click(unfold);
   return agentIndex();
 }
 
 async function openWizard() {
-  const index = await raisedIndex();
-  await userEvent.click(within(index).getByRole("button", { name: "New application" }));
+  await openNewApplication();
   return screen.findByRole("region", { name: "App Builder" });
 }
 
@@ -129,7 +136,47 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("New application opens the wizard speaking in the pane, and the flyout keeps its apps", async () => {
+test("apps the workspace ships on its first turn reach the sidebar with no reload", async () => {
+  /** A workspace provisions the apps it ships on its first turn — a turn the member takes from
+   *  inside a portal that has already booted. The read that seeded the sidebar therefore predates
+   *  every one of them, and a column that waited for a reload would state one app through the whole
+   *  of a member's first session. */
+  let shipped = [AGENT];
+  wire({
+    "/api/agents": () => boot(shipped, ADMIN),
+    "/api/agents/status": () =>
+      json({ statuses: shipped.map((agent) => status(agent.id, {})) }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  vi.useFakeTimers();
+  try {
+    render(<Portal />);
+    const settle = async (ms: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+    await settle(0);
+    const index = screen.getByRole("navigation", { name: "Apps" });
+    const row = (name: string) =>
+      within(index).queryByRole("button", { name: new RegExp("^" + name) });
+    expect(row("Assistant")).toBeTruthy();
+    expect(row("Research")).toBeNull();
+
+    // The turn lands and the workspace gains its apps. The status read answers for the new agent
+    // before any re-read of the boot payload, which is the signal the sidebar has gained one.
+    shipped = [AGENT, RESEARCH];
+
+    await settle(RESTING_STATUS_MS);
+    expect(row("Research")).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("New application opens the wizard speaking in the pane, and the apps list keeps its rows", async () => {
   const sent: { url: string; body: string }[] = [];
   wire({
     "/api/agents": () => boot([AGENT], ADMIN),
@@ -149,7 +196,7 @@ test("New application opens the wizard speaking in the pane, and the flyout keep
   expect(sent[0].body).toBe(OPENING);
   expect(within(wizard).getByText(OPENING)).toBeTruthy();
   expect(within(wizard).getByLabelText("Ask UFO")).toBeTruthy();
-  expect(within(await raisedIndex()).getByText("Assistant")).toBeTruthy();
+  expect(within(await shownIndex()).getByText("Assistant")).toBeTruthy();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
@@ -280,7 +327,7 @@ test("a conversation the composer founds after a failed opening send is still th
   // The bar reads the founded conversation's own board, and the rail row takes its title — neither
   // is reachable from a wizard that lost the conversation.
   expect(await waitFor(progress)).toBeTruthy();
-  expect(within(await raisedIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(within(await shownIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 test("the rail names the run in flight and takes the conversation's own title", async () => {
@@ -299,20 +346,20 @@ test("the rail names the run in flight and takes the conversation's own title", 
   });
   render(<Portal />);
 
-  const index = await raisedIndex();
+  const index = await shownIndex();
   expect(within(index).queryByText("App Builder")).toBeNull();
 
-  await userEvent.click(within(index).getByRole("button", { name: "New application" }));
+  await openNewApplication();
 
   // Until admission answers there is no conversation and nothing to call it, so the row states the
   // run alone; the title the chat route hands back names it from then on.
-  const raised = await raisedIndex();
-  expect(await within(raised).findByText("App Builder")).toBeTruthy();
-  expect(within(raised).queryByRole("button", { name: /App Builder/ })).toBeNull();
+  const running = await shownIndex();
+  expect(await within(running).findByText("App Builder")).toBeTruthy();
+  expect(within(running).queryByRole("button", { name: /App Builder/ })).toBeNull();
 
   answer();
 
-  expect(await within(raised).findByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(await within(await shownIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 test("the progress bar reads the run's own phase board and advances with it", async () => {
@@ -385,7 +432,7 @@ test("an answer to the wizard's question rides the turn that asked it", async ()
   // The question rides the turn's terminal, and a member can only answer in a pane that has drawn
   // the conversation — so the emit waits for the bind the rail's title states, the way a real
   // terminal can only follow a stream the page already tails.
-  expect(await within(await raisedIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(await within(await shownIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
   StreamFake.last().emit("terminal", {
     ...ASKED,
     question: {
@@ -425,7 +472,7 @@ test("the app the last phase creates reaches the rail when the turn settles", as
 
   await waitFor(() => expect(progress().getAttribute("aria-valuenow")).toBe("5"));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  await raisedIndex();
+  await shownIndex();
   await openAgentRow("Research");
 
   expect(location.hash).toBe("#/agents/" + SECOND_ID);
@@ -433,16 +480,56 @@ test("the app the last phase creates reaches the rail when the turn settles", as
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
-test("the New application act stands under the app rows, at the foot of the index", async () => {
+/** The rows are the section's own list, and the act that adds to it is the section head's: the
+ *  index states apps, and what to do about apps is behind the name it stands under. */
+test("the act that builds an app stands as the apps list's first row", async () => {
   location.hash = "#/agents";
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
 
-  const index = await raisedIndex();
-  const act = within(index).getByRole("button", { name: "New application" });
-  const last = within(index).getByRole("button", { name: /^Research/ });
+  await userEvent.click(await screen.findByRole("button", { name: "Expand sidebar" }));
+  const index = await agentIndex();
 
-  expect(last.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // The band folds the section and offers nothing else, so it holds no menu to hide the act in.
+  const band = screen.getByRole("button", { name: "Apps" });
+  expect(band.getAttribute("aria-haspopup")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Apps options" })).toBeNull();
+
+  const rows = within(index)
+    .getAllByRole("button")
+    .map((row) => row.getAttribute("aria-label") ?? row.textContent);
+  expect(rows[0]).toBe("New app");
+});
+
+test("pressing a section's band folds it away, and the fold holds across a reload", async () => {
+  location.hash = "#/agents";
+  wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
+  const first = render(<Portal />);
+
+  // The band is only drawn once the sidebar stands open — the glyph rail has no room for it, and
+  // a fold with no head to undo it is a dead end, so the rail ignores one.
+  await userEvent.click(await screen.findByRole("button", { name: "Expand sidebar" }));
+  const index = await agentIndex();
+  expect(within(index).queryByRole("button", { name: /^Research/ })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull(),
+  );
+  expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-expanded")).toBe("false");
+
+  // A column narrowed to the part someone works from would widen again on every reload otherwise.
+  first.unmount();
+  render(<Portal />);
+  // The sidebar opens as this browser holds it, so the band is drawn without asking again.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-expanded")).toBe("false"),
+  );
+  expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull();
+
+  // And it opens again from the same band.
+  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
+  expect(await screen.findByRole("navigation", { name: "Apps" })).toBeTruthy();
 });
 
 /** A phone screen has no width for a column beside the page, so the nav drawer holds the index
@@ -458,7 +545,7 @@ test("the drawer holds the apps index at a phone width, and a pick shuts it", as
 
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
-  const index = await raisedIndex();
+  const index = await shownIndex();
   expect(drawer.contains(index)).toBe(true);
   await userEvent.click(within(index).getByRole("button", { name: /^Research/ }));
 
@@ -481,7 +568,7 @@ test("closing the wizard gives the pane back to the app and clears the run's row
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
-  expect(within(await raisedIndex()).queryByText("App Builder")).toBeNull();
+  expect(within(await shownIndex()).queryByText("App Builder")).toBeNull();
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
 });
 
@@ -520,7 +607,7 @@ test("a close before the founding send answers keeps the pane closed and founds 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(sent).toEqual([OPENING]);
   expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull();
-  expect(within(await raisedIndex()).queryByText(/App Builder/)).toBeNull();
+  expect(within(await shownIndex()).queryByText(/App Builder/)).toBeNull();
 });
 
 /** The run is the key's, not the mount's: a wizard reopened while its founding send is still in
@@ -557,7 +644,7 @@ test("a wizard reopened during its founding send binds to the run the first moun
   );
   expect(sent).toEqual([OPENING]);
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  expect(within(await raisedIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(within(await shownIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 /** The run is the key's, not the screen's: leaving for another screen unmounts every pane here,
@@ -578,14 +665,14 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
-  await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+  await userEvent.click(screen.getByRole("button", { name: "Ask assistant" }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
-  const index = await raisedIndex();
+  const index = await shownIndex();
   await userEvent.click(within(index).getByRole("button", { name: /App Builder/ }));
 
   const wizard = await screen.findByRole("region", { name: "App Builder" });
   expect(await within(wizard).findByText(saying(OPENING))).toBeTruthy();
-  expect(await within(await raisedIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(await within(await shownIndex()).findByText("App Builder: " + TITLE)).toBeTruthy();
   expect(sent).toEqual([OPENING]);
 });
 
@@ -608,10 +695,10 @@ test("an app row leaves the run standing, and the rail's own row returns to it",
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
-  await raisedIndex();
+  await shownIndex();
   await openAgentRow("Research");
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Builder" })).toBeNull());
-  const index = await raisedIndex();
+  const index = await shownIndex();
   const row = await within(index).findByRole("button", { name: /App Builder/ });
 
   await userEvent.click(row);
@@ -654,7 +741,7 @@ test("a founding send from the chat screen never blocks the wizard's own", async
 
   answerChat();
   await waitFor(() => expect(within(wizard).queryByText("About our numbers.")).toBeNull());
-  expect(within(await raisedIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
+  expect(within(await shownIndex()).getByText("App Builder: " + TITLE)).toBeTruthy();
 });
 
 /** A founding send the key turns away is refused to its caller and worn by the key as a fault —
@@ -689,7 +776,7 @@ test("each row in the index draws its own app's mark, and states nothing by it",
   wire({ "/transcript": () => json({ messages: [] }) });
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = within(await raisedIndex());
+  const index = within(await shownIndex());
 
   const assistant = index.getByRole("button", { name: /^Assistant/ });
   expect(assistant.querySelector(".element-icon-propylon")).toBeTruthy();
@@ -782,7 +869,7 @@ test("the main app has no Archive action in Settings", async () => {
   expect(within(dialog).queryByRole("button", { name: "Archive" })).toBeNull();
 });
 
-test("the workspace Apps tab restores an archived app hidden from the Applications flyout", async () => {
+test("the workspace Apps tab restores an archived app the sidebar does not list", async () => {
   const posted: unknown[] = [];
   const onAgents = vi.fn();
   wire({
@@ -808,9 +895,8 @@ test("the workspace Apps tab restores an archived app hidden from the Applicatio
       onAgents={onAgents}
     />,
   );
-  const index = within(await raisedIndex());
+  const index = within(await shownIndex());
   expect(index.queryByText("Invoice Intake")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Applications" }));
   expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Restore" }));
@@ -990,21 +1076,19 @@ const SCRIBE = { id: THIRD_ID, name: "scribe", model: "auto", main: false, icon:
 const WATCHER = { id: FOURTH_ID, name: "watcher", model: "auto", main: false, icon: "dingir" };
 
 const HOURS_AGO = new Date(Date.now() - 5 * 3_600_000).toISOString();
-const IN_THREE_HOURS = new Date(Date.now() + 3 * 3_600_000).toISOString();
 
 function status(agentId: string, held: Partial<AgentStatus>): AgentStatus {
   return {
     agent_id: agentId,
     turn: null,
     activity: null,
-    next_run_at: null,
     last_active_at: null,
     last_failed: false,
     ...held,
   };
 }
 
-test("the index sorts a working app as now, a resting one by its last activity, an unplaced one last", async () => {
+test("a working app leads the index, and a pin orders everything under it", async () => {
   wire({
     "/api/agents/status": () =>
       json({
@@ -1018,15 +1102,20 @@ test("the index sorts a working app as now, a resting one by its last activity, 
   location.hash = "#/agents";
   render(<App agents={[AGENT, RESEARCH, SCRIBE]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = await raisedIndex();
-  await waitFor(() => {
-    const rows = within(index).getAllByRole("button", { name: /^(Assistant|Research|Scribe)/ });
-    expect(rows.map((row) => row.querySelector(".text-label")!.textContent)).toEqual([
-      "Research",
-      "Assistant",
-      "Scribe",
-    ]);
-  });
+  const index = await shownIndex();
+  await expandApps();
+  const drawn = () =>
+    within(index)
+      .getAllByRole("button", { name: /^(Assistant|Research|Scribe)/ })
+      .map((row) => row.querySelector(".text-label")!.textContent);
+  // Research is working, so it leads; under it the ladder stands as it was.
+  await waitFor(() => expect(drawn()).toEqual(["Research", "Assistant", "Scribe"]));
+
+  // A pin moves a row up the order under the working one, and moves nothing else: Assistant keeps
+  // its place relative to Scribe, and the app doing work keeps the top.
+  await userEvent.click(within(index).getByRole("button", { name: "Pin Scribe" }));
+
+  await waitFor(() => expect(drawn()).toEqual(["Research", "Scribe", "Assistant"]));
 });
 
 test("a working row prints its work under the name, in plain text and with no tooltip", async () => {
@@ -1046,7 +1135,7 @@ test("a working row prints its work under the name, in plain text and with no to
     <App agents={[AGENT, RESEARCH, SCRIBE, WATCHER]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  const index = await raisedIndex();
+  const index = await shownIndex();
   const row = (name: RegExp) => within(index).getByRole("button", { name });
   // The line is drawn a character at a time, so what a reader is given is the whole line beside
   // those cells and the cells themselves are hidden — which is what the row is named by.
@@ -1062,23 +1151,30 @@ test("a working row prints its work under the name, in plain text and with no to
   expect(screen.queryByRole("tooltip")).toBeNull();
 });
 
-test("a resting row holds its status at the pointer, and one without a status triggers no tooltip", async () => {
+test("an app that is not working states nothing under its name, and opens nothing at the pointer", async () => {
   wire({
     "/api/agents/status": () =>
-      json({ statuses: [status(SECOND_ID, { last_active_at: HOURS_AGO })] }),
+      json({
+        statuses: [
+          status(SECOND_ID, { last_failed: true }),
+          status(AGENT_ID, { last_active_at: HOURS_AGO }),
+        ],
+      }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents";
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = await raisedIndex();
-  const row = () => within(index).getByRole("button", { name: /^Research/ });
-  fireEvent.focus(row());
-  expect((await screen.findByRole("tooltip")).textContent).toBe("Active 5h ago");
-  fireEvent.blur(row());
+  const index = await shownIndex();
+  // A failed run and a run five hours ago are both read off the dot. Neither takes a line, and
+  // nothing stands in for one at the pointer.
+  const failed = within(index).getByRole("button", { name: /^Research/ });
+  await waitFor(() => expect(failed.querySelector(".bg-blocked")).toBeTruthy());
+  expect(failed.textContent).toBe("Research");
 
-  // An app the read said nothing about has nothing to hold there, so nothing opens over it.
-  fireEvent.focus(within(index).getByRole("button", { name: /^Assistant/ }));
+  const quiet = within(index).getByRole("button", { name: /^Assistant/ });
+  expect(quiet.textContent).toBe("Assistant");
+  fireEvent.focus(quiet);
   await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
 });
 
@@ -1100,7 +1196,8 @@ test("the avatar dot reads live on work in flight, blocked on parked or failed, 
     <App agents={[AGENT, RESEARCH, SCRIBE, WATCHER]} member={MEMBER} onAgents={() => {}} />,
   );
 
-  const index = await raisedIndex();
+  const index = await shownIndex();
+  await expandApps();
   const dot = (name: RegExp, tone: string) =>
     within(index).getByRole("button", { name }).querySelector("." + tone);
   await waitFor(() => expect(dot(/^Assistant/, "bg-live")).toBeTruthy());
@@ -1108,6 +1205,52 @@ test("the avatar dot reads live on work in flight, blocked on parked or failed, 
   expect(dot(/^Scribe/, "bg-blocked")).toBeTruthy();
   expect(dot(/^Watcher/, "bg-live")).toBeNull();
   expect(dot(/^Watcher/, "bg-blocked")).toBeNull();
+});
+
+test("a folded rail holds each app's name at the pointer", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/agents";
+  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
+
+  // The shell opens folded, so the rows are marks: the name they cannot draw is held at the pointer.
+  const index = await agentIndex();
+  const row = within(index).getByRole("button", { name: "Research" });
+  expect(row.textContent).toBe("");
+  fireEvent.focus(row);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Research");
+});
+
+test("an app installed and not set up wears the blocked dot, and work outranks it", async () => {
+  wire({
+    "/api/agents/status": () => json({ statuses: [status(AGENT_ID, { turn: "running" })] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents";
+  render(
+    <App
+      agents={[
+        { ...AGENT, setup_due: true },
+        { ...RESEARCH, setup_due: true },
+        { ...SCRIBE, setup_due: false },
+      ]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
+  );
+
+  const index = await shownIndex();
+  await expandApps();
+  const dot = (name: RegExp, tone: string) =>
+    within(index).getByRole("button", { name }).querySelector("." + tone);
+
+  // Owed setup is the app waiting on the member, which is what the blocked tone says.
+  await waitFor(() => expect(dot(/^Research/, "bg-blocked")).toBeTruthy());
+  // An app that owes setup and is working states the work: something is happening now either way.
+  expect(dot(/^Assistant/, "bg-live")).toBeTruthy();
+  expect(dot(/^Assistant/, "bg-blocked")).toBeNull();
+  // An app that owes nothing and is doing nothing wears no dot at all.
+  expect(dot(/^Scribe/, "bg-blocked")).toBeNull();
+  expect(dot(/^Scribe/, "bg-live")).toBeNull();
 });
 
 test("a row keeps the member's focus as its status gains and loses a tooltip", async () => {
@@ -1126,20 +1269,19 @@ test("a row keeps the member's focus as its status gains and loses a tooltip", a
   location.hash = "#/agents";
   render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = await raisedIndex();
+  const index = await shownIndex();
   const row = () => within(index).getByRole("button", { name: /^Research/ });
   await waitFor(() => expect(row().querySelector(".bg-live")).toBeTruthy());
   row().focus();
   expect(document.activeElement).toBe(row());
 
-  // The work ends, the row loses its line and gains a tooltip: the same element wears both, so
-  // whoever was standing on it still is.
+  // The work ends and the row closes its line over nothing: the row is one element across that
+  // change, so whoever was standing on it still is.
   working = false;
   await waitFor(() => expect(row().querySelector(".bg-live")).toBeNull(), {
     timeout: 2 * WORKING_STATUS_MS,
   });
   expect(document.activeElement).toBe(row());
-  expect((await screen.findByRole("tooltip")).textContent).toBe("Active 5h ago");
 }, 15_000);
 
 /** A presence read is nobody's errand: no member action re-runs it, so a poll that gave up on one
@@ -1154,8 +1296,8 @@ test("a status read that fails after answering keeps polling and recovers", asyn
     },
     "/transcript": () => json({ messages: [] }),
   });
-  // Off the apps pane, so the flyout is the only reader of the status route — the poll under test
-  // is its own, not one the pane also runs.
+  // Off the apps pane, so the sidebar's index is the only reader of the status route — the poll
+  // under test is its own, not one the pane also runs.
   location.hash = "";
   vi.useFakeTimers();
   try {
@@ -1168,17 +1310,15 @@ test("a status read that fails after answering keeps polling and recovers", asyn
       });
     };
     await settle(0);
-    // The menu opens on the pointer press, and `userEvent` cannot make one while this test holds
-    // the clock: the keyboard press is the same act, and it needs no timer to advance.
-    fireEvent.keyDown(screen.getByRole("button", { name: "Applications" }), { key: "Enter" });
-    await settle(0);
     const index = screen.getByRole("navigation", { name: "Apps" });
     const row = () => within(index).getByRole("button", { name: /^Research/ });
     expect(row().querySelector(".bg-live")).toBeTruthy();
 
     await settle(WORKING_STATUS_MS);
     expect(answers).toBe(2);
-    expect(row().querySelector(".bg-live")).toBeNull();
+    // The refusal does not replace the answer before it, so the row keeps the dot it was drawn
+    // with rather than stating the app had gone quiet.
+    expect(row().querySelector(".bg-live")).toBeTruthy();
 
     await settle(WORKING_STATUS_MS);
     expect(answers).toBe(3);
@@ -1188,14 +1328,6 @@ test("a status read that fails after answering keeps polling and recovers", asyn
   }
 });
 
-test("statusLine states each resting mark by its own words", () => {
-  expect(statusLine(undefined)).toBeNull();
-  expect(statusLine(status(AGENT_ID, { turn: "parked" }))).toBe("Paused");
-  expect(statusLine(status(AGENT_ID, { last_failed: true }))).toBe("Last run failed");
-  expect(statusLine(status(AGENT_ID, { next_run_at: IN_THREE_HOURS }))).toBe("Next run in 3h");
-  expect(statusLine(status(AGENT_ID, { last_active_at: HOURS_AGO }))).toBe("Active 5h ago");
-  expect(statusLine(status(AGENT_ID, {}))).toBe("Idle");
-});
 
 test("a name is drawn word by word, and only a word written wholly in lowercase is raised", () => {
   expect(agentName("assistant")).toBe("Assistant");
@@ -1212,7 +1344,7 @@ test("the index row and the pane header draw the app's name in Title Case", asyn
   location.hash = "#/agents/" + SECOND_ID;
   render(<App agents={[AGENT, REVIEWER]} member={MEMBER} onAgents={() => {}} />);
 
-  const index = within(await raisedIndex());
+  const index = within(await shownIndex());
   expect(index.getByRole("button", { name: /^Code Reviewer/ })).toBeTruthy();
   expect(index.queryByText("code reviewer")).toBeNull();
 

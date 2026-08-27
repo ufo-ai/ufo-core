@@ -1,18 +1,18 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
-  IconApps,
   IconBrandSlack,
+  IconChevronDown,
+  IconFilter2,
   IconChevronRight,
   IconDeviceDesktop,
-  IconEdit,
-  IconFilter2,
   IconLayoutSidebarRight,
   IconLogout,
   IconMenu2,
   IconMessageCircle,
   IconMoon,
   IconPlug,
+  IconPlus,
   IconSettings,
   IconSun,
   IconTerminal2,
@@ -28,6 +28,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Admin } from "@/views/Admin";
@@ -58,10 +59,10 @@ import {
   useViewer,
 } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
+import { useAppStatus } from "@/lib/appStatusStore";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
 import { Waiting } from "@/kernel/panel";
-import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
@@ -83,7 +84,9 @@ import {
 import { RAIL_SHOWN_OPTIONS, railGroups, railShut, stampIso, type RailGroup } from "@/lib/rail";
 import {
   foldSidebar,
+  pickAppsExpanded,
   pickPinned,
+  pickSectionShut,
   pickRailShown,
   pickRailShut,
   pickRailSort,
@@ -133,6 +136,27 @@ export type AppProps = {
   onAgents: () => void;
 };
 
+/** Apps the workspace gained after this page loaded. A workspace ships its apps on its first turn,
+ *  which is a turn the member takes from inside an already-loaded portal — so the boot read that
+ *  seeded the sidebar predates every one of them, and without this the column states one app until
+ *  the member happens to reload.
+ *
+ *  The status read is the signal, and it costs nothing: it already answers for every agent the
+ *  member reaches, so an id the boot read never carried is the workspace having gained one. Each id
+ *  is asked about once. A re-read that comes back without it — an app this member may not read —
+ *  must not send the next tick asking again. */
+function useProvisioned(agents: Agent[], onAgents: () => void): void {
+  const { statuses } = useAppStatus();
+  const asked = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const known = new Set(agents.map((agent) => agent.id));
+    const gained = Object.keys(statuses).filter((id) => !known.has(id) && !asked.current.has(id));
+    if (!gained.length) return;
+    for (const id of gained) asked.current.add(id);
+    onAgents();
+  }, [statuses, agents, onAgents]);
+}
+
 export function App({
   agents,
   archived = [],
@@ -159,6 +183,8 @@ export function App({
   useEffect(startRouter, []);
 
   useEffect(readRail, []);
+
+  useProvisioned(agents, onAgents);
 
   /** The drawer stands over the page, so every act that moves the page shuts it. The router
    *  publishes a route for each of those acts, whether or not the address it wrote had changed. */
@@ -437,6 +463,9 @@ function AccountMenu({ member }: { member: Member }) {
   );
 }
 
+const APPS = "Apps";
+const CHATS = "Chats";
+
 const NAV_ROW =
   "flex h-(--size-row) w-full items-center gap-md rounded-full border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill";
 
@@ -445,15 +474,19 @@ const NAV_ROW =
  *  or standing open: a column of headings each carrying a control the member is not using reads as
  *  a toolbar, and the heading is a place before it is an act. It holds its box while hidden, so
  *  nothing under the pointer moves. */
-const SECTION_HEAD =
-  "group/head flex h-(--size-row) w-full items-center gap-sm rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill data-[state=open]:bg-fill";
+const SECTION_HEAD_CHEVRON =
+  "size-icon shrink-0 transition-transform duration-100 ease-control motion-reduce:transition-none";
 
+/** The menu the section holds, drawn only once the band is pointed at, reached by keyboard, or
+ *  standing open: a column of headings each carrying a control the member is not using reads as a
+ *  toolbar, and the heading is a place before it is an act. It holds its box while hidden, so
+ *  nothing under the pointer moves. */
 const SECTION_HEAD_GLYPH =
-  "size-(--size-glyph) shrink-0 opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none group-hover/head:opacity-100 group-focus-visible/head:opacity-100 group-data-[state=open]/head:opacity-100";
+  "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none group-hover/head:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 data-[state=open]:bg-fill";
 
 /** The rows the sidebar pins where the member has pinned none themselves: the workspace's shipped
  *  apps, in name order, so the sidebar arrives holding its own destinations. The chat app is not one
- *  of them — the New conversation row above is the way to it. */
+ *  of them — the Ask assistant row above is the way to it. */
 function defaultPins(agents: Agent[]): string[] {
   const apps = agents.filter((agent) => agent.app && agent.app !== CHAT_SURFACE);
   apps.sort((a, b) => a.name.localeCompare(b.name));
@@ -462,8 +495,7 @@ function defaultPins(agents: Agent[]): string[] {
 
 const GLYPH = "size-(--size-glyph) shrink-0";
 
-const NewChatGlyph = () => <IconEdit className={GLYPH} aria-hidden />;
-const AppsGlyph = () => <IconApps className={GLYPH} aria-hidden />;
+const AskGlyph = () => <IconPlus className={GLYPH} aria-hidden />;
 const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
@@ -577,79 +609,61 @@ function SchemePick({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-/** The Applications row and the flyout it holds. The row is the way to the apps screen; resting on
- *  it — or opening its chevron, which is what a touch screen has — raises the apps index whole:
- *  every app with its live status, the run in flight, and the New application act, so switching
- *  apps is one hover from anywhere. */
-function ApplicationsFlyout({
-  route,
-  agents,
+/** A sidebar section's head: the band folds the section, and the mark at its end opens the menu.
+ *
+ *  Two acts, two controls. The band is the section's name and the whole of it is the fold, because
+ *  putting a section away is the thing a member does to a heading; the menu is a second act on the
+ *  same row and gets its own mark rather than stealing the first. A chevron states which way the
+ *  fold stands — pointing down over an open section, along the row over a shut one — so the band
+ *  answers "is my column hiding anything" without being clicked.
+ *
+ *  The two are siblings rather than nested, because a control inside a control is neither. */
+function SectionHead({
+  label,
+  shut,
   collapsed,
-  pinned,
-  onPin,
-  onBuild,
+  onShut,
+  children,
 }: {
-  route: Route;
-  agents: Agent[];
-  collapsed: boolean;
-  pinned: string[];
-  onPin: (agentId: string) => void;
-  onBuild: () => void;
+  label: string;
+  shut: boolean;
+  /** Whether the sidebar stands folded to its glyph rail, which has no room for a section's name. */
+  collapsed?: boolean;
+  onShut: (shut: boolean) => void;
+  /** The menu the band's mark opens. A section with nothing to offer beyond its own rows passes
+   *  none, and draws no mark: a control that opens an empty menu is a control that lies. */
+  children?: React.ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
-  const host = useDrawerHost();
-  const building = route.kind === "agents" && route.build === true;
-  const openId = route.kind === "agent" ? route.agentId : null;
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
-      {/* The section's header, not a destination: the same muted band Conversations wears, and
-          the same disclosure act a rail group's heading carries — the whole line the trigger for
-          the flyout that holds everything the section reaches. */}
-      {collapsed ? (
-        <SidebarTooltip collapsed={collapsed} label="Applications">
+    <div
+      className={cn(
+        "group/head flex h-(--size-row) w-full shrink-0 items-center rounded-control hover:bg-fill",
+        collapsed && "hidden",
+      )}
+    >
+      <button
+        type="button"
+        aria-expanded={!shut}
+        onClick={() => onShut(!shut)}
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent px-sm",
+          "text-left font-sans text-label font-medium text-ink-soft",
+        )}
+      >
+        <span className="min-w-0 truncate">{label}</span>
+        <IconChevronDown className={cn(SECTION_HEAD_CHEVRON, shut && "-rotate-90")} aria-hidden />
+      </button>
+      {children ? (
+        <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label="Applications"
-              className={cn(NAV_ROW, "justify-center gap-0 px-0")}
-            >
-              <AppsGlyph />
+            <button type="button" aria-label={label + " options"} className={SECTION_HEAD_GLYPH}>
+              <IconFilter2 className="size-icon" aria-hidden />
             </button>
           </DropdownMenuTrigger>
-        </SidebarTooltip>
-      ) : (
-        <DropdownMenuTrigger asChild>
-          <button type="button" className={SECTION_HEAD}>
-            <span className="min-w-0 flex-1 truncate">Applications</span>
-            <IconFilter2 className={SECTION_HEAD_GLYPH} aria-hidden />
-          </button>
-        </DropdownMenuTrigger>
-      )}
-      {/* The index is a list of its own rows rather than menu items, so a pick shuts the menu from
-          here — nothing inside it is an item Radix would shut it for. */}
-      <DropdownMenuContent
-        side="right"
-        align="start"
-        container={host}
-        className="max-h-96 w-sidebar p-0 py-sm"
-      >
-        <AppsIndex
-          agents={agents}
-          openId={openId}
-          building={building}
-          pinned={pinned}
-          onPin={onPin}
-          onOpen={(agentId) => {
-            setOpen(false);
-            openAgent(agentId);
-          }}
-          onBuild={() => {
-            setOpen(false);
-            onBuild();
-          }}
-        />
-      </DropdownMenuContent>
-    </DropdownMenu>
+          {children}
+        </DropdownMenu>
+      ) : null}
+    </div>
   );
 }
 
@@ -677,6 +691,10 @@ function WorkspaceSidebar({
   const surfaces = useSurfaces();
   /* A drawer is always drawn whole, so the fold a desk width holds is ignored while it stands. */
   const collapsed = rail.collapsed && !narrow;
+  /* A folded section states nothing and its head is what opens it again — so on the glyph rail,
+     where no head is drawn, the fold is ignored rather than leaving rows nobody can reach. */
+  const appsShut = !collapsed && rail.sectionsShut.includes(APPS);
+  const chatsShut = !collapsed && rail.sectionsShut.includes(CHATS);
   const pinned = rail.pinned ?? defaultPins(agents);
   const chatApp = chatSurface(agents);
   return useDrawerList(
@@ -715,27 +733,44 @@ function WorkspaceSidebar({
         {mainAgent ? (
           <li>
             <NavRow
-              icon={<NewChatGlyph />}
+              icon={<AskGlyph />}
               current={standing(route, COMPOSING)}
               collapsed={collapsed}
-              label="New conversation"
+              label="Ask assistant"
               onClick={() =>
                 chatApp
                   ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
                   : openNewChat(mainAgent.id)
               }
             >
-              New conversation
+              Ask assistant
             </NavRow>
           </li>
         ) : null}
       </ul>
-      <div className="flex shrink-0 flex-col gap-px px-sm">
-        <ApplicationsFlyout
-          route={route}
-          agents={agents}
+      {/* The workspace's apps, drawn where the member works rather than behind a hover: the column
+          states what each one is doing, which is the fact the sidebar exists to carry. Pinned rows
+          lead, the apps that worked lately follow, and the rest wait behind `More`. */}
+      {/* The section yields before the shell does. Held at its natural height it would stand a
+          full sixteen rows tall on a screen with no room for them, and the nav scrolls nowhere —
+          so the foot of the sidebar, and the way out of it, would be pushed off the bottom edge.
+          Shrinking here spends the squeeze inside the list, which already scrolls. */}
+      <div className="flex min-h-0 flex-col gap-px px-sm">
+        <SectionHead
+          label={APPS}
+          shut={appsShut}
           collapsed={collapsed}
+          onShut={(shut) => pickSectionShut(APPS, shut)}
+        />
+        {appsShut ? null : (
+        <AppsIndex
+          agents={agents}
+          openId={route.kind === "agent" ? route.agentId : null}
+          building={route.kind === "agents" && route.build === true}
           pinned={pinned}
+          expanded={rail.appsExpanded}
+          collapsed={collapsed}
+          onExpand={pickAppsExpanded}
           onPin={(agentId) =>
             pickPinned(
               pinned.includes(agentId)
@@ -743,37 +778,22 @@ function WorkspaceSidebar({
                 : [...pinned, agentId],
             )
           }
+          onOpen={openAgent}
           onBuild={onBuild}
         />
-        <ul className="m-0 flex list-none flex-col gap-px p-0">
-          {pinned.map((id) => {
-            const agent = agents.find((entry) => entry.id === id);
-            if (!agent) return null;
-            return (
-              <li key={agent.id}>
-                <NavRow
-                  icon={<AgentIcon name={agent.icon} className="size-(--size-glyph) shrink-0" />}
-                  current={standing(route, `agent:${agent.id}`)}
-                  collapsed={collapsed}
-                  label={agentName(agent.name)}
-                  onClick={() => openAgent(agent.id)}
-                >
-                  {agentName(agent.name)}
-                </NavRow>
-              </li>
-            );
-          })}
-        </ul>
+        )}
       </div>
       {/* The conversations section is built the way the applications section above it is: the
           heading and what stands under it are one column, so a section's first row sits the same
           hair below its heading in both. Only the rows scroll — a heading that scrolled away would
           leave the filter it carries unreachable at the foot of a long rail. */}
       <div className={cn("flex min-h-0 flex-1 flex-col gap-px px-sm", collapsed && "hidden")}>
-        <RailSettingsFlyout />
-        <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
-          <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
-        </div>
+        <RailSettingsFlyout shut={chatsShut} onShut={(shut) => pickSectionShut(CHATS, shut)} />
+        {chatsShut ? null : (
+          <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
+            <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
+          </div>
+        )}
       </div>
       <ul className="m-0 mt-auto flex shrink-0 list-none flex-col gap-px px-sm py-0">
         <li>
@@ -1179,22 +1199,16 @@ function NotShared() {
   return <PaneNote>This conversation is not shared with this account.</PaneNote>;
 }
 
-/** The conversations header and the settings menu it holds: the same band and the same menu the
- *  Applications header carries, so the two sections read and act as one system. A sort is a pick
+/** The chats header and the settings menu it holds: the same band and the same menu the apps
+ *  header carries, so the two sections read and act as one system. A sort is a pick
  *  between ladders and a surface is a choice turned on and off, which is why one shuts the menu and
  *  the other leaves it standing — the surfaces are read as a set, and the rail adjusts behind the
  *  menu while the member reads what each tick did. */
-function RailSettingsFlyout() {
+function RailSettingsFlyout({ shut, onShut }: { shut: boolean; onShut: (shut: boolean) => void }) {
   const { sort, shown } = useRail();
   const host = useDrawerHost();
   return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <button type="button" className={SECTION_HEAD}>
-          <span className="min-w-0 flex-1 truncate">Conversations</span>
-          <IconFilter2 className={SECTION_HEAD_GLYPH} aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
+    <SectionHead label={CHATS} shut={shut} onShut={onShut}>
       <DropdownMenuContent side="right" align="start" container={host}>
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>Sort by</DropdownMenuSubTrigger>
@@ -1219,7 +1233,7 @@ function RailSettingsFlyout() {
           </DropdownMenuCheckboxItem>
         ))}
       </DropdownMenuContent>
-    </DropdownMenu>
+    </SectionHead>
   );
 }
 
@@ -1388,16 +1402,6 @@ function RailList({
   );
 }
 
-/** How a title too long for its row travels while the member is on it. The pace is a reading one
- *  rather than a duration, so a title that overruns by a word and one that overruns by a sentence
- *  both pass the frame at the speed they are read at. The rest is what the pointer pays to start
- *  it: crossing the rail on the way somewhere else passes over every row in it, and a ticker that
- *  began on contact would set the whole column moving. The way back is a return rather than a
- *  reading, so it takes one duration and no rest. */
-const TICKER_SPEED = 45;
-const TICKER_REST_MS = 300;
-const TICKER_BACK_MS = 150;
-
 /** A fact the group above cannot state — the agent holding the conversation, the surface it came
  *  in on, whoever else spoke — is read on the way to a decision, not scanned. As a second line it
  *  doubles every row in the rail to serve the few that carry one, so it is held at the pointer and
@@ -1430,50 +1434,24 @@ function RailRow({
   surface: string;
   onClick: () => void;
 }) {
-  const frame = useRef<HTMLSpanElement>(null);
-  const text = useRef<HTMLSpanElement>(null);
-  const [shift, setShift] = useState(0);
-  const run = () => {
-    const held = frame.current;
-    const words = text.current;
-    if (!held || !words || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    setShift(Math.max(0, Math.round(words.getBoundingClientRect().width - held.clientWidth)));
-  };
+  const [asks, setAsks] = useState(0);
   const button = (
     <button
       type="button"
       aria-current={current}
       onClick={onClick}
-      onPointerEnter={run}
-      onPointerLeave={() => setShift(0)}
-      onFocus={run}
-      onBlur={() => setShift(0)}
+      onPointerEnter={() => setAsks((asked) => asked + 1)}
+      onPointerLeave={() => setAsks(0)}
+      onFocus={() => setAsks((asked) => asked + 1)}
+      onBlur={() => setAsks(0)}
       className={cn(
         "flex h-(--size-row) w-full items-center gap-xs rounded-row border-0 bg-transparent px-sm text-left text-label text-inherit hover:bg-fill",
         current && "bg-fill",
       )}
     >
-      <span
-        ref={frame}
-        className={cn(
-          "min-w-0 flex-1 overflow-hidden whitespace-nowrap",
-          shift ? "text-clip" : "text-ellipsis",
-        )}
-      >
-        <span
-          ref={text}
-          className={cn("transition-transform ease-linear", shift ? "inline-block" : "inline")}
-          style={{
-            transform: `translateX(${-shift}px)`,
-            transitionDuration: shift
-              ? Math.round((shift / TICKER_SPEED) * 1000) + "ms"
-              : TICKER_BACK_MS + "ms",
-            transitionDelay: shift ? TICKER_REST_MS + "ms" : "0ms",
-          }}
-        >
-          {title}
-        </span>
-      </span>
+      <Ticker asks={asks} className="flex-1">
+        {title}
+      </Ticker>
       <SurfaceGlyph surface={surface} />
     </button>
   );

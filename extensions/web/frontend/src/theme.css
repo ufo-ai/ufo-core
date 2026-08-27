@@ -290,7 +290,7 @@
 
   --breakpoint-narrow: 720px;
 
-  --container-sidebar: 240px;
+  --container-sidebar: 216px;
   /* The first-run answers are read down one narrow column, set by the longest one-line choice
      rather than the question above it. */
   --container-answer: 280px;
@@ -430,6 +430,11 @@
      wrong question for a part of a page that has five more parts under it. */
   --size-fold: 96px;
   --size-row: 32px;
+  /* How far the apps list opens before it scrolls inside itself. Sixteen rows: enough that a
+     workspace's whole set is usually read at once, and short enough that the conversations
+     under it are still on the screen when it is. A workspace with more apps than this still
+     reaches every one of them: the list scrolls here rather than ending. */
+  --size-apps-open: calc(var(--size-row) * 16);
   --size-textarea: 12em;
   --size-usage-chart: 10em;
   /* The mark and its wordmark, drawn as one asset: the block sits on the same optical band as

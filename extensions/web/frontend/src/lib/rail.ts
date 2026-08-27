@@ -1,6 +1,6 @@
 import { agentName } from "@/lib/agentName";
 import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
-import type { OwnedConversation } from "@/lib/types";
+import type { Agent, OwnedConversation } from "@/lib/types";
 
 export type ChatRow = {
   conversation_id: string;
@@ -161,6 +161,96 @@ export function heldPinned(): string[] | null {
 
 export function holdPinned(pinned: string[]): void {
   localStorage.setItem(HELD_PINNED, pinned.join("\n"));
+}
+
+/** The apps in the order the sidebar draws them: the pinned ones in the order the member pinned
+ *  them, then the rest by the app that worked most recently, and last the apps that have never
+ *  worked, by name. A pin is a place the member put a row, so it holds that place whatever the app
+ *  has been doing since; below the pins the column answers to the workspace instead, where an app
+ *  that ran this morning is nearer the member's day than one that ran in March, and an app that
+ *  has done nothing at all has only its name to stand by. Two apps sharing a moment keep the order
+ *  they arrived in, so a read answering for neither settles the column rather than shuffling it.
+ *  Whether work in flight is a moment now is the caller's read, which is why the moment arrives as
+ *  a lookup. */
+export function appOrder(
+  apps: Agent[],
+  pinned: string[],
+  lastActiveAt: (agentId: string) => number | null,
+): Agent[] {
+  const byId = new Map(apps.map((app) => [app.id, app]));
+  const stood = pinned.map((id) => byId.get(id)).filter((app) => app !== undefined);
+  const drawn = new Set(stood);
+  const active: { app: Agent; at: number }[] = [];
+  const never: Agent[] = [];
+  for (const app of apps) {
+    if (drawn.has(app)) continue;
+    const at = lastActiveAt(app.id);
+    if (at === null) never.push(app);
+    else active.push({ app, at });
+  }
+  active.sort((left, right) => right.at - left.at);
+  never.sort((left, right) => left.name.localeCompare(right.name));
+  return stood.concat(
+    active.map((row) => row.app),
+    never,
+  );
+}
+
+/** The apps drawn while the list stands collapsed, and the tail the `More` row reveals. */
+export type AppRun = { shown: Agent[]; more: Agent[] };
+
+/** How many apps the sidebar states before the rest wait behind `More`. The column is shared with
+ *  the member's conversations, so the list takes a run of it and no more. Opened, it draws every
+ *  app the workspace has and scrolls inside the height `--size-apps-open` allows — the tail is
+ *  never cut, because an app the list refused to draw is one the member has no way to reach. */
+const APPS_SHOWN = 8;
+
+/** Where the collapsed list ends, and what work in flight does to it.
+ *
+ *  The cut is a count, not a judgement about any one app: the same number of rows stands whatever
+ *  the workspace is doing, so the column holds still. A run that admitted apps for being busy — or
+ *  that stood for the pinned ones alone — would resize itself as work started and as the member
+ *  pinned, and the list would collapse under them at the moment they acted on it. Pinning moves an
+ *  app up the order; it does not decide what the sidebar draws.
+ *
+ *  An app that is working rises to the top, and nothing else moves: the others keep their order
+ *  under it, and one arriving from the tail pushes them down by a row rather than reshuffling them.
+ *  Work is the one fact worth the top of the column, and it is worth reaching for an app the member
+ *  never pinned. Working is the caller's read, so an app's own status governs this and nothing here
+ *  has to ask for it. */
+export function appRun(apps: Agent[], working: (agentId: string) => boolean): AppRun {
+  const busy = apps.filter((app) => working(app.id));
+  const risen = new Set(busy.map((app) => app.id));
+  const ladder = busy.concat(apps.filter((app) => !risen.has(app.id)));
+  return { shown: ladder.slice(0, APPS_SHOWN), more: ladder.slice(APPS_SHOWN) };
+}
+
+const HELD_SECTIONS_SHUT = "sections-shut";
+
+/** The sidebar sections the member has folded shut, by name, held across sessions. A section is a
+ *  place they keep or put away; one they put away stays away on the next load, because a column
+ *  narrowed to the part someone works from would widen again on every reload otherwise. A browser
+ *  holding nothing has folded none, which is the sidebar whole. */
+export function heldSectionsShut(): string[] {
+  return (localStorage.getItem(HELD_SECTIONS_SHUT) ?? "").split("\n").filter(Boolean);
+}
+
+export function holdSectionsShut(shut: string[]): void {
+  localStorage.setItem(HELD_SECTIONS_SHUT, shut.join("\n"));
+}
+
+const HELD_APPS_EXPANDED = "apps-expanded";
+
+/** Whether the member has opened the apps list past the run the sidebar draws on its own. The
+ *  column carries their conversations as well, so the apps take a run of it and the rest wait
+ *  behind a row; a member who asked for the whole set asked about their own workspace, and that
+ *  answer holds on every load after. */
+export function heldAppsExpanded(): boolean {
+  return localStorage.getItem(HELD_APPS_EXPANDED) === "expanded";
+}
+
+export function holdAppsExpanded(expanded: boolean): void {
+  localStorage.setItem(HELD_APPS_EXPANDED, expanded ? "expanded" : "collapsed");
 }
 
 function admits(row: ChatRow, shown: RailShown): boolean {

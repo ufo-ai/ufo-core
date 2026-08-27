@@ -33,6 +33,11 @@ export type Agent = {
    *  it either way, and a member arriving on its address still opens it — hidden is what the
    *  portal shows, never what the workspace has. */
   hidden?: boolean;
+  /** Whether this app is installed and cannot work until the member acts — an account ungranted, a
+   *  credential unfilled, a standing order unarmed. Read once at boot: what it answers changes only
+   *  when the member settles one of those, and the setup screen re-reads for itself as they do. An
+   *  agent nobody provisioned declares nothing and so owes nothing. */
+  setup_due?: boolean;
   web_audience?: string[];
 };
 

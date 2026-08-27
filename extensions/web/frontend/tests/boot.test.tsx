@@ -8,6 +8,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
+import { agentName } from "@/lib/agentName";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { chatHash } from "@/lib/route";
 import { webAudienceLabel } from "@/lib/audience";
@@ -196,9 +197,12 @@ test("the sidebar names the shell's destinations and states the member at its fo
   expect(names).toEqual([
     "Search",
     "Expand sidebar",
-    "New conversation",
-    "Applications",
-    "Conversations",
+    "Ask assistant",
+    "Apps",
+    "New app",
+    agentName(AGENT.name),
+    "Chats",
+    "Chats options",
     "Connectors",
     "Workspace",
     "Theme",
@@ -207,22 +211,57 @@ test("the sidebar names the shell's destinations and states the member at its fo
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
 });
 
-test("a section heading holds its menu glyph but draws it only under the pointer", async () => {
+test("a section heading folds its section, and holds its menu behind a mark drawn under the pointer", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  for (const name of ["Applications", "Conversations"]) {
-    const glyph = within(sidebar).getByRole("button", { name }).querySelector("svg");
-    if (!glyph) throw new Error(name + " states no menu glyph");
-    /* Held in the layout and drawn transparent rather than taken out of it: a glyph that arrives
-       on hover would move the heading's own words as the pointer lands on them. */
-    expect(glyph.getAttribute("class")).toContain("opacity-0");
-    expect(glyph.getAttribute("class")).toContain("group-hover/head:opacity-100");
-    expect(glyph.getAttribute("class")).toContain("group-focus-visible/head:opacity-100");
-    expect(glyph.getAttribute("class")).not.toContain("hidden");
+  for (const name of ["Apps", "Chats"]) {
+    /* The band is the fold and states which way it stands. It opens no menu: a heading is a place
+       before it is an act, and the act it does carry is the one a member does to a heading. */
+    const band = within(sidebar).getByRole("button", { name });
+    expect(band.getAttribute("aria-haspopup")).toBeNull();
+    expect(band.getAttribute("aria-expanded")).toBe("true");
+    const chevron = band.querySelector("svg");
+    if (!chevron) throw new Error(name + " states no fold mark");
+    expect(chevron.getAttribute("class")).not.toContain("opacity-0");
   }
+
+  /* A menu is a second act on the same row, so it takes its own mark — held in the layout and drawn
+     transparent, so nothing under the pointer moves as it arrives. Only the section that has one
+     draws it: Apps carries its act as a row instead. */
+  expect(within(sidebar).queryByRole("button", { name: "Apps options" })).toBeNull();
+  const options = within(sidebar).getByRole("button", { name: "Chats options" });
+  expect(options.getAttribute("aria-haspopup")).toBe("menu");
+  expect(options.getAttribute("class")).toContain("opacity-0");
+  expect(options.getAttribute("class")).toContain("group-hover/head:opacity-100");
+  expect(options.getAttribute("class")).not.toContain("hidden");
+});
+
+test("the apps section yields its height rather than pushing the sidebar's foot off the screen", async () => {
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  const apps = within(sidebar).getByRole("navigation", { name: "Apps" });
+
+  /* The nav scrolls nowhere, so a section held at its natural height would push the rows under it
+     — Connectors, Workspace, and the way out — past the bottom edge on a short screen. The squeeze
+     is spent inside the list, which caps and scrolls. */
+  const section = apps.parentElement;
+  if (!section) throw new Error("the apps list stands in no section");
+  expect(section.className).not.toContain("shrink-0");
+  expect(apps.className).not.toContain("shrink-0");
+
+  const scroller = apps.firstElementChild;
+  if (!scroller) throw new Error("the apps list has no scrolling frame");
+  expect(scroller.className).toContain("overflow-y-auto");
+  expect(scroller.className).toContain("max-h-(--size-apps-open)");
+
+  // The foot is what must survive it.
+  expect(within(sidebar).getByRole("button", { name: "Workspace" })).toBeTruthy();
 });
 
 test("the shell opens on the rail, and a sidebar the member widened stays widened", async () => {
@@ -321,9 +360,15 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
   expect(names).toEqual([
     "Search",
     "Collapse sidebar",
-    "New conversation",
-    "Applications",
-    "Conversations",
+    "Ask assistant",
+    "Apps",
+    "New app",
+    /* The drawer is always drawn whole, so the app's row states its name and the pin act every row
+       wears. */
+    agentName(AGENT.name),
+    "Pin " + agentName(AGENT.name),
+    "Chats",
+    "Chats options",
     "Connectors",
     "Workspace",
     "Theme",

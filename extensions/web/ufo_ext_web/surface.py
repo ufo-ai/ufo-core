@@ -111,6 +111,7 @@ from ufo.sdk.surfaces import (
     KeyedAdmission,
     ListedConversation,
     PortalKind,
+    SetupState,
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
@@ -170,8 +171,8 @@ MAX_MEMORY_QUERY_CHARS = 500
 MAX_SEARCH_CHARS = 200
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
-SCHEDULED_TASK_KIND = "scheduled_task"
 SITE_KIND = "site"
+SETUP_READ_FANOUT = 8
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
 COMMENT_SURFACES = frozenset({"slack", "ufo"})
@@ -997,6 +998,19 @@ async def _flag_reads(agents: tuple[AgentSummary, ...]) -> dict[str, bool]:
     return dict(zip(keys, answers, strict=True))
 
 
+def _setup_ready(state: SetupState) -> bool:
+    """Whether every account, credential and standing order this app's provision declared is
+    settled — the one reading of a `SetupState` that answers about the app rather than a row.
+
+    An app that declared nothing is ready: the read answers an empty declaration with empty rows,
+    and a row that does not exist cannot be outstanding."""
+    return (
+        all(connector.granted for connector in state.connectors)
+        and all(credential.filled for credential in state.credentials)
+        and all(order.armed for order in state.standing)
+    )
+
+
 async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     """The portal's first read: the signed-in member and the agents their web audience holds — every
     agent for a workspace admin, the main agent plus the granted non-main agents for everyone else.
@@ -1010,7 +1024,18 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     The create act draws nothing from this read:
     it is a conversation the `create-application` skill runs, and the screen offers it to every
     signed-in member, because the `agent` kind admits a create from any speaking member and stamps
-    them the owner. `archived` contains the apps this member may restore."""
+    them the owner. `archived` contains the apps this member may restore.
+
+    `setup_due` says an app is installed and cannot work yet — an account ungranted, a credential
+    unfilled, or a standing order unarmed. It rides this read rather than the status poll beside
+    it: each answer costs a transaction, up to three selects, and an object-registry read per
+    standing kind — a price a once-per-boot read pays and a four-second poll cannot. Only a
+    provisioned row is asked, because the declaration is written where `provisioned_by` is: an
+    agent a member built declares nothing and so owes nothing, and the asking runs
+    `SETUP_READ_FANOUT` wide because that price is per app on the one request the member is
+    waiting on: a workspace holding thirty apps would otherwise hold thirty transactions open at
+    once on the pool the whole deploy shares, and eight keeps the read wide enough that its
+    latency is the slowest answer rather than the sum of them."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1025,6 +1050,19 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
         agent.id: await _homepage_state(ctx, agent, member_id, audience.admin)
         for agent in audience.agents
     }
+    provisioned = tuple(agent for agent in audience.agents if agent.provisioned_by is not None)
+    fanout = asyncio.Semaphore(SETUP_READ_FANOUT)
+
+    async def setup_of(agent: AgentSummary) -> SetupState:
+        async with fanout:
+            return await ctx.agent_setup(agent.id, member_id)
+
+    setup_states = await asyncio.gather(*(setup_of(agent) for agent in provisioned))
+    due = frozenset(
+        agent.id
+        for agent, state in zip(provisioned, setup_states, strict=True)
+        if not _setup_ready(state)
+    )
     archived = [
         app
         for app in await ctx.list_archived_agents()
@@ -1061,6 +1099,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "mine": agent.owner_member_id == member_id,
                     "hidden": agent.id in hidden,
                     "homepage": homepages[agent.id],
+                    "setup_due": agent.id in due,
                     **(
                         {"web_audience": list(grants.get(agent.id, ()))}
                         if grants is not None
@@ -1076,19 +1115,17 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
 async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
     """Each visible agent's live picture, polled beside the index `agents_index` serves: the
     liveest non-terminal turn it holds — with what a running one is doing right now, peeked off
-    the hub's newest activity frame — when any turn of its last moved, whether its most recent
-    terminal turn failed, and the soonest unpaused scheduled task on it — read through the task
-    kind's own member gate, never its table.
+    the hub's newest activity frame — when any turn of its last moved, and whether its most
+    recent terminal turn failed.
 
     An agent is visible workspace-wide; its turns are not. The aggregate is fenced to the
     conversations this reader reads, so a row reports this member's picture of the agent and never
     another member's private turn.
 
-    The turn aggregate is one read for every agent at once; the two per-agent reads are taken only
-    where the row is drawn from them. A running turn's hub is peeked for the agents running one,
-    and an agent's tasks are listed only where no turn state stands in front of them — so an agent
-    at work costs the object store nothing, and a screen pays that read only for the agents
-    standing still."""
+    Every tab holding the portal open polls this for as long as it is open, at four seconds while
+    any agent in the workspace works, so it costs one turn aggregate for every agent at once and
+    nothing per resting agent. The single per-agent read is the hub peek, taken only for the
+    agents holding a running turn, because the frame it wants exists only while that turn does."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1103,24 +1140,6 @@ async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
         frame = await ctx.latest_activity(status.running_turn_id)
         if frame is not None:
             activity[status.agent_id] = frame.text
-    next_runs: dict[UUID, str] = {}
-    for status in statuses:
-        if status.live is not None or status.last_failed:
-            continue
-        page = await ctx.list_member_objects(
-            SCHEDULED_TASK_KIND,
-            status.agent_id,
-            member_id,
-            admin=audience.admin,
-            query=ObjectListQuery(filters={"paused": False}, order_by="next_run_at"),
-        )
-        if page is None:
-            break
-        if not page.rows:
-            continue
-        soonest = page.rows[0].fields["next_run_at"]
-        if isinstance(soonest, str):
-            next_runs[status.agent_id] = soonest
     return JSONResponse(
         {
             "statuses": [
@@ -1128,7 +1147,6 @@ async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
                     "agent_id": str(status.agent_id),
                     "turn": status.live,
                     "activity": activity.get(status.agent_id),
-                    "next_run_at": next_runs.get(status.agent_id),
                     "last_active_at": _iso(status.last_active_at),
                     "last_failed": status.last_failed,
                 }
@@ -3644,13 +3662,7 @@ async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
         *(ctx.agent_setup(agent.id, member_id) for agent, _extension in app_agents)
     )
     installed = tuple(
-        StarterApp(
-            id=agent.id,
-            extension=extension,
-            ready=all(connector.granted for connector in state.connectors)
-            and all(credential.filled for credential in state.credentials)
-            and all(order.armed for order in state.standing),
-        )
+        StarterApp(id=agent.id, extension=extension, ready=_setup_ready(state))
         for (agent, extension), state in zip(app_agents, app_states, strict=True)
         if extension is not None
     )

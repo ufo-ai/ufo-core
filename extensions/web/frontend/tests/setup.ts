@@ -1,6 +1,7 @@
 import { cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
 
+import { resetAppStatusStore } from "@/lib/appStatusStore";
 import { resetChatStore } from "@/lib/chatStore";
 import { resetRailStore } from "@/lib/railStore";
 import { resetRouter } from "@/lib/router";
@@ -92,6 +93,7 @@ beforeEach(() => {
 afterEach(() => {
   const faults = keyFaults;
   keyFaults = [];
+  resetAppStatusStore();
   resetChatStore();
   resetRailStore();
   resetRouter();
