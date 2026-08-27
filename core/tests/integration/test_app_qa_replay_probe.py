@@ -24,9 +24,11 @@ pytestmark = pytest.mark.docker
 
 
 async def test_real_followup_probe_captures_one_initial_evidence_artifact(
-    sandbox_container: tuple[str, Path], sandbox_image: str
+    tmp_path: Path, sandbox_image: str
 ) -> None:
-    _, workspace_root = sandbox_container
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    workspace_root.chmod(0o777)
     conversation_id = uuid4()
     workspace = workspace_root / str(conversation_id)
     app = workspace / "ufo-app"
