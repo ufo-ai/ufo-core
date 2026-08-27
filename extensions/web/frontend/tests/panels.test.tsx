@@ -792,7 +792,7 @@ test("the sources listing groups a binding's streams and acts on the main agent'
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 

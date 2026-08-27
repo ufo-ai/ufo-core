@@ -71,7 +71,7 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     search: "Search memory",
     render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
-  sources: declared("Sources", SOURCES),
+  connectors: declared("Connectors", SOURCES),
   credentials: declared("Credentials", CREDENTIALS),
   usage: {
     label: "Usage",

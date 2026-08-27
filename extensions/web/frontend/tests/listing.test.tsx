@@ -526,7 +526,7 @@ test("the sources declaration projects a binding and a bare stream into one unif
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -583,7 +583,7 @@ test("a shared binding is offered no Share control", async () => {
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -630,7 +630,7 @@ test("resync posts the binding whole, account and base url included", async () =
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -675,7 +675,7 @@ test("an applied outcome states itself under the listing that produced it", asyn
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -711,7 +711,7 @@ test("share flips the value it carries, and remove posts no spec at all", async 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -779,7 +779,7 @@ test("a parked stream reads as parked rather than due, and the reason is on the 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -987,7 +987,7 @@ test("an applied intent keeps the selected tab and the typed search term", async
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -1090,7 +1090,7 @@ test("the sources declaration searches and filters by access with live counts", 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -1157,7 +1157,7 @@ test("a tab alone survives an applied intent, with no search term typed", async 
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <PlacedWorkspace view="sources" />
+      <PlacedWorkspace view="connectors" />
     </MainAgentProvider>,
   );
 
@@ -1211,7 +1211,7 @@ test("leaving the workspace entirely also releases held controls", async () => {
 
   await narrow("rss");
   location.hash = "#/agents/" + AGENT.id + "/chat";
-  await waitFor(() => expect(screen.queryByPlaceholderText("Search sources")).toBeNull());
+  await waitFor(() => expect(screen.queryByPlaceholderText("Search connectors")).toBeNull());
   location.hash = "#/workspace/sources";
 
   expect(await screen.findByText("notion")).toBeTruthy();

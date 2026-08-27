@@ -136,9 +136,9 @@ test("a workspace tab and a section carry the same place and parse back to it", 
     range: "7d",
     opens: [OLDER_KEY],
   };
-  expect(parseHash(workspaceHash("sources", place))).toEqual({
+  expect(parseHash(workspaceHash("connectors", place))).toEqual({
     kind: "workspace",
-    view: "sources",
+    view: "connectors",
     place,
   });
   expect(parseHash(sectionHash("connectors", place))).toEqual({
@@ -154,9 +154,9 @@ test("a workspace tab and a section carry the same place and parse back to it", 
 /** A screen that left the workspace tabs kept its name, and the links members already hold spell
  *  the address it had then. The table reads that address as the section holding the same screen. */
 test("a screen moved off the workspace tabs still answers at the address it had", () => {
-  expect(parseHash("#/workspace/connectors?q=slack")).toEqual({
+  expect(parseHash("#/workspace/wiki?q=slack")).toEqual({
     kind: "section",
-    section: "connectors",
+    section: "wiki",
     place: { q: "slack" },
   });
   expect(parseHash("#/workspace/artifacts")).toEqual({
@@ -164,7 +164,48 @@ test("a screen moved off the workspace tabs still answers at the address it had"
     section: "artifacts",
     place: {},
   });
+  expect(parseHash("#/workspace/connectors?q=slack")).toEqual({
+    kind: "section",
+    section: "connectors",
+    place: { q: "slack" },
+  });
   expect(parseHash("#/workspace/nothing")).toEqual({ kind: "bad-link" });
+});
+
+/** A tab renamed keeps the links members already hold, and takes no address a live screen answers
+ *  at: the tab is spelled by the name it carried before, in the read and in the builder alike,
+ *  because the name it carries now is the section's. */
+test("a renamed workspace tab is read and written at the address it had", () => {
+  expect(parseHash("#/workspace/sources")).toEqual({
+    kind: "workspace",
+    view: "connectors",
+    place: {},
+  });
+  expect(parseHash("#/workspace/sources?q=rss")).toEqual({
+    kind: "workspace",
+    view: "connectors",
+    place: { q: "rss" },
+  });
+  expect(workspaceHash("connectors")).toBe("#/workspace/sources");
+  expect(workspaceHash("connectors", { q: "rss" })).toBe("#/workspace/sources?q=rss");
+});
+
+/** A tab segment naming a property every object inherits names no tab: the read is over the tab
+ *  list itself, so these addresses report a bad link rather than standing a view no registry
+ *  holds. */
+test("an address naming an inherited property of an object names no workspace tab", () => {
+  for (const name of [
+    "constructor",
+    "__proto__",
+    "toString",
+    "valueOf",
+    "hasOwnProperty",
+    "isPrototypeOf",
+  ]) {
+    expect(parseHash("#/workspace/" + name)).toEqual({ kind: "bad-link" });
+    expect(parseHash("#/workspace/" + name + "?q=slack")).toEqual({ kind: "bad-link" });
+  }
+  expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
 /** Tasks made the opposite move — off its own section, onto the workspace tabs — and the links to
@@ -504,8 +545,9 @@ test("the conversation a sign-in carried through opens, and the hash names it", 
   expect(location.hash).toBe(chatHash(CONVO_ID));
 });
 
-/** One line answers every address the portal cannot read — a mis-cased conversation permalink and a
- *  mangled slot track alike — so it names no kind of link. */
+/** One line answers every address the portal cannot read — a mis-cased conversation permalink, a
+ *  mangled slot track, and a tab segment naming a property every object inherits alike — so it names
+ *  no kind of link. */
 test("an address the portal cannot read reports a bad link, whichever part is mangled", async () => {
   history.replaceState(null, "", chatHash(MIXED_CASE_CONVO_ID));
   wire({ "/transcript": () => json({ messages: [] }) });
@@ -516,6 +558,18 @@ test("an address the portal cannot read reports a bad link, whichever part is ma
   view.unmount();
 
   history.replaceState(null, "", "#/connectors?open=a~~b");
+  const mangled = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  mangled.unmount();
+
+  history.replaceState(null, "", "#/workspace/__proto__");
+  const inherited = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  inherited.unmount();
+
+  history.replaceState(null, "", "#/workspace/constructor");
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("This link is not valid.")).toBeTruthy();
@@ -528,7 +582,7 @@ test("an address the portal cannot read reports a bad link, whichever part is ma
 
 test("search and chip ride the hash by replacement, never as history entries", async () => {
   location.hash = "#/agents";
-  location.hash = workspaceHash("sources");
+  location.hash = workspaceHash("connectors");
   serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -551,8 +605,8 @@ test("a search term typed and not submitted does not follow the member to the ne
   serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await goTo("Sources");
-  await userEvent.type(await screen.findByLabelText("Search sources"), "rss");
+  await goTo("Connectors");
+  await userEvent.type(await screen.findByLabelText("Search connectors"), "rss");
   expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("rss");
   expect(location.hash).not.toContain("q=");
 
@@ -563,7 +617,7 @@ test("a search term typed and not submitted does not follow the member to the ne
 });
 
 test("a reloaded filter lands filtered", async () => {
-  location.hash = workspaceHash("sources", { q: "rss", chip: "Workspace" });
+  location.hash = workspaceHash("connectors", { q: "rss", chip: "Workspace" });
   serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -576,7 +630,7 @@ test("a reloaded filter lands filtered", async () => {
 });
 
 test("a tab click releases the filters, so returning starts unfiltered", async () => {
-  location.hash = workspaceHash("sources", { q: "rss", chip: "Workspace" });
+  location.hash = workspaceHash("connectors", { q: "rss", chip: "Workspace" });
   serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -584,7 +638,7 @@ test("a tab click releases the filters, so returning starts unfiltered", async (
 
   await goTo("Team");
   await waitFor(() => expect(location.hash).toBe("#/workspace/team"));
-  await goTo("Sources");
+  await goTo("Connectors");
 
   await waitFor(() => expect(location.hash).toBe("#/workspace/sources"));
   expect(((await screen.findByRole("searchbox")) as HTMLInputElement).value).toBe("");
@@ -623,7 +677,7 @@ test("the usage range rides the address, and a link naming one lands on it", asy
 
 test("a placement from a pane the member already left never writes its dead place back", async () => {
   let release: ((value: Response) => void) | null = null;
-  location.hash = workspaceHash("sources", { q: "rss" });
+  location.hash = workspaceHash("connectors", { q: "rss" });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -661,7 +715,7 @@ test("a placement from a pane the member already left never writes its dead plac
   await userEvent.click(await screen.findByRole("button", { name: "Resync" }));
   await waitFor(() => expect(release).not.toBeNull());
   await goTo("Team");
-  await goTo("Sources");
+  await goTo("Connectors");
   await waitFor(() => expect(location.hash).toBe("#/workspace/sources"));
 
   release!(json({ applied: true, message: "Resync queued." }));
@@ -694,7 +748,7 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
 });
 
 test("a hash naming a filter or a memory class that does not exist says so", async () => {
-  location.hash = workspaceHash("sources", { chip: "Nonexistent" });
+  location.hash = workspaceHash("connectors", { chip: "Nonexistent" });
   serve();
   const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   expect(await screen.findByText("That filter is not available.")).toBeTruthy();
@@ -708,7 +762,7 @@ test("a hash naming a filter or a memory class that does not exist says so", asy
 
 test("an intent resolving after the member leaves never rewrites where they went", async () => {
   let release: ((value: Response) => void) | null = null;
-  location.hash = workspaceHash("sources");
+  location.hash = workspaceHash("connectors");
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {

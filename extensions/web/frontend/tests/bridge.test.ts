@@ -95,9 +95,12 @@ test("navigation admits conversations, apps, new chats, and sections, and refuse
   expect(framedNavigation("#/agents/" + AGENT_ID + "/setup")).toBe(true);
   expect(framedNavigation("#/connectors")).toBe(true);
   expect(framedNavigation("#/wiki?open=run%2Fabc")).toBe(true);
+  expect(framedNavigation("#/workspace/artifacts")).toBe(true);
   expect(framedNavigation("#/workspace/connectors")).toBe(true);
   expect(framedNavigation("#/admin")).toBe(false);
   expect(framedNavigation("#/workspace/team")).toBe(false);
+  expect(framedNavigation("#/workspace/sources")).toBe(false);
+  expect(framedNavigation("#/workspace/__proto__")).toBe(false);
   expect(framedNavigation("#/agents/" + AGENT_ID + "/conversations/" + CONVERSATION_ID + "/slots/changes")).toBe(false);
   expect(framedNavigation("#/")).toBe(false);
   expect(framedNavigation("https://evil.example.com")).toBe(false);

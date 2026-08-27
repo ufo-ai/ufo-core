@@ -172,6 +172,19 @@ test("the connectors section lists the connection pool", async () => {
   expect(screen.getByText(/Only you/)).toBeTruthy();
 });
 
+/** This screen stood on a workspace tab once, and the links members hold spell the address it had
+ *  then. That address answers with this screen still, and not with the workspace tab that carries
+ *  the same name today. */
+test("the address the connectors section had on the workspace tabs lands on it", async () => {
+  location.hash = "#/workspace/connectors";
+  connectors();
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("github")).toBeTruthy();
+  expect(screen.getByText(/Only you/)).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Credentials" })).toBeNull();
+});
+
 /** The three legs are GitHub's own, so they are read in GitHub's record and stand nowhere on the
  *  page's own ground. */
 test("the GitHub row opens the coverage its install stands on", async () => {

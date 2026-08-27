@@ -6,7 +6,7 @@ export const WORKSPACE_TABS = [
   "tasks",
   "skills",
   "memory",
-  "sources",
+  "connectors",
   "credentials",
   "usage",
   "billing",
@@ -183,10 +183,6 @@ export function mergePlace(held: WorkspacePlace, patch: WorkspacePlace): Workspa
   const next: WorkspacePlace = {};
   for (const key of PLACE_KEYS) carryKey(next, key in patch ? patch : held, key);
   return next;
-}
-
-function isWorkspaceTab(name: string): name is WorkspaceTab {
-  return WORKSPACE_TABS.includes(name as WorkspaceTab);
 }
 
 function isSection(name: string): name is Section {
@@ -368,9 +364,29 @@ const AGENT = row(
     AGENT_PREFIX + agentId + serializePlace(place),
 );
 
-/* Connectors stood on a workspace tab once, and so did every screen that ships as an app today, so
-   links to those addresses exist outside this code. The address keeps answering with the section
-   that holds the same screen, which is why this one row reads to either kind. */
+/* A tab renamed keeps the address it carried before as its one spelling, because the name it
+   carries now is a section's name and that section answers at that address for the links members
+   already hold. The member reads the tab's label, which is the new name; the address is the tab's
+   durable id, exactly as a section name outlives who renders it. */
+const TAB_ADDRESSES: { [Name in WorkspaceTab]?: string } = { connectors: "sources" };
+
+/** The one spelling of a tab under the workspace prefix. */
+function tabAddress(view: WorkspaceTab): string {
+  return TAB_ADDRESSES[view] ?? view;
+}
+
+/** The tab an address names, over the tab list itself, so a name the list does not hold answers
+ *  nothing — a tab segment naming an inherited property of a lookup object is a name no tab
+ *  carries. */
+function tabAt(name: string): WorkspaceTab | undefined {
+  return WORKSPACE_TABS.find((tab) => tabAddress(tab) === name);
+}
+
+/* Every screen that ships as an app today stood on a workspace tab once, so links to those
+   addresses exist outside this code. The address keeps answering with the section that holds the
+   same screen, which is why this one row reads to either kind. A section holds its name here first:
+   the screen a held link named is the screen the link still lands on, and a tab renamed onto that
+   name is read and written at the address it carried before. */
 const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
   "workspace",
   new RegExp(`^${WORKSPACE_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),
@@ -378,12 +394,12 @@ const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
     const name = match[1];
     const place = parsePlace(match[2]);
     if (!place) return null;
-    if (isWorkspaceTab(name)) return { kind: "workspace", view: name, place };
     if (isSection(name)) return { kind: "section", section: name, place };
-    return null;
+    const tab = tabAt(name);
+    return tab === undefined ? null : { kind: "workspace", view: tab, place };
   },
   (view: WorkspaceTab, place: WorkspacePlace = {}) =>
-    WORKSPACE_PREFIX + view + serializePlace(place),
+    WORKSPACE_PREFIX + tabAddress(view) + serializePlace(place),
 );
 
 /* The door swings the other way too: tasks stood as its own section, shipped as an app, and links
