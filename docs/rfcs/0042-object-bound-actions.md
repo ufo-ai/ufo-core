@@ -8,19 +8,21 @@ date: 2026-08-27
 # Object-bound actions — progressive capability discovery through workspace objects
 
 > Keep the five generic workspace-object verbs, add one `object_action` dispatcher, and let an
-> extension attach typed collection or instance actions to any registered object kind. `object_list`
-> and `object_get` return the relevant actions only after the model chooses a domain. Thirty-five
-> named tools become object actions while one new kind, `surface`, gives Slack and iMessage their
-> existing installation object. The hosted pack's member-facing schema inventory falls from 67 to
-> 34 before runtime connector expansion, without changing authority, audit, idempotency, hooks, or
-> final-act behavior.
+> extension attach typed collection or instance actions to any registered object kind. A capability
+> lives where its subject lives: `object_list` and `object_get` return the relevant actions only
+> after the model chooses a domain. Twenty-four named tools become object actions while one new
+> kind, `surface`, gives Slack and iMessage their existing installation object. The hosted pack's
+> member-facing schema registry falls from 67 to 45 before runtime connector expansion, the lazy
+> tool catalog is deleted once the inventory lands — object discovery becomes the one deferral
+> mechanism — and authority, audit, idempotency, hooks, and final-act behavior do not change.
 
 ## Decision
 
 | Question | Decision |
 |---|---|
 | What stays globally listed? | Cross-cutting execution, conversation control, research, connector discovery, and the six object verbs in [Retained global tools](#retained-global-tools). |
-| What moves? | The 35 names in [Action inventory](#action-inventory). |
+| What moves? | The 24 names in [Action inventory](#action-inventory) — a starting assignment: a family that fails its eval gate returns to the global set, updating the inventory tables in that change. |
+| What happens to the lazy tool catalog? | Deleted in the final unit. Object discovery is the one deferral mechanism; retained global tools are always on the wire. |
 | How are moved capabilities found? | Collection actions on `object_list(kind)`; instance actions on `object_get(kind, name)`. `object_explain(kind)` returns both sets. |
 | How are they called? | One generic `object_action` tool with a structured target and an action-specific `input` mapping. |
 | May an extension attach to another extension's or core's kind? | Yes. Kind ownership controls object reads; action ownership controls the handler and its `ExtensionContext`. |
@@ -43,9 +45,10 @@ model tool transport.
 | Source | Established pattern | Consequence here |
 |---|---|---|
 | [OData actions and functions](https://learn.microsoft.com/en-us/odata/webapi-8/fundamentals/actions-functions) and [action routing](https://learn.microsoft.com/en-us/odata/webapi-8/fundamentals/action-routing) | Non-CRUD behavior binds to either an entity or a collection; side-effecting actions and side-effect-free functions retain distinct execution semantics. | UFO has instance and collection bindings. One dispatcher carries both reads and writes, while `side_effecting` remains an action property; a second `object_function` wire tool would add a distinction the model transport does not use. |
-| [Google AIP-130](https://google.aip.dev/130) and [AIP-136](https://google.aip.dev/136) | Prefer standard methods; use custom methods only when CRUD is dishonest. Bind them to a resource or collection whenever possible. | `object_apply` remains the path for authored state. OAuth, rebuilds, searches, generation, state machines, and current-conversation workflows become actions rather than simulated fields. |
+| [Google AIP-130](https://google.aip.dev/130) and [AIP-136](https://google.aip.dev/136) | Prefer standard methods; use custom methods only when CRUD is dishonest. Bind them to a resource or collection whenever possible. | `object_apply` remains the path for authored state. OAuth handoffs, rebuilds, searches, and state machines become actions rather than simulated fields. |
+| [Google AIP-164](https://google.aip.dev/164) | A soft-deleted resource remains gettable; undelete is a method on that resource. | Archived agents stay readable through `object_get`; `restore_application` binds instance. |
 | [Stripe PaymentIntent cancellation](https://docs.stripe.com/api/payment_intents/cancel) | An operation is object-local even when only some object states accept it; invocation returns the state refusal. | Discovery does not maintain a second `available` flag. An action may be listed while its handler refuses the current state. |
-| [Siren](https://github.com/kevinswiber/siren#actions) | An entity representation can carry named actions and their input controls. Action names are unique within that entity's action set. | Object projections return action name, description, JSON Schema, and a pre-bound invocation template. Uniqueness is per kind and binding, not deploy-wide short name. |
+| [Siren](https://github.com/kevinswiber/siren#actions) | An entity representation can carry named actions and their input controls. Action names are unique within that entity's action set. | Object projections return action name, description, JSON Schema, and a pre-bound invocation template. Uniqueness is per kind, not deploy-wide short name. |
 | [Kubernetes RBAC subresources](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-resources) | A resource operation has its own authorization identity; possessing general resource access does not imply every subresource verb. | Agent allowlists and hooks address each action by canonical id. Granting `object_action` alone grants nothing. |
 | [OWASP API1:2023](https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/) | Every operation receiving an object id must perform object-level authorization on that request. | A discovered invocation template is not trusted. Dispatch resolves visibility and authority again under the live call. |
 | [OpenAI tool search results](https://openai.com/index/introducing-gpt-5-4/#tool-use) | Deferring large tool definitions reduces repeated context cost; OpenAI reports 47% lower total tokens at equal accuracy on its cited 250-task MCP Atlas comparison. | UFO progressively reveals actions through the object vocabulary it already exposes. The external result motivates measurement, not an assumed UFO gain; this RFC defines UFO-specific evals below. |
@@ -65,17 +68,26 @@ capabilities local to that part, and invokes one through a stable generic transp
 3. five `ObjectVerbs` from `core/src/ufo/objects.py`.
 
 `_agent_tools()` in `core/src/ufo/loop/queue.py` then removes `profile_only` entries or intersects
-that tuple with an agent allowlist. In `assistant_hosted`, the resulting member-facing static set is
-67 schemas before any provider-specific connector tools: 17 core builtins + 45 extension tools +
-five object verbs. Seventeen additional raw browser and application-builder primitives are already
-`profile_only` and are not part of that 67.
+that tuple with an agent allowlist. In `assistant_hosted`, the resulting member-facing static
+registry is 67 schemas before any provider-specific connector tools: 17 core builtins + 45
+extension tools + five object verbs. Seventeen additional raw browser and application-builder
+primitives are already `profile_only` and are not part of that 67.
 
-Thirty-four names in the hosted set are object-local. `monitor` is the same shape in the separate
-monitors extension, making 35 repository-wide. Moving the hosted 34 and adding `object_action`
-changes the static member-facing inventory from 67 to 34, a net reduction of 33 schemas. This count
-does not claim a token saving: descriptions and JSON Schemas differ in size, and a moved action is
-still read when its object is explored. The measurement gate uses serialized bytes, billed input,
-cache behavior, tool yields, and task accuracy.
+The lazy tool catalog (#2585) currently thins what that registry puts on the wire: above
+`DIRECT_TOOL_LIMIT`, a request offers the eager names, the tools the transcript already used, and
+a `tool_search` tool over the rest. It is a deferral stopgap with no domain locality — a flat
+keyword search over the same global inventory — and running it beside object discovery would give
+one member ask two discovery grammars. This RFC's final unit deletes it; until that unit lands it
+keeps running unchanged, the counts here are registry counts, and the billed comparison is
+measured against production with the catalog live.
+
+Twenty-three names in the hosted set are object-local. `monitor` is the same shape in the separate
+monitors extension, making 24 repository-wide. Moving the hosted 23 and adding `object_action`
+changes the static member-facing registry from 67 to 45, a net reduction of 22 schemas. This count
+does not claim a token saving: descriptions and JSON Schemas differ in size, a static schema rides
+the cached prompt prefix while a discovered one is per-conversation transcript tokens, and a moved
+action is still read when its object is explored. The measurement gate uses serialized bytes,
+billed input, cache behavior, tool yields, and task accuracy.
 
 ### The object substrate
 
@@ -89,9 +101,9 @@ RFC 0017 already supplies the required discovery vocabulary:
 - `object_apply` and `object_delete` are the generic mutations.
 
 The registry is already extension-spanning and workspace-scoped. The gap is imperative behavior.
-`request_credentials`, `slack_connect`, `memory_search`, and `generate_image` are not honest CRUD,
+`request_credentials`, `slack_connect`, `memory_search`, and `deploy_website` are not honest CRUD,
 but globally listing each one gives every model round their full schemas even when the member's task
-has nothing to do with credentials, Slack, memory, or media.
+has nothing to do with credentials, Slack, memory, or sites.
 
 ### Constraints a generic dispatcher must preserve
 
@@ -116,12 +128,18 @@ resolution is therefore an engine boundary, not handler glue.
 
 ## Proposal
 
-### 1. Two bindings, one action declaration
+### 1. One declaration, two bindings
 
-An action binds either to a kind's collection or one visible object instance.
+An action is a `ToolDef` bound to a kind's collection or to one visible object instance.
 
 ```python
 ActionBinding = Literal["collection", "instance"]
+
+
+@dataclass(frozen=True)
+class ObjectBinding:
+    kind: str
+    binding: ActionBinding
 
 
 @dataclass(frozen=True)
@@ -133,16 +151,12 @@ class ObjectActionTarget:
 
 
 @dataclass(frozen=True)
-class ObjectAction[InputT: BaseModel]:
-    kind: str
-    binding: ActionBinding
+class ToolDef[InputT: BaseModel]:
     name: str
     description: str
     input_model: type[InputT]
-    handler: Callable[
-        [ToolContext, ObjectActionTarget, InputT],
-        Awaitable[ToolResult],
-    ]
+    handler: Callable[[ToolContext, InputT], Awaitable[ToolResult]]
+    bound: ObjectBinding | None = None
     untrusted: bool = False
     side_effecting: bool = False
     subagent_default: bool = False
@@ -153,20 +167,26 @@ class ObjectAction[InputT: BaseModel]:
     presentation: ActionPresentation | None = None
 ```
 
-The code may factor the repeated execution fields shared with `ToolDef`; it must not copy their
-interpretation. Boot normalizes a global tool or bound action into one `CallDefinition` carrying
-its handler, input model, contributing extension context, flags, semantic id, and final-act model.
-The wire call resolves to that definition before scheduling. Requester and target binding then
-produce one `EffectiveCall`; hooks and execution consume only that complete type.
+There is one callable declaration. A `ToolDef` whose `bound` is `None` is a global tool; one
+carrying an `ObjectBinding` is an object action and never enters the wire registry. Both flow
+through the same collision gate, allowlist selection, hook matching, idempotency keying, and
+telemetry — nothing normalizes a second declaration form into a first, because there is no second
+form. `ask_user` and `connect_account` carry `final_act_model` on the same field an action does.
+Requester and target resolution produce one `EffectiveCall` per wire call; hooks and execution
+consume only that complete type.
 
-The handler signatures differ deliberately. A global tool has no object target. An object action
-receives the target separately, so its `input_model` contains only action-specific member/model
-input. A member cannot smuggle `kind`, `name`, `agent`, or `generation` through that model, and a
-portal does not need RFC 0022's `compose` callback to strip server-owned fields.
+The handler signature does not change. A bound handler reads its resolved `ObjectActionTarget`
+from the `ToolContext`, exactly as a side-effecting handler already reads its per-call idempotency
+key; a global call carries none. The target never enters `input_model`, so a member cannot smuggle
+`kind`, `name`, `agent`, or `generation` through action input, and a portal does not need RFC
+0022's `compose` callback to strip server-owned fields. The existing registry gate that refuses an
+input model reserving `requested_by` covers actions for free. `agent_targetable` has three
+declared consumers — `grant_web_access`, `read_private_transcript`, and `set_homepage` — each
+resolving its target under the existing cross-agent gate.
 
-Collection binding is used when an action creates or searches instances, spans the collection, or
-is scoped by the current turn rather than one durable row. Instance binding is used only when one
-existing visible `kind/name` is the target. This is the same division OData and AIP-136 make.
+Collection binding is used when an action creates or searches instances or spans the collection.
+Instance binding is used only when one existing visible `kind/name` is the target. This is the
+same division OData and AIP-136 make.
 
 Actions remain imperative. An extension must use `object_apply` when the operation is faithfully an
 authored desired state. An action is warranted for at least one of:
@@ -174,13 +194,13 @@ authored desired state. An action is warranted for at least one of:
 - an external handoff or state machine;
 - an operation over derived state;
 - a search whose semantics exceed object listing;
-- a current-turn or current-conversation workflow;
-- generated output;
+- generated output with a durable destination;
 - a transition that cannot be represented as a spec replacement.
 
 ### 2. Contribution is separate from kind ownership
 
-`Manifest` gains `object_actions: tuple[ObjectAction, ...]`. The loader builds two bindings:
+A bound `ToolDef` registers through the existing `tools` manifest point — one declaration, one
+registration path — and the loader partitions on `bound`. It builds two bindings:
 
 - `BoundKind`: kind owner plus the context its store reads under;
 - `BoundAction`: contributing extension plus the context its handler runs under.
@@ -193,7 +213,7 @@ fail. This is required for:
 - coding attaching `connect_github` to core's `credential`;
 - metronome attaching `manage_billing` to core's `workspace`;
 - Slack and iMessage attaching to core's `surface`;
-- OpenRouter attaching generation to core's `artifact`.
+- web attaching `read_private_transcript` to core's `conversation`.
 
 Object visibility is evaluated by the kind owner's store. The action then runs with the
 contributor's `ExtensionContext`, preserving its own credential slots, store, blob namespace,
@@ -206,7 +226,7 @@ Boot fails on:
 |---|---|
 | Missing target kind | Names action, contributor, and missing kind. |
 | Invalid kind or action name | Uses the existing kind/tool naming grammars. |
-| Duplicate `(kind, binding, action)` | Names both contributors. |
+| Duplicate `(kind, action)` | Names both contributors; a short name never repeats within a kind, across either binding. |
 | Input model admits extra fields, secrets, or non-JSON values | Uses the object-spec model gate over the action model. |
 | Empty presentation label or confirmation | Refused when `presentation` is present. |
 | Presentation on a `profile_only` action | Refused because prepared member intents never reach profile-only calls. |
@@ -220,15 +240,15 @@ static claims beside the handler's live decision. The existing handler gate rema
 Every action has a canonical identity:
 
 ```
-action:<kind>:<binding>:<name>
+action:<kind>:<name>
 ```
 
 Examples:
 
 ```
-action:member:collection:add_member
-action:member:instance:grant_web_access
-action:surface:instance:slack_connect
+action:member:add_member
+action:member:grant_web_access
+action:surface:slack_connect
 ```
 
 The short `name` appears in object results and `object_action.input.action`. The canonical id is
@@ -242,8 +262,10 @@ used anywhere a deploy-wide identity is required:
 - telemetry and meters;
 - boot collision reports.
 
-An action short name may repeat on different kinds or bindings. A canonical action id cannot
-collide with a global tool name because the `action:` prefix is reserved.
+An action short name may repeat across kinds, never within one: binding is a declared attribute,
+not identity, so an action that migrates between collection and instance keeps its allowlists,
+hook selectors, and dashboards, and no kind can carry one name on both bindings. A canonical
+action id cannot collide with a global tool name because the `action:` prefix is reserved.
 
 ### 4. Discovery projections
 
@@ -332,8 +354,10 @@ class ObjectActionInput(BaseModel):
 
 Dispatch is fixed:
 
-1. Resolve `(kind, collection|instance, action)` from whether `name` is empty.
-2. Reject an unknown action with the actions registered for that kind and binding.
+1. Look up `action` on `kind`; reject an unknown action with the actions registered for that kind.
+2. Check arity against the action's declared binding: an instance action without `name`, or a
+   collection action with one, is a loud pre-dispatch error — never a fallback to the other
+   binding.
 3. Enforce the executing agent's grant for the canonical action id.
 4. Resolve `requested_by` exactly as a global tool call does.
 5. Validate `input` with the action's `input_model`.
@@ -355,8 +379,8 @@ object-level rule still requires resolving the live object and caller on invocat
 
 ### 6. Engine semantics survive the wire-name collapse
 
-The engine resolves `CallDefinition` before any behavior that currently reads `ToolDef`, then
-resolves the call-specific `EffectiveCall` before hooks and handler execution.
+The engine resolves the one declaration before any behavior that reads it, then resolves the
+call-specific `EffectiveCall` before hooks and handler execution.
 
 | Engine behavior | Required action behavior |
 |---|---|
@@ -408,7 +432,7 @@ would be false. Domain stores keep any audit rows they already own.
 
 ### 8. Prepared intents and portal controls
 
-`ActionPresentation` is an optional consumer declaration on an object action:
+`ActionPresentation` is an optional consumer declaration on any callable:
 
 ```python
 @dataclass(frozen=True)
@@ -436,8 +460,10 @@ action declaration supplies the final-act model, and parsing remains after `post
 that replaces the result also suppresses the handoff. Global `ask_user` and `connect_account` use
 the same final-act declaration on their global call definitions.
 
-Portal controls for retained global tools remain explicit. A second generic member-action registry
-does not land; a repeated need on a retained tool is evidence to reconsider its object binding.
+Because the declaration is one shape, `presentation` is binding-agnostic: a retained global tool
+with a portal control declares it on the same field, the route prepares `ToolIntent(tool=<name>,
+...)` directly, and the moved hand-written action maps go with it. One declaration feeds chat,
+model discovery, and every portal control; a second member-action registry never exists.
 
 ### 9. Sandbox bridge
 
@@ -487,10 +513,10 @@ the locality; renaming is not needed to achieve it.
 |---|---|---|---|
 | `member` | collection | `add_member` | Creates a member; role/seat updates already use the member kind. |
 | `member/<id>` | instance | `grant_web_access`, `revoke_web_access` | The grant subject is the member. The action may target a visible agent through the existing cross-agent gate. |
-| `agent` | collection | `restore_application` | Archived agents appear in the agent listing but are not gettable live instances; restore takes the listed id and a new live name. |
+| `agent/<archived-id>` | instance | `restore_application` | An archived agent stays a gettable row with archived status (AIP-164); restore is its undelete, taking a new live name as action input when the old one is taken. |
 | `credential` | collection | `request_credentials` | One handoff may request several slots. |
 | `credential/github_app_installation` | instance | `connect_github` | The action authorizes the exact non-member-filled slot the callback fills. |
-| `conversation` | collection, current turn | `cancel_spawn`, `message_spawn`, `update_todo_list`, `update_todo_status`, `plan_objective`, `run_independent_steps`, `record_step`, `read_objective`, `report_problem`, `read_private_transcript` | The first nine operate on work owned by the executing conversation; spawn ids and objective/todo state are not separate workspace kinds. Transcript acknowledgement takes a conversation id as action input because its purpose is to establish the access that an instance `get` requires; its handler performs the object-level check before recording access. |
+| `conversation/<id>` | instance | `read_private_transcript` | The conversation kind's get serves a speaking admin the private row it already lists; the transcript itself stays behind acknowledgement, which is this action, and its handler records the access. |
 | `skill` | collection | `skill_search` | Searches the complete loadable catalog, beyond CRUD listing of member-authored skill objects. |
 | `surface/slack` | instance | `slack_connect`, `slack_app_manifest`, `slack_channels` | Install state, manifest, credentials, and remote channels belong to the Slack surface. |
 | `surface/imessage` | instance | `imessage_connect` | Provider binding and phone proof configure the iMessage surface. |
@@ -501,10 +527,9 @@ the locality; renaming is not needed to achieve it.
 | `monitor` | collection | `monitor` | Arms a monitor after probing; the existing monitor kind lists and deletes armed rows. |
 | `site` | collection | `deploy_website`, `publish_website`, `build_website`, `build_ufo_application`, `render_application_preview` | These create, publish, build, or preview site/application output rather than update an existing site spec. |
 | `site/<name>` | instance | `set_homepage` | Binds one hosted site to the selected agent's homepage. |
-| `artifact` | collection | `generate_image`, `generate_video` | Generation writes media into the workspace for `share_file` to turn into an artifact; the artifact collection is the durable destination without inventing a media-job kind. |
 
-Count: 35 named tools, 17 anchor/binding rows, 12 existing kinds plus the one new `surface` kind.
-The hosted pack contains 34 because it does not activate the monitors extension.
+Count: 24 named tools, 16 anchor/binding rows, 11 existing kinds plus the one new `surface` kind.
+The hosted pack contains 23 because it does not activate the monitors extension.
 
 ### Authority-sensitive actions
 
@@ -528,17 +553,19 @@ fail a granting or admin action even if its agent allowlist contains the canonic
 
 ## Retained global tools
 
-These 34 schemas remain in the hosted member-facing set after `object_action` lands. Connector/MCP
-provider expansion remains separate.
+These 45 schemas remain in the hosted member-facing set after `object_action` lands and the lazy
+tool catalog is deleted. Connector/MCP provider expansion remains separate.
 
 | Domain | Global tools | Reason |
 |---|---|---|
 | Object substrate | `object_list`, `object_get`, `object_explain`, `object_apply`, `object_delete`, `object_action` | The uniform discovery and dispatch vocabulary. |
 | Workspace execution | `bash`, `read`, `write`, `edit`, `glob`, `grep` | High-frequency sandbox primitives over paths, not durable workspace objects. |
 | Conversation control | `ask_user`, `pause_and_wait` | Final acts whose target is the current interaction, not discoverable durable state. |
-| Delegation | `spawn` | High-frequency computation primitive; the target catalog is already in the prompt/registry. Follow-up operations move to the conversation anchor. |
+| Delegation | `spawn` | High-frequency computation primitive; the target catalog is already in the prompt/registry. |
+| Conversation work | `cancel_spawn`, `message_spawn`, `update_todo_list`, `update_todo_status`, `plan_objective`, `run_independent_steps`, `record_step`, `read_objective`, `report_problem` | Their target is the executing turn's own work — the current-interaction criterion that keeps `ask_user` and `pause_and_wait` global — and the spawn lifecycle stays on one transport. The conversation collection would anchor them to rows they never touch. |
 | Skills | `load_skill` | Executes a known skill. Tail discovery moves to `skill_search` on the skill collection. |
 | Artifacts | `share_file` | Delivers an existing workspace path; it is the bridge from sandbox bytes to a durable artifact. |
+| Media generation | `generate_image`, `generate_video` | Generation writes a workspace path for `share_file` to deliver; the target is a path and a provider, not a durable object. |
 | Ephemeral site runtime | `website`, `start_server` | Starts or inspects the current sandbox server; durable site lifecycle moves to site actions. |
 | Research | `search_web`, `fetch_url`, `search_vertical`, `wide_research` | Stateless, high-frequency information access without a workspace-object target. |
 | Computation | `js_repl`, `xlsx_repl` | Stateful scratch execution scoped to the current conversation workspace. |
@@ -580,9 +607,9 @@ context-loading mechanism; forcing repeated reads would add latency and still pr
 
 | Proof | Assertion |
 |---|---|
-| Hosted inventory | Exactly 34 non-`profile_only` static schemas before provider connector expansion. |
-| Candidate placement | All 34 hosted candidates and `monitor` register as actions; none enters model schemas as a named tool. |
-| Retained inventory | The exact names in [Retained global tools](#retained-global-tools) remain. |
+| Hosted inventory | The static member-facing registry is exactly the names in [Retained global tools](#retained-global-tools) — a names gate, not a count. |
+| Candidate placement | All 23 hosted candidates and `monitor` register as actions; none enters model schemas as a named tool. |
+| Catalog removal | `tool_search`, `EAGER_TOOL_NAMES`, and `DIRECT_TOOL_LIMIT` are gone with the final unit; the source-shape grep finds no remnant. |
 | Collisions | Duplicate action tuple, missing kind, reserved canonical prefix, and global/action identity errors fail boot. |
 | SDK boundary | Extensions register actions through `ufo.sdk`; extension imports of core internals remain gated. |
 | Source shape | No candidate has a global `ToolDef` registration. References in action values, tests, descriptions, audit records, and member copy remain legitimate. |
@@ -616,26 +643,56 @@ read the result through public object/surface projections. They prove:
 
 Each moved action keeps its focused handler tests and gains one registry/dispatch test. Each family
 gets an end-to-end proof at its real dependency boundary: Slack/iMessage provider flow, credential
-handoff, memory index, site store, media provider, or conversation workflow.
+handoff, memory index, site store, monitor probe, or transcript access.
 
 ### Model evals
 
-Every family runs paired control and object-action arms over realistic asks, including neighboring
-negative cases. At minimum:
+**Suites move with their tools.** `required_tools_scorer` and its siblings grade `call.name` from
+the transcript, and existing suites assert moved names (`tool_calling` requires `memory_update`,
+`member_add_notify` requires `add_member`, `credential_handoff` requires `request_credentials`,
+`app_home_change`, `new_application`, and five more). Each family unit updates those suites'
+required trajectories to the dispatched form in the same change — a case keeps asserting the same
+member outcome, expressed in each arm's own vocabulary, and the paired verdict stays per-case pass
+counts. No mapping layer enters the harness.
 
-| Suite | Positive cases | Neighbor confusion |
-|---|---|---|
-| Membership/access | invite, seat change, web grant, transcript acknowledgement | `object_apply member` vs `add_member`; member grant vs surface setup |
-| Credentials/surfaces | fill slot, GitHub App, Slack OAuth/manifest/status/channels, iMessage phone | `connect_account` vs credential/surface action |
-| Memory/skills | durable recall, explicit record, tail skill search | `object_list` lexical query vs semantic search; `load_skill` vs search |
-| Conversation work | spawn follow-up/cancel, todo, objective, problem report | `spawn` vs follow-up; `pause_and_wait` vs monitor |
-| Derived rebuilds | page facts and report digest | one-row correction vs collection rebuild |
-| Sites/media | build, preview, deploy, publish, homepage, image/video | ephemeral `website`/`start_server` vs durable site action; `share_file` vs generation |
+**Sourcing.** Cases are real queries, known failures, and neighbor confusion — enumerated, never
+invented to fit:
+
+- A positive brief is the founding member ask of a production turn that called the moved tool,
+  scrubbed of workspace identifiers. An authored brief is admitted only for an action with no
+  production invocation yet, and is marked authored. Production-sourced wording is the leak gate:
+  a paraphrase of the action description is not a case, and no brief contains the action name.
+- Known failures — production or nightly turns where the model chose a neighboring tool — enter as
+  claimed cases.
+- Each action's confusion set is derived from the inventory, not curated: `object_apply` on its
+  kind, its sibling actions, and its nearest retained global.
+- Call frequency from the same production records weights the aggregate cost and latency claims;
+  per-action accuracy gates stay unweighted.
+- Family arms extend the existing suites and run whole under the ablation gate; no parallel matrix
+  is authored.
+
+**Coverage is per action, not per family.** Every moved action has a cold case (no prior discovery
+in the transcript), a warm case (the action known from the transcript and invoked directly), and
+one claimed neighbor negative from its derived confusion set. Each family adds one task spanning
+two anchors. Three cross-cutting arms: a subagent arm under a canonical-id allowlist; a
+post-compaction case where an action discovered before compaction is used after it; and the
+catalog-deletion arm gating unit 7 — the final static wire against the catalog-live control on the
+whole matrix, since deleting the catalog changes every request's schema bytes.
+
+Family suites at minimum:
+
+| Suite | Extends | Positive cases | Neighbor confusion |
+|---|---|---|---|
+| Membership/access | `member_add_notify` | invite, seat change, web grant, transcript acknowledgement | `object_apply member` vs `add_member`; member grant vs surface setup |
+| Credentials/surfaces | `credential_handoff`, `connector_connections`, `slack_*` | fill slot, GitHub App, Slack OAuth/manifest/status/channels, iMessage phone | `connect_account` vs credential/surface action |
+| Memory/skills/monitor | `tool_calling`, `skill_routing` | durable recall, explicit record, tail skill search, monitor arm | `object_list` lexical query vs semantic search; `load_skill` vs search; `pause_and_wait` vs monitor |
+| Derived rebuilds | `report_digest` | page facts and report digest | one-row correction vs collection rebuild |
+| Sites | `site_build`, `new_application`, `app_home_change` | build, preview, deploy, publish, homepage | ephemeral `website`/`start_server` vs durable site action |
 
 Acceptance requires:
 
 - no suite-level or claimed-case regression under the existing paired verdict gates;
-- every moved action selected successfully from a cold task with no action name in the user text;
+- every moved action passes its cold, warm, and neighbor cases;
 - negative cases do not invoke a neighboring action more often than control;
 - all prompt/skill wording retained only when an ablation proves it load-bearing.
 
@@ -650,10 +707,13 @@ For the same eval samples, record:
 - total task cost and wall time;
 - accuracy.
 
-The fixed count gate is 67 → 34. A performance claim ships only from measured bytes/tokens. A moved
-action may add at most one discovery yield on a cold task; tasks already reading the target object
-should add none. A family that cannot hold accuracy or bounded discovery latency stays global until
-its failure has a different, measured design.
+The registry gate is 67 → 45, and the count proves nothing by itself: a static schema is cached
+prompt prefix while a discovered action is per-conversation transcript tokens, so the comparison
+lives in billed and cache tokens against the control — current production, lazy tool catalog live.
+A performance claim ships only from those measurements. A moved action may add at most one
+discovery yield on a cold task; tasks already reading the target object should add none. A family
+that cannot hold accuracy or bounded discovery latency stays global until its failure has a
+different, measured design.
 
 ## Doctrine fit / implications
 
@@ -663,7 +723,7 @@ Core owns only what extensions cannot express:
 
 - the deploy-wide kind/action registry and collision gate;
 - the generic `object_action` wire schema;
-- normalization into `EffectiveCall` before engine policy;
+- per-call resolution into `EffectiveCall` before engine policy;
 - action projections on generic object reads;
 - the `surface` projection over core-owned manifest and installation state.
 
@@ -672,7 +732,9 @@ Their extensions own the declarations and handlers.
 
 ### One shape
 
-- CRUD is five object verbs; imperative behavior is one action declaration and one dispatcher.
+- CRUD is five object verbs; every callable is one `ToolDef`, bound or global; imperative object
+  behavior is that declaration bound to a kind, dispatched through one wire tool.
+- One discovery mechanism: object reads. The lazy tool catalog goes with the final unit.
 - Model and portal consume one serializable action view.
 - Capability identity is canonical once and threaded through every engine consumer.
 - Authority lives in executable gates, not discovery metadata.
@@ -706,13 +768,21 @@ Simple and strongly typed on the model wire. Rejected because schema cost grows 
 extension and every round, conceptual locality is absent, and the object registry already provides
 the progressive namespace. The control arm remains necessary to prove the new path.
 
+### Keep the lazy tool catalog beside object actions
+
+The catalog (#2585) already defers non-eager schemas behind a flat `tool_search`. Rejected as the
+end state: it is a keyword search over the same global inventory, with no domain locality, no
+typed identity, and no prepared-intent story, and running it beside object discovery gives one
+member ask two discovery grammars. It keeps production cheap until the inventory lands; the final
+unit deletes it.
+
 ### Add one kind per tool family
 
 Seven candidate kinds were `web_access`, `billing`, `todo`, `objective`, `spawn`, `media`, and
-`surface`. Rejected except `surface`: the first six already have a durable subject in `member`,
-`workspace`, `conversation`, or `artifact`. New kinds would create fake objects or duplicate
-existing state. `surface` alone has real manifest and installation identity with no object
-projection.
+`surface`. Rejected except `surface`: `web_access` and `billing` already have their durable
+subject in `member` and `workspace`; `todo`, `objective`, `spawn`, and `media` have no durable
+subject at all — their tools stay global — and a kind for them would create fake objects.
+`surface` alone has real manifest and installation identity with no object projection.
 
 ### Put setup actions on `extension`
 
@@ -727,7 +797,7 @@ down.
 
 ### Encode actions as `object_apply`
 
-Rejected. An OAuth handoff, remote channel search, rebuild, generation request, or monitor arm is
+Rejected. An OAuth handoff, remote channel search, rebuild, or monitor arm is
 not a desired spec replacement. A fake spec would persist commands, introduce ambiguous replay,
 and violate AIP-136's standard-method-first rule by contorting CRUD.
 
@@ -768,39 +838,41 @@ across a turn replay.
 
 Rejected. It declares member-callability beside model-callability, needs a `compose` function to
 remove server-owned fields, and lets a kind and a tool both claim an action. `ActionPresentation`
-is optional metadata on the one executable object action, and its handler input already excludes
-the bound target.
+is optional metadata on the one executable declaration, and a bound handler's input already
+excludes the target.
 
 ## Implementation units
 
 Each unit is independently reviewable and removes every global registration it replaces.
 
-1. **Registry and dispatch.** `ObjectAction`, boot validation, canonical ids, `EffectiveCall`,
-   `object_action`, object projections, SDK export, bridge exposure, and sample-extension proof.
-   No production action moves in this unit.
+1. **Registry and dispatch.** `ObjectBinding` on the one declaration, boot validation, canonical
+   ids, `EffectiveCall`, `object_action`, object projections, SDK export, bridge exposure, and
+   sample-extension proof. No production action moves in this unit.
 2. **Surface object.** Core `surface` read projection; Slack and iMessage actions; their four named
    tool registrations removed; provider integration tests and portal first-run intents updated.
-3. **Authority actions.** Member add/web grants, agent restore, credential request/GitHub install,
-   workspace billing, transcript acknowledgement, and rebuild actions. Prepared intents move with
-   each action; admin and speaker gates remain handler tests.
-4. **Conversation actions.** Spawn follow-ups, todos, objectives, and problem reporting. Agent and
-   profile allowlists, hook selectors, prompts, and app skills update in the same unit.
-5. **Knowledge actions.** Skill search, memory search/update, and monitor arm. Retrieval and monitor
+3. **Authority actions.** Member add/web grants, agent restore over gettable archived rows,
+   credential request/GitHub install, workspace billing, transcript acknowledgement as a
+   conversation instance action, and rebuild actions. Prepared intents move with each action;
+   admin and speaker gates remain handler tests.
+4. **Knowledge actions.** Skill search, memory search/update, and monitor arm. Retrieval and monitor
    evals prove the discovery round and neighboring-tool choice.
-6. **Site and media actions.** Build, preview, deploy, publish, homepage, image, and video actions;
-   application-builder profile grants and hooks use canonical action ids.
-7. **Portal generation.** `ActionPresentation`, action-derived controls, generic prepared-intent
-   envelope, and removal of the moved hand-written action maps. Retained global-tool controls stay
-   explicit.
-8. **Inventory gate and docs.** The exact 34 global names are enforced; `spec.md`, permission docs,
-   skills, and operator documentation describe the one action path; the full family eval matrix
-   runs against the final inventory.
+5. **Site actions.** Build, preview, deploy, publish, and homepage actions; application-builder
+   profile grants and hooks use canonical action ids.
+6. **Portal generation.** `ActionPresentation`, schema-derived controls, generic prepared-intent
+   envelope, and removal of the moved hand-written action maps. Retained global tools with portal
+   controls declare `presentation` on their own definitions.
+7. **Inventory gate, catalog removal, and docs.** The retained global names are enforced; the lazy
+   tool catalog is deleted behind the catalog-deletion arm — the final static wire paired against
+   the catalog-live control on the whole matrix; `spec.md`, permission docs, skills, and operator
+   documentation describe the one action path.
 
 Unit 1 changes no model prompt. Every later prompt or skill wording change carries its own ablation.
 The RFC itself is documentation and requires no model-text eval.
 
 ## Open decisions
 
-None. The implementation may change private class factoring, but the bindings, one new kind,
-canonical identity, discovery shapes, authority rules, inventory, and proof gates above are fixed by
-this proposal.
+None. The implementation may change private class factoring, and the
+[Action inventory](#action-inventory) is a starting assignment, not a promise: a family that fails
+its eval gate returns to the global set by the rule above, updating the inventory tables in that
+change. The bindings, one new kind, canonical identity, discovery shapes, authority rules, and
+proof gates are fixed by this proposal.
