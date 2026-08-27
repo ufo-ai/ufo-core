@@ -112,6 +112,13 @@ class SubagentActivity(BaseModel):
     status: str = ""
 
 
+class ArrivalQueued(BaseModel):
+    """A member message joined a turn already running. This internal rendezvous wakes a
+    foreground spawn; surface tails filter it out."""
+
+    arrival_id: UUID
+
+
 LiveFrame = (
     TextDelta
     | Terminal
@@ -123,6 +130,7 @@ LiveFrame = (
     | Reply
     | SubagentActivity
 )
+HubFrame = LiveFrame | ArrivalQueued
 
 
 class Hub(Protocol):
@@ -135,18 +143,16 @@ class Hub(Protocol):
     registers through its Manifest `hubs` point fans out across processes, which is what lifts the
     single-instance boot guard."""
 
-    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str: ...
+    async def publish(self, turn_id: UUID, frame: HubFrame) -> str: ...
 
-    def subscribe(
-        self, turn_id: UUID, cursor: str = ""
-    ) -> AsyncIterator[tuple[str, LiveFrame]]: ...
+    def subscribe(self, turn_id: UUID, cursor: str = "") -> AsyncIterator[tuple[str, HubFrame]]: ...
 
     async def covers(self, turn_id: UUID, cursor: str) -> bool: ...
 
     async def latest_activity(self, turn_id: UUID) -> Activity | None: ...
 
 
-def _offer(queue: asyncio.Queue[tuple[str, LiveFrame]], item: tuple[str, LiveFrame]) -> None:
+def _offer(queue: asyncio.Queue[tuple[str, HubFrame]], item: tuple[str, HubFrame]) -> None:
     if queue.full():
         queue.get_nowait()
     queue.put_nowait(item)
@@ -157,8 +163,8 @@ class _TurnStream:
     """One turn's live state: the replay ring, the live subscribers, the monotonic cursor
     sequence, and whether the turn's stream has ended. Mutated only under the hub's lock."""
 
-    buffer: deque[tuple[str, LiveFrame]]
-    subscribers: list[tuple[asyncio.Queue[tuple[str, LiveFrame]], asyncio.AbstractEventLoop]]
+    buffer: deque[tuple[str, HubFrame]]
+    subscribers: list[tuple[asyncio.Queue[tuple[str, HubFrame]], asyncio.AbstractEventLoop]]
     seq: int = 0
     ended: bool = False
 
@@ -208,7 +214,7 @@ class InProcessHub:
             self._turns[turn_id] = stream
         return stream
 
-    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+    async def publish(self, turn_id: UUID, frame: HubFrame) -> str:
         with self._lock:
             held = self._turns.get(turn_id)
             if isinstance(frame, SubagentActivity) and (held is None or held.ended):
@@ -231,14 +237,14 @@ class InProcessHub:
 
     async def subscribe(
         self, turn_id: UUID, cursor: str = ""
-    ) -> AsyncIterator[tuple[str, LiveFrame]]:
+    ) -> AsyncIterator[tuple[str, HubFrame]]:
         """Replay the buffered frames after `cursor`, then stream live ones. Registering the live
         queue and snapshotting the buffer happen under one lock, and publish appends then snapshots
         subscribers under the same lock, so every frame reaches this subscriber exactly once: a
         frame the snapshot missed was published after registration and so was fanned to the
         just-registered queue, and a frame in the snapshot was published before registration and so
         was not fanned. Live frames therefore always follow the replay, never overlap it."""
-        queue: asyncio.Queue[tuple[str, LiveFrame]] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_FRAMES)
+        queue: asyncio.Queue[tuple[str, HubFrame]] = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE_FRAMES)
         entry = (queue, asyncio.get_running_loop())
         with self._lock:
             stream = self._stream(turn_id)

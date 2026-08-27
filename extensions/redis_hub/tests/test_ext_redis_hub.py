@@ -29,8 +29,9 @@ from ufo.blob import FilesystemBlobStore
 from ufo.hub import (
     Absorbed,
     Activity,
+    ArrivalQueued,
     CostTick,
-    LiveFrame,
+    HubFrame,
     Parked,
     SubagentActivity,
     Terminal,
@@ -52,13 +53,14 @@ def redis_reachable() -> bool:
 
 needs_redis = pytest.mark.skipif(not redis_reachable(), reason="redis service not reachable")
 
-FRAMES: tuple[LiveFrame, ...] = (
+FRAMES: tuple[HubFrame, ...] = (
     TextDelta(text="hello"),
     Terminal(frame=TerminalFrame(status="done", text="answer", model="claude-opus-4-8")),
     Parked(message="over a spend cap"),
     CostTick(cost_micro_usd=110, tokens=10),
     Activity(text="Listing the workspace."),
     Absorbed(arrivals=(UUID(int=7), UUID(int=8))),
+    ArrivalQueued(arrival_id=UUID(int=12)),
     SubagentActivity(
         turn_id=UUID(int=9),
         parent_turn_id=UUID(int=10),
@@ -71,7 +73,7 @@ FRAMES: tuple[LiveFrame, ...] = (
 
 
 @pytest.mark.parametrize("frame", FRAMES)
-def test_frame_wire_codec_round_trips_every_kind(frame: LiveFrame) -> None:
+def test_frame_wire_codec_round_trips_every_kind(frame: HubFrame) -> None:
     assert frame_from_payload(frame_payload(frame)) == frame
 
 
@@ -141,7 +143,7 @@ async def test_a_blocking_read_timeout_is_an_idle_tick_the_subscribe_survives() 
     such ticks."""
     hub = RedisStreamHub(url=f"{REDIS_TEST_URL}?socket_timeout=0.2")
     turn_id = uuid4()
-    received: list[LiveFrame] = []
+    received: list[HubFrame] = []
 
     async def consume() -> None:
         async for _cursor, frame in hub.subscribe(turn_id):
@@ -218,7 +220,7 @@ async def test_frames_cross_event_loops() -> None:
     publishes, serve-loop tails topology — so shared loop-bound client state fails this test."""
     hub = RedisStreamHub(url=REDIS_TEST_URL)
     turn_id = uuid4()
-    received: list[LiveFrame] = []
+    received: list[HubFrame] = []
 
     async def consume() -> None:
         async for _cursor, frame in hub.subscribe(turn_id):

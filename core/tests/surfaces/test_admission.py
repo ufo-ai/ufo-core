@@ -12,7 +12,7 @@ from ufo import o11y
 from ufo.db import workspace_tx
 from ufo.ext.context import AgentArchived
 from ufo.ext.surface import Admitted, fence_member_message, mint_marker
-from ufo.hub import InProcessHub, Reply
+from ufo.hub import ArrivalQueued, InProcessHub, Reply
 from ufo.loop.engine import _claim_turn
 from ufo.schema import tables
 from ufo.schema.records import SURFACE_COMMENT_ROUND_INDEX, TerminalFrame, TurnContext
@@ -654,8 +654,10 @@ async def test_a_surface_comment_is_recorded_once_and_published_to_the_live_thre
         (admitted.comment_id, SURFACE_COMMENT_ROUND_INDEX, admitted.arrival_id, comment)
     ]
     stream = hub.subscribe(opened.turn_id)
-    _cursor, frame = await anext(stream)
+    _arrival_cursor, arrival = await anext(stream)
+    _reply_cursor, frame = await anext(stream)
     await stream.aclose()
+    assert arrival == ArrivalQueued(arrival_id=admitted.arrival_id)
     assert frame == Reply(
         id=admitted.comment_id,
         message_ref=admitted.arrival_id,

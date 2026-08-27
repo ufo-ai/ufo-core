@@ -25,8 +25,9 @@ from redis.typing import StreamEntry, XReadResponse
 from ufo.sdk.hub import (
     Absorbed,
     Activity,
+    ArrivalQueued,
     CostTick,
-    LiveFrame,
+    HubFrame,
     Parked,
     Reply,
     Resumed,
@@ -65,13 +66,14 @@ _FRAME_KINDS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("resumed", Resumed),
     ("reply", Reply),
     ("subagent_activity", SubagentActivity),
+    ("arrival_queued", ArrivalQueued),
 )
 _KIND_BY_TYPE = {cls: kind for kind, cls in _FRAME_KINDS}
 _TYPE_BY_KIND = {kind: cls for kind, cls in _FRAME_KINDS}
 _ACTIVITY_KINDS = frozenset({TOOL_ACTIVITY_KIND, SKILL_ACTIVITY_KIND})
 
 
-def frame_payload(frame: LiveFrame) -> dict[str, object]:
+def frame_payload(frame: HubFrame) -> dict[str, object]:
     """The wire form of one frame: its kind tag and its model fields, so a tail reconstructs the
     exact LiveFrame variant it was published as."""
     if isinstance(frame, Activity):
@@ -80,7 +82,7 @@ def frame_payload(frame: LiveFrame) -> dict[str, object]:
     return {"kind": _KIND_BY_TYPE[type(frame)], "data": frame.model_dump(mode="json")}
 
 
-def frame_from_payload(payload: dict[str, object]) -> LiveFrame:
+def frame_from_payload(payload: dict[str, object]) -> HubFrame:
     kind = payload["kind"]
     if kind == TOOL_ACTIVITY_KIND:
         tool_wire = _ToolActivityWire.model_validate(payload["data"])
@@ -90,7 +92,7 @@ def frame_from_payload(payload: dict[str, object]) -> LiveFrame:
         return Activity(text=f"Loading {skill_wire.skill}.")
     if not isinstance(kind, str) or kind not in _TYPE_BY_KIND:
         raise ValueError(f"unknown live-frame kind: {kind!r}")
-    return cast(LiveFrame, _TYPE_BY_KIND[kind].model_validate(payload["data"]))
+    return cast(HubFrame, _TYPE_BY_KIND[kind].model_validate(payload["data"]))
 
 
 def _stream_id(entry_id: str) -> tuple[int, int]:
@@ -134,7 +136,7 @@ class RedisStreamHub:
     def _stream(self, turn_id: UUID) -> str:
         return f"{STREAM_PREFIX}:{turn_id}"
 
-    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+    async def publish(self, turn_id: UUID, frame: HubFrame) -> str:
         stream = self._stream(turn_id)
         wire = json.dumps(frame_payload(frame), sort_keys=True, separators=(",", ":"))
         async with self._client().pipeline(transaction=False) as pipe:
@@ -145,7 +147,7 @@ class RedisStreamHub:
 
     async def subscribe(
         self, turn_id: UUID, cursor: str = ""
-    ) -> AsyncIterator[tuple[str, LiveFrame]]:
+    ) -> AsyncIterator[tuple[str, HubFrame]]:
         stream = self._stream(turn_id)
         last = cursor or "0"
         while True:

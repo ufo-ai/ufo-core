@@ -14,7 +14,7 @@ import pytest
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.hub import InProcessHub, LiveFrame, Terminal
+from ufo.hub import ArrivalQueued, HubFrame, InProcessHub, LiveFrame, Terminal
 from ufo.models.interface import TextDelta
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
@@ -22,7 +22,7 @@ from ufo.surfaces import hub_tail
 from ufo.surfaces.hub_tail import tail_frames
 
 
-async def _drain(stream: AsyncIterator[tuple[str, LiveFrame]]) -> None:
+async def _drain(stream: AsyncIterator[tuple[str, HubFrame]]) -> None:
     async for _item in stream:
         pass
 
@@ -44,6 +44,18 @@ async def test_tail_streams_live_frames_until_a_terminal(db: None) -> None:
         TextDelta(text="a"),
         Terminal(frame=TerminalFrame(status="done", text="a")),
     ]
+    keep.cancel()
+
+
+async def test_tail_filters_arrival_rendezvous_frames(db: None) -> None:
+    hub = InProcessHub()
+    turn_id = uuid4()
+    keep = await _keepalive(hub, turn_id)
+    await hub.publish(turn_id, ArrivalQueued(arrival_id=uuid4()))
+    await hub.publish(turn_id, TextDelta(text="answering"))
+    await hub.publish(turn_id, Terminal(frame=TerminalFrame(status="done")))
+    frames = [frame async for _cursor, frame in tail_frames(hub, turn_id)]
+    assert frames == [TextDelta(text="answering"), Terminal(frame=TerminalFrame(status="done"))]
     keep.cancel()
 
 
@@ -140,11 +152,11 @@ class PoisonedHub:
     """A hub whose subscribe dies on its first pull — a poisoned backend deserialization or wire
     shape — so the tail must log the pump's death and still end on the durable poll."""
 
-    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+    async def publish(self, turn_id: UUID, frame: HubFrame) -> str:
         raise AssertionError("the tail never publishes")
 
-    def subscribe(self, turn_id: UUID, cursor: str = "") -> AsyncIterator[tuple[str, LiveFrame]]:
-        async def poisoned() -> AsyncIterator[tuple[str, LiveFrame]]:
+    def subscribe(self, turn_id: UUID, cursor: str = "") -> AsyncIterator[tuple[str, HubFrame]]:
+        async def poisoned() -> AsyncIterator[tuple[str, HubFrame]]:
             raise RuntimeError("unreadable XREAD response")
             yield "", TextDelta(text="")
 

@@ -57,7 +57,7 @@ from ufo.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvalu
 from ufo.db import workspace_tx
 from ufo.ext.context import AgentArchived
 from ufo.ext.surface import Admitted, conversation_name
-from ufo.hub import Hub, Reply
+from ufo.hub import ArrivalQueued, Hub, Reply
 from ufo.o11y import current_traceparent, log, span
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -149,6 +149,8 @@ class Admission:
                 intent=intent,
                 comment=comment,
             )
+        if admitted.arrival_id is not None and not admitted.opened_run and self.hub is not None:
+            await self.hub.publish(admitted.turn_id, ArrivalQueued(arrival_id=admitted.arrival_id))
         if admitted.comment_id is not None and comment is not None and self.hub is not None:
             await self.hub.publish(
                 admitted.turn_id,

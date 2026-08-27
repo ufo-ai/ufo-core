@@ -525,6 +525,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             registry=runtime.subagents,
             parent=turn,
             audience=audience,
+            hub=runtime.hub,
             key_slot_for=runtime.registry.key_slot_for,
             billing_url=runtime.billing_url,
         )

@@ -37,6 +37,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import TurnInvoker
 from ufo.ext.manifest import SubagentProfile
 from ufo.ext.surface import conversation_name
+from ufo.hub import ArrivalQueued, Hub
 from ufo.loop.prompts.render import (
     CITATION_BLOCK,
     CITATION_SLOT,
@@ -78,7 +79,6 @@ from ufo.turns.contracts import Contract, input_contract, output_contract
 from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.turns.untrusted import wall
 
-SUBAGENT_POLL_SECONDS = 1.0
 SUBAGENT_WORKFLOW_POLL_SECONDS = 1.0
 PROFILE_TARGET_KIND = "profile"
 AGENT_TARGET_KIND = "agent"
@@ -214,6 +214,7 @@ class Subagents:
     registry: SubagentRegistry
     parent: Turn
     audience: Audience
+    hub: Hub | None = None
     key_slot_for: Callable[[str], str | None] | None = None
     billing_url: str | None = None
     requester_member_id: UUID | None = None
@@ -900,35 +901,57 @@ class Subagents:
         None says the child was moved to the background, where it keeps running and hands back its
         own result, so the parent can answer the member now.
 
-        The signal is the engine's own — an admitted `inbound_message` row no turn has drained is
-        exactly what the parent's next arrival drain would fold — so the wait ends on the message
-        the parent is about to read rather than on a clock, and one poll of the child's terminal
-        carries the question.
+        Member admission publishes the durable arrival row's id through the turn hub. The wait
+        validates that exact row while stamping the child for delivery in one transaction, so a
+        stale replay after the parent absorbed the message does nothing and no database poll runs
+        while nobody speaks.
 
-        The child's terminal is read first, and the move is refused for a child that already
-        committed one, so a message landing in the same instant the child finishes resolves to the
-        child's result: the caller gets the answer it waited for, and the conversation is not woken
-        by a result the parent already holds. The workflow wait uses DBOS's bounded polling pool;
-        only the interrupt signal polls the application database, so concurrent foreground spawns
-        cannot exhaust the turn pool by polling their child rows."""
-        detachable = not self.parent.spawned
+        The guarded move is the race resolution. It refuses after the child's terminal commits, so
+        that terminal answers inline; this waiter owns the subscription and settles each move
+        before reading the next arrival, without cancelling a transaction."""
+        if self.parent.spawned:
+            return await self._await_terminal(turn_id)
+        if self.hub is None:
+            raise RuntimeError("an interruptible spawn requires the turn hub")
         terminal_wait = asyncio.create_task(self._await_terminal(turn_id))
+        subscription = self.hub.subscribe(self.parent.id)
+        arrival_wait = asyncio.ensure_future(anext(subscription))
         try:
             while True:
-                finished, _ = await asyncio.wait((terminal_wait,), timeout=SUBAGENT_POLL_SECONDS)
-                if finished:
+                await asyncio.wait(
+                    (terminal_wait, arrival_wait), return_when=asyncio.FIRST_COMPLETED
+                )
+                if not arrival_wait.done():
                     return await terminal_wait
-                if detachable and await self._member_waiting() and await self._detach(turn_id):
+                try:
+                    _, frame = await arrival_wait
+                except StopAsyncIteration:
+                    return await terminal_wait
+                except Exception as error:
+                    log(
+                        "subagent.arrival_wait_failed",
+                        turn_id=str(turn_id),
+                        parent_turn_id=str(self.parent.id),
+                        error=repr(error),
+                    )
+                    return await terminal_wait
+                if isinstance(frame, ArrivalQueued) and await self._detach(
+                    turn_id, frame.arrival_id
+                ):
                     log(
                         "subagent.detached_on_arrival",
                         turn_id=str(turn_id),
                         parent_turn_id=str(self.parent.id),
                     )
                     return None
+                if terminal_wait.done():
+                    return await terminal_wait
+                arrival_wait = asyncio.ensure_future(anext(subscription))
         finally:
-            if not terminal_wait.done():
-                terminal_wait.cancel()
-            await asyncio.gather(terminal_wait, return_exceptions=True)
+            for task in (terminal_wait, arrival_wait):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(terminal_wait, arrival_wait, return_exceptions=True)
 
     async def _terminal_or_park(self, turn_id: UUID) -> TerminalFrame | None:
         async with workspace_tx() as connection:
@@ -948,28 +971,7 @@ class Subagents:
             )
         return None
 
-    async def _member_waiting(self) -> bool:
-        """Whether a member has spoken into the parent's conversation and nothing has read it yet.
-        Only member rows count: a child's own delivered result and an extension's prompt are work
-        the system posted to itself, and a wait ended by its own child's arrival would detach the
-        very spawn it is waiting on. A subagent's conversation is its parent's private channel that
-        no member speaks into, which is why a spawned parent never asks."""
-        async with workspace_tx() as connection:
-            waiting = (
-                await connection.execute(
-                    sa.select(tables.inbound_message.c.id)
-                    .where(
-                        tables.inbound_message.c.workspace_id == self.parent.workspace_id,
-                        tables.inbound_message.c.conversation_id == self.parent.conversation_id,
-                        tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
-                        tables.inbound_message.c.consumed_turn_id.is_(None),
-                    )
-                    .limit(1)
-                )
-            ).first()
-        return waiting is not None
-
-    async def _detach(self, turn_id: UUID) -> bool:
+    async def _detach(self, turn_id: UUID, arrival_id: UUID) -> bool:
         """Hand the child the delivery its awaiting parent will no longer perform, so a child nobody
         blocks on still reaches the conversation — the same `DELIVERY_PENDING` stamp a spawn asked
         for in the background carries from admission.
@@ -985,8 +987,19 @@ class Subagents:
                 .values(result_delivery=DELIVERY_PENDING, updated_at=sa.func.now())
                 .where(
                     tables.turn.c.id == turn_id,
+                    tables.turn.c.workspace_id == self.parent.workspace_id,
                     tables.turn.c.terminal.is_(None),
                     tables.turn.c.result_delivery.is_(None),
+                    sa.exists(
+                        sa.select(tables.inbound_message.c.id).where(
+                            tables.inbound_message.c.id == arrival_id,
+                            tables.inbound_message.c.workspace_id == self.parent.workspace_id,
+                            tables.inbound_message.c.conversation_id == self.parent.conversation_id,
+                            tables.inbound_message.c.admitted_turn_id == self.parent.id,
+                            tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+                            tables.inbound_message.c.consumed_turn_id.is_(None),
+                        )
+                    ),
                 )
             )
         return moved.rowcount == 1

@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from ufo.billing.accounting import ALLOW, SpendEvaluator, applicable_caps_absent
 from ufo.billing.balance import balance_refusal_message, read_headroom
 from ufo.db import workspace_tx
-from ufo.hub import Activity, Hub, LiveFrame, Parked, Terminal
+from ufo.hub import Activity, ArrivalQueued, Hub, LiveFrame, Parked, Terminal
 from ufo.o11y import log
 from ufo.schema import tables
 from ufo.schema.records import PARKED, TerminalFrame
@@ -70,8 +70,10 @@ async def _pump(
     hub: Hub, turn_id: UUID, since: str, frames: asyncio.Queue[tuple[str, LiveFrame]]
 ) -> None:
     try:
-        async for item in hub.subscribe(turn_id, since):
-            await frames.put(item)
+        async for cursor, frame in hub.subscribe(turn_id, since):
+            if isinstance(frame, ArrivalQueued):
+                continue
+            await frames.put((cursor, frame))
     except Exception as error:
         log("hub_tail.pump_failed", turn=str(turn_id), error=repr(error))
 
