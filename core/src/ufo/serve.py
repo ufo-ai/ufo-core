@@ -45,7 +45,7 @@ from ufo.access.egress_rules import (
     derive_manifest_rules,
 )
 from ufo.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
-from ufo.auth.bearer import LOGIN_PATH, LOGOUT_PATH
+from ufo.auth.bearer import JOIN_PATH, LOGIN_PATH, LOGOUT_PATH
 from ufo.billing.balance import billing_screen_url
 from ufo.blob import (
     BlobStore,
@@ -195,15 +195,15 @@ from ufo.tools.bridge import bridge_tools
 from ufo.turns.ambient_reply import AMBIENT_REPLY_JOB, AmbientReplyClassifier
 from ufo.workspace import init_workspace_credentials, ws
 
-RESERVED_HOST_PREFIXES = (LOGIN_PATH, LOGOUT_PATH, "/v1/onboard", "/ufo")
+RESERVED_HOST_PREFIXES = (LOGIN_PATH, LOGOUT_PATH, JOIN_PATH, "/v1/onboard", "/ufo")
 
 
 def _assert_no_reserved_routes(app: FastAPI) -> None:
-    """On the shared host one ingress hands `/login`, `/logout`, `/v1/onboard`, and `/ufo` to the
-    onboarding gateway and everything else to this fleet, so the sign-in flow is same-origin with
-    the product. The fleet must therefore mount nothing under those prefixes — otherwise the ingress
-    silently shadows it. Asserting it at boot makes the split a fail-loud invariant, not a hand-kept
-    property of the ingress template."""
+    """On the shared host one ingress hands `/login`, `/logout`, `/join`, `/v1/onboard`, and `/ufo`
+    to the onboarding gateway and everything else to this fleet, so the sign-in flow is same-origin
+    with the product. The fleet must therefore mount nothing under those prefixes — otherwise the
+    ingress silently shadows it. Asserting it at boot makes the split a fail-loud invariant, not a
+    hand-kept property of the ingress template."""
     conflicts = [
         route.path
         for route in app.routes

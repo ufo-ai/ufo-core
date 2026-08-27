@@ -61,3 +61,9 @@ variable "slack_connect_team_id" {
   default     = ""
   description = "Team ID of UFO's own operator Slack workspace. The gateway refuses to mutate channels in any other team."
 }
+
+variable "signup_key" {
+  type        = string
+  default     = ""
+  description = "The path segment that opens the join door: a member who holds https://<apex>/join/<key> founds their own domain's workspace with nobody to approve them. Empty serves no door, so a deploy never opens signup by leaving it alone."
+}

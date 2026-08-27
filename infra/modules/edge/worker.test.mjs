@@ -645,6 +645,16 @@ test("an apex door carries the ask it was opened with to the host that reads it"
   );
 });
 
+test("apex /join carries the signup key to the app host that answers it", async () => {
+  // The link is shared as an apex address; the door that binds the session is on the app host, so
+  // the key has to survive the hop or the member lands on a sign-in that grants them nothing.
+  const prod = await request("https://ufo.ai/join/ufo", { ua: "Mozilla/5.0" });
+  assert.equal(prod.status, 302);
+  assert.equal(prod.headers.get("location"), "https://app.ufo.ai/join/ufo");
+  const testing = await request("https://testing.ufo.ai/join/61fcacb5", { ua: "Mozilla/5.0" });
+  assert.equal(testing.headers.get("location"), "https://app.testing.ufo.ai/join/61fcacb5");
+});
+
 test("apex /logout 302s to the app host, where the session cookie is bound", async () => {
   const prod = await request("https://ufo.ai/logout", { ua: "Mozilla/5.0" });
   assert.equal(prod.status, 302);

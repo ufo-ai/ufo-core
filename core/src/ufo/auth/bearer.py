@@ -31,6 +31,7 @@ TOKEN_SEPARATOR = "."
 SESSION_COOKIE = "ufo_session"
 LOGIN_PATH = "/login"
 LOGOUT_PATH = "/logout"
+JOIN_PATH = "/join"
 
 
 def mint_token(

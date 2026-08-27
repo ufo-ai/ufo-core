@@ -155,6 +155,10 @@ const debug = params.get('debug') === '1';
    drawn for it however live that session is. The ask rides the Google hop the way the others do, or
    the callback would return to a door that forwards the completed sign-in away unfinished. */
 const invite = params.get('invite') === '1';
+/* The join door has bound a session carrying an authority this browser's own bearer knows nothing
+   about, so the form is drawn for it however live that session is — and the ask rides the hop for
+   the same reason the invitation's does. */
+const join = params.get('join') === '1';
 let token = null;
 let workspace = null;
 let debuggerUrl = null;
@@ -369,6 +373,7 @@ if (artifact) gq.set('a', artifact);
 if (firstRun) gq.set('first', '1');
 if (debug) gq.set('debug', '1');
 if (invite) gq.set('invite', '1');
+if (join) gq.set('join', '1');
 google.href = START + (gq.size ? '?' + gq : '');
 
 if (fault) {

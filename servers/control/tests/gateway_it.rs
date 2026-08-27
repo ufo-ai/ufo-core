@@ -13,9 +13,10 @@ use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use ufo_control::claim::ClaimWorkflow;
 use ufo_control::gateway::{
-    parse_invite_required, router, stamped_script, GatewayState, Onboarding, BILLING_CHOICE,
-    FIRST_MOVE_PROMPT, INVITATION_LOGIN_PATH, LOGIN_PATH, LOGOUT_PATH, MAX_BODY_BYTES,
-    OPERATOR_COOKIE, OPERATOR_EMAIL_DOMAIN, WORKSPACE_PROMPT,
+    keyed_mark, parse_invite_required, router, stamped_script, GatewayState, Onboarding,
+    BILLING_CHOICE, FIRST_MOVE_PROMPT, INVITATION_LOGIN_PATH, JOIN_LOGIN_PATH, LOGIN_PATH,
+    LOGOUT_PATH, MAX_BODY_BYTES, OPERATOR_COOKIE, OPERATOR_EMAIL_DOMAIN, SIGNUP_MARK_TTL_MINUTES,
+    WORKSPACE_PROMPT,
 };
 use ufo_control::invite::InviteCodes;
 use ufo_control::shared::SharedWorkspaces;
@@ -26,12 +27,13 @@ use ufo_control::web::{
     LOGO_PNG_PATH, ONBOARD_SESSION_COOKIE, SHARE_HOME_BYTES, SHARE_HOME_PATH, SHARE_SITE_BYTES,
     SHARE_SITE_PATH,
 };
-use ufo_control::workos::{Verifier, WorkosVerifier, CONSOLE_CODE};
+use ufo_control::workos::{seal_session, Verifier, WorkosVerifier, CONSOLE_CODE};
 
 const SECRET: &str = "local-dev-token-secret";
 const APEX: &str = "flyingobject.ai";
 const WORKSPACE: &str = "11111111-1111-1111-1111-111111111111";
 const CONVERSATION: &str = "6f1c8038-1111-4222-8333-444455556666";
+const SIGNUP_KEY: &str = "ufo";
 
 /// A gateway on its own socket, with its own database and its own two stand-in services.
 struct Rig {
@@ -40,6 +42,15 @@ struct Rig {
 }
 
 async fn rig(workos: Vec<(u16, String)>, serve: Vec<(u16, String)>, gate: bool) -> Rig {
+    rig_with(workos, serve, gate, Some(SIGNUP_KEY)).await
+}
+
+async fn rig_with(
+    workos: Vec<(u16, String)>,
+    serve: Vec<(u16, String)>,
+    gate: bool,
+    signup_key: Option<&str>,
+) -> Rig {
     let pool = ledger_pool().await;
     let (workos_base, _) = spawn_http(workos).await;
     let (serve_base, _) = spawn_http(serve).await;
@@ -66,6 +77,7 @@ async fn rig(workos: Vec<(u16, String)>, serve: Vec<(u16, String)>, gate: bool) 
             token_secret: SECRET.to_string(),
             apex_host: APEX.to_string(),
             invite_required: gate,
+            signup_key: signup_key.map(str::to_string),
         },
         stamped_script: stamped_script("https://testing.flyingobject.ai"),
         client_bin_dir: None,
@@ -1053,4 +1065,569 @@ fn the_invite_gate_defaults_to_required_and_refuses_a_value_that_is_not_a_boolea
         let refused = parse_invite_required(garbage).unwrap_err();
         assert!(refused.contains("is not a boolean"), "{refused}");
     }
+}
+
+/// One click on the join link, answering the cookie it bound.
+async fn join(rig: &Rig, key: &str) -> (StatusCode, Option<String>) {
+    let response = client()
+        .get(format!("{}/join/{key}", rig.base))
+        .send()
+        .await
+        .unwrap();
+    let cookie = response.headers().get("set-cookie").map(|value| {
+        value
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    });
+    (response.status(), cookie)
+}
+
+#[tokio::test]
+async fn the_join_door_binds_a_session_and_sends_the_browser_to_the_sign_in_page() {
+    let rig = rig(vec![], vec![], true).await;
+    let response = client()
+        .get(format!("{}/join/{SIGNUP_KEY}", rig.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    // The ask is what makes the door draw the form for a browser already holding a session; the
+    // address names no key, and this one is kept out of the next request.
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        JOIN_LOGIN_PATH
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("referrer-policy")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "no-referrer"
+    );
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(cookie.starts_with(ONBOARD_SESSION_COOKIE), "{cookie}");
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("Secure"), "{cookie}");
+}
+
+#[tokio::test]
+async fn a_key_that_does_not_match_is_answered_as_an_unrouted_path() {
+    let rig = rig(vec![], vec![], true).await;
+    let (status, cookie) = join(&rig, "not-the-key").await;
+    // A refusal of its own would tell a caller the door is there to be guessed at.
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(cookie.is_none(), "{cookie:?}");
+}
+
+#[tokio::test]
+async fn a_deploy_that_configures_no_key_serves_no_join_door() {
+    // Unset is the default, so a deploy never opens signup by leaving the knob alone.
+    let rig = rig_with(vec![], vec![], true, None).await;
+    let (status, cookie) = join(&rig, SIGNUP_KEY).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(cookie.is_none(), "{cookie:?}");
+}
+
+#[tokio::test]
+async fn the_signup_key_founds_the_domain_workspace_with_no_operator_grant() {
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"founder@acme.com"}}"#.to_string()),
+        ],
+        vec![
+            (200, r#"{"choices":[]}"#.to_string()),
+            (
+                200,
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
+                    .to_string(),
+            ),
+        ],
+        true,
+    )
+    .await;
+    let (status, cookie) = join(&rig, SIGNUP_KEY).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let cookie = cookie.expect("the door binds a session");
+
+    let (_, carried) = web_turn(&rig, Some(&cookie), "founder@acme.com").await;
+    // The email turn re-mints, as it does for every arrival; the authority rides the new session.
+    let cookie = carried.unwrap_or(cookie);
+    let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
+    let verbs: Vec<&str> = payload["directives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|directive| directive["verb"].as_str().unwrap())
+        .collect();
+    assert!(verbs.contains(&"token"), "{payload}");
+    assert!(verbs.contains(&"workspace"), "{payload}");
+
+    // The grant the member wrote for themselves is an ordinary row, spent the ordinary way, so the
+    // ledger and everything that reads it see what an operator grant leaves.
+    let connection = rig.pool.get().await.unwrap();
+    let rows = connection
+        .query(
+            "select email, consumed_at, object_number, business \
+             from ufo_control.invite_code where email_domain = $1",
+            &[&"acme.com"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, String>("email"), "founder@acme.com");
+    assert!(rows[0]
+        .get::<_, Option<chrono::DateTime<Utc>>>("consumed_at")
+        .is_some());
+    assert!(rows[0].get::<_, Option<i32>>("object_number").is_none());
+    assert!(rows[0].get::<_, Option<String>>("business").is_none());
+}
+
+#[tokio::test]
+async fn a_browser_that_never_opened_the_join_link_is_still_refused() {
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"founder@acme.com"}}"#.to_string()),
+        ],
+        vec![(200, r#"{"choices":[]}"#.to_string())],
+        true,
+    )
+    .await;
+    let (_, cookie) = web_turn(&rig, None, "founder@acme.com").await;
+    let cookie = cookie.expect("the email turn binds a session");
+    let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
+    assert!(
+        payload.to_string().contains("acme.com has no invite."),
+        "{payload}"
+    );
+}
+
+#[tokio::test]
+async fn the_signup_key_survives_the_google_hop() {
+    // The hop re-mints the session, so an authority the door bound would be dropped there unless it
+    // is carried — and the member would be refused after proving their address.
+    let rig = rig(
+        vec![],
+        vec![
+            (200, r#"{"choices":[]}"#.to_string()),
+            (
+                200,
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
+                    .to_string(),
+            ),
+        ],
+        true,
+    )
+    .await;
+    let (_, cookie) = join(&rig, SIGNUP_KEY).await;
+    let cookie = cookie.expect("the door binds a session");
+
+    let start = client()
+        .get(format!("{}/v1/onboard/auth/start", rig.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let hopped = start
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let location = start.headers().get("location").unwrap().to_str().unwrap();
+    let state = location.split("state=").nth(1).unwrap().to_string();
+
+    let returned = client()
+        .get(format!(
+            "{}/v1/onboard/auth/callback?state={state}&code=founder%40acme.com",
+            rig.base
+        ))
+        .header("cookie", &hopped)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(returned.status(), StatusCode::SEE_OTHER);
+
+    let (payload, _) = web_turn(&rig, Some(&hopped), "").await;
+    let verbs: Vec<&str> = payload["directives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|directive| directive["verb"].as_str().unwrap())
+        .collect();
+    assert!(verbs.contains(&"token"), "{payload}");
+}
+
+#[tokio::test]
+async fn a_keyed_session_offers_creation_beside_a_membership_it_already_holds() {
+    // Without this the create option is offered only where a grant already stands, so a member who
+    // belongs somewhere else could never reach the gate that would write theirs.
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"founder@acme.com"}}"#.to_string()),
+        ],
+        vec![(
+            200,
+            r#"{"choices":[{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","label":"other.example","member":true}]}"#
+                .to_string(),
+        )],
+        true,
+    )
+    .await;
+    let (_, cookie) = join(&rig, SIGNUP_KEY).await;
+    let cookie = cookie.expect("the door binds a session");
+    let (_, carried) = web_turn(&rig, Some(&cookie), "founder@acme.com").await;
+    let cookie = carried.unwrap_or(cookie);
+    let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
+    assert!(
+        payload.to_string().contains("Create acme.com workspace"),
+        "{payload}"
+    );
+}
+
+#[tokio::test]
+async fn a_keyed_session_writes_no_second_grant_over_a_spent_one() {
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"second@acme.com"}}"#.to_string()),
+        ],
+        vec![(200, r#"{"choices":[]}"#.to_string())],
+        true,
+    )
+    .await;
+    let invites = InviteCodes::new(rig.pool.clone());
+    invites.mint(None, "founder@acme.com", None).await.unwrap();
+    invites
+        .redeem("acme.com", uuid::Uuid::new_v4())
+        .await
+        .unwrap();
+
+    let (_, cookie) = join(&rig, SIGNUP_KEY).await;
+    let cookie = cookie.expect("the door binds a session");
+    let (_, carried) = web_turn(&rig, Some(&cookie), "second@acme.com").await;
+    let cookie = carried.unwrap_or(cookie);
+    let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
+    assert!(
+        payload
+            .to_string()
+            .contains("The invite for acme.com was already used."),
+        "{payload}"
+    );
+
+    let connection = rig.pool.get().await.unwrap();
+    let rows = connection
+        .query(
+            "select 1 from ufo_control.invite_code where email_domain = $1",
+            &[&"acme.com"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[tokio::test]
+async fn a_keyed_session_replaces_a_grant_that_expired_unspent() {
+    // `redeem` answers `Expired` before it answers `Unknown`, and `mint` is the only thing that
+    // clears an expired unconsumed row — so a gate that self-granted on `Unknown` alone refused
+    // this domain for good, and told the member to reply to an invite email they never had.
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"founder@acme.com"}}"#.to_string()),
+        ],
+        vec![
+            (200, r#"{"choices":[]}"#.to_string()),
+            (
+                200,
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
+                    .to_string(),
+            ),
+        ],
+        true,
+    )
+    .await;
+    InviteCodes {
+        pool: rig.pool.clone(),
+        ttl: Duration::seconds(-1),
+    }
+    .mint(None, "founder@acme.com", None)
+    .await
+    .unwrap();
+
+    let (_, cookie) = join(&rig, SIGNUP_KEY).await;
+    let cookie = cookie.expect("the door binds a session");
+    let (_, carried) = web_turn(&rig, Some(&cookie), "founder@acme.com").await;
+    let cookie = carried.unwrap_or(cookie);
+    let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
+    let verbs: Vec<&str> = payload["directives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|directive| directive["verb"].as_str().unwrap())
+        .collect();
+    assert!(verbs.contains(&"token"), "{payload}");
+
+    // The stale row is gone rather than shadowing the live one, so the domain reads as granted once.
+    let connection = rig.pool.get().await.unwrap();
+    let rows = connection
+        .query(
+            "select consumed_at from ufo_control.invite_code where email_domain = $1",
+            &[&"acme.com"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0]
+        .get::<_, Option<chrono::DateTime<Utc>>>("consumed_at")
+        .is_some());
+}
+
+/// The cookie the join door would have bound at a given moment, sealed exactly as it seals one.
+fn keyed_cookie(key: &str, expires_at: chrono::DateTime<Utc>) -> String {
+    let mark = keyed_mark(key, SECRET, expires_at);
+    let sealed = seal_session(
+        &format!("{mark}~Zm9yLXRoZS10ZXN0LW9ubHktbm90LXJhbmRvbS1pZA"),
+        SECRET,
+    );
+    format!("{ONBOARD_SESSION_COOKIE}={sealed}")
+}
+
+/// The expiry a marked cookie names.
+fn mark_expiry(cookie: &str) -> String {
+    cookie
+        .split_once('=')
+        .unwrap()
+        .1
+        .split('~')
+        .nth(2)
+        .expect("a marked session names an expiry")
+        .to_string()
+}
+
+#[tokio::test]
+async fn the_join_door_draws_the_form_for_a_browser_already_signed_in() {
+    // `/login` forwards a live bearer straight to its portal. The door has just bound a session
+    // carrying an authority that bearer knows nothing about, so a forward would spend it on nothing
+    // and the member could never found their domain without signing out first.
+    let rig = rig(vec![], vec![], true).await;
+    let response = client()
+        .get(format!("{}/join/{SIGNUP_KEY}", rig.base))
+        .send()
+        .await
+        .unwrap();
+    let landing = response
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let bearer = mint_token(SECRET, WORKSPACE, "dana@acme.com", Utc::now()).unwrap();
+    let page = client()
+        .get(format!("{}{landing}", rig.base))
+        .header("cookie", format!("{SESSION_COOKIE}={bearer}; {cookie}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        page.status(),
+        StatusCode::OK,
+        "the form is drawn, not forwarded"
+    );
+}
+
+#[tokio::test]
+async fn a_mark_the_deploy_has_stopped_serving_grants_nothing() {
+    // "Empty serves no door" has to hold for the marks already out, or emptying the knob closes
+    // nothing. The mark is answered in a Set-Cookie any client reads, so it is a bearer.
+    let door = rig(vec![], vec![], true).await;
+    let (_, cookie) = join(&door, SIGNUP_KEY).await;
+    let captured = cookie.expect("the door binds a session");
+
+    // Unset, then rotated: both are a deploy that has stopped serving the key this mark names.
+    for signup_key in [None, Some("rotated")] {
+        let closed = rig_with(
+            vec![
+                (200, r#"{"id":"m1"}"#.to_string()),
+                (200, r#"{"user":{"email":"founder@acme.com"}}"#.to_string()),
+            ],
+            vec![(200, r#"{"choices":[]}"#.to_string())],
+            true,
+            signup_key,
+        )
+        .await;
+        let (_, carried) = web_turn(&closed, Some(&captured), "founder@acme.com").await;
+        let cookie = carried.unwrap_or_else(|| captured.clone());
+        let (payload, _) = web_turn(&closed, Some(&cookie), "123456").await;
+        assert!(
+            payload.to_string().contains("acme.com has no invite."),
+            "{signup_key:?}: {payload}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_captured_mark_stops_counting_when_it_expires() {
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"founder@acme.com"}}"#.to_string()),
+        ],
+        vec![(200, r#"{"choices":[]}"#.to_string())],
+        true,
+    )
+    .await;
+    // The door's own mark, aged past its window. Everything else about the session is untouched, so
+    // the expiry is the only thing that can refuse it.
+    let stale = keyed_cookie(
+        SIGNUP_KEY,
+        Utc::now() - Duration::minutes(SIGNUP_MARK_TTL_MINUTES + 1),
+    );
+    let (_, carried) = web_turn(&rig, Some(&stale), "founder@acme.com").await;
+    let cookie = carried.unwrap_or(stale);
+    let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
+    assert!(
+        payload.to_string().contains("acme.com has no invite."),
+        "{payload}"
+    );
+}
+
+#[tokio::test]
+async fn a_re_mint_carries_the_mark_without_extending_it() {
+    // The walk re-mints the session on the email turn and again on the Google hop. A re-mint that
+    // reissued the expiry would let a captured mark be renewed indefinitely.
+    let rig = rig(vec![], vec![], true).await;
+    let (_, cookie) = join(&rig, SIGNUP_KEY).await;
+    let cookie = cookie.expect("the door binds a session");
+    let before = mark_expiry(&cookie);
+
+    let (_, carried) = web_turn(&rig, Some(&cookie), "founder@acme.com").await;
+    let carried = carried.expect("the email turn re-mints");
+    assert_ne!(carried, cookie, "the session id itself is reissued");
+    assert_eq!(
+        mark_expiry(&carried),
+        before,
+        "the expiry is copied, not renewed"
+    );
+}
+
+#[tokio::test]
+async fn the_join_ask_survives_the_google_hop_it_was_carried_into() {
+    // The mark alone is not enough. A member already signed in elsewhere who takes the Google hop
+    // returns to the door, and a return to bare `/login` forwards them to the workspace they already
+    // have — claim verified, mark spent on nothing, domain never founded.
+    let rig = rig(
+        vec![],
+        vec![
+            (200, r#"{"choices":[]}"#.to_string()),
+            (
+                200,
+                r#"{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","admin":true,"founding":true}"#
+                    .to_string(),
+            ),
+        ],
+        true,
+    )
+    .await;
+    let (_, cookie) = join(&rig, SIGNUP_KEY).await;
+    let cookie = cookie.expect("the door binds a session");
+    let bearer = mint_token(SECRET, WORKSPACE, "dana@elsewhere.com", Utc::now()).unwrap();
+
+    // The page hands the ask to the hop, as it does for an invitation.
+    let start = client()
+        .get(format!("{}/v1/onboard/auth/start?join=1", rig.base))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    let hopped = start
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let state = start
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+
+    let returned = client()
+        .get(format!(
+            "{}/v1/onboard/auth/callback?state={state}&code=founder%40acme.com",
+            rig.base
+        ))
+        .header("cookie", &hopped)
+        .send()
+        .await
+        .unwrap();
+    let landing = returned
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(landing.contains("join=1"), "{landing}");
+
+    // And the door that ask names draws the form rather than forwarding the live bearer away.
+    let page = client()
+        .get(format!("{}{landing}", rig.base))
+        .header("cookie", format!("{SESSION_COOKIE}={bearer}; {hopped}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK, "{landing} forwarded instead");
+
+    let (payload, _) = web_turn(&rig, Some(&hopped), "").await;
+    let verbs: Vec<&str> = payload["directives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|directive| directive["verb"].as_str().unwrap())
+        .collect();
+    assert!(verbs.contains(&"token"), "{payload}");
 }

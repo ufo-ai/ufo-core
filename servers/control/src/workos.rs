@@ -41,7 +41,10 @@ pub const GOOGLE_PROVIDER: &str = "GoogleOAuth";
 pub const GRANT_REFUSED: &str = "invalid_grant";
 pub const SIGN_IN_FAILED: &str = "Sign-in failed. Try again.";
 pub const CODE_NOT_SENT: &str = "Could not send the verification code. Try again.";
-pub const MAX_STATE_SESSION_BYTES: usize = 128;
+/// A bound on the session a state may name, over and above the signature that already makes it
+/// ours. It has to admit the longest value this gateway mints — a sealed session carrying the join
+/// door's mark, which is the random id, the mark's tag and expiry, and the seal.
+pub const MAX_STATE_SESSION_BYTES: usize = 192;
 pub const STATE_SEPARATOR: char = '.';
 pub const WORKOS_TIMEOUT_SECONDS: u64 = 10;
 
@@ -64,6 +67,7 @@ pub struct AuthCarry {
     pub first_run: bool,
     pub debug: bool,
     pub invite: bool,
+    pub join: bool,
 }
 
 #[derive(serde::Serialize, Deserialize)]
@@ -74,6 +78,7 @@ struct StatePayload {
     f: bool,
     d: bool,
     i: bool,
+    j: bool,
 }
 
 /// The OAuth `state`: the onboarding session and what the member clicked to reach sign-in, under a
@@ -87,6 +92,7 @@ pub fn pack_state(carry: &AuthCarry, secret: &str) -> String {
         f: carry.first_run,
         d: carry.debug,
         i: carry.invite,
+        j: carry.join,
     };
     let json = serde_json::to_vec(&payload).expect("the carry serializes");
     let body = URL_SAFE_NO_PAD.encode(json);
@@ -123,6 +129,7 @@ pub fn unpack_state(raw: &str, secret: &str) -> Result<AuthCarry, StateError> {
         first_run: payload.f,
         debug: payload.d,
         invite: payload.i,
+        join: payload.j,
     })
 }
 
@@ -190,7 +197,7 @@ fn cookie_signature(session: &str, secret: &str) -> String {
     subkey_signature(secret, COOKIE_KEY_LABEL, session.as_bytes())
 }
 
-fn subkey_signature(secret: &str, label: &[u8], message: &[u8]) -> String {
+pub(crate) fn subkey_signature(secret: &str, label: &[u8], message: &[u8]) -> String {
     let mut derive =
         <Hmac<Sha256>>::new_from_slice(secret.as_bytes()).expect("hmac takes any key length");
     derive.update(label);

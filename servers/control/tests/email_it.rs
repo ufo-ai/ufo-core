@@ -14,7 +14,8 @@ use ufo_control::email::{
     apex_host, email_sender_from_env, invite_email, normalize_email, parse_assume_role_credentials,
     sigv4_headers, AwsEndpoints, EmailSender, SesCredentials, SesEmailSender, WorkEmailError,
     WorkEmailPolicy, AWS_ROLE_ARN_ENV, AWS_WEB_IDENTITY_TOKEN_FILE_ENV, CONSOLE_EMAIL_MODE,
-    DEFAULT_SES_REGION, EMAIL_MODE_ENV, SES_REGION_ENV, SES_SENDER_ENV,
+    DEFAULT_SES_REGION, DISPOSABLE_EMAIL_DOMAINS, EMAIL_MODE_ENV, FREE_EMAIL_DOMAINS,
+    SES_REGION_ENV, SES_SENDER_ENV,
 };
 
 const STS_RESPONSE: &str = r#"<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -530,4 +531,69 @@ fn an_unknown_mode_fails_loud_rather_than_defaulting() {
         .to_string();
     assert!(refused.contains("smtp"), "{refused}");
     assert!(refused.contains("not a valid email mode"), "{refused}");
+}
+
+#[test]
+fn a_shared_consumer_domain_is_refused_whatever_country_it_serves() {
+    // The join door founds a workspace behind this list alone, and a shared mail domain that slips
+    // through becomes one workspace that every later stranger at that domain is seated in.
+    let policy = WorkEmailPolicy::default();
+    for email in [
+        "someone@web.de",
+        "someone@gmx.net",
+        "someone@t-online.de",
+        "someone@mail.ru",
+        "someone@yandex.ru",
+        "someone@qq.com",
+        "someone@163.com",
+        "someone@naver.com",
+        "someone@hanmail.net",
+        "someone@orange.fr",
+        "someone@laposte.net",
+        "someone@libero.it",
+        "someone@uol.com.br",
+        "someone@seznam.cz",
+        "someone@wp.pl",
+        "someone@hotmail.co.uk",
+        "someone@yahoo.co.jp",
+        "someone@live.ca",
+        "someone@outlook.com.br",
+        "someone@comcast.net",
+        "someone@btinternet.com",
+        "someone@bigpond.com",
+        "someone@rediffmail.com",
+        "someone@tutanota.com",
+        "someone@1secmail.com",
+        // A brand already on the list, under a country domain the first pass missed. The sweep is
+        // by brand and country now, so a listed provider is listed wherever it operates.
+        "someone@protonmail.ch",
+        "someone@gmx.co.uk",
+        "someone@aol.co.uk",
+        "someone@hotmail.ch",
+        "someone@yahoo.co.za",
+        "someone@outlook.co.nz",
+    ] {
+        assert!(
+            matches!(policy.validate(email), Err(WorkEmailError::NotWork(_))),
+            "{email} slipped past the denylist"
+        );
+    }
+}
+
+#[test]
+fn the_denylist_names_each_domain_once() {
+    // Two lists, one membership test. A name in both reads as a disagreement about what it is.
+    let mut seen = std::collections::HashSet::new();
+    for domain in FREE_EMAIL_DOMAINS.iter().chain(DISPOSABLE_EMAIL_DOMAINS) {
+        assert!(seen.insert(*domain), "{domain} is listed twice");
+        assert_eq!(
+            *domain,
+            domain.to_lowercase(),
+            "{domain} is not lowercase, so no address can ever match it"
+        );
+        assert!(
+            domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.'),
+            "{domain} is not a domain the pattern can produce"
+        );
+    }
 }

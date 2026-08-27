@@ -11,7 +11,7 @@ use ufo_control::email::{
 };
 use ufo_control::gateway::{
     parse_invite_required, router, stamped_script, GatewayState, Onboarding, CLIENT_BIN_DIR_ENV,
-    GATEWAY_PORT_ENV, INVITE_REQUIRED_ENV,
+    GATEWAY_PORT_ENV, INVITE_REQUIRED_ENV, SIGNUP_KEY_ENV,
 };
 use ufo_control::invite::{InviteCodes, SignupProfile};
 use ufo_control::invite_delivery::{self, InviteDeliveries, POLL_INTERVAL_SECONDS};
@@ -188,6 +188,14 @@ async fn gateway() -> Result<(), String> {
     if !invite_required {
         tracing::warn!(target: "ufo_control::main", "gateway.invite_gate.disabled");
     }
+    // An empty value is no key: a deploy that declares the variable and leaves it blank serves no
+    // join door, rather than one every caller opens with an empty path segment.
+    let signup_key = std::env::var(SIGNUP_KEY_ENV)
+        .ok()
+        .filter(|key| !key.is_empty());
+    if signup_key.is_some() {
+        tracing::info!(target: "ufo_control::main", "gateway.signup_key.configured");
+    }
 
     let pool = db::connect(&dsn, ca_bundle.as_deref())
         .await
@@ -223,6 +231,7 @@ async fn gateway() -> Result<(), String> {
             token_secret,
             apex_host: apex,
             invite_required,
+            signup_key,
         },
         stamped_script: stamped_script(&public_base_url),
         client_bin_dir: std::env::var(CLIENT_BIN_DIR_ENV).ok(),

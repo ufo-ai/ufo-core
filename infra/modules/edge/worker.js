@@ -7,6 +7,7 @@ const FLEET_FETCH_TIMEOUT_MS = 3_000;
 const PAGE_CACHE = "public, max-age=600";
 const SITE_CARD_PREFIX = "/surface/sites/share/site/";
 const ARTIFACT_PREFIX = "/artifacts/";
+const JOIN_PREFIX = "/join/";
 const ARTIFACT_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const WAITLIST_SENDER = "__WAITLIST_SENDER__";
 
@@ -205,6 +206,11 @@ export default {
     }
     if (url.pathname.startsWith("/ufo/bin/")) {
       return fetch(`${env.ORIGIN_BASE}${url.pathname}`);
+    }
+    // The signup link is shared as an apex address, and the door that binds the session lives on the
+    // app host with every other cookie this deploy sets. The key rides one hop and is answered there.
+    if (request.method === "GET" && url.pathname.startsWith(JOIN_PREFIX)) {
+      return Response.redirect(`https://app.${url.hostname}${url.pathname}`, 302);
     }
     if (request.method === "GET" && url.pathname.startsWith(SITE_CARD_PREFIX)) {
       return siteCard(url);

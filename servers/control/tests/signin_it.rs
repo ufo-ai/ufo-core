@@ -31,6 +31,7 @@ fn carry(session: &str, conversation: Option<&str>, artifact: Option<&str>) -> A
         first_run: false,
         debug: false,
         invite: false,
+        join: false,
     }
 }
 
@@ -40,6 +41,7 @@ fn a_packed_state_round_trips_its_carry() {
         first_run: true,
         debug: true,
         invite: true,
+        join: true,
         ..carry("session-1", Some(CONVERSATION), Some("/artifacts/abc"))
     };
     let unpacked = unpack_state(&pack_state(&original, SECRET), SECRET).unwrap();

@@ -21,6 +21,7 @@ browser ------>|  waitlist -> D1 + mail queue               |
                +--------------------------------------------+
 ufo client --->|  GET /ufo -> version-stamped POSIX client  |
 browser ------>|  GET /login -> sign-in page (app host)     |
+               |  GET /join/<key> -> mark session -> form   |
                |  GET /logout -> clear session -> /login    |
                |  GET /v1/onboard/auth/* -> WorkOS (Google) |
                |  POST /v1/onboard/{channel} (web = JSON)   |
@@ -78,6 +79,8 @@ Onboarding.advance(channel, session, body, install)
   +-- membership plus live grant --------> choose membership or new workspace
   |
   +-- no candidate, live domain grant ---> burn it, then create workspace
+  |
+  +-- no candidate, no grant, join door --> mint this domain's grant, burn it, create
   |
   +-- no candidate or grant -------------> say why, name the waitlist, exit
   |
@@ -175,6 +178,59 @@ expiry, both database-enforced), so one grant opens exactly one workspace and a 
 proceeds without consulting it again. Each refusal — no grant, expired, already burned — says why,
 names the waitlist, and exits, because the member holds nothing that could change the answer. The
 claim keeps its verified email, so re-running the installer after a grant lands resolves it.
+
+## The join door
+
+`UFO_SIGNUP_KEY` names one path segment, and `GET /join/<key>` is a signup that waits for nobody.
+The apex hops the link to the app host (edge worker), where the door compares the key in constant
+time, binds a sign-in session marked with the authority to found, and 303s to `/login?join=1` under
+`Referrer-Policy: no-referrer`. The ask is load-bearing: bare `/login` forwards a browser holding a
+live bearer straight to its portal, which would spend the mark on nothing and leave the member
+unable to found their domain without signing out first. It rides the Google hop with the rest of the
+carry for the same reason an invitation's does — the callback returns to this door, and a return
+that dropped it would forward the completed sign-in away unfinished. The key rides that one request: the address the member lands on
+names none, and the page never reads one. A key that does not match is answered as an unrouted path
+is, and so is every request where the deploy configures none, because a refusal of its own would
+tell a caller the door is there.
+
+The invite gate stays required. What the marked session changes is one branch inside it: where a
+verified domain has no grant, the flow mints that domain's grant itself and the ordinary redemption
+spends it. The row, the burn, the `invite_id` stamped on the claim, the Slack Connect delivery that
+keys on it — all identical to a grant `ufo-control invite` wrote, so nothing downstream learns a new
+shape. It carries no `business` or `goals`, which the agent prompt already reads as absent. A domain
+that already holds a grant mints no second one: live or already spent, the redemption that follows
+answers for it, so two racing turns and a member who opens the link twice land on one grant.
+
+The authority is a mark inside the sealed session value the cookie carries, not beside it: `key~`,
+the configured key under a signature, and an expiry. No caller can add it to a session of their own,
+and the claim keyed by that session holds it through the code, the Google hop, and every retry with
+no column of its own. The web POST and the Google hop each re-mint the session as they always did —
+a claim is still only ever started under a session freshly minted by the gateway — and copy the
+mark onto the session they mint, expiry included, so a re-mint carries the authority without
+renewing it.
+
+The mark is a bearer, because the door answers it in a `Set-Cookie` any HTTP client reads and a
+member can hand it on. So it is bounded rather than trusted, and every turn grades it again. The
+signed tag names the key the door was opened with, so emptying `signup_key` closes the door for the
+marks already out and rotating it does the same — which is what "empty serves no door" has to mean.
+The expiry bounds a captured mark to the sign-in it was minted for
+(`SIGNUP_MARK_TTL_MINUTES`, thirty). Neither bound rests on the key being unguessable.
+
+The work-email denylist is what stands between the door and a shared mailbox provider becoming one
+workspace. An operator grant used to be the last check before any domain could be founded, so the
+list was never load-bearing; behind the door it is. It names the consumer and disposable providers
+by country as well as by brand, and a test refuses a duplicate, an uppercase entry, or a value the
+address pattern could never produce. It does not solve a domain many unrelated people share
+legitimately — a university, an ISP still selling mailboxes — which is a bound on who the door is
+opened to, not on what the list can know.
+
+The key is configuration rather than a secret container: `signup_key` in each environment's
+`terraform.tfvars`. Nothing rests on it being unguessable, and production's is `ufo` — the soft door
+that stands in for waitlist approval until the waitlist is removed, open to anyone who tries the
+obvious segment. What it authorizes is bounded instead: founding a workspace for a domain WorkOS
+says the member owns, and nothing else. It mails no invitation, so it is no relay; it names no
+domain, so it opens nobody else's workspace; and it moves no seat in a workspace that already
+stands. Everyone without the link is refused and pointed at the waitlist, exactly as before.
 
 ## Signup Slack Connect invitation
 

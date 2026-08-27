@@ -80,6 +80,18 @@ local stack with no SES account.
 member's verified email domain. The local hosted stack (root README) sets it `false` so signup needs
 no grant; unset means required, so a deploy never opens signup by forgetting the knob.
 
+`UFO_SIGNUP_KEY` is the path segment that opens the join door, `GET /join/<key>`. A member who holds
+that link founds their own domain's workspace with nobody to approve them: the door binds a session
+carrying that authority and sends them to `/login?join=1`, and the gate writes them the grant their
+verified domain names, then spends it the ordinary way. The authority is a mark inside the sealed
+session — the key under a signature, plus an expiry — so emptying or rotating the knob closes the
+door for the marks already out, and a captured one stops counting after
+`SIGNUP_MARK_TTL_MINUTES`. So the key authorizes founding a workspace
+for a domain the member proves they own, and nothing else — it mails no invitation and names no
+domain of its own. Empty or unset serves no door, and a key that does not match is answered as an
+unrouted path, so a caller learns nothing about whether one is configured. Everyone without the
+link is refused exactly as before, which is why the gate stays required.
+
 ## Validation
 
 ```bash

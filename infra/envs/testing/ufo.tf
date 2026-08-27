@@ -264,6 +264,9 @@ data "kubectl_file_documents" "hosted" {
     slack_connect_enabled = var.slack_connect_enabled ? "true" : "false"
     slack_connect_team_id = var.slack_connect_team_id
 
+    # The join door, which writes a member their own grant once WorkOS verifies their address.
+    signup_key = var.signup_key
+
     # The portal records browser sessions into this deploy's own RUM application, which it reads
     # from the ufo-serve Secret above.
     rum_recording = true
