@@ -58,6 +58,7 @@ from ufo_ext_imessage.tools import (
     PHONE_CLAIM_MINUTES,
     ImessageConnect,
     ImessageConnectInput,
+    _display_phone,
     opt_in_link,
 )
 from ufo_testsupport.surfaces import (
@@ -469,15 +470,50 @@ def test_manifest_declares_complete_durable_surface() -> None:
 
 
 def test_phone_and_queue_boundaries() -> None:
-    parsed = ImessageConnectInput(phone_number="+1 415 555 0123")
-    assert parsed.phone_number == "+14155550123"
+    for stated in (
+        "5594259991",
+        "(559) 425-9991",
+        "559-425-9991",
+        "559.425.9991",
+        "559/425/9991",
+        "559 _ 425 _ 9991",
+        "+1 559 425 9991",
+        "+1 (559) 425-9991",
+        "1.559.425.9991",
+    ):
+        assert ImessageConnectInput(phone_number=stated).phone_number == "+15594259991"
     queue = queue_key("iMessage;-;+14155550123", direct=True)
     assert conversation_from_queue(queue).id == "iMessage;-;+14155550123"
     assert conversation_from_queue(queue).direct
-    with pytest.raises(ValueError, match=r"E\.164"):
-        ImessageConnectInput(phone_number="4155550123")
+    with pytest.raises(ValueError, match="10-digit US number"):
+        ImessageConnectInput(phone_number="425-9991")
     with pytest.raises(ValueError, match="queue key"):
         conversation_from_queue('["other","chat"]')
+
+
+def test_phone_display_uses_us_format() -> None:
+    assert _display_phone("+14085550123") == "(408) 555-0123"
+
+
+def test_a_phone_that_states_no_readable_number_is_refused_not_rewritten() -> None:
+    for stated in (
+        "0612345678",
+        "1234567890",
+        "07911123456",
+        "12 34 56 78",
+        "+0123456789",
+        "+1",
+        "+10000000000",
+        "+11415555012",
+        "+4155550123456789",
+        "+44 7911 123456",
+        "+44 (0) 7911 123456",
+        "+44 07911 123456",
+        "(+45) 12 34 56 78",
+        "call me",
+    ):
+        with pytest.raises(ValueError, match="10-digit US number"):
+            ImessageConnectInput(phone_number=stated)
 
 
 async def test_missing_provider_keeps_listener_inactive() -> None:
@@ -871,7 +907,7 @@ async def test_inbound_opt_in_survives_restart_then_the_next_message_gets_writeb
     assert json.loads(first.content[0].text) == {
         "state": "pending",
         "instruction": (
-            f'Text "{opt_in_text}" to +14085550123 from that phone within '
+            f'Text "{opt_in_text}" to (408) 555-0123 from that phone within '
             f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
             "Scan the attached image with that phone to open the message."
         ),
@@ -1014,7 +1050,7 @@ async def test_an_expired_claim_can_move_to_another_member(db: None, tmp_path: P
     assert json.loads(result.content[0].text) == {
         "state": "pending",
         "instruction": (
-            f'Text "{opt_in_text}" to +14085550123 from that phone within '
+            f'Text "{opt_in_text}" to (408) 555-0123 from that phone within '
             f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
             "Scan the attached image with that phone to open the message."
         ),
@@ -1087,7 +1123,7 @@ async def test_connect_answers_a_phone_the_surface_already_knows(db: None, tmp_p
         assert await ScopedStore(IMESSAGE_EXTENSION).get(claim_key(member_id, phone)) is None
     assert json.loads(mine.content[0].text) == {
         "state": "connected",
-        "instruction": "That phone is connected. Text +14085550123 from it.",
+        "instruction": "That phone is connected. Text (408) 555-0123 from it.",
         "assigned_phone_number": "+14085550123",
     }
     assert json.loads(theirs.content[0].text) == {

@@ -51,7 +51,7 @@ export type IntentOutcome = {
   message: string;
   turn_id?: string;
   credentials?: CredentialRequest | null;
-  /** The install link a connect intent's tool minted for the member who submitted it. */
+  /** The provider link a connect intent's tool minted for the member who submitted it. */
   url?: string | null;
 };
 

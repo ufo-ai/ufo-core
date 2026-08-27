@@ -3284,6 +3284,7 @@ async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response:
 
 SLACK_SURFACE = "slack"
 GITHUB_PROVIDER = "github"
+IMESSAGE_EXTENSION = "imessage"
 CONNECT_STEP_NAMES = (SLACK_SURFACE, GITHUB_PROVIDER)
 CONNECTOR_CATALOG_LIMIT = 50
 CONNECTOR_CATALOG_QUERY_CHARS = 100
@@ -3309,14 +3310,16 @@ class ConnectorCatalogTile(BaseModel):
 async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response:
     """The connector catalog, read by the first run's selector and the Connect page: the tools a
     team can say it uses, and the two of them the pages install themselves, beside whether the
-    workspace holds them. Each step reads the leg its own Connect
-    act writes: Slack's is the surface installation `slack_connect` binds, GitHub's the `git_push`
-    credential leg `github/coverage` reports — what `connect_github` fills by installing the App,
-    and what a stored token fills where no organization installed it — never the `api` leg, a broker
-    connection row that act neither writes nor needs. Both rows are the whole workspace's rather
-    than the reader's audience: the row is stated as a bare boolean, and a step narrowed by audience
-    would tell a member to install what the workspace already has. Both steps carry the catalog's
-    own label, so a tile and the step it reveals never name one connector two ways."""
+    workspace holds them. The read also states whether the deploy offers iMessage, so every member
+    sees that branch after the team step only when its tool exists. Each connector step reads the
+    leg its own Connect act writes: Slack's is the surface installation `slack_connect` binds,
+    GitHub's the `git_push` credential leg `github/coverage` reports — what `connect_github` fills
+    by installing the App, and what a stored token fills where no organization installed it — never
+    the `api` leg, a broker connection row that act neither writes nor needs. Both rows are the
+    whole workspace's rather than the reader's audience: the row is stated as a bare boolean, and a
+    step narrowed by audience would tell a member to install what the workspace already has. Both
+    steps carry the catalog's own label, so a tile and the step it reveals never name one connector
+    two ways."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -3327,6 +3330,9 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     return JSONResponse(
         {
             "providers": [tile.model_dump(mode="json") for tile in FIRST_RUN_PROVIDERS],
+            "imessage": any(
+                extension.name == IMESSAGE_EXTENSION for extension in ctx.deploy_extensions
+            ),
             "connectors": [
                 ConnectStep(name=tile.name, label=tile.label, installed=held[tile.name]).model_dump(
                     mode="json"

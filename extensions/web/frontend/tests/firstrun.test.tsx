@@ -9,10 +9,12 @@ import { AGENT, AGENT_ID, chatsOnWire, CONVO_ID, json, MEMBER, TURN_ID, type Rou
 const ADMIN = { ...MEMBER, admin: true };
 
 const SLACK_LINK = "https://slack.com/oauth/v2/authorize?state=sealed";
+const IMESSAGE_LINK = "sms:+14085550123?&body=UFO%20ABC123";
 
 const OPENED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Setting up" };
 
 const FIRST_RUN = {
+  imessage: true,
   providers: [
     { name: "slack", label: "Slack" },
     { name: "github", label: "GitHub" },
@@ -636,7 +638,7 @@ test("the first box takes the cursor as the step arrives", async () => {
   await waitFor(() => expect(document.activeElement).toBe(first));
 });
 
-test("every address written is added on one press, and then the chat opens", async () => {
+test("every address written is added on one press, and then iMessage is offered", async () => {
   const sent: string[] = [];
   const posted = recorder();
   open({
@@ -659,11 +661,155 @@ test("every address written is added on one press, and then the chat opens", asy
       { verb: "add_member", email: "alex@work.com", admin: false },
     ]),
   );
+  await screen.findByRole("heading", { name: "Use this agent in iMessage" });
+  expect(sent).toEqual([]);
+});
+
+test("skipping every invite offers iMessage before the chat opens", async () => {
+  const sent: string[] = [];
+  const posted = recorder();
+  open({
+    "/intents": posted.route,
+    "/chat": (_url, init) => {
+      sent.push(String(init?.body));
+      return json(OPENED);
+    },
+  });
+
+  await record("Notion");
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+
+  await screen.findByRole("heading", { name: "Use this agent in iMessage" });
+  expect(screen.getByText("Connect your phone to message UFO anytime.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Connect iMessage" })).toBeTruthy();
+  expect(sent).toEqual([]);
+});
+
+test("a deploy without iMessage finishes when every invite is skipped", async () => {
+  const sent: string[] = [];
+  const posted = recorder();
+  open(
+    {
+      "/intents": posted.route,
+      "/chat": (_url, init) => {
+        sent.push(String(init?.body));
+        return json(OPENED);
+      },
+    },
+    ADMIN,
+    { ...FIRST_RUN, imessage: false },
+  );
+
+  await record("Notion");
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+
   await waitFor(() =>
     expect(sent).toEqual([
       "I just set up this workspace. I want to develop products faster, and we use Notion.",
     ]),
   );
+  expect(screen.queryByRole("heading", { name: "Use this agent in iMessage" })).toBeNull();
+});
+
+test("the iMessage offer starts the phone claim through the intent lane", async () => {
+  const sent: string[] = [];
+  const posted = recorder({
+    connect_imessage: {
+      applied: true,
+      message: 'Text "UFO ABC123" to (408) 555-0123 from that phone within 30 minutes.',
+      url: IMESSAGE_LINK,
+    },
+  });
+  open({
+    "/intents": posted.route,
+    "/chat": (_url, init) => {
+      sent.push(String(init?.body));
+      return json(OPENED);
+    },
+  });
+
+  await record("Notion");
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+  const connect = await screen.findByRole("button", { name: "Connect iMessage" });
+  expect((connect as HTMLButtonElement).disabled).toBe(true);
+  await userEvent.type(screen.getByLabelText("iMessage phone number"), "(559).425/99-91");
+  expect((screen.getByLabelText("iMessage phone number") as HTMLInputElement).value).toBe(
+    "(559) 425-9991",
+  );
+  fireEvent.change(screen.getByLabelText("iMessage phone number"), {
+    target: { value: "+1 (559) 425-9991" },
+  });
+  expect((screen.getByLabelText("iMessage phone number") as HTMLInputElement).value).toBe(
+    "(559) 425-9991",
+  );
+  await userEvent.click(await screen.findByRole("button", { name: "Connect iMessage" }));
+
+  expect(
+    (
+      await screen.findByRole("link", {
+        name: 'Text "UFO ABC123" to (408) 555-0123',
+      })
+    ).getAttribute("href"),
+  ).toBe(IMESSAGE_LINK);
+  expect(screen.getByRole("link", { name: "Text code to UFO" }).getAttribute("href")).toBe(
+    IMESSAGE_LINK,
+  );
+  expect(intents(posted.calls).at(-1)).toEqual({
+    verb: "connect_imessage",
+    phone_number: "+15594259991",
+  });
+  await userEvent.click(screen.getByRole("button", { name: "Nevermind" }));
+  await waitFor(() =>
+    expect(sent).toEqual([
+      "I just set up this workspace. I want to develop products faster, and we use Notion.",
+    ]),
+  );
+});
+
+test("an invalid iMessage phone stays on the form with one instruction", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Notion");
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+  await userEvent.type(screen.getByLabelText("iMessage phone number"), "425-9991");
+  await userEvent.click(screen.getByRole("button", { name: "Connect iMessage" }));
+
+  expect(
+    screen.getByText("Enter a 10-digit US phone number."),
+  ).toBeTruthy();
+  expect(intents(posted.calls)).toEqual([toolingIntent("notion")]);
+});
+
+test("an iMessage phone that states another country code is refused, not cut to ten digits", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Notion");
+  await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+  fireEvent.change(await screen.findByLabelText("iMessage phone number"), {
+    target: { value: "+44 7911 123456" },
+  });
+  expect((screen.getByLabelText("iMessage phone number") as HTMLInputElement).value).toBe(
+    "+44 7911 123456",
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Connect iMessage" }));
+
+  expect(screen.getByText("Enter a 10-digit US phone number.")).toBeTruthy();
+  expect(intents(posted.calls)).toEqual([toolingIntent("notion")]);
+});
+
+test("back from the iMessage offer returns to the invite fields", async () => {
+  const posted = recorder();
+  open({ "/intents": posted.route });
+
+  await record("Notion");
+  await userEvent.type(await screen.findByLabelText("Email 1"), "sam@work.com");
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Back" }));
+
+  expect(await screen.findByRole("heading", { name: "Invite your team" })).toBeTruthy();
+  expect((screen.getByLabelText("Email 1") as HTMLInputElement).value).toBe("sam@work.com");
 });
 
 test("a refused invite states the refusal and adds nobody", async () => {
@@ -700,6 +846,8 @@ test("the last act says the picks and the question into the agent's new chat", a
   await userEvent.click(screen.getByRole("button", { name: "Gmail" }));
   await userEvent.click(commit());
   await userEvent.click(await screen.findByRole("button", { name: "Skip" }));
+  await screen.findByRole("heading", { name: "Use this agent in iMessage" });
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
   await waitFor(() => expect(sent.length).toBe(1));
   expect(sent[0].url).toBe("/surface/web/agents/" + AGENT_ID + "/chat?conversation=new");
@@ -729,6 +877,8 @@ test("picking no connector records nothing and still sends the goal", async () =
   await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Invite your team" });
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await screen.findByRole("heading", { name: "Use this agent in iMessage" });
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
   await waitFor(() =>
     expect(sent).toEqual(["I just set up this workspace. I want to increase revenue."]),
@@ -754,6 +904,8 @@ test("free text becomes the initial prompt", async () => {
   await userEvent.click(commit());
   await userEvent.click(await screen.findByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Invite your team" });
+  await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+  await screen.findByRole("heading", { name: "Use this agent in iMessage" });
   await userEvent.click(screen.getByRole("button", { name: "Skip" }));
 
   await waitFor(() =>

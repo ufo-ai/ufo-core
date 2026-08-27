@@ -900,7 +900,8 @@ the identity. **Alternative — bring-your-own app** (`slack_connect method="man
 identity with `auth.test`.
 
 iMessage setup is one chat tool. An admin binds the deploy's Spectrum project to the workspace;
-each signed-in member claims an E.164 phone number. The tool registers the phone with Spectrum,
+each signed-in member claims a 10-digit US phone number, stored in E.164 form. The tool registers
+the phone with Spectrum,
 records the claim, and returns the assigned line with the claim's random six-character `UFO <code>`,
 an `sms:` link carrying it, and the same prefilled message shared as a QR, so the code is never
 typed: one tap on the phone reading the reply, one scan from any other screen. A phone the surface

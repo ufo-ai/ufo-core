@@ -218,6 +218,7 @@ class ToolIntent(BaseModel):
         "manage_billing",
         "slack_connect",
         "connect_github",
+        "imessage_connect",
         "rebuild_report_digest",
         "rebuild_page_facts",
     ]

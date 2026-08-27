@@ -65,9 +65,11 @@ from ufo_ext_web.panels import (
     FIRST_RUN_PROVIDER_NAMES,
     ApplyIntent,
     ConnectGitHubIntent,
+    ConnectImessageIntent,
     ConnectSlackIntent,
     PanelIntent,
     _connect_outcome,
+    _imessage_outcome,
     _outcome,
     _rebuild_outcome,
     _tool_intent,
@@ -3265,6 +3267,7 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     bare = await client.get(path, headers=cookie)
     assert bare.status_code == 200
     payload = bare.json()
+    assert payload["imessage"] is False
     assert {"gmail", "notion", "linear", "slack", "github"} <= {
         tile["name"] for tile in payload["providers"]
     }
@@ -3314,7 +3317,7 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     }
     anonymous = await client.get(path)
     assert anonymous.status_code == 401
-    assert set(payload) == {"providers", "connectors"}
+    assert set(payload) == {"providers", "connectors", "imessage"}
 
 
 async def test_connector_catalog_searches_the_live_broker_namespace(
@@ -10494,6 +10497,16 @@ def test_the_first_run_connect_steps_prepare_the_install_tools_verbatim() -> Non
         assert prepared.input == {}
 
 
+def test_the_first_run_imessage_offer_prepares_the_phone_tool_verbatim() -> None:
+    submitted = PanelIntent.model_validate(
+        {"submitted": {"verb": "connect_imessage", "phone_number": "+1 415 555 0123"}}
+    ).submitted
+    assert isinstance(submitted, ConnectImessageIntent)
+    prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
+    assert prepared.tool == "imessage_connect"
+    assert prepared.input == {"phone_number": "+1 415 555 0123"}
+
+
 def test_the_rebuild_intents_prepare_their_own_extensions_tools_verbatim() -> None:
     """Each rebuild names the tool that owns the text being written again and carries nothing but
     the line the activity timeline reads. Neither panel holds a window, a batch size, or a rule
@@ -10625,6 +10638,59 @@ def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
     assert refused == {
         "applied": False,
         "message": "only a workspace admin can connect GitHub",
+        "turn_id": str(turn_id),
+    }
+
+
+def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> None:
+    turn_id = uuid4()
+    instruction = 'Text "UFO ABC123" to +14085550123 from that phone within 30 minutes.'
+    link = "sms:+14085550123?&body=UFO%20ABC123"
+    pending = json.loads(
+        _imessage_outcome(
+            TerminalFrame(
+                status="done",
+                text=wall(
+                    "imessage_connect",
+                    json.dumps(
+                        {
+                            "state": "pending",
+                            "instruction": instruction,
+                            "opt_in_link": link,
+                        }
+                    ),
+                ),
+            ),
+            turn_id,
+        ).body
+    )
+    assert pending == {
+        "applied": True,
+        "message": instruction,
+        "url": link,
+        "turn_id": str(turn_id),
+    }
+    refused = json.loads(
+        _imessage_outcome(
+            TerminalFrame(
+                status="done",
+                text=wall(
+                    "imessage_connect",
+                    json.dumps(
+                        {
+                            "state": "not_connected",
+                            "instruction": "This deploy has no iMessage provider credentials.",
+                        }
+                    ),
+                ),
+            ),
+            turn_id,
+        ).body
+    )
+    assert refused == {
+        "applied": False,
+        "message": "This deploy has no iMessage provider credentials.",
+        "url": None,
         "turn_id": str(turn_id),
     }
 

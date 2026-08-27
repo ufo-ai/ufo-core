@@ -24,7 +24,8 @@ from ufo_ext_imessage.surface import (
     read_claim,
 )
 
-E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
+US_E164_PATTERN = re.compile(r"^\+1([2-9][0-9]{2})([2-9][0-9]{2})([0-9]{4})$")
+US_FORMATTING = re.compile(r"\D")
 PHONE_CLAIM_MINUTES = 30
 PHONE_CLAIM_TTL = timedelta(minutes=PHONE_CLAIM_MINUTES)
 OPT_IN_QR_FILENAME = "opt-in.png"
@@ -51,6 +52,13 @@ def opt_in_qr(assigned_phone_number: str, opt_in_code: str) -> bytes:
     return image.getvalue()
 
 
+def _display_phone(phone_number: str) -> str:
+    us = US_E164_PATTERN.fullmatch(phone_number)
+    if us is None:
+        return phone_number
+    return f"({us.group(1)}) {us.group(2)}-{us.group(3)}"
+
+
 class ImessageConnectInput(BaseModel):
     phone_number: str = Field(
         description="The member's iMessage phone number in E.164 form, such as +14155550123."
@@ -59,10 +67,18 @@ class ImessageConnectInput(BaseModel):
     @field_validator("phone_number")
     @classmethod
     def _e164(cls, value: str) -> str:
-        phone = "".join(value.split())
-        if E164_PATTERN.fullmatch(phone) is None:
-            raise ValueError("phone_number must use E.164 form")
-        return phone
+        printed = value.strip()
+        if any(character.isalpha() for character in printed):
+            raise ValueError("phone_number must be a 10-digit US number")
+        digits = US_FORMATTING.sub("", printed)
+        if "+" in printed and not digits.startswith("1"):
+            raise ValueError("phone_number must be a 10-digit US number")
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        stated = f"+1{digits}"
+        if US_E164_PATTERN.fullmatch(stated) is None:
+            raise ValueError("phone_number must be a 10-digit US number")
+        return stated
 
 
 def _result(state: str, instruction: str, **extra: object) -> ToolResult:
@@ -78,7 +94,7 @@ def _opt_in_result(assigned_phone_number: str, opt_in_code: str) -> ToolResult:
     opt_in_text = f"{OPT_IN_TEXT} {opt_in_code}"
     return _result(
         "pending",
-        f'Text "{opt_in_text}" to {assigned_phone_number} from that phone within '
+        f'Text "{opt_in_text}" to {_display_phone(assigned_phone_number)} from that phone within '
         f"{PHONE_CLAIM_MINUTES} minutes. Case, spaces and punctuation do not matter. "
         "Scan the attached image with that phone to open the message.",
         assigned_phone_number=assigned_phone_number,
@@ -124,7 +140,7 @@ class ImessageConnect:
             )
             return _result(
                 "connected",
-                f"That phone is connected. Text {assigned_phone_number} from it.",
+                f"That phone is connected. Text {_display_phone(assigned_phone_number)} from it.",
                 assigned_phone_number=assigned_phone_number,
             )
         key = claim_key(ctx.speaker_member_id, args.phone_number)

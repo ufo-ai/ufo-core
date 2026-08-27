@@ -30,6 +30,7 @@ type Connector = ProviderTile & { installed: boolean };
 export type FirstRunPayload = {
   providers: ProviderTile[];
   connectors: Connector[];
+  imessage: boolean;
 };
 
 const GOAL_STEP = "goal";
@@ -102,6 +103,7 @@ const CONNECT_COPY: Record<
 
 const TOOLS_STEP = "tools";
 const TEAM_STEP = "team";
+const IMESSAGE_STEP = "imessage";
 
 /** The invite step's form, named so the act that submits it can stand in the page's head with the
  *  other acts rather than inside the fields it commits. */
@@ -126,6 +128,10 @@ const STEP_COPY: Record<string, { title: string; note: string }> = {
   [TEAM_STEP]: {
     title: "Invite your team",
     note: "Each address becomes a member of this workspace. They sign in with their work email.",
+  },
+  [IMESSAGE_STEP]: {
+    title: "Use this agent in iMessage",
+    note: "Connect your phone to message UFO anytime.",
   },
   ...CONNECT_COPY,
 };
@@ -214,6 +220,11 @@ export function FirstRun({
   const [connected, setConnected] = useState<string[]>([]);
   const [rows, setRows] = useState<string[]>(() => Array<string>(INVITE_ROWS).fill(""));
   const [added, setAdded] = useState<string[]>([]);
+  const [imessageOffer, setImessageOffer] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [imessageLink, setImessageLink] = useState<string | null>(null);
+  const [imessageMessage, setImessageMessage] = useState("");
+  const [imessageReady, setImessageReady] = useState(false);
   const [at, setAt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
@@ -269,9 +280,14 @@ export function FirstRun({
           recorded === null
             ? [GOAL_STEP, TOOLS_STEP, TEAM_STEP]
             : [GOAL_STEP, TOOLS_STEP, ...chosen.map((row) => row.name), TEAM_STEP];
-        const step = revealed[at];
+        const step = imessageOffer ? IMESSAGE_STEP : revealed[at];
         const connector = chosen.filter((row) => row.name === step)[0];
-        const ConnectIcon = connector ? CONNECT_COPY[connector.name].icon : null;
+        const ConnectIcon =
+          step === IMESSAGE_STEP
+            ? IconMessages
+            : connector
+              ? CONNECT_COPY[connector.name].icon
+              : null;
         const held = connector ? connector.installed || connected.includes(step) : false;
         const finish = () => {
           setPendingAsk(
@@ -288,6 +304,9 @@ export function FirstRun({
           onOpenChat();
         };
         const advance = () => (at + 1 < revealed.length ? setAt(at + 1) : finish());
+        const offerImessage = () => (payload.imessage ? setImessageOffer(true) : finish());
+        const back = () => (imessageOffer ? setImessageOffer(false) : setAt(at - 1));
+        const skip = () => (step === TEAM_STEP ? offerImessage() : advance());
         const wanted = rows
           .map((row) => row.trim())
           .filter(Boolean)
@@ -309,8 +328,37 @@ export function FirstRun({
             setAdded((held) => [...held, email]);
           }
           setBusy(false);
-          finish();
+          offerImessage();
         };
+        const connectImessage = async (event: FormEvent) => {
+          event.preventDefault();
+          if (busy) return;
+          const stated = phone.trim();
+          const digits = stated.replace(/\D/g, "");
+          const foreign = stated.startsWith("+") && !digits.startsWith("1");
+          if (foreign || digits.length !== 10) {
+            setNotice({
+              text: "Enter a 10-digit US phone number.",
+              refused: true,
+            });
+            return;
+          }
+          setBusy(true);
+          const outcome = await postIntent(agent.id, {
+            verb: "connect_imessage",
+            phone_number: `+1${digits}`,
+          });
+          setBusy(false);
+          if (!outcome.applied) {
+            setNotice(outcomeNotice(outcome));
+            return;
+          }
+          setNotice(QUIET);
+          setImessageLink(outcome.url ?? null);
+          setImessageMessage(outcome.message);
+          setImessageReady(true);
+        };
+        const imessageLinkEnd = imessageMessage.indexOf(" from ");
         return (
           <Frame
             title={STEP_COPY[step].title}
@@ -331,12 +379,12 @@ export function FirstRun({
             actions={
               <>
                 {at > 0 ? (
-                  <Button size="bar" className="h-10" onClick={() => setAt(at - 1)}>
+                  <Button size="bar" className="h-10" onClick={back}>
                     Back
                   </Button>
                 ) : null}
                 {step === GOAL_STEP || step === TOOLS_STEP ? null : (
-                  <Button size="bar" className="h-10" onClick={advance}>
+                  <Button size="bar" className="h-10" onClick={skip}>
                     Skip
                   </Button>
                 )}
@@ -351,7 +399,7 @@ export function FirstRun({
                   >
                     Invite
                   </Button>
-                ) : (
+                ) : step === IMESSAGE_STEP ? null : (
                   <Button
                     variant="send"
                     size="bar"
@@ -430,6 +478,91 @@ export function FirstRun({
                   advance();
                 }}
               />
+            ) : null}
+            {step === IMESSAGE_STEP ? (
+              <div className="flex w-full max-w-(--container-connect) flex-col gap-2xl px-2xl">
+                {imessageReady ? (
+                  <>
+                    <Notice>
+                      {imessageLink ? (
+                        <ConsentLink
+                          url={imessageLink}
+                          className="text-inherit underline underline-offset-2 hover:text-ink"
+                        >
+                          {imessageLinkEnd < 0
+                            ? imessageMessage
+                            : imessageMessage.slice(0, imessageLinkEnd)}
+                        </ConsentLink>
+                      ) : (
+                        imessageMessage
+                      )}
+                      {imessageLink && imessageLinkEnd >= 0
+                        ? imessageMessage.slice(imessageLinkEnd)
+                        : null}
+                    </Notice>
+                    {imessageLink ? (
+                      <ConsentLink
+                        url={imessageLink}
+                        className={cn(
+                          buttonVariants({ variant: "send", size: "bar" }),
+                          "h-10 w-full",
+                        )}
+                      >
+                        Text code to UFO
+                      </ConsentLink>
+                    ) : null}
+                    <Button variant="outline" size="bar" className="h-10 w-full" onClick={finish}>
+                      Nevermind
+                    </Button>
+                  </>
+                ) : (
+                  <form
+                    onSubmit={connectImessage}
+                    className="flex flex-col gap-2xl"
+                  >
+                    <Input
+                      surface="answer"
+                      type="tel"
+                      aria-label="iMessage phone number"
+                      autoComplete="tel-national"
+                      inputMode="numeric"
+                      placeholder="(555) 555-5555"
+                      value={phone}
+                      onChange={(event) => {
+                        const printed = event.target.value;
+                        const stated = printed.replace(/\D/g, "");
+                        // A number that states a country code outside +1 stands as printed, so
+                        // the step refuses it. Reformatting it as ten US digits would claim a
+                        // different real US number.
+                        if (printed.trimStart().startsWith("+") && !stated.startsWith("1")) {
+                          setPhone(printed);
+                          return;
+                        }
+                        const digits = (
+                          stated.length === 11 && stated.startsWith("1") ? stated.slice(1) : stated
+                        ).slice(0, 10);
+                        if (digits.length < 4) setPhone(digits);
+                        else if (digits.length < 7)
+                          setPhone(`(${digits.slice(0, 3)}) ${digits.slice(3)}`);
+                        else
+                          setPhone(
+                            `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`,
+                          );
+                      }}
+                    />
+                    <Button
+                      type="submit"
+                      variant="send"
+                      size="bar"
+                      className="h-10 w-full"
+                      busy={busy}
+                      disabled={!phone.trim()}
+                    >
+                      Connect iMessage
+                    </Button>
+                  </form>
+                )}
+              </div>
             ) : null}
             {step === TEAM_STEP ? (
               <Invite

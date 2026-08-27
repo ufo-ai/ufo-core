@@ -37,6 +37,9 @@ STATED_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 SLACK_INSTALL_LINK_KEY = "authorize_url"
 SLACK_INSTALL_HINT_KEY = "hint"
 BILLING_PORTAL_LINK_KEY = "portal_url"
+IMESSAGE_STATE_KEY = "state"
+IMESSAGE_INSTRUCTION_KEY = "instruction"
+IMESSAGE_LINK_KEY = "opt_in_link"
 
 
 class ApplyIntent(BaseModel):
@@ -630,6 +633,14 @@ class ConnectGitHubIntent(BaseModel):
     verb: Literal["connect_github"]
 
 
+class ConnectImessageIntent(BaseModel):
+    """The first run's iMessage offer: the member's stated phone number dispatched verbatim to
+    the surface tool that binds the provider and proves the address."""
+
+    verb: Literal["connect_imessage"]
+    phone_number: str
+
+
 class AddMemberIntent(BaseModel):
     """One member added from the team panel — the same admin-only `add_member` chat verb, which
     mints the member at whatever email domain their address carries and reports whether they took a
@@ -654,6 +665,7 @@ class PanelIntent(BaseModel):
         | AddMemberIntent
         | AudienceIntent
         | ConnectGitHubIntent
+        | ConnectImessageIntent
         | ConnectSlackIntent
         | CorrectionIntent
         | CredentialIntent
@@ -673,6 +685,7 @@ def _tool_intent(
         | AddMemberIntent
         | AudienceIntent
         | ConnectGitHubIntent
+        | ConnectImessageIntent
         | ConnectSlackIntent
         | CorrectionIntent
         | CredentialIntent
@@ -771,6 +784,11 @@ def _tool_intent(
                 tool="connect_github",
                 input={},
             )
+        case ConnectImessageIntent():
+            return ToolIntent(
+                tool="imessage_connect",
+                input={"phone_number": submitted.phone_number},
+            )
         case AddMemberIntent():
             return ToolIntent(
                 tool="add_member",
@@ -862,6 +880,30 @@ def _connect_outcome(
             link = found.group() if found else None
             stated = "" if link else frame.text
     return JSONResponse({"applied": True, "message": stated, "url": link, "turn_id": str(turn_id)})
+
+
+def _imessage_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
+    if frame.status != "done":
+        return _outcome(frame, turn_id)
+    stated_state = STATED_JSON_OBJECT.search(frame.text)
+    if stated_state is None:
+        raise RuntimeError("imessage_connect answered no connection state")
+    state = json.loads(stated_state.group())
+    connection = state.get(IMESSAGE_STATE_KEY)
+    instruction = state.get(IMESSAGE_INSTRUCTION_KEY)
+    if not isinstance(connection, str) or not isinstance(instruction, str):
+        raise RuntimeError("imessage_connect answered an invalid connection state")
+    link = state.get(IMESSAGE_LINK_KEY)
+    if link is not None and not isinstance(link, str):
+        raise RuntimeError("imessage_connect answered an invalid Messages link")
+    return JSONResponse(
+        {
+            "applied": connection in {"pending", "connected"},
+            "message": instruction,
+            "url": link,
+            "turn_id": str(turn_id),
+        }
+    )
 
 
 def _portal_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
@@ -1027,6 +1069,8 @@ async def submit_intent(
                     case Terminal():
                         if isinstance(submitted, ConnectSlackIntent | ConnectGitHubIntent):
                             return _connect_outcome(submitted, frame.frame, admitted.turn_id)
+                        if isinstance(submitted, ConnectImessageIntent):
+                            return _imessage_outcome(frame.frame, admitted.turn_id)
                         if isinstance(submitted, PaymentMethodIntent):
                             return _portal_outcome(frame.frame, admitted.turn_id)
                         if isinstance(submitted, DigestRebuildIntent | PageFactRebuildIntent):
