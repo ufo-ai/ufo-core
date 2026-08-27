@@ -7,8 +7,12 @@ sets, and the unkeyed answer — no provider, so every flag resolves to its call
 vendor provider publishes none of that, so the endpoint and bounds are read off the client it built.
 """
 
+import json
 import logging
+from collections.abc import Callable
+from dataclasses import replace
 
+import httpx
 import pytest
 import ufo_ext_flagship as flagship
 from flagship import FlagshipServerProvider
@@ -118,3 +122,92 @@ def test_a_deploy_missing_any_one_key_gets_no_provider(
         "account_id_set": missing != flagship.ACCOUNT_ID_ENV,
         "auth_token_set": missing != flagship.AUTH_TOKEN_ENV,
     }
+
+
+WRITE_TOKEN = "cf-write-secret-0xfeedface"
+FLAGS_URL = (
+    f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/flagship/apps/{APP_ID}/flags"
+)
+HELD_FLAG = {
+    "key": "enable-wiki-app",
+    "flag_key": "enable-wiki-app",
+    "type": "boolean",
+    "description": "written by whoever made this flag",
+    "enabled": True,
+    "default_variation": "on",
+    "variations": {"on": "true", "off": "false"},
+    "rules": [{"priority": 1, "serve_variation": "on"}],
+}
+ANSWERED_FLAG = {**HELD_FLAG, "updated_at": "2026-08-27T22:00:00Z", "updated_by": "someone"}
+
+
+def _admin(
+    monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]
+) -> flagship.FlagshipAdmin:
+    """The write client, keyed, answering in this process through the vendor's own stand-in
+    transport — so a case reads the request this code composed, not a log of its own."""
+    _keyed(monkeypatch)
+    monkeypatch.setenv(flagship.WRITE_TOKEN_ENV, WRITE_TOKEN)
+    return replace(
+        flagship.build_admin(), client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+
+def test_writing_needs_a_token_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve's token may evaluate and nothing else, so the write reads its own key and names it
+    rather than failing at Cloudflare with a permission error somebody has to decode."""
+    _keyed(monkeypatch)
+    monkeypatch.delenv(flagship.WRITE_TOKEN_ENV, raising=False)
+    with pytest.raises(RuntimeError, match=flagship.WRITE_TOKEN_ENV):
+        flagship.build_admin()
+
+
+def test_serving_a_flag_changes_one_field_of_what_the_app_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Terraform creates a flag and then ignores what it serves, so this is the only writer of that
+    field — and it must stay the only thing it touches. The API's `PUT` takes the whole flag, so a
+    body naming its own fields drops the rest: the rollout somebody built, and the `type` and
+    `flag_key` terraform sets, whose absence makes the next plan want to replace the flag — which
+    the destructive-change guard refuses, so every deploy stops until the state is repaired. The
+    body is therefore what the app answered, minus the fields it answers with and refuses on a
+    write, with one field changed."""
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"success": True, "result": ANSWERED_FLAG})
+
+    _admin(monkeypatch, handler).serve("enable-wiki-app", on=False)
+
+    assert [(request.method, str(request.url)) for request in sent] == [
+        ("GET", f"{FLAGS_URL}/enable-wiki-app"),
+        ("PUT", f"{FLAGS_URL}/enable-wiki-app"),
+    ]
+    assert json.loads(sent[1].content) == {**HELD_FLAG, "default_variation": "off"}
+    assert sent[1].headers["authorization"] == f"Bearer {WRITE_TOKEN}"
+
+
+def test_serving_a_variation_the_flag_does_not_hold_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flag someone built with other variations is not one this verb can state on and off for, and
+    saying so beats a Cloudflare 400 an operator has to decode."""
+    other = {**ANSWERED_FLAG, "variations": {"beta": "true", "control": "false"}}
+    admin = _admin(
+        monkeypatch, lambda request: httpx.Response(200, json={"success": True, "result": other})
+    )
+    with pytest.raises(RuntimeError, match="no 'off' variation"):
+        admin.serve("enable-wiki-app", on=False)
+
+
+def test_a_refusal_carries_what_cloudflare_said(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator ran one verb and is owed the reason it wrote nothing."""
+    admin = _admin(
+        monkeypatch,
+        lambda request: httpx.Response(
+            403, json={"success": False, "errors": [{"message": "Authentication error"}]}
+        ),
+    )
+    with pytest.raises(RuntimeError, match="Authentication error"):
+        admin.serve("enable-wiki-app", on=True)

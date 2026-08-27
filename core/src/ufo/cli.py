@@ -1,6 +1,7 @@
 """The ufoctl CLI: init, serve, portal, ext, bundle."""
 
 import asyncio
+import importlib
 import os
 import re
 import secrets
@@ -728,6 +729,46 @@ async def _credit_balance(
 async def _set_reserve(config: Config, named: str, reserve_micro_usd: int) -> bool:
     async with _balance_scope(config, named) as (connection, workspace_id):
         return await set_reserve(connection, workspace_id, reserve_micro_usd)
+
+
+FLAG_BACKEND_ENTRY_POINT = "ufo_ext_{backend}"
+
+
+@main.group()
+def flags() -> None:
+    """Set what a feature flag serves, without a deploy.
+
+    Which flags exist is terraform's (`infra/envs/edge/flags.tf`), applied by a deploy and held to
+    the set the code reads by a gate. What one serves is the flag service's, so this verb and the
+    vendor's dashboard are the two ways it changes, and neither waits on a release."""
+
+
+@flags.command(name="set")
+@click.argument("key")
+@click.option("--on/--off", required=True, help="what every workspace no rule matches is served")
+def flags_set(key: str, on: bool) -> None:
+    """Serve one flag on or off for this deploy's environment.
+
+    A key no active extension reads is refused: it would leave the flag service holding a state no
+    code consults, which reads on a dashboard as a feature that moved."""
+    config = load_config()
+    if config.flags.backend is None:
+        raise click.ClickException("this deploy selects no flag backend ([flags] backend)")
+    manifests = load_manifests(config.pack.name)
+    declared = {spec.key for manifest in manifests for spec in manifest.flags}
+    if key not in declared:
+        raise click.ClickException(f"no active extension reads flag {key!r}")
+    module = FLAG_BACKEND_ENTRY_POINT.format(backend=config.flags.backend)
+    try:
+        admin = importlib.import_module(module).build_admin()
+        admin.serve(key, on=on)
+    except (ImportError, AttributeError) as error:
+        raise click.ClickException(
+            f"flag backend {config.flags.backend!r} writes nothing"
+        ) from error
+    except RuntimeError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"{key} {'on' if on else 'off'}")
 
 
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400

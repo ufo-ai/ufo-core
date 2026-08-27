@@ -364,12 +364,22 @@ and serve builds no flag provider, so every flag resolves to the default its cal
 the portal's own flags that is the screen drawn, because each of them withholds something already
 shipped.
 
-Those three read flags and cannot write one. The flags themselves are code: each environment
-declares every key and the state it serves in `infra/envs/<env>/flags.tf`, and the deploy applies
-them on the Cloudflare token terraform already holds — so turning a feature on is a pull request,
-and no credential that can move a feature is handed to anybody. That token needs the Flagship Write
-permission (Manage Account > Account API Tokens in the Cloudflare dashboard); without it the apply
-refuses, naming the resource.
+Those three read flags and cannot write one. Which flags exist is code: `infra/envs/edge/flags.tf`
+declares every key for both environments, applied by each deploy on a token scoped to that
+environment's Flagship app, and a gate holds that list to the set the extensions read.
+
+What a flag serves is not code — terraform creates it and then ignores the field — so a feature
+reaches a member without a deploy:
+
+```bash
+kubectl -n ufo-system exec deployment/ufo-serve -- ufoctl flags set enable-wiki-app --on
+```
+
+That verb writes through `cloudflare-flagship-write-token`, a fourth property scoped to the one
+Flagship app and projected into the fleet's own pods, because the operator surface here is a verb
+run in one of them. The vendor's dashboard does the same thing and neither is reverted by an apply.
+Seeding that property is the one act nothing here can do for itself: Cloudflare mints an API token
+only from its dashboard.
 
 ## Web login
 

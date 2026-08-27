@@ -40,6 +40,7 @@ FAIL_CLOSED_PROPERTIES = frozenset(
         "cloudflare-account-id",
         "cloudflare-flagship-app-id",
         "cloudflare-flagship-token",
+        "cloudflare-flagship-write-token",
     }
 )
 

@@ -927,3 +927,53 @@ async def _noop_dispose() -> None:
 
 async def _unreached_target(named: str) -> UUID:
     raise RuntimeError("stop after the owner database is initialized")
+
+
+FLAGSHIP_CONFIG = """\
+[database]
+url = "sqlite+aiosqlite:///ufo.db"
+
+[blob]
+backend = "filesystem"
+root = "./blobs"
+
+[flags]
+backend = "flagship"
+"""
+NO_FLAGS_CONFIG = """\
+[database]
+url = "sqlite+aiosqlite:///ufo.db"
+
+[blob]
+backend = "filesystem"
+root = "./blobs"
+"""
+
+
+def test_flags_set_refuses_a_key_no_extension_reads(cli_home: CliRunner) -> None:
+    """A flag nothing reads is a typo or a leftover, and serving one leaves the flag service holding
+    a state no code consults — which on a dashboard reads as a feature that moved."""
+    Path("ufo.toml").write_text(FLAGSHIP_CONFIG)
+    refused = cli_home.invoke(cli.main, ["flags", "set", "enable-nothing-at-all", "--on"])
+    assert refused.exit_code != 0
+    assert "no active extension reads flag" in refused.output
+
+
+def test_flags_set_refuses_a_deploy_that_selected_no_backend(cli_home: CliRunner) -> None:
+    """There is no service to write, and a deploy holding none serves each flag its own default."""
+    Path("ufo.toml").write_text(NO_FLAGS_CONFIG)
+    refused = cli_home.invoke(cli.main, ["flags", "set", "enable-wiki-app", "--on"])
+    assert refused.exit_code != 0
+    assert "selects no flag backend" in refused.output
+
+
+def test_flags_set_names_the_write_key_the_deploy_lacks(
+    cli_home: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal every operator meets first: the backend is selected and its write token is not
+    set, so the verb says which key rather than failing at Cloudflare."""
+    monkeypatch.delenv("CLOUDFLARE_FLAGSHIP_WRITE_TOKEN", raising=False)
+    Path("ufo.toml").write_text(FLAGSHIP_CONFIG)
+    refused = cli_home.invoke(cli.main, ["flags", "set", "enable-wiki-app", "--on"])
+    assert refused.exit_code != 0
+    assert "CLOUDFLARE_FLAGSHIP_WRITE_TOKEN" in refused.output

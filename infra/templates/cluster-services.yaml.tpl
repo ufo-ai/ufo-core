@@ -103,6 +103,11 @@ spec:
     - {secretKey: CLOUDFLARE_FLAGSHIP_APP_ID, remoteRef: {key: ${secret_api_keys}, property: cloudflare-flagship-app-id}}
     - {secretKey: CLOUDFLARE_ACCOUNT_ID, remoteRef: {key: ${secret_api_keys}, property: cloudflare-account-id}}
     - {secretKey: CLOUDFLARE_FLAGSHIP_TOKEN, remoteRef: {key: ${secret_api_keys}, property: cloudflare-flagship-token}}
+    # The token `ufoctl flags set` writes a flag's served value with, scoped to this
+    # environment's Flagship app alone. Serve never reads it: it is projected because the
+    # operator surface here is a verb run in one of the fleet's own pods, the way
+    # `ufoctl balance credit` is, so flipping a flag asks nobody to hold a credential.
+    - {secretKey: CLOUDFLARE_FLAGSHIP_WRITE_TOKEN, remoteRef: {key: ${secret_api_keys}, property: cloudflare-flagship-write-token}}
     # Serve trusts the proxy certificate; only the proxy receives the key.
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_platform}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}

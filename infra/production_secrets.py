@@ -33,6 +33,7 @@ API_KEYS_PROPERTIES = frozenset(
         "cloudflare-account-id",
         "cloudflare-flagship-app-id",
         "cloudflare-flagship-token",
+        "cloudflare-flagship-write-token",
         "composio-api-key",
         "datadog-api-key",
         "e2b-api-key",
@@ -69,6 +70,7 @@ FAIL_CLOSED_PROPERTIES = frozenset(
         "cloudflare-account-id",
         "cloudflare-flagship-app-id",
         "cloudflare-flagship-token",
+        "cloudflare-flagship-write-token",
     }
 )
 GATEWAY_PROPERTIES = frozenset({"bot-token"})

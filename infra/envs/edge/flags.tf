@@ -7,13 +7,20 @@
 #
 # The set is pinned to what the active extensions declare at the `flags` Manifest point, by a gate,
 # so a key the portal reads and this file omits fails CI rather than reading its default forever in
-# a live deploy. The state beside each key is the answer a workspace no rule matches is served:
-# testing offers everything, production withholds it until this file says otherwise.
+# a live deploy. Testing creates every flag on, because that is where a screen is seen first;
+# production creates each one off, so nothing reaches a member there before somebody turns it on.
 #
-# Terraform owns whether each flag exists and what it serves. It does not own targeting: a rollout
-# somebody builds to reach one workspace is exactly what the flag service is for, and an apply that
-# erased it would take away the thing the workspace targeting key exists for, with nothing here able
-# to put it back.
+# Terraform owns that each flag exists and the shape it has — its type, its two variations, and
+# `enabled`. It does not own what the flag serves. With no rule matching, the served value is
+# `default_variation`, so owning that here would mean every flip waited on a deploy; it is created
+# once and the flag service holds it from then on. Targeting is the same: a rollout somebody builds
+# to reach one workspace is what the flag service is for, and an apply that erased it would take
+# away the thing the workspace targeting key exists for.
+#
+# So `ufoctl flags set <key> --on/--off`, or a toggle in the dashboard, changes what a member sees
+# with no deploy, and this file still guarantees the flag is there to toggle. What it does not
+# answer is what an environment serves today: a value below is what its flag is created at, so
+# editing one moves a flag that does not exist yet and nothing else.
 locals {
   flagship_apps = {
     testing = "88d0356a-b440-48cf-ac58-d66f0b65f0c3"
@@ -57,7 +64,7 @@ resource "cloudflare_flagship_flag" "testing_portal" {
   rules             = []
 
   lifecycle {
-    ignore_changes = [rules]
+    ignore_changes = [default_variation, rules]
   }
 }
 
@@ -76,6 +83,6 @@ resource "cloudflare_flagship_flag" "prod_portal" {
   rules             = []
 
   lifecycle {
-    ignore_changes = [rules]
+    ignore_changes = [default_variation, rules]
   }
 }
