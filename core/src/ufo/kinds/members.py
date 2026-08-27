@@ -298,8 +298,10 @@ class AddMemberInput(BaseModel):
     )
     notify: bool = Field(
         default=True,
-        description="Whether to email them that they were added, with a link to sign in. Set "
-        "false only when the member asks you not to write to this person.",
+        description="Whether to email them that they were added, with a link to sign in — true "
+        "is the default, so an email goes out unless you set false. When the member asks for "
+        "the add to be silent ('don't notify them', 'add them quietly'), pass false; if you are "
+        "not sure whether they want an email sent, ask before adding.",
     )
 
 
@@ -372,8 +374,10 @@ ADD_MEMBER_TOOL_DEF = ToolDef(
     description=(
         "Add someone to this workspace by their email, optionally as an admin, before they "
         "have ever contacted the agent, at any email domain — an outside contractor or advisor is "
-        "added the same way as a colleague. They are emailed a link to sign in unless notify is "
-        "false. Only a workspace admin using the main agent may add a member. Changing an "
+        "added the same way as a colleague. Adding emails them a link to sign in by default; "
+        "set notify to false when the member asks for the add to be silent, and ask before "
+        "adding if unsure whether an email should go out. Only a workspace admin using the main "
+        "agent may add a member. Changing an "
         "existing member's role or seat is an apply on the member object, not this."
     ),
     input_model=AddMemberInput,

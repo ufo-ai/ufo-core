@@ -27,7 +27,10 @@ terminal install command.
    or an advisor is added the same way as a colleague. The person is
    emailed that they were added, with a link to the ordinary sign-in page — there is no invite code
    and nothing for the admin to pass on, and the verification code arrives when they sign in with
-   that work email. An admin asking the agent can ask for no message; the portal's Team view always
+   that work email — unless the admin asked for the add to be silent ("don't notify them"), in
+   which case no email goes out. When an admin asks you to add someone, notice whether they want
+   the person emailed; if they ask for no message, say so when adding and add them silently. An
+   admin asking the agent can ask for no message; the portal's Team view always
    sends it. Signing in opens the one workspace their verified address can enter, or asks them to
    choose when an exact membership and their email domain name different workspaces. An exact
    membership needs no invite.
