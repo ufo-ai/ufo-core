@@ -965,6 +965,8 @@ class PageState:
     revision: int
     digest: str
     body_ref: str
+    title: str
+    stream: str
 
 
 def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
@@ -1425,6 +1427,7 @@ class ExtensionContext:
             sa.column("memory_kind", sa.Text),
             sa.column("as_of", sa.DateTime(timezone=True)),
             sa.column("superseded_by", sa.Uuid),
+            sa.column("retired_at", sa.DateTime(timezone=True)),
             sa.column("updated_at", sa.DateTime(timezone=True)),
         )
         objective = sa.table(
@@ -1476,6 +1479,7 @@ class ExtensionContext:
                         memory_item.c.workspace_id == self.workspace_id,
                         memory_item.c.subject.in_(("shared", f"member:{member_id}")),
                         memory_item.c.superseded_by.is_(None),
+                        memory_item.c.retired_at.is_(None),
                         sa.or_(
                             memory_item.c.updated_at >= since,
                             memory_item.c.memory_kind == "task",
@@ -2010,6 +2014,8 @@ class ExtensionContext:
             tables.page.c.revision,
             tables.page.c.digest,
             tables.page.c.body_ref,
+            tables.page.c.title,
+            tables.page.c.stream,
         ).where(
             tables.page.c.workspace_id == self.store.workspace_id,
             tables.page.c.id.in_(page_ids),
@@ -2023,6 +2029,8 @@ class ExtensionContext:
                 revision=row.revision,
                 digest=row.digest,
                 body_ref=row.body_ref,
+                title=row.title,
+                stream=row.stream,
             )
             for row in rows
         }
@@ -2039,6 +2047,8 @@ class ExtensionContext:
                 tables.page.c.revision,
                 tables.page.c.digest,
                 tables.page.c.body_ref,
+                tables.page.c.title,
+                tables.page.c.stream,
             )
             .select_from(
                 tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
@@ -2059,6 +2069,8 @@ class ExtensionContext:
                 revision=row.revision,
                 digest=row.digest,
                 body_ref=row.body_ref,
+                title=row.title,
+                stream=row.stream,
             )
             for row in rows
         }

@@ -1,23 +1,41 @@
-"""The `memory` object kind: stored memory items readable by durable id.
+"""The memory extension's two object kinds: `memory`, stored memory items readable by durable id,
+and `profile`, what the workspace knows about each of its members.
 
-`memory_search` finds and returns refs; this kind is what a ref opens — the item's body and recall
+`memory_search` finds and returns refs; that kind is what a ref opens — the item's body and recall
 inputs beside its provenance links: `created_from` names the synced page a derivation distilled it
 from, `superseded_by` the item consolidation replaced it with. Search excludes superseded items,
 so the link is the recovery path when an old id arrives through a stale reference; `get` resolves
-any visible row while `list` shows only live ones. Reads follow the caller's audience; foreign
-rooms are sealed from shared memory, and a signed-in member reads the same rows in the portal on
-the subjects their own conversation carries. `memory_update` stays the write path, and there is no
-delete: index chunks are derived by jobs and no cleanup path exists for one item's chunks."""
+any visible row while `list` shows only live ones — a row superseded, or one the page pass retired,
+is off the listing the wiki reads and still open by its id. Reads follow the caller's audience;
+foreign rooms are sealed from shared memory, and a signed-in member reads the same rows in the
+portal on the subjects their own conversation carries. `memory_update` stays the write path, and
+there is no delete: index chunks are derived by jobs and no cleanup path exists for one item's
+chunks.
 
+`profile` is the People band: one row per member, named by their member id, carrying the role and
+the current focus the People pass wrote. It reads on the same rule the shared half of `memory` does
+— a reader whose subjects carry the workspace-shared one reads every entry, and a foreign room
+reads none — because every entry is written from the shared facts alone, so a profile says exactly
+what its reader could already read in the Facts band. The pass is the write path; apply and delete
+refuse."""
+
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
+from typing import Final
 from uuid import UUID
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.audience import audience_subjects, conversation_audience
-from ufo.sdk.context import ExtensionContext, JsonValue, SourceReader, agent_current
+from ufo.sdk.context import (
+    ExtensionContext,
+    JsonValue,
+    PageState,
+    SourceReader,
+    agent_current,
+)
 from ufo.sdk.objects import (
     MemberObject,
     ObjectDetail,
@@ -30,15 +48,23 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     object_page,
 )
+from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.tools import ToolContext
-from ufo_ext_memory.store import clip_to_word, memory_item
+from ufo_ext_memory.condenser import memory_profile
+from ufo_ext_memory.store import _aware, clip_to_word, memory_item
 
 MEMORY_KIND = "memory"
+PROFILE_KIND = "profile"
 PAGE_OBJECT_KIND = "page"
+CREATED_FROM: Final = "created_from"
 MEMORY_UPDATE_REFUSAL = "memories are recorded through memory_update, never applied"
 MEMORY_UNDELETABLE = (
     "memories cannot be deleted — consolidation supersedes them and recall drops superseded items"
 )
+PROFILE_WRITE_REFUSAL = (
+    "member profiles are written by the People pass from the workspace's shared facts"
+)
+PROFILE_LIST_MAX = 500
 SUMMARY_MAX = 120
 TEXT_MAX = 2000
 """How much of an item's body a listing row carries as `text`. A consolidated summary is a
@@ -51,7 +77,7 @@ class MemorySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     body: str = Field(description="The stored memory text.")
     subject: str = Field(description="The exact visibility audience.")
-    item_class: str = Field(description="fact, episodic, or semantic.")
+    item_class: str = Field(description="fact, episodic, semantic, section, or overview.")
     memory_kind: str = Field(
         description="Recency-decay kind: fact, preference, decision, event, or task."
     )
@@ -72,7 +98,7 @@ def _stamp(written: datetime) -> str:
     """The moment an item was recorded, as one wire spelling whatever the dialect stored. SQLite
     holds no offset on a `timezone=True` column and Postgres does, and a field a consumer orders
     and reads has to mean the same thing under both."""
-    return (written if written.tzinfo else written.replace(tzinfo=UTC)).isoformat()
+    return _aware(written).isoformat()
 
 
 def _row(
@@ -82,7 +108,10 @@ def _row(
     item_class: str,
     memory_kind: str,
     written: datetime | None,
+    page_id: UUID | None,
+    pages: Mapping[UUID, PageState],
 ) -> ObjectRow:
+    state = None if page_id is None else pages.get(page_id)
     return ObjectRow(
         name=name,
         summary=clip_to_word(body, SUMMARY_MAX),
@@ -92,6 +121,9 @@ def _row(
             "memory_kind": memory_kind,
             "text": clip_to_word(body, TEXT_MAX),
             "written": None if written is None else _stamp(written),
+            "created_from_page_id": None if page_id is None else str(page_id),
+            "created_from_page_title": None if state is None else state.title,
+            "created_from_page_stream": None if state is None else state.stream,
         },
     )
 
@@ -142,10 +174,17 @@ class MemoryObjects:
         """One memory item as the portal reads it — the row `list` renders beside the detail `get`
         reads, on the same subjects `member_page` lists under. A superseded item still answers, so
         a stale reference lands on the `superseded_by` link that names its replacement."""
-        detail = await self._item(_require_ext(ext), _member_reader(member_id), name)
+        context = _require_ext(ext)
+        reader = _member_reader(member_id)
+        detail = await self._item(context, reader, name)
         if detail is None:
             return None
         spec = detail.spec
+        page_id = next(
+            (UUID(link.target.name) for link in detail.links if link.relation == CREATED_FROM),
+            None,
+        )
+        cited = await context.readable_page_states(() if page_id is None else (page_id,), reader)
         return MemberObject(
             row=_row(
                 name,
@@ -154,6 +193,8 @@ class MemoryObjects:
                 spec.item_class,
                 spec.memory_kind,
                 detail.created_at,
+                page_id,
+                cited,
             ),
             detail=detail,
         )
@@ -183,6 +224,7 @@ class MemoryObjects:
                             memory_item.c.workspace_id == ext.store.workspace_id,
                             memory_item.c.subject.in_(subjects),
                             memory_item.c.superseded_by.is_(None),
+                            memory_item.c.retired_at.is_(None),
                         )
                         .order_by(memory_item.c.created_at.desc(), memory_item.c.id)
                         .limit(MEMORY_LIST_MAX)
@@ -194,7 +236,7 @@ class MemoryObjects:
         page_ids = tuple(
             row["created_from_page_id"] for row in rows if row["created_from_page_id"] is not None
         )
-        current = await ext.readable_page_states(page_ids, reader)
+        cited = await ext.readable_page_states(page_ids, reader)
         return object_page(
             tuple(
                 _row(
@@ -204,11 +246,13 @@ class MemoryObjects:
                     row["item_class"],
                     row["memory_kind"],
                     row["created_at"],
+                    row["created_from_page_id"],
+                    cited,
                 )
                 for row in rows
                 if row["created_from_page_id"] is None
                 or (
-                    (state := current.get(row["created_from_page_id"])) is not None
+                    (state := cited.get(row["created_from_page_id"])) is not None
                     and state.subject == row["subject"]
                     and state.revision == row["created_from_page_revision"]
                     and state.subject in subjects
@@ -259,7 +303,7 @@ class MemoryObjects:
         if row["created_from_page_id"] is not None:
             links.append(
                 ObjectLink(
-                    relation="created_from",
+                    relation=CREATED_FROM,
                     target=ObjectRef(kind=PAGE_OBJECT_KIND, name=str(row["created_from_page_id"])),
                 )
             )
@@ -335,5 +379,185 @@ MEMORY_OBJECT = ObjectKind(
     ),
     spec_model=MemorySpec,
     store=MemoryObjects(),
-    list_fields=frozenset({"subject", "item_class", "memory_kind", "text", "written"}),
+    list_fields=frozenset(
+        {
+            "subject",
+            "item_class",
+            "memory_kind",
+            "text",
+            "written",
+            "created_from_page_id",
+            "created_from_page_title",
+            "created_from_page_stream",
+        }
+    ),
+)
+
+
+class ProfileSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: str = Field(description="What this person does in the workspace, in a short phrase.")
+    focus: str = Field(description="What they are carrying now, in one sentence.")
+
+
+@dataclass(frozen=True)
+class ProfileObjects:
+    """Read-only handlers over the extension's own `memory_profile` rows. Every entry is written
+    from the workspace-shared facts, so the fence is whether the reader carries the shared subject
+    at all: a member of the workspace reads the whole People band, a foreign room reads none of it.
+    Both mutations refuse."""
+
+    async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
+        return await self._page(_require_ext(ctx.ext), ctx.read_subjects, query)
+
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        """The People band a signed-in member reads outside a turn — the rows `list` produces, on
+        the subjects their own conversation carries, which is the workspace-shared one and their
+        own. No entry widens for an admin, because none of them is narrowed for anyone else."""
+        return await self._page(
+            _require_ext(ext), audience_subjects(conversation_audience(member_id)), query
+        )
+
+    async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ProfileSpec] | None:
+        found = await self._entry(_require_ext(ctx.ext), ctx.read_subjects, name)
+        return None if found is None else found.detail
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[ProfileSpec] | None:
+        return await self._entry(
+            _require_ext(ext), audience_subjects(conversation_audience(member_id)), name
+        )
+
+    async def _page(
+        self, ext: ExtensionContext, subjects: frozenset[str], query: ObjectListQuery
+    ) -> ObjectPage:
+        if SHARED_SUBJECT not in subjects:
+            return object_page((), query)
+        async with ext.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        memory_profile.c.member_id,
+                        memory_profile.c.role,
+                        memory_profile.c.focus,
+                        memory_profile.c.written_at,
+                    )
+                    .where(memory_profile.c.workspace_id == ext.store.workspace_id)
+                    .order_by(memory_profile.c.written_at.desc(), memory_profile.c.member_id)
+                    .limit(PROFILE_LIST_MAX)
+                )
+            ).all()
+        return object_page(tuple(_profile_row(row) for row in rows), query)
+
+    async def _entry(
+        self, ext: ExtensionContext, subjects: frozenset[str], name: str
+    ) -> MemberObject[ProfileSpec] | None:
+        if SHARED_SUBJECT not in subjects:
+            return None
+        try:
+            member_id = UUID(name)
+        except ValueError:
+            return None
+        async with ext.transaction() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        memory_profile.c.member_id,
+                        memory_profile.c.role,
+                        memory_profile.c.focus,
+                        memory_profile.c.written_at,
+                    ).where(
+                        memory_profile.c.workspace_id == ext.store.workspace_id,
+                        memory_profile.c.member_id == member_id,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        written = _aware(row.written_at)
+        return MemberObject(
+            row=_profile_row(row),
+            detail=ObjectDetail(
+                spec=ProfileSpec(role=row.role, focus=row.focus),
+                created_at=written,
+                updated_at=written,
+            ),
+        )
+
+    async def status(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> dict[str, JsonValue] | None:
+        return None
+
+    async def apply(
+        self,
+        ctx: ToolContext,
+        name: str,
+        spec: ProfileSpec,
+        old: ProfileSpec | None,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
+        raise VerbNotSupported(PROFILE_WRITE_REFUSAL)
+
+    async def delete(
+        self,
+        ctx: ToolContext,
+        name: str,
+        *,
+        expected_generation: UUID | None,
+    ) -> None:
+        raise VerbNotSupported(PROFILE_WRITE_REFUSAL)
+
+
+def _profile_row(row: sa.Row) -> ObjectRow:
+    return ObjectRow(
+        name=str(row.member_id),
+        summary=clip_to_word(f"{row.role} — {row.focus}", SUMMARY_MAX),
+        fields={
+            "member_id": str(row.member_id),
+            "role": row.role,
+            "focus": row.focus,
+            "written": _stamp(row.written_at),
+        },
+    )
+
+
+PROFILE_OBJECT = ObjectKind(
+    name=PROFILE_KIND,
+    description=(
+        "What the workspace knows about one of its members: the role they hold and the work they "
+        "are carrying now, written nightly from the workspace's shared facts. Read-only."
+    ),
+    guidance=(
+        "The People band's rows, named by member id — the same name the `member` kind's rows "
+        "carry, so a profile and a roster row join on it. Each carries member_id, role (a short "
+        "phrase), focus (one sentence on what that person is carrying now) and `written`, the "
+        "moment the entry was recorded; listing orders on `written`, newest first. An entry exists "
+        "only where the workspace's shared facts said something about that person, so a member "
+        "with no entry is one nothing shared has been recorded about. Reads follow the "
+        "conversation audience and never widen for an admin. Apply and delete are refused — the "
+        "People pass is the write path, and what it can say is what memory_update and the synced "
+        "sources put in shared memory."
+    ),
+    spec_model=ProfileSpec,
+    store=ProfileObjects(),
+    list_fields=frozenset({"member_id", "role", "focus", "written"}),
 )

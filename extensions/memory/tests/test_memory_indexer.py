@@ -100,6 +100,8 @@ class ReclassifyingPage:
                 revision=self.before_revision if self.calls == 1 else self.after_revision,
                 digest="sha256:test",
                 body_ref=f"pages/{self.page_id}",
+                title="Q3 pricing rollout",
+                stream="pull_requests",
             )
         }
 

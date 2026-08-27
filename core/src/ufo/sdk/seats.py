@@ -19,3 +19,6 @@ from ufo.seats import (
 from ufo.seats import (
     member_workspaces as member_workspaces,
 )
+from ufo.seats import (
+    workspace_domain as workspace_domain,
+)

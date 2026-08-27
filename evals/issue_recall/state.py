@@ -117,7 +117,10 @@ class CorpusAttestor:
                 (
                     await connection.execute(
                         sa.select(memory_item)
-                        .where(memory_item.c.superseded_by.is_(None))
+                        .where(
+                            memory_item.c.superseded_by.is_(None),
+                            memory_item.c.retired_at.is_(None),
+                        )
                         .order_by(memory_item.c.id)
                     )
                 ).all()

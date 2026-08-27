@@ -531,3 +531,62 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
     )
     assert all(record.title != "Missing report" for record in records)
     assert all(record.title != "Invalid report" for record in records)
+
+
+async def test_member_context_drops_a_memory_the_page_pass_retired(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, member_id, _, brief_id = await _seed()
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(memory_item),
+            (
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "subject": "shared",
+                    "body": "Live shared fact.",
+                    "item_class": "fact",
+                    "memory_kind": "fact",
+                    "confidence": 8,
+                    "retired_at": None,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "subject": "shared",
+                    "body": "Retired shared fact.",
+                    "item_class": "fact",
+                    "memory_kind": "fact",
+                    "confidence": 8,
+                    "retired_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "subject": f"member:{member_id}",
+                    "body": "Retired member task.",
+                    "item_class": "fact",
+                    "memory_kind": "task",
+                    "confidence": 8,
+                    "retired_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ),
+        )
+    with ws(workspace_id), agent(brief_id):
+        context = context_for(
+            "report_digest",
+            frozenset(),
+            member_context_blob=WorkspaceBlobStore(FilesystemBlobStore(tmp_path)),
+            member_context_read=True,
+            scheduled_member_id=member_id,
+        )
+        records = await context.member_context(since=now - timedelta(days=1))
+    assert [record.text for record in records] == ["Live shared fact."]

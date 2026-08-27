@@ -53,13 +53,19 @@ import type {
   ReactMouseEvent,
 } from "ufo/kit";
 
-/** What the store calls a consolidated summary: a cluster of facts the consolidator collapsed into
- *  one item. It is the only memory written to be read whole, so it is what a page opens on. */
-const SUMMARY_CLASS = "semantic";
+/** What the store calls the page's opening paragraph: one item per subject, rewritten in place by
+ *  the job that re-reads every fact standing under it. It is written to be read whole, so it is
+ *  what a page opens on. */
+const SUMMARY_CLASS = "overview";
 
 const NOT_FOUND = 404;
 /** What an item the store filed on its own is classed as, before any consolidation. */
 const ATOM_CLASS = "fact";
+/** What the store calls a cluster of aged rows the consolidator collapsed into one. The rows it
+ *  stands for are stamped superseded and leave every band the moment it is written, so a band
+ *  drawing atoms alone loses what a member recorded instead of showing what replaced it. Every
+ *  summary carries the `fact` kind, so the Facts band is where they stand. */
+const CLUSTER_CLASS = "semantic";
 const MEMBER_PREFIX = "member/";
 /** The app's own name, which is what its front page is called and what every page and sheet inside
  *  it is reached from. */
@@ -70,19 +76,34 @@ const MEMORY_KIND = "memory";
 const MEMBER_KIND = "member";
 /** Memory items are named by uuid, so the index's default order by name is arbitrary. `written` is
  *  the field the kind declares for the moment it recorded an item, and every band reads newest
- *  first — the order a document states what it knows in.
- *
- *  A topic lists the atomic items only. The consolidator files its summaries under the `fact` kind
- *  too, so without the class the Facts topic would restate, item by item, the Overview standing
- *  above it — and the reader would meet the same sentence twice on one page. */
-const NEWEST_FIRST =
-  "item_class=" + ATOM_CLASS + "&order_by=written&order=desc";
-/** The overview's read: the consolidator's summaries, which carry `item_class=semantic` — the
- *  class axis, not a memory kind — newest first. A deploy that runs without memory registers no
- *  `memory` kind at all and answers the listing with a 404, which the band states as memory being
- *  absent rather than as a fault. */
+ *  first — the order a document states what it knows in. */
+const NEWEST_FIRST = "order_by=written&order=desc";
+/** The overview's read: the written paragraph, which carries `item_class=overview` — the class
+ *  axis, not a memory kind — newest first. A deploy that runs without memory registers no `memory`
+ *  kind at all and answers the listing with a 404, which the band states as memory being absent
+ *  rather than as a fault. */
+/** One band's read of one class. The listing filter takes a single value and the portal cuts its
+ *  answer to a page before this app sees it, so asking for every class and sorting them here would
+ *  spend that page on rows the band does not draw — a band whose newest page is all `episodic`
+ *  would draw nothing and report itself absent. Two reads, each filtered where the cut happens. */
+const bandRead = (memoryKind: string, itemClass: string) =>
+  "/objects/" +
+  MEMORY_KIND +
+  "?memory_kind=" +
+  memoryKind +
+  "&item_class=" +
+  itemClass +
+  "&" +
+  NEWEST_FIRST;
+
 const OVERVIEW_READ =
-  "/objects/" + MEMORY_KIND + "?item_class=" + SUMMARY_CLASS + "&order_by=written&order=desc";
+  "/objects/" + MEMORY_KIND + "?item_class=" + SUMMARY_CLASS + "&" + NEWEST_FIRST;
+/** What a section's own paragraph is classed as: one row per topic, rewritten in place by the job
+ *  that re-reads the topic rather than appended to. One read answers every band, because five reads
+ *  for five paragraphs is five round trips for one document. */
+const SECTION_CLASS = "section";
+const SECTION_READ =
+  "/objects/" + MEMORY_KIND + "?item_class=" + SECTION_CLASS + "&" + NEWEST_FIRST;
 /** How many rows a topic holds behind its fold before the Memory tab is the better place to
  *  keep reading. */
 const TOPIC_ROWS = 24;
@@ -157,9 +178,13 @@ type MemoryObject = {
   summary: string;
   text?: string;
   subject: string;
+  item_class: string;
   memory_kind: string;
   written: string | null;
   agent_id: string;
+  created_from_page_id: string | null;
+  created_from_page_title: string | null;
+  created_from_page_stream: string | null;
 };
 
 type ObjectsPayload = { objects: MemoryObject[] };
@@ -172,6 +197,43 @@ type MemberRow = {
 };
 
 type MembersPayload = { objects: MemberRow[] };
+
+/** What the nightly people pass writes about one member: the part they play here and what they are
+ *  carrying now, both read from the workspace's shared facts alone. A member the pass has not
+ *  reached yet simply has none, and the roster row stands as it always did. */
+type ProfileRow = {
+  name: string;
+  role: string | null;
+  focus: string | null;
+};
+
+type ProfilesPayload = { objects: ProfileRow[] };
+
+const PROFILE_KIND = "profile";
+
+/** Every member's role and focus in one read, keyed by the member id the roster names them by. A
+ *  deploy running without memory registers no `profile` kind and answers 404, which leaves the
+ *  roster drawn exactly as it is rather than failing the band around it. */
+function useProfiles(reloads: number): Map<string, ProfileRow> {
+  const state = usePanelRead<ProfilesPayload>(
+    "/objects/" + PROFILE_KIND + "?order_by=written&order=desc",
+    reloads,
+  );
+  return new Map(
+    state.phase === "ready"
+      ? distinct(state.payload.objects).map((row) => [row.name, row])
+      : [],
+  );
+}
+
+/** Every topic's paragraph in one read. A band takes its own out of the answer, so the page pays one
+ *  round trip for the five it draws and a topic the job has not written yet simply has none. */
+function useSections(reloads: number, scope: Scope): MemoryObject[] {
+  const state = usePanelRead<ObjectsPayload>(SECTION_READ, reloads);
+  return state.phase === "ready"
+    ? inScope(distinct(state.payload.objects), scope)
+    : [];
+}
 
 function useRoster(reloads: number) {
   const main = useMainAgent();
@@ -414,11 +476,13 @@ function Acts({
           >
             <p className="m-0">
               Rows derived from synced pages are written again from those pages, as the derivation
-              pass reaches each one. No row is dropped before its replacement is written.
+              pass reaches each one. No row is dropped before its replacement is written. Rows
+              drawn from the pages a tool writes about its own runs are removed, because the wiki
+              writes no rows from those pages now.
             </p>
             <p className="m-0">
-              Overview summaries are not rebuilt. The consolidation pass writes them from facts that
-              agree, and re-forms them on its own as facts age into a cluster.
+              The paragraphs are not rebuilt. The nightly passes write them again from the rows that
+              stand under them once this derivation has run.
             </p>
             <p className="m-0">
               Rows an app recorded in a conversation are not rebuilt. They came from conversations
@@ -446,6 +510,8 @@ function Workspace({
   const [reloads, setReloads] = useState(0);
   const { present, report, updated } = usePresence();
   const summary = usePanelRead<ObjectsPayload>(OVERVIEW_READ, reloads);
+  const sections = useSections(reloads, "shared");
+  const profiles = useProfiles(reloads);
   const members = useRoster(reloads);
   const roster =
     members.phase === "ready" ? distinct(members.payload.objects) : [];
@@ -487,6 +553,7 @@ function Workspace({
       <People
         state={members}
         rows={roster}
+        profiles={profiles}
         viewer={viewer}
         onOpen={(id) => onPlace({ opens: opened(opens, MEMBER_PREFIX + id) })}
       />
@@ -496,6 +563,7 @@ function Workspace({
           key={topic.memoryKind}
           topic={topic}
           scope="shared"
+          sections={sections}
           reloads={reloads}
           opens={opens}
           onPresent={report}
@@ -530,11 +598,14 @@ function Workspace({
 function People({
   state,
   rows,
+  profiles,
   viewer,
   onOpen,
 }: {
   state: ReturnType<typeof usePanelRead<MembersPayload>>;
   rows: MemberRow[];
+  /** What each member does and carries, by member id. Absent for a member the pass has not read. */
+  profiles: Map<string, ProfileRow>;
   viewer: string | null;
   onOpen: (id: string) => void;
 }) {
@@ -548,10 +619,16 @@ function People({
             primary={(row) =>
               row.email === viewer ? row.email + " (you)" : row.email
             }
-            meta={(row) => [
-              row.admin ? "Admin" : "Member",
-              row.seated ? "Seated" : "No seat",
-            ]}
+            meta={(row) => {
+              const profile = profiles.get(row.name);
+              return [
+                profile?.role ?? null,
+                row.admin ? "Admin" : "Member",
+                row.seated ? "Seated" : "No seat",
+                profile?.focus ?? null,
+              ];
+            }}
+            whole
             open={(row) => () => onOpen(row.name)}
           />
         )}
@@ -580,7 +657,7 @@ function Member({
   const [reloads, setReloads] = useState(0);
   const { present, report, updated } = usePresence();
   const members = useRoster(reloads);
-  const summary = usePanelRead<ObjectsPayload>(OVERVIEW_READ, reloads);
+  const sections = useSections(reloads, "own");
   const found =
     members.phase === "ready"
       ? (distinct(members.payload.objects).find((row) => row.name === id) ??
@@ -588,9 +665,6 @@ function Member({
       : null;
   const mine = found !== null && found.email === viewer;
   const entries: Entry[] = [
-    ...(mine && present.overview
-      ? [{ id: "overview", title: "Overview" }]
-      : []),
     ...(mine
       ? MEMBER_TOPICS.filter((topic) => present[topic.memoryKind]).map(
           (topic) => ({
@@ -624,12 +698,12 @@ function Member({
         </Panel>
       ) : mine ? (
         <>
-          <Overview state={summary} scope="own" onPresent={report} />
           {MEMBER_TOPICS.map((topic) => (
             <Topic
               key={topic.memoryKind}
               topic={topic}
               scope="own"
+              sections={sections}
               reloads={reloads}
               opens={opens}
               from={MEMBER_PREFIX + id}
@@ -706,11 +780,11 @@ function Overview({
     );
   }
   if (matches.length === 0) return null;
+  const written = matches[0];
+  if (written === undefined) return null;
   return (
     <Band id="overview" title="Overview" note={overviewNote(state, scope)}>
-      {matches.map((row) => (
-        <p key={row.name}>{row.text ?? row.summary}</p>
-      ))}
+      <p>{written.text ?? written.summary}</p>
     </Band>
   );
 }
@@ -723,8 +797,8 @@ function overviewNote(
 ): string {
   const written =
     scope === "shared"
-      ? "Written from the workspace's facts once enough of them agree."
-      : "Written from your facts once enough of them agree.";
+      ? "Written from every fact this workspace holds."
+      : "Written from every fact recorded about you.";
   if (state.phase !== "ready") return written;
   const stamps = inScope(distinct(state.payload.objects), scope)
     .map((row) => row.written)
@@ -749,6 +823,7 @@ function overviewNote(
 function Topic({
   topic,
   scope,
+  sections,
   reloads,
   opens,
   from,
@@ -757,6 +832,8 @@ function Topic({
 }: {
   topic: TopicSpec;
   scope: Scope;
+  /** Every topic's paragraph, read once for the page and handed to the band it belongs to. */
+  sections: MemoryObject[];
   reloads: number;
   opens: string[];
   /** The page a bullet is pressed on, which every record it opens stands after. */
@@ -764,18 +841,17 @@ function Topic({
   onPresent: (id: string, drawn: boolean, newest: string | null) => void;
   onPlace: (place: Placement) => void;
 }) {
-  const state = usePanelRead<ObjectsPayload>(
-    "/objects/" +
-      MEMORY_KIND +
-      "?memory_kind=" +
-      topic.memoryKind +
-      "&" +
-      NEWEST_FIRST,
+  const atoms = usePanelRead<ObjectsPayload>(bandRead(topic.memoryKind, ATOM_CLASS), reloads);
+  const clusters = usePanelRead<ObjectsPayload>(
+    bandRead(topic.memoryKind, CLUSTER_CLASS),
     reloads,
   );
+  const state = atoms.phase === "ready" ? clusters : atoms;
   const rows =
-    state.phase === "ready"
-      ? inScope(distinct(state.payload.objects), scope).slice(0, TOPIC_ROWS)
+    atoms.phase === "ready" && clusters.phase === "ready"
+      ? inScope(distinct([...atoms.payload.objects, ...clusters.payload.objects]), scope)
+          .sort((left, right) => ((left.written ?? "") < (right.written ?? "") ? 1 : -1))
+          .slice(0, TOPIC_ROWS)
       : [];
   const drawn = rows.length > 0;
   const newest = rows[0]?.written ?? null;
@@ -791,8 +867,10 @@ function Topic({
     );
   }
   if (!drawn) return null;
+  const written = sections.find((row) => row.memory_kind === topic.memoryKind);
   return (
     <Band id={topic.memoryKind} title={topic.title} note={topic.note}>
+      {written === undefined ? null : <p>{written.text ?? written.summary}</p>}
       <ul>
         {rows.map((row) => {
           const id = slotOf({ agent: row.agent_id, kind: MEMORY_KIND, name: row.name });
@@ -814,6 +892,11 @@ function Topic({
                 )}
               >
                 {row.summary}
+                {row.created_from_page_title === null ? null : (
+                  <span className="text-small text-ink-soft">
+                    {" " + row.created_from_page_title}
+                  </span>
+                )}
               </button>
             </li>
           );

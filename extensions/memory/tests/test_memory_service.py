@@ -117,6 +117,8 @@ class ReclassifyingPage:
                 revision=PAGE_REVISION,
                 digest=PAGE_DIGEST,
                 body_ref=f"pages/{self.page_id}",
+                title="Q3 pricing rollout",
+                stream="pull_requests",
             )
         }
 

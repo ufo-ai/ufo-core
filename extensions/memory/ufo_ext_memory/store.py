@@ -10,7 +10,10 @@ are already gone). `MemoryIndexer` is the derivation job: it atomically claims m
 hold, and stamps the digest so the row is no longer due. A claimed publishable body the index still
 holds — an identical re-commit that only rebound the row's page revision, or a lease-expired retry —
 settles without paying the embed again (the id is content-addressed over the body, so held chunks
-are that body's); a body whose chunks were withdrawn is not held and is re-embedded.
+are that body's); a body whose chunks were withdrawn is not held and is re-embedded. A row the page
+pass retired carries `retired_at`, the one column `commit` never clears and every read here fences
+on: a page still synced re-commits its identical body each derivation, so a judgement kept in
+`superseded_by` would be undone by the next tick, and one kept here stands.
 Everything reaches the database through the extension's workspace-scoped
 `transaction()` and the deploy index/embed backends core threads onto its context — never a core
 internal.
@@ -81,9 +84,9 @@ MEMORY_BODY_MAX_CHARS = 115
 characters, the statement about it 85. Every object index in this repo renders a row at 120, so a
 body written to this budget reaches them whole and the ellipsis never appears."""
 OVERVIEW_BODY_MAX_CHARS = 900
-"""How long the consolidated Overview body runs: the one memory text a member reads whole rather
-than scans, so what bounds it is a paragraph and not the row the wiki's lists are scanned as. 900
-characters is what the 150 words the consolidation prompt asks for measure."""
+"""How long a written paragraph runs: the memory text a member reads whole rather than scans, so
+what bounds it is a paragraph and not the row the wiki's lists are scanned as. 900 characters is
+what the 150 words every paragraph prompt asks for measure."""
 HALFLIFE_DAYS: dict[str, float] = {
     "fact": 365.0,
     "preference": 180.0,
@@ -94,19 +97,24 @@ HALFLIFE_DAYS: dict[str, float] = {
 
 logger = logging.getLogger(__name__)
 
-ItemClass = Literal["fact", "episodic", "semantic"]
+ItemClass = Literal["fact", "episodic", "semantic", "section", "overview"]
 FACT: Literal["fact"] = "fact"
 EPISODIC: ItemClass = "episodic"
 SEMANTIC: ItemClass = "semantic"
+SECTION: ItemClass = "section"
+OVERVIEW: ItemClass = "overview"
 
 BODY_MAX_CHARS: dict[ItemClass, int] = {
     FACT: MEMORY_BODY_MAX_CHARS,
     EPISODIC: MEMORY_BODY_MAX_CHARS,
     SEMANTIC: OVERVIEW_BODY_MAX_CHARS,
+    SECTION: OVERVIEW_BODY_MAX_CHARS,
+    OVERVIEW: OVERVIEW_BODY_MAX_CHARS,
 }
 """What each class of body is written to be, which is what the commit holds it to. A fact and an
-episodic breadcrumb are rows in a list a member scans; the Overview summary is a paragraph they
-read whole. One bound over both is one of the two shapes measured against the other's budget."""
+episodic breadcrumb are rows in a list a member scans; the consolidator's summary, the paragraph
+that opens a wiki section and the one that opens the whole page are read whole. One bound over both
+shapes is one of them measured against the other's budget."""
 
 MemoryKind = Literal["fact", "preference", "decision", "event", "task"]
 KIND_FACT: MemoryKind = "fact"
@@ -138,6 +146,7 @@ memory_item = sa.Table(
     sa.Column("embedding_digest", sa.Text, nullable=True),
     sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("superseded_by", sa.Uuid, nullable=True),
+    sa.Column("retired_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(
@@ -365,7 +374,8 @@ class MemoryWrite(BaseModel):
 
 class MemoryItem(BaseModel):
     """A stored memory row as the derivation job loads it. `embedding_digest` NULL means the item is
-    due for indexing; `superseded_by` points at the item that replaced it."""
+    due for indexing; `superseded_by` points at the item that replaced it, and `retired_at` says the
+    page pass judged the wiki reads better without it."""
 
     id: UUID
     subject: str
@@ -379,6 +389,7 @@ class MemoryItem(BaseModel):
     source_id: UUID | None = None
     embedding_digest: str | None = None
     superseded_by: UUID | None = None
+    retired_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -478,8 +489,8 @@ class Recalled:
 
 def half_life_days(item_class: str, memory_kind: str) -> float | None:
     """The recency half-life recall decays this item by, or None when it carries none: only facts
-    decay (per-`memory_kind` half-lives: fact/preference/decision/event/task); episodic/semantic
-    rank on relevance alone."""
+    decay (per-`memory_kind` half-lives: fact/preference/decision/event/task); every other class
+    ranks on relevance alone."""
     if item_class != FACT:
         return None
     return HALFLIFE_DAYS.get(memory_kind, HALFLIFE_DAYS[KIND_FACT])
@@ -638,7 +649,13 @@ class MemoryStore:
         is a read-time fence that never withdrew them, and the id is content-addressed over the
         body, so what the index holds is still exactly this body's. Without that clear, the
         restatement would land back under the fence the sweep set and stay invisible to every
-        reader."""
+        reader.
+
+        `retired_at` is the one column this upsert leaves exactly as it found it. A page still
+        synced re-commits its identical body on every derivation, so a judgement written where the
+        upsert reaches would stand until the next tick and no longer; the page pass retires a row by
+        stamping that column, and the row it retired stays retired through every re-derivation of
+        the body behind it."""
         item_id = uuid5(
             MEMORY_ITEM_NAMESPACE,
             "\x00".join((str(self.workspace_id), write.subject, write.item_class, write.body)),
@@ -1029,6 +1046,7 @@ class MemoryStore:
                             memory_item.c.subject.in_(subjects),
                             memory_item.c.embedding_digest.is_(None),
                             memory_item.c.superseded_by.is_(None),
+                            memory_item.c.retired_at.is_(None),
                             authority,
                         )
                         .order_by(memory_item.c.created_at.desc())
@@ -1074,8 +1092,8 @@ class MemoryStore:
         """Read the surviving (non-superseded) items back in fused order, fenced on the source
         grant: a page-derived row survives only when the reader holds one of its source links, a
         member-written row (no source) always. A superseded item — or one outside the
-        `[start, end)` `created_at` window, or one whose page has moved off its bound revision —
-        drops out here rather than being served."""
+        `[start, end)` `created_at` window, or one whose page has moved off its bound revision, or
+        one the page pass retired — drops out here rather than being served."""
         if not fused:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
@@ -1084,6 +1102,7 @@ class MemoryStore:
             memory_item.c.workspace_id == self.workspace_id,
             memory_item.c.subject.in_(subjects),
             memory_item.c.superseded_by.is_(None),
+            memory_item.c.retired_at.is_(None),
             sa.or_(memory_item.c.source_id.is_(None), _granted_link(source_ids)),
         ]
         if start is not None:
@@ -1179,7 +1198,9 @@ class MemoryIndexer:
     each body whose chunks the index does not already hold, then writes the content digest and
     clears the claim so the row is no longer due. It owns a row's chunks, never the row: a body it
     may not publish is withheld from the index and its
-    row left intact for the fact deriver, the one writer that retires a page-derived memory. Every
+    row left intact for the fact deriver, the one writer that retires a page-derived memory. A row
+    the page pass retired is withheld the same way, and the pass clears its digest to make it due,
+    so the chunks it had published leave the index on the tick that follows the curation. Every
     claimed row reaches a terminal digest either way, so a row nobody may read can never hold the
     claim slots a newly committed fact needs."""
 
@@ -1208,6 +1229,7 @@ class MemoryIndexer:
                 memory_item.c.source_id,
                 memory_item.c.embedding_digest,
                 memory_item.c.superseded_by,
+                memory_item.c.retired_at,
             )
             .where(
                 memory_item.c.embedding_digest.is_(None),
@@ -1231,7 +1253,7 @@ class MemoryIndexer:
         return tuple(MemoryItem.model_validate(dict(row)) for row in rows)
 
     async def _index_item(self, item: MemoryItem) -> None:
-        if not await self._publishable(
+        if item.retired_at is not None or not await self._publishable(
             item.subject,
             item.created_from_page_id,
             item.created_from_page_revision,

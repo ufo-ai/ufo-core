@@ -368,10 +368,10 @@ async def test_recall_hook_observes_search_failure_without_denial(
 
 
 async def test_a_body_commits_to_the_budget_of_its_own_class(db: None) -> None:
-    """A wiki row and the consolidated Overview item are read in different ways and written to
-    different lengths, so the commit seam bounds a body by the class it carries. One number over
-    both measures a paragraph against a row, and the Overview summary is what it refuses — the band
-    of the wiki that would then stand empty however often the consolidation job ran."""
+    """A wiki row and a paragraph the page opens a band on are read in different ways and written
+    to different lengths, so the commit seam bounds a body by the class it carries. One number over
+    both measures a paragraph against a row, and the paragraph is what it refuses — the band of the
+    wiki that would then stand empty however often the writing pass ran."""
     workspace_id = await _workspace()
     with ws(workspace_id):
         store = _store(StubEmbed(vec((0, 1.0))))
@@ -1504,6 +1504,127 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_source_grant(
     assert str(item_id) in granted_names
     assert ungranted_get is None
     assert granted_get is not None
+
+
+async def test_a_row_cites_the_page_it_was_derived_from(db: None, tmp_path: Path) -> None:
+    """A page-derived row carries the page it came from — the id an `object_get kind=page` opens,
+    with the title and stream that name it — on the listing and on the row the portal renders
+    beside a detail; a row a member wrote carries nulls in the same three fields."""
+    workspace_id = await _workspace()
+    member = uuid4()
+    source_id, page_id = uuid4(), uuid4()
+    derived_id, written_id = uuid4(), uuid4()
+    now = datetime(2026, 7, 9, tzinfo=UTC)
+    ext = _ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))))
+    granted = _tool_ctx(ext, None, tmp_path, workspace_id=workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=granted.turn.agent_id,
+                workspace_id=workspace_id,
+                name="granted",
+                prompt="p",
+                model="m",
+                is_main=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source).values(
+                id=source_id,
+                workspace_id=workspace_id,
+                backend="folder",
+                config={},
+                subject="shared",
+                next_sync_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source_grant).values(
+                workspace_id=workspace_id,
+                source_id=source_id,
+                agent_id=granted.turn.agent_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                digest="sha256:page",
+                body_ref=f"pages/{page_id}",
+                stream="pull_requests",
+                title="Q3 pricing rollout",
+                subject="shared",
+                tombstone=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(memory_item).values(
+                id=derived_id,
+                workspace_id=workspace_id,
+                subject="shared",
+                body="pricing ships on the first of the quarter",
+                item_class="fact",
+                memory_kind="fact",
+                confidence=5,
+                created_from_page_id=page_id,
+                created_from_page_revision=revision,
+                source_id=source_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(memory_item).values(
+                id=written_id,
+                workspace_id=workspace_id,
+                subject="shared",
+                body="the team stands up at nine",
+                item_class="fact",
+                memory_kind="fact",
+                confidence=5,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    query = ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields)
+    with ws(workspace_id):
+        rows = {row.name: row for row in (await MemoryObjects().list(granted, query)).rows}
+        with agent(granted.turn.agent_id):
+            read = await MemoryObjects().member_detail(
+                ext, str(derived_id), member_id=member, admin=False
+            )
+    cited = rows[str(derived_id)].fields
+    assert (
+        cited["created_from_page_id"],
+        cited["created_from_page_title"],
+        cited["created_from_page_stream"],
+    ) == (str(page_id), "Q3 pricing rollout", "pull_requests")
+    plain = rows[str(written_id)].fields
+    assert (
+        plain["created_from_page_id"],
+        plain["created_from_page_title"],
+        plain["created_from_page_stream"],
+    ) == (None, None, None)
+    assert read is not None
+    assert (
+        read.row.fields["created_from_page_id"],
+        read.row.fields["created_from_page_title"],
+        read.row.fields["created_from_page_stream"],
+    ) == (str(page_id), "Q3 pricing rollout", "pull_requests")
 
 
 async def test_list_recent_carries_each_row_subject(db: None, tmp_path: Path) -> None:

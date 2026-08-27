@@ -215,10 +215,10 @@ class DigestRebuildIntent(BaseModel):
 class PageFactRebuildIntent(BaseModel):
     """The wiki's rebuild, prepared by the page and dispatched verbatim to `rebuild_page_facts`. It
     reaches exactly the rows a job can produce again — the facts derived from synced pages, which
-    the pages themselves still hold. The consolidated Overview summaries re-form on the
-    consolidation job's own terms as facts age into a cluster, and an item an app recorded in a
-    conversation came from a turn that has ended, so neither is this intent's to redo; the page
-    states both before the member presses it."""
+    the pages themselves still hold. The page's paragraphs are written again by the nightly passes
+    from the rows that survive this derivation, and an item an app recorded in a conversation came
+    from a turn that has ended, so neither is this intent's to redo; the page states both before the
+    member presses it."""
 
     verb: Literal["rebuild_page_facts"]
 

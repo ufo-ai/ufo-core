@@ -1,17 +1,22 @@
-"""The memory extension's declared points: the three tools, the `memory` object kind, the recall
-hook, two page-change consumers, three derivation jobs.
+"""The memory extension's declared points: the three tools, the `memory` and `profile` object
+kinds, the recall hook, two page-change consumers, seven derivation jobs.
 
 `memory_search` and `memory_update` are the agent's durable-memory tools and `rebuild_page_facts`
 sends the fact deriver back over every synced page; the `user_prompt_submit`
 hook auto-injects relevant memory into the turn's context before the model runs. Two `page_change`
 hooks ride independent core-runner cursors: `index_pages` turns each replayed source-page change
 into index chunks + a mirror row, and `derive_facts` distills each into durable `fact`
-memory_items with a bounded metered model pass. Three JobSpecs run the interval derivations:
+memory_items with a bounded metered model pass. Seven JobSpecs run the interval derivations:
 `memory_index` turns committed items into index chunks, `memory_consolidate` clusters aged facts
-into `semantic` summaries that supersede their originals, and `memory_dedup` sweeps one group of
-duplicate copies per tick onto its newest copy. Recall is a best-effort prompt hook: the handler
-owns a soft timeout below the hook deadline and records recall failures, while the hook chain logs
-an outer fault at error severity and continues the turn without an injection.
+into `semantic` summaries that supersede their originals, `memory_dedup` sweeps one group of
+duplicate copies per tick onto its newest copy, `memory_section` rewrites the paragraph that
+opens each band of the wiki from the facts standing in it, `memory_overview` rewrites the one
+paragraph the whole page opens on, `memory_people` writes each member's role and current focus into
+`memory_profile`, and `memory_page_pass` reads each subject's whole page on the deploy's own model —
+the one job declaring `needs_deploy_model`, since seeing a page whole is what it is for — retiring
+the rows that repeat one another. Recall is a best-effort prompt hook: the
+handler owns a soft timeout below the hook deadline and records recall failures, while the hook
+chain logs an outer fault at error severity and continues the turn without an injection.
 """
 
 import asyncio
@@ -43,6 +48,7 @@ from ufo.sdk.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemoryMatch
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import ObjectRef
 from ufo.sdk.operator import resolve_operator_workspace
+from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_memory.condenser import (
@@ -50,23 +56,37 @@ from ufo_ext_memory.condenser import (
     MIN_CLUSTER_FACTS,
     MIN_DUPLICATE_COPIES,
     MIN_OLDEST_AGE,
+    MIN_OVERVIEW_FACTS,
+    MIN_SECTION_FACTS,
+    PAGE_PASS_MIN_ROWS,
     FactDeriver,
     MemoryConsolidator,
     MemoryDeduper,
+    OverviewWriter,
+    PagePass,
+    ProfileWriter,
+    SectionWriter,
 )
 from ufo_ext_memory.events import (
     MAX_RECALL_ERROR_CLASS_CHARS,
     MAX_RECALLED_MEMORY_IDS,
     MEMORY_RECALL_EVENT,
 )
-from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT, PAGE_OBJECT_KIND
+from ufo_ext_memory.objects import (
+    MEMORY_KIND,
+    MEMORY_OBJECT,
+    PAGE_OBJECT_KIND,
+    PROFILE_OBJECT,
+)
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
     KIND_FACT,
     MAX_CONFIDENCE,
     MEMORY_BODY_MAX_CHARS,
+    OVERVIEW,
     RECALL_ITEM_MAX_CHARS,
+    SECTION,
     ItemClass,
     MemoryIndexer,
     MemoryKind,
@@ -99,9 +119,37 @@ CONSOLIDATE_JOB = "memory_consolidate"
 CONSOLIDATE_SCHEDULE = "0 0 * * * *"
 DEDUP_JOB = "memory_dedup"
 DEDUP_SCHEDULE = "0 30 * * * *"
+SECTION_JOB = "memory_section"
+SECTION_SCHEDULE = "0 15 3 * * *"
+"""Daily at 03:15 UTC, half an hour after the curation pass. A band's paragraph is a re-read of
+every fact standing under one heading — one metered model pass per band, so up to five per subject —
+and what it says moves as slowly as the band does, where the hourly jobs each move one cluster or
+one group. Writing after the curation is what makes the paragraph answer to the rows printed beneath
+it. The hour keeps that spend off a working day, and minute 15 keeps it clear of the consolidator on
+the hour and the deduper on the half hour, so no workspace pays two model jobs in one minute."""
+OVERVIEW_JOB = "memory_overview"
+OVERVIEW_SCHEDULE = "0 20 3 * * *"
+"""Daily at 03:20 UTC, five minutes after the section pass. The page's opening paragraph and its
+band paragraphs are the same act at two altitudes, written from the same live facts, so they belong
+to one night's reading of the page rather than to two states of it a workspace apart. Minute 20
+keeps the pass clear of the consolidator on the hour, the deduper on the half hour and the section
+pass's own minute, so no workspace pays two model jobs in one minute."""
+PROFILE_JOB = "memory_people"
+PROFILE_SCHEDULE = "0 25 3 * * *"
+"""Daily at 03:25 UTC, in the same nightly window as the two paragraph passes and one minute of its
+own after them. The People band is written from the facts those passes just read, so the whole page
+states one night; it runs last of the three because it is the only pass that also reads the roster,
+which is what puts a member seated that day on the page the same night."""
+PAGE_PASS_JOB = "memory_page_pass"
+PAGE_PASS_SCHEDULE = "0 45 2 * * *"
+"""Daily at 02:45 UTC, before the night's writing passes. This pass retires rows and writes no
+prose, so it runs first: a paragraph written from rows the same night's curation then retired would
+describe the page for a day as it stood before the curation, and the member reading it would find
+sentences answering to nothing under them. Minute 45 stands clear of the consolidator on the hour
+and the deduper on the half hour, so no workspace pays two model jobs in one minute."""
 REBUILD_QUEUED = (
     "The facts derived from synced pages are written again as the derivation pass reaches each "
-    "page. Overview summaries and items an app recorded in a conversation are untouched."
+    "page. The page's paragraphs and items an app recorded in a conversation are untouched."
 )
 REBUILD_ADMIN_ONLY = "Only a workspace admin can rebuild the facts derived from synced pages."
 logger = logging.getLogger(__name__)
@@ -126,9 +174,9 @@ class MemorySearchInput(BaseModel):
 
 
 RecordedClass = Literal["fact", "episodic"]
-"""The classes an agent records. `semantic` is the wiki's Overview band, which the consolidation job
-writes from facts that agree — the page tells the member exactly that, so it stays the one producer
-and a ledger an agent hand-wrote never lands under that heading."""
+"""The classes an agent records. `overview` and `section` are the wiki's own paragraphs and
+`semantic` is the consolidation job's summary of facts that agree — each has exactly one producing
+pass, so a ledger an agent hand-wrote never lands under a heading a member reads as written."""
 
 
 class MemoryUpdateInput(BaseModel):
@@ -295,6 +343,7 @@ class MemorySearchService:
             memory_item.c.workspace_id == self.ctx.store.workspace_id,
             memory_item.c.subject.in_(subjects),
             memory_item.c.superseded_by.is_(None),
+            memory_item.c.retired_at.is_(None),
         )
         if kinds is not None:
             query = query.where(memory_item.c.item_class.in_(kinds))
@@ -518,7 +567,9 @@ async def rebuild_page_facts_handler(ctx: ToolContext, args: RebuildPageFactsInp
     """Mark every synced page due for derivation again and return. Nothing is written or removed
     here: clearing the cursor sends `derive_facts` back over every page, and that pass — which owns
     this derived state — writes each page's facts and retires the reading they replace. A page the
-    pass leaves without a fact keeps the one it has, so no row goes before its replacement exists.
+    pass leaves without a fact keeps the one it has, so no row goes before its replacement exists;
+    a page of a machine-status stream is the one page whose rows go with nothing in their place,
+    since that gate derives no replacement for them ever again.
 
     A tick already running holds the cursor value it read, so its own advance loses the
     compare-and-set against the cleared key and it stops where it stands; the next tick starts from
@@ -553,6 +604,38 @@ async def dedup_memory(ctx: ExtensionContext) -> None:
     ).run()
 
 
+async def write_memory_sections(ctx: ExtensionContext) -> None:
+    await SectionWriter(
+        transaction=ctx.transaction,
+        workspace_id=ctx.store.workspace_id,
+        model=ctx.model,
+    ).run()
+
+
+async def write_memory_overview(ctx: ExtensionContext) -> None:
+    await OverviewWriter(
+        transaction=ctx.transaction,
+        workspace_id=ctx.store.workspace_id,
+        model=ctx.model,
+    ).run()
+
+
+async def write_member_profiles(ctx: ExtensionContext) -> None:
+    await ProfileWriter(
+        transaction=ctx.transaction,
+        workspace_id=ctx.store.workspace_id,
+        model=ctx.model,
+    ).run()
+
+
+async def curate_memory_pages(ctx: ExtensionContext) -> None:
+    await PagePass(
+        transaction=ctx.transaction,
+        workspace_id=ctx.store.workspace_id,
+        model=ctx.model,
+    ).run()
+
+
 def _items_awaiting_index() -> sa.Select[tuple[UUID]]:
     return (
         sa.select(memory_item.c.workspace_id)
@@ -573,6 +656,7 @@ def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]:
             memory_item.c.item_class == FACT,
             memory_item.c.created_from_page_id.is_(None),
             memory_item.c.superseded_by.is_(None),
+            memory_item.c.retired_at.is_(None),
             memory_item.c.created_at <= cutoff,
         )
         .group_by(memory_item.c.workspace_id)
@@ -593,11 +677,107 @@ def _dedupable_workspaces() -> sa.Select[tuple[UUID]]:
         sa.select(memory_item.c.workspace_id)
         .where(
             memory_item.c.created_from_page_id.is_(None),
+            memory_item.c.item_class != SECTION,
             memory_item.c.superseded_by.is_(None),
+            memory_item.c.retired_at.is_(None),
             memory_item.c.created_at <= cutoff,
         )
         .group_by(memory_item.c.workspace_id, memory_item.c.subject, memory_item.c.item_class)
         .having(sa.func.count() >= MIN_DUPLICATE_COPIES)
+        .distinct()
+    )
+
+
+def _class_count(item_class: ItemClass) -> sa.Function[int]:
+    """How many of a group's rows carry one class. A paragraph pass is bound by two floors read off
+    one grouped scan — the rows a paragraph would be written from, and the paragraph itself — so
+    each count has to name its class rather than take the whole group."""
+    return sa.func.count(sa.case((memory_item.c.item_class == item_class, 1)))
+
+
+def _summarizable_workspaces() -> sa.Select[tuple[UUID]]:
+    """Workspaces the section pass has work in: a (subject, memory_kind) band holding at least
+    MIN_SECTION_FACTS live facts, or one still holding a paragraph. The pass's own floor is folded
+    into the candidate read so a workspace whose wiki is still a handful of rows is never bound on
+    the daily tick — and a band that has fallen under it is the other half of the same work, its
+    paragraph now standing over rows it was not written from, which a read naming the floor alone
+    would leave standing for ever. The projection is distinct, so a workspace with five such bands
+    is one candidate bound once."""
+    return (
+        sa.select(memory_item.c.workspace_id)
+        .where(
+            memory_item.c.item_class.in_((FACT, SECTION)),
+            memory_item.c.superseded_by.is_(None),
+            memory_item.c.retired_at.is_(None),
+        )
+        .group_by(memory_item.c.workspace_id, memory_item.c.subject, memory_item.c.memory_kind)
+        .having(
+            sa.or_(
+                _class_count(FACT) >= MIN_SECTION_FACTS,
+                _class_count(SECTION) > 0,
+            )
+        )
+        .distinct()
+    )
+
+
+def _overviewable_workspaces() -> sa.Select[tuple[UUID]]:
+    """Workspaces the overview pass has work in: at least MIN_OVERVIEW_FACTS live facts on the
+    workspace-shared subject, or an opening paragraph still standing there. The pass's own floor and
+    its own subject are folded into the candidate read so a workspace whose wiki is still a handful
+    of rows, and one whose rows are all a member's own, is never bound on the daily tick — while a
+    page that has fallen under the floor is bound to lose the paragraph the floor now refuses to
+    rewrite."""
+    return (
+        sa.select(memory_item.c.workspace_id)
+        .where(
+            memory_item.c.subject == SHARED_SUBJECT,
+            memory_item.c.item_class.in_((FACT, OVERVIEW)),
+            memory_item.c.superseded_by.is_(None),
+            memory_item.c.retired_at.is_(None),
+        )
+        .group_by(memory_item.c.workspace_id)
+        .having(
+            sa.or_(
+                _class_count(FACT) >= MIN_OVERVIEW_FACTS,
+                _class_count(OVERVIEW) > 0,
+            )
+        )
+    )
+
+
+def _peopled_workspaces() -> sa.Select[tuple[UUID]]:
+    """Workspaces the People pass could write an entry in: one holding a shared fact at all. The
+    roster is never empty where a workspace has one — the pass writes from facts that name a member,
+    and a workspace with no shared fact has nothing any entry could be drawn from, so binding it
+    would spend a metered pass to answer that."""
+    return (
+        sa.select(memory_item.c.workspace_id)
+        .where(
+            memory_item.c.subject == SHARED_SUBJECT,
+            memory_item.c.item_class == FACT,
+            memory_item.c.superseded_by.is_(None),
+            memory_item.c.retired_at.is_(None),
+        )
+        .distinct()
+    )
+
+
+def _curatable_workspaces() -> sa.Select[tuple[UUID]]:
+    """Workspaces holding a page worth the deploy model's whole-page read: at least
+    PAGE_PASS_MIN_ROWS live facts under one subject — the page pass's own floor, folded into the
+    candidate read so a workspace whose wiki is still a handful of rows is never bound on the
+    nightly tick. The projection is distinct, so a workspace with several such pages is one
+    candidate bound once."""
+    return (
+        sa.select(memory_item.c.workspace_id)
+        .where(
+            memory_item.c.item_class == FACT,
+            memory_item.c.superseded_by.is_(None),
+            memory_item.c.retired_at.is_(None),
+        )
+        .group_by(memory_item.c.workspace_id, memory_item.c.subject)
+        .having(sa.func.count() >= PAGE_PASS_MIN_ROWS)
         .distinct()
     )
 
@@ -654,8 +834,10 @@ def manifest() -> Manifest:
                     "Write the workspace's page-derived facts again, for a workspace admin who "
                     "says the wiki rows drawn from synced documents read badly. It marks every "
                     "synced page due and returns: the derivation pass replaces each page's facts "
-                    "as it reaches them, and no row goes before its replacement is written. It "
-                    "redoes nothing else — Overview summaries are the consolidation pass's, and an "
+                    "as it reaches them, and no row goes before its replacement is written. Rows "
+                    "drawn from a page the wiki derives nothing from at all — the streams a run of "
+                    "the machine writes about itself — are retired outright. It "
+                    "redoes nothing else — the wiki's paragraphs are the writing passes', and an "
                     "item recorded through memory_update came from a conversation that cannot be "
                     "held again. Use it for the whole workspace's page facts, never to change one "
                     "row: a single wrong statement is corrected by recording the right one."
@@ -665,7 +847,7 @@ def manifest() -> Manifest:
                 side_effecting=True,
             ),
         ),
-        objects=(MEMORY_OBJECT,),
+        objects=(MEMORY_OBJECT, PROFILE_OBJECT),
         hooks=(
             HookSpec(event="user_prompt_submit", handler=recall_hook, best_effort=True),
             HookSpec(event="page_change", handler=index_pages),
@@ -689,6 +871,31 @@ def manifest() -> Manifest:
                 schedule=DEDUP_SCHEDULE,
                 handler=dedup_memory,
                 candidates=owner_candidates(_dedupable_workspaces),
+            ),
+            JobSpec(
+                name=SECTION_JOB,
+                schedule=SECTION_SCHEDULE,
+                handler=write_memory_sections,
+                candidates=owner_candidates(_summarizable_workspaces),
+            ),
+            JobSpec(
+                name=OVERVIEW_JOB,
+                schedule=OVERVIEW_SCHEDULE,
+                handler=write_memory_overview,
+                candidates=owner_candidates(_overviewable_workspaces),
+            ),
+            JobSpec(
+                name=PROFILE_JOB,
+                schedule=PROFILE_SCHEDULE,
+                handler=write_member_profiles,
+                candidates=owner_candidates(_peopled_workspaces),
+            ),
+            JobSpec(
+                name=PAGE_PASS_JOB,
+                schedule=PAGE_PASS_SCHEDULE,
+                handler=curate_memory_pages,
+                candidates=owner_candidates(_curatable_workspaces),
+                needs_deploy_model=True,
             ),
         ),
         memory_search=(

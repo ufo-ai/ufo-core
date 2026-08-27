@@ -174,7 +174,8 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   `memory_update` tools, the read-only `memory` object kind (each search hit carries its
   `memory/<id>` or `page/<id>` ref and date; `object_get` opens it — `created_from` links a
   derived item back to its synced page, `superseded_by` a consolidated one to its replacement,
-  and search excludes superseded items), and recall (lexical + vector RRF fusion), auto-injected
+  `retired_at` one the nightly curation pass judged off the page, and search excludes both), the
+  nightly passes that write the wiki, and recall (lexical + vector RRF fusion), auto-injected
   each turn through a `user_prompt_submit` hook. Member and room audiences read their own subject
   plus shared; shared reads shared; foreign reads only its sealed subject. Automatic recall uses
   the conversation audience. Explicit memory tools and opened result objects combine the
@@ -707,6 +708,12 @@ the team roster, source bindings, the deploy's member-fillable credential slots,
 files, hosted sites, and usage. The wiki is a second reading of two of them, as a document rather
 than a listing: the workspace's shared memory set out under the kind that filed each item, and the
 roster as the way into one member's page, where that member's own memory answers to them alone.
+Four nightly passes write that document. One reads the whole page on the deploy model and retires
+the rows that repeat one another; the other three then write from what survived — the paragraph the
+page opens on, the paragraph over each band, and each member's part and what they carry. A page a
+tool writes about its own runs derives no rows at all, and a row an earlier sync derived from one is
+retired when the derivation reaches that page again. The rows stand under the paragraphs as the
+record they were written from, each naming the source page it came from.
 The team view is the workspace roster — every member reads who
 their colleagues are, which of them administer the workspace, and who holds a seat, exactly what
 the `member` kind answers a member asking the main agent in an internal conversation. The roster

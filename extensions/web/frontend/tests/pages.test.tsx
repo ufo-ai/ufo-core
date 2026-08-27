@@ -187,6 +187,60 @@ test("the wiki page heads one member under the crumb the shell handed it", async
   expect(rosterCalls.every((url) => url.endsWith("/objects/member?agent=" + AGENT.id))).toBe(true);
 });
 
+const CONSOLIDATED = "Acme Corp — Moved the billing cutover to 11 March, with Rob Ryan owning it.";
+const BREADCRUMB = "Acme Corp — Opened the billing dashboard.";
+
+/** What a member told an app survives consolidation on their own page. The hourly pass collapses
+ *  aged rows into one summary and stamps the originals superseded, so the rows themselves leave
+ *  every band; a band drawing `fact` alone would then hold nothing, and the summary standing for
+ *  them belongs to no other part of the page — the member's own words would be readable nowhere.
+ *  An `episodic` row of the same band stays off it: recall offers a breadcrumb as a topic to open,
+ *  and a document does not state the motion of a tool as one of its lines. */
+test("a member's own page draws the summary its consolidated rows were collapsed into", async () => {
+  const row = (item_class: string, summary: string) => ({
+    name: item_class + "-row",
+    summary,
+    text: summary,
+    subject: "member:" + MEMBER.email,
+    item_class,
+    memory_kind: "fact",
+    written: "2026-08-20T09:00:00+00:00",
+    agent_id: AGENT.id,
+    created_from_page_id: null,
+    created_from_page_title: null,
+    created_from_page_stream: null,
+  });
+  await runPage(
+    "wiki",
+    {
+      // The listing filters by class server-side and pages the answer, so each band asks for one
+      // class at a time. A stub answering every class on one read would prove the opposite of what
+      // ships: that a band can be crowded out by rows it never draws.
+      "/objects/memory": (url) =>
+        json({
+          objects: !url.includes("memory_kind=fact")
+            ? []
+            : url.includes("item_class=semantic")
+              ? [row("semantic", CONSOLIDATED)]
+              : url.includes("item_class=episodic")
+                ? [row("episodic", BREADCRUMB)]
+                : [],
+        }),
+      "/objects/member": () =>
+        json({
+          objects: [
+            { name: MEMBER.email, email: MEMBER.email, admin: false, seated: true },
+          ],
+        }),
+    },
+    { place: { opens: ["member/" + MEMBER.email] } },
+  );
+
+  expect(await screen.findByRole("heading", { name: "Facts" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: CONSOLIDATED })).toBeTruthy();
+  expect(screen.queryByText(BREADCRUMB)).toBeNull();
+});
+
 test("the artifacts page mounts and draws the empty shelf with its search", async () => {
   await runPage("artifacts", {
     "/objects/site": () => objectIndex(SITE_KIND, []),

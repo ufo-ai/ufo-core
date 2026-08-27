@@ -57,6 +57,7 @@ async def _remembered_review_day(outcome: ScenarioOutcome) -> CapabilityVerdict:
                     memory_item.c.workspace_id == ws_current().workspace_id,
                     memory_item.c.body.ilike(f"%{REVIEW_DAY}%"),
                     memory_item.c.superseded_by.is_(None),
+                    memory_item.c.retired_at.is_(None),
                 )
             )
         ).scalar_one()

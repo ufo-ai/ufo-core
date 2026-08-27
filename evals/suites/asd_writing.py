@@ -12,10 +12,10 @@ checker decides — whether a member who does not operate the system can act on 
 the judge only once the countable half has passed. `ranked` and `glance` are deterministic alone:
 a ranking is an index and a glance budget is characters and repeated content words.
 
-Each case carries what the pipeline shipped on 2026-08-21 as `production` and, where one was
-written, the hand rewrite as `rewrite`. Together they are the calibration: a grader that passes
-today's output measures nothing, and a grader that fails a good rewrite measures the wrong thing,
-so the scorer tests assert both ends on every case that has them."""
+Each case carries what the pipeline shipped on 2026-08-21 and 2026-08-26 as `production` and,
+where one was written, the hand rewrite as `rewrite`. Together they are the calibration: a grader
+that passes today's output measures nothing, and a grader that fails a good rewrite measures the
+wrong thing, so the scorer tests assert both ends on every case that has them."""
 
 from __future__ import annotations
 
@@ -550,12 +550,25 @@ class RadarCase:
 
 
 @dataclass(frozen=True)
+class WikiPage:
+    """One synced source page as the extraction pass meets it. A page's title and stream ride the
+    payload beside its body because a body that leaves its subject implied has one only there: a
+    pull request page is titled with the change, and a comment page is titled
+    `comments/<repo>/<id>` and names nothing."""
+
+    title: str
+    stream: str
+    body: str
+
+
+@dataclass(frozen=True)
 class WikiRowsCase:
     """The source pages a wiki section's rows are extracted from, and the row set a reader can use:
-    `max_rows` is what the section may spend once near-duplicates have collapsed onto one row."""
+    `max_rows` is what the section may spend once near-duplicates have collapsed onto one row, and
+    zero is a page the wiki keeps no row of at all."""
 
     name: str
-    pages: tuple[str, ...]
+    pages: tuple[WikiPage, ...]
     max_rows: int
     leads: tuple[str, ...]
     buried: tuple[str, ...]
@@ -569,7 +582,9 @@ class WikiRowsCase:
 
     @property
     def instruction(self) -> str:
-        return "Extract the facts of this page\n\n" + "\n\n".join(self.pages)
+        return "Extract the facts of this page\n\n" + "\n\n".join(
+            f"{page.title} ({page.stream})\n{page.body}" for page in self.pages
+        )
 
     def parts(self, passages: tuple[str, ...]) -> dict[str, Failures]:
         parts = {READABLE: readable(passages, self.jargon), GLANCE: self._glance(passages)}
@@ -593,7 +608,10 @@ class WikiRowsCase:
     def payload(self) -> JsonObject:
         return {
             "name": self.name,
-            "pages": list(self.pages),
+            "pages": [
+                {"title": page.title, "stream": page.stream, "body": page.body}
+                for page in self.pages
+            ],
             "maxRows": self.max_rows,
             "leads": list(self.leads),
             "buried": list(self.buried),
@@ -908,10 +926,30 @@ PREFERENCE_PAGE = """Design review, 19 August 2026
 Rob Ryan said the direction is correct but probably slightly overshot. He asked to try 2x and then
 view the screen at that size before deciding."""
 
+REVIEW_PULL_PAGE = """metalcraftai/ufo pull request 2455 — an app's settings stand in a panel over
+the screen
+Opened by alexg-ufo on 26 August 2026 at 09:12 UTC, from the branch settings-panel into main.
+The pull request is open, has no assignee, and carries no labels."""
+
+REVIEW_COMMENT_PAGE = """Comment on metalcraftai/ufo pull request 2455, 26 August 2026 at 09:41 UTC
+alexg-ufo wrote: @claude review this one before I merge it."""
+
+REVIEW_EVENT_PAGE = """metalcraftai/ufo issue event 18446744 — mentioned
+alexg-ufo mentioned claude[bot] on pull request 2455 on 26 August 2026 at 09:41 UTC."""
+
+CI_RUN_PAGE = """test — workflow run 4417 of metalcraftai/ufo, 26 August 2026
+The run concluded success at 08:02 UTC after 12 minutes 35 seconds, on commit a24e8236 of main.
+A push from alexg-ufo started it, and it is attempt 1 of 1."""
+
+PRICE_RULE_PAGE = """Comment on metalcraftai/ufo pull request 2461, 26 August 2026 at 14:08 UTC
+Marshall Reed wrote: I will not merge the price change until Rob Ryan and the Idler.ai finance team
+have both approved it, and every hosted workspace hears the new price fourteen days before it
+starts."""
+
 WIKI_ROW_CASES = (
     WikiRowsCase(
         "wiki-open-work-one-introduction",
-        (INTRODUCTION_THREAD,),
+        (WikiPage("intro — Nalu Concepcion, Idler.ai", "messages", INTRODUCTION_THREAD),),
         max_rows=2,
         leads=("call", "talk", "speak"),
         buried=(),
@@ -931,7 +969,7 @@ WIKI_ROW_CASES = (
     ),
     WikiRowsCase(
         "wiki-history-beta-leads",
-        (HISTORY_PAGE,),
+        (WikiPage("metalcraftai/ufo", "repositories", HISTORY_PAGE),),
         max_rows=3,
         leads=("private beta", "beta"),
         buried=("created on", "last pushed", "last updated"),
@@ -949,7 +987,7 @@ WIKI_ROW_CASES = (
     ),
     WikiRowsCase(
         "wiki-decisions-logo-review",
-        (DECISIONS_PAGE,),
+        (WikiPage("Connector logo review", "documents", DECISIONS_PAGE),),
         max_rows=4,
         leads=(),
         buried=(),
@@ -973,7 +1011,7 @@ WIKI_ROW_CASES = (
     ),
     WikiRowsCase(
         "wiki-facts-domain-scope",
-        (SEATS_PAGE,),
+        (WikiPage("Domain scope debugging notes", "documents", SEATS_PAGE),),
         max_rows=3,
         leads=(),
         buried=(),
@@ -992,7 +1030,7 @@ WIKI_ROW_CASES = (
     ),
     WikiRowsCase(
         "wiki-preference-whole-line",
-        (PREFERENCE_PAGE,),
+        (WikiPage("Design review", "documents", PREFERENCE_PAGE),),
         max_rows=2,
         leads=(),
         buried=(),
@@ -1000,6 +1038,59 @@ WIKI_ROW_CASES = (
         production=(
             "Rob Ryan described the direction as correct but probably slightly overshot, "
             "requested trying 2x and then viewing screen…",
+        ),
+    ),
+    WikiRowsCase(
+        "wiki-history-one-review-across-three-pages",
+        (
+            WikiPage(
+                "an app's settings stand in a panel over the screen",
+                "pull_requests",
+                REVIEW_PULL_PAGE,
+            ),
+            WikiPage("comments/metalcraftai/ufo/3391042118", "comments", REVIEW_COMMENT_PAGE),
+            WikiPage("issue_events/metalcraftai/ufo/18446744", "issue_events", REVIEW_EVENT_PAGE),
+        ),
+        max_rows=1,
+        leads=(),
+        buried=(),
+        jargon=("alexg-ufo", "claude[bot]"),
+        production=(
+            "MetalcraftAI UFO pull request 2455 — Alexg-ufo asked Claude to review it on "
+            "26 August 2026.",
+            "Alexg-Ufo — Asked Claude to review UFO pull request 2455 on 26 August 2026.",
+            "Alex G-UFO — Requested a Claude review of MetalcraftAI UFO pull request 2455 on "
+            "26 August 2026.",
+        ),
+        rewrite=("Pull request 2455 — Alex Graveley told Claude to examine it on 26 August 2026.",),
+    ),
+    WikiRowsCase(
+        "wiki-history-ci-run-keeps-nothing",
+        (WikiPage("test", "workflow_runs", CI_RUN_PAGE),),
+        max_rows=0,
+        leads=(),
+        buried=(),
+        jargon=("ci run", "workflow run"),
+        production=(
+            "MetalcraftAI UFO CI run a24e823 — Finished on 26 August 2026 after 12 minutes "
+            "35 seconds.",
+        ),
+    ),
+    WikiRowsCase(
+        "wiki-decisions-price-change-cut",
+        (WikiPage("comments/metalcraftai/ufo/3391118742", "comments", PRICE_RULE_PAGE),),
+        max_rows=2,
+        leads=(),
+        buried=(),
+        jargon=("metalcraftai/ufo",),
+        production=(
+            "metalcraftai/ufo pull request 2461 — Marshall Reed will not merge the price change "
+            "until Rob Ryan and the…",
+        ),
+        rewrite=(
+            "Pull request 2461 — Marshall Reed keeps it closed until Rob Ryan and the Idler.ai "
+            "finance team agree.",
+            "Hosted workspaces — Hear about a new price fourteen days before it starts.",
         ),
     ),
 )
@@ -1193,7 +1284,13 @@ class AsdWritingSuite:
         """The condenser's own extraction pass over the case's source pages."""
         payload = {
             "pages": [
-                {"page_id": str(index), "body": body} for index, body in enumerate(case.pages)
+                {
+                    "page_id": str(index),
+                    "title": page.title,
+                    "stream": page.stream,
+                    "body": page.body,
+                }
+                for index, page in enumerate(case.pages)
             ]
         }
         reply = await writer.turn(

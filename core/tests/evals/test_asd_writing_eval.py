@@ -21,6 +21,8 @@ from evals.suites.asd_writing import (
 )
 from ufo.config import DEFAULT_BACKGROUND_JOBS_MODEL
 
+KEEPS_NOTHING = "wiki-history-ci-run-keeps-nothing"
+
 LEADS_CORRECTLY = frozenset(
     {
         "radar-assistants-api-shutdown-ranked",
@@ -141,14 +143,14 @@ def test_sentences_are_the_lines_of_a_consolidated_paragraph() -> None:
 def test_production_output_fails_every_grader_but_the_entries_that_lead() -> None:
     """The calibration. A grader today's output passes measures nothing, and a grader that fails
     everything measures nothing either: the six entries that do lead with the finding hold the line
-    while the other thirty-seven verdicts are the defect the suite was built to see move."""
+    while the other forty-three verdicts are the defect the suite was built to see move."""
     verdicts = {
         f"{case.name}-{dimension}": case.parts(case.production)[dimension].passed
         for case in CASES
         for dimension in case.dimensions
     }
 
-    assert len(verdicts) == 43
+    assert len(verdicts) == 49
     assert sum(verdicts.values()) == 6
     assert {name for name, passed in verdicts.items() if passed} == LEADS_CORRECTLY
     assert all(name.endswith(RANKED) for name in LEADS_CORRECTLY)
@@ -172,9 +174,16 @@ def test_the_hand_rewrites_pass_where_the_shipped_lines_fail() -> None:
             name = f"{case.name}-{dimension}"
             (flipped if rewritten[dimension].passed else standing).append(name)
 
-    assert len(flipped) == 15
+    assert len(flipped) == 19
     assert standing == ["wiki-history-beta-leads-ranked"]
     assert {name.rsplit("-", 1)[1] for name in flipped} == {READABLE, RANKED, GLANCE}
+
+
+def test_a_page_worth_no_row_passes_only_where_the_writer_recorded_none() -> None:
+    case = next(case for case in CASES if case.name == KEEPS_NOTHING)
+
+    assert not case.parts(case.production)[GLANCE].passed
+    assert all(verdict.passed for verdict in case.parts(()).values())
 
 
 def test_the_suite_writes_on_the_background_model_and_judges_on_the_semantic_one() -> None:
@@ -182,7 +191,7 @@ def test_the_suite_writes_on_the_background_model_and_judges_on_the_semantic_one
 
     assert task.simulator_model == DEFAULT_BACKGROUND_JOBS_MODEL
     assert task.judge_model == SEMANTIC_JUDGE_MODEL
-    assert len(task.cases) == 43
+    assert len(task.cases) == 49
     assert task.narrow is not None
     assert task.narrow(
         ("radar-eval-sweep-failed-ranked", "wiki-history-beta-leads-ranked")

@@ -903,7 +903,7 @@ async def test_memory_filter_narrows_to_one_class_and_composes_with_paging(
     path = "/surface/web/workspace/memory"
 
     unfiltered = (await client.get(path, headers=headers)).json()
-    assert set(unfiltered["kinds"]) == {"fact", "episodic", "semantic"}
+    assert set(unfiltered["kinds"]) == {"fact", "episodic", "semantic", "section", "overview"}
     assert unfiltered["kind"] is None
     assert "an episode" in _texts(unfiltered)
 
