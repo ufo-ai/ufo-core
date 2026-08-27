@@ -622,6 +622,7 @@ jobs:
         working-directory: infra/envs/edge
         env:
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_flagship_testing_api_token: ${{ secrets.FLAGSHIP_TESTING_API_TOKEN }}
         run: |
           LOCK=true
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
@@ -629,6 +630,7 @@ jobs:
           fi
           terraform plan -input=false -no-color -lock="$LOCK" -lock-timeout=10m \
             -target=cloudflare_ruleset.shipped_app_cache \
+            -target=cloudflare_flagship_flag.testing_portal \
             -target=module.testing \
             -out="$RUNNER_TEMP/edge.tfplan"
 

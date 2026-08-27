@@ -12,7 +12,7 @@ undeclared slot is refused."""
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import ClassVar
@@ -60,11 +60,8 @@ from ufo.sdk.manifest import (
     CredentialSlot,
     Deny,
     EmbedBackendSpec,
-    FlagAdmin,
-    FlagAdminSpec,
     FlagProviderSpec,
     FlagSpec,
-    FlagState,
     HookContext,
     HookOutcome,
     HookSpec,
@@ -1040,38 +1037,6 @@ class SampleSearchProvider:
         return FetchedPage(url=request.url, text=SAMPLE_FETCH_TEXT)
 
 
-_ADMINISTERED_FLAGS: dict[str, FlagState] = {}
-
-
-@dataclass(frozen=True)
-class SampleFlagAdmin:
-    """The probe's flag service: the administration seam `ufoctl flags` writes through, holding
-    what it was told in the extension's own record so a test reads the writes back through the verb
-    that made them rather than through a call log.
-
-    A write keeps whatever else the record holds for that flag — the targeting a real service would
-    hold — so the seam is driven the way one behaves: setting a flag states its untargeted answer
-    and takes no rollout away."""
-
-    def listing(self) -> tuple[FlagState, ...]:
-        return tuple(state for _, state in sorted(_ADMINISTERED_FLAGS.items()))
-
-    def create(self, key: str, *, on: bool) -> None:
-        if key in _ADMINISTERED_FLAGS:
-            raise RuntimeError(f"flag {key!r} already exists")
-        _ADMINISTERED_FLAGS[key] = FlagState(key=key, on=on)
-
-    def set(self, key: str, *, on: bool) -> None:
-        held = _ADMINISTERED_FLAGS.get(key)
-        if held is None:
-            raise RuntimeError(f"no flag {key!r}")
-        _ADMINISTERED_FLAGS[key] = replace(held, on=on)
-
-
-def build_flag_admin() -> FlagAdmin:
-    return SampleFlagAdmin()
-
-
 def build_flag_provider(_cache_ttl_seconds: float) -> InMemoryProvider:
     """The OpenFeature provider the probe registers through the `flag_providers` Manifest point:
     `sample-flag-on` resolves true and `sample-flag-off` false, so a flagged path is driven both
@@ -1416,7 +1381,6 @@ def manifest() -> Manifest:
             ),
         ),
         flag_providers=(FlagProviderSpec(backend=FLAG_BACKEND, build=build_flag_provider),),
-        flag_admins=(FlagAdminSpec(backend=FLAG_BACKEND, build=build_flag_admin),),
         flags=(FlagSpec(key=PROBE_FLAG, what=PROBE_FLAG_WHAT),),
         memory_search=(
             MemorySearchProviderSpec(name=MEMORY_SEARCH_PROVIDER, build=SampleMemorySearch),

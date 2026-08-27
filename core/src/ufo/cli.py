@@ -9,8 +9,8 @@ import sys
 import threading
 import tomllib
 import webbrowser
-from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from html import escape
@@ -45,7 +45,6 @@ from ufo.db import (
 )
 from ufo.durability import replay_safe_client
 from ufo.ext.loader import load_manifests, lockfile_path
-from ufo.ext.manifest import FlagAdmin, FlagSpec, FlagState, Manifest
 from ufo.ext.store import ExtensionStore, read_catalog
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
 from ufo.onboard.seed import KitchenSink
@@ -729,128 +728,6 @@ async def _credit_balance(
 async def _set_reserve(config: Config, named: str, reserve_micro_usd: int) -> bool:
     async with _balance_scope(config, named) as (connection, workspace_id):
         return await set_reserve(connection, workspace_id, reserve_micro_usd)
-
-
-FLAG_COLUMN = 30
-STATE_COLUMN = 12
-
-
-def _reads(state: FlagState | None) -> str:
-    """How one flag reads for a workspace no rule matches, and whether rules make that answer
-    partial. A flag the service does not hold at all is `missing`: it reads as the default its call
-    site passed, which on a screen looks exactly like a state an operator chose."""
-    if state is None:
-        return "missing"
-    return ("on" if state.on else "off") + (" (rules)" if state.targeted else "")
-
-
-def _declared_flags(manifests: tuple[Manifest, ...]) -> tuple[FlagSpec, ...]:
-    """Every flag the active extensions read, in key order.
-
-    Two extensions declaring one key is the state where turning a flag on moves a feature nobody
-    naming it expected to move, so it fails here rather than in the service."""
-    declared: dict[str, FlagSpec] = {}
-    for manifest in manifests:
-        for spec in manifest.flags:
-            held = declared.get(spec.key)
-            if held is not None and held.what != spec.what:
-                raise click.ClickException(f"two extensions declare flag {spec.key!r}")
-            declared[spec.key] = spec
-    return tuple(spec for _, spec in sorted(declared.items()))
-
-
-@contextmanager
-def _readable_refusal() -> Iterator[None]:
-    """A flag service that refuses answers the operator, never a traceback: the verb made one
-    request, and the reason it wrote nothing is the whole of what they need."""
-    try:
-        yield
-    except RuntimeError as error:
-        raise click.ClickException(str(error)) from error
-
-
-def _flag_service() -> tuple[tuple[FlagSpec, ...], FlagAdmin]:
-    """What the code declares, and the flag service this deploy writes through.
-
-    The verb is refused where the deploy selected no backend: there is no service to write, and a
-    deploy holding none offers every flagged feature already."""
-    config = load_config()
-    manifests = load_manifests(config.pack.name)
-    if config.flags.backend is None:
-        raise click.ClickException("this deploy selects no flag backend ([flags] backend)")
-    admins = {spec.backend: spec for manifest in manifests for spec in manifest.flag_admins}
-    selected = admins.get(config.flags.backend)
-    if selected is None:
-        raise click.ClickException(
-            f"flag backend {config.flags.backend!r} registers no administration client"
-        )
-    return _declared_flags(manifests), selected.build()
-
-
-@main.group()
-def flags() -> None:
-    """Read and set the deploy's feature flags in the service `[flags] backend` selects."""
-
-
-@flags.command(name="list")
-def flags_list() -> None:
-    """Every flag the code reads, beside the state the deploy's flag service holds it in.
-
-    A declared flag the service does not hold reads as its call-site default forever, which on a
-    screen looks exactly like a state an operator chose — so `missing` is the state worth seeing."""
-    with _readable_refusal():
-        declared, admin = _flag_service()
-        held = {state.key: state for state in admin.listing()}
-    for spec in declared:
-        state = held.pop(spec.key, None)
-        click.echo(f"{spec.key:<{FLAG_COLUMN}} {_reads(state):<{STATE_COLUMN}} {spec.what}")
-    for key, state in sorted(held.items()):
-        click.echo(
-            f"{key:<{FLAG_COLUMN}} {_reads(state):<{STATE_COLUMN}} read by no active extension"
-        )
-
-
-@flags.command(name="set")
-@click.argument("key")
-@click.option("--on/--off", required=True, help="what the flag serves every workspace")
-def flags_set(key: str, on: bool) -> None:
-    """Set one flag, creating it where the service does not hold it yet."""
-    with _readable_refusal():
-        declared, admin = _flag_service()
-        if key not in {spec.key for spec in declared}:
-            raise click.ClickException(f"no active extension reads flag {key!r}")
-        held = {state.key for state in admin.listing()}
-        if key in held:
-            admin.set(key, on=on)
-            click.echo(f"{key} {'on' if on else 'off'}")
-            return
-        admin.create(key, on=on)
-        click.echo(f"{key} {'on' if on else 'off'} (created)")
-
-
-@flags.command(name="sync")
-@click.option("--on/--off", required=True, help="the state every declared flag is left in")
-def flags_sync(on: bool) -> None:
-    """Bring every declared flag to one state, creating what the service does not hold.
-
-    This is how an environment is set: on where the deploy offers what it ships, off where it does
-    not. A flag the service holds and no extension reads is left alone and named, because deleting
-    one is how an evaluation the dashboard still shows stops answering."""
-    with _readable_refusal():
-        declared, admin = _flag_service()
-        held = {state.key: state.on for state in admin.listing()}
-        for spec in declared:
-            if spec.key not in held:
-                admin.create(spec.key, on=on)
-                click.echo(f"{spec.key} {'on' if on else 'off'} (created)")
-                continue
-            if held[spec.key] == on:
-                click.echo(f"{spec.key} {'on' if on else 'off'} (already)")
-                continue
-            admin.set(spec.key, on=on)
-            click.echo(f"{spec.key} {'on' if on else 'off'}")
-        for key in sorted(set(held) - {spec.key for spec in declared}):
-            click.echo(f"{key} left alone (read by no active extension)")
 
 
 SPEND_WINDOW_DEFAULT_SECONDS = 86_400

@@ -45,7 +45,7 @@ variable "ses_sender" {
 variable "cloudflare_api_token" {
   type        = string
   sensitive   = true
-  description = "Cloudflare API token (Zone:DNS:Edit on flyingobject.ai) for external-dns + cert-manager DNS-01. Supply via TF_VAR_cloudflare_api_token; never commit."
+  description = "Cloudflare API token (Zone:DNS:Edit on flyingobject.ai) for external-dns + cert-manager DNS-01. Supply via TF_VAR_cloudflare_api_token; never commit. The deploy writes this value into the cert-manager and external-dns Kubernetes secrets, so it carries no scope beyond DNS: the feature flags are written from infra/envs/edge on tokens scoped to one Flagship app each."
 }
 
 variable "slack_connect_enabled" {

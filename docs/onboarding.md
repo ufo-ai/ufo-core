@@ -364,6 +364,13 @@ and serve builds no flag provider, so every flag resolves to the default its cal
 the portal's own flags that is the screen drawn, because each of them withholds something already
 shipped.
 
+Those three read flags and cannot write one. The flags themselves are code: each environment
+declares every key and the state it serves in `infra/envs/<env>/flags.tf`, and the deploy applies
+them on the Cloudflare token terraform already holds — so turning a feature on is a pull request,
+and no credential that can move a feature is handed to anybody. That token needs the Flagship Write
+permission (Manage Account > Account API Tokens in the Cloudflare dashboard); without it the apply
+refuses, naming the resource.
+
 ## Web login
 
 The whole browser sign-in flow is same-origin on the **app host** (`app.<apex>`), the sole

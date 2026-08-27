@@ -1449,7 +1449,6 @@ def _provider_names(manifest: Manifest) -> list[tuple[str, str]]:
         *(("carriers", spec.name) for spec in manifest.carriers),
         *(("search_providers", spec.backend) for spec in manifest.search_providers),
         *(("flag_providers", spec.backend) for spec in manifest.flag_providers),
-        *(("flag_admins", spec.backend) for spec in manifest.flag_admins),
         *(("embeds", spec.name) for spec in manifest.embeds),
         *(("indexes", spec.name) for spec in manifest.indexes),
     ]
@@ -1513,6 +1512,51 @@ def _registered_naming_failures() -> list[str]:
     manifests = tuple(manifest for manifest, _ in discovered().values())
     packs = tuple(discovered_packs().values())
     return _naming_failures(manifests, packs)
+
+
+def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
+    """Every flag the code reads is a flag each environment's terraform declares, and the reverse.
+
+    A key the portal reads and an environment does not declare never reaches its flag service, so it
+    answers its call-site default in every workspace forever — a feature nobody can turn on, or one
+    nobody can turn off, and neither states which. A key declared and never read is worse: an
+    operator sets it, the dashboard says the feature moved, and no code ever asked.
+
+    The two lists are in different languages, so nothing but this holds them together. The pack is
+    read from each environment root's own serve config, and the flags from the edge root, which is
+    where every Cloudflare resource for both environments lives."""
+    from ufo.ext.loader import load_manifests
+
+    packs = {
+        path.parent.name: found.group(1)
+        for path, source in terraform.items()
+        if path.name == "ufo.tf"
+        and (found := re.search(r'\[pack\]\s*\n\s*name = "([a-z0-9_]+)"', source))
+    }
+    flags_source = next(
+        (source for path, source in terraform.items() if path.name == "flags.tf"), None
+    )
+    if flags_source is None:
+        return ["flags: no env root declares flags.tf"]
+    failures = []
+    for environment, pack in sorted(packs.items()):
+        declared = {spec.key for manifest in load_manifests(pack) for spec in manifest.flags}
+        if not declared:
+            continue
+        block = re.search(rf"{environment}\s*=\s*\{{(.*?)\n    \}}", flags_source, re.DOTALL)
+        if block is None:
+            failures.append(f"flags: no portal_flags map for {environment}")
+            continue
+        keys = set(re.findall(r'"([a-z0-9-]+)"\s*=\s*(?:true|false)', block.group(1)))
+        for key in sorted(keys - declared):
+            failures.append(
+                f"flags: {environment} declares {key!r}, which no extension in {pack} reads"
+            )
+        for key in sorted(declared - keys):
+            failures.append(
+                f"flags: {environment} omits {key!r}, which an extension in {pack} reads"
+            )
+    return failures
 
 
 def _portal_style_failures() -> list[str]:
@@ -1884,6 +1928,7 @@ def main() -> int:
     if not terraform:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")
     failures.extend(_shared_singleton_failures(terraform))
+    failures.extend(_declared_flag_failures(terraform))
 
     for failure in failures:
         print(f"GATE: {failure}")

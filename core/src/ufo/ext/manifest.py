@@ -294,58 +294,13 @@ class AuthProxySpec:
 class FlagSpec:
     """A flag an extension reads, declared by the extension that reads it.
 
-    The declaration is what `ufoctl flags` reconciles into the deploy's flag service: a key the code
-    reads and the service does not hold evaluates to nothing and reads as its closed default
-    forever, which looks exactly like a feature turned off. `what` states what turning it on offers,
-    in one line, because the operator deciding that is not reading the call site."""
+    The declaration is the set each hosted environment's terraform must declare, held to it by a
+    gate: a key the code reads and the flag service does not hold evaluates to its call-site default
+    forever, which on a screen looks exactly like a state somebody chose. `what` states what turning
+    it on offers, in one line, because whoever decides that is reading the terraform, not this."""
 
     key: str
     what: str
-
-
-@dataclass(frozen=True)
-class FlagState:
-    """One flag as the deploy's flag service holds it.
-
-    `on` is what the service serves a workspace no targeting rule matches. `targeted` says the
-    service holds rules for this flag, so that is not every workspace's answer — an operator reading
-    a listing has to know the difference, and a write must leave those rules where they are."""
-
-    key: str
-    on: bool
-    targeted: bool = False
-
-
-class FlagAdmin(Protocol):
-    """The deploy's flag service as an operator writes it — the administration half of the backend
-    `config.flags.backend` selects, which the reading half never touches."""
-
-    def listing(self) -> tuple[FlagState, ...]:
-        """Every flag the service holds for this deploy."""
-
-    def create(self, key: str, *, on: bool) -> None:
-        """Add a flag the service does not hold yet."""
-
-    def set(self, key: str, *, on: bool) -> None:
-        """Set what a flag the service already holds serves a workspace no rule matches.
-
-        Everything else the service holds for that flag — its targeting rules above all — stands.
-        An operator turning a feature off is saying what the untargeted answer is, never that the
-        rollout someone built should be thrown away."""
-
-
-@dataclass(frozen=True)
-class FlagAdminSpec:
-    """The administration half of a flag backend, registered beside its provider under the same
-    `backend` name and built only for the verb that writes.
-
-    It is separate from `FlagProviderSpec` because the two answer to different credentials and
-    different lifetimes: serve holds a token that may only evaluate, and is asked for an answer on
-    the hot path; an operator holds one that may write, and is asked once. A deploy that ships no
-    write credential still reads every flag."""
-
-    backend: str
-    build: Callable[[], FlagAdmin]
 
 
 @dataclass(frozen=True)
@@ -789,7 +744,6 @@ class Manifest:
     auth_proxies: tuple[AuthProxySpec, ...] = ()
     search_providers: tuple[SearchProviderSpec, ...] = ()
     flag_providers: tuple[FlagProviderSpec, ...] = ()
-    flag_admins: tuple[FlagAdminSpec, ...] = ()
     flags: tuple[FlagSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     conversation_slots: tuple[ConversationSlotProvider, ...] = ()

@@ -1345,6 +1345,7 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
         "workflow",
         "job_name",
         "targets",
+        "flag_token",
         "plan_name",
         "guard_name",
         "apply_name",
@@ -1358,7 +1359,12 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
         (
             "deploy.yml",
             "edge",
-            ("cloudflare_ruleset.shipped_app_cache", "module.testing"),
+            (
+                "cloudflare_ruleset.shipped_app_cache",
+                "cloudflare_flagship_flag.testing_portal",
+                "module.testing",
+            ),
+            "flagship_testing_api_token",
             "edge",
             "Reject destructive changes",
             "Terraform apply",
@@ -1371,7 +1377,8 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
         (
             "deploy-production.yml",
             "deploy",
-            ("module.prod",),
+            ("cloudflare_flagship_flag.prod_portal", "module.prod"),
+            "flagship_prod_api_token",
             "production-edge",
             "Reject destructive production edge changes",
             "Terraform production edge apply",
@@ -1388,6 +1395,7 @@ def test_edge_deploys_are_isolated(
     workflow: str,
     job_name: str,
     targets: tuple[str, ...],
+    flag_token: str,
     plan_name: str,
     guard_name: str,
     apply_name: str,
@@ -1413,7 +1421,13 @@ def test_edge_deploys_are_isolated(
     assert plan["working-directory"] == "infra/envs/edge"
     assert guard["working-directory"] == "infra/envs/edge"
     assert apply["working-directory"] == "infra/envs/edge"
-    assert plan["env"] == {"TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}"}
+    # One deploy carries one environment's flag credential. The other environment's token is not in
+    # this step at all, so a testing deploy — and every pull request, which reaches no environment
+    # secret — cannot move a production feature whatever it targets.
+    assert plan["env"] == {
+        "TF_VAR_cloudflare_api_token": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
+        f"TF_VAR_{flag_token}": "${{ secrets." + flag_token.upper() + " }}",
+    }
     assert "-lock-timeout=10m" in plan["run"]
     assert tuple(re.findall(r"-target=(\S+)", plan["run"])) == targets
     assert f'-out="{plan_path}"' in plan["run"]

@@ -2610,7 +2610,7 @@ async def test_the_wiki_app_is_listed_where_the_service_answers_for_it(
     web: tuple[AsyncClient, UUID, UUID], unbound_flags: None
 ) -> None:
     """The other half of the exception: closed is the state before an answer, not a state no answer
-    can leave — `ufoctl flags set enable-wiki-app --on` is the whole act that offers the app."""
+    can leave — flipping this environment's `enable-wiki-app` to true offers the app."""
     client, workspace_id, _agent_id = web
     init_flags(
         InMemoryProvider(

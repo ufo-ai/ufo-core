@@ -801,3 +801,53 @@ def test_containment_gate_ignores_a_membership_test_that_is_not_about_paths() ->
         )
     }
     assert gates._lexical_containment_failures(trees) == []
+
+
+ENV_UFO_TF = Path("infra/envs/testing/ufo.tf")
+EDGE_FLAGS = Path("infra/envs/edge/flags.tf")
+PACK_CONFIG = '  serve_config = <<-TOML\n    [pack]\n    name = "assistant_hosted"\n  TOML\n'
+
+
+def _declared_keys() -> set[str]:
+    from ufo.ext.loader import load_manifests
+
+    return {spec.key for manifest in load_manifests("assistant_hosted") for spec in manifest.flags}
+
+
+def _flags_tf(*keys: str) -> str:
+    body = "".join(f'      "{key}" = true\n' for key in keys)
+    return "locals {\n  portal_flags = {\n    testing = {\n" + body + "    }\n  }\n}\n"
+
+
+def test_flag_gate_names_a_key_the_code_reads_and_the_environment_omits() -> None:
+    """The failure with no other signal: the deploy comes up, the flag service is never told about
+    that key, and every workspace reads the call-site default forever."""
+    failures = gates._declared_flag_failures(
+        {ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: _flags_tf("enable-memory-tab")}
+    )
+    assert failures
+    assert any("enable-wiki-app" in failure and "omits" in failure for failure in failures)
+
+
+def test_flag_gate_names_a_key_the_environment_declares_and_nothing_reads() -> None:
+    """The reverse, which reads worse: an operator sets it, the dashboard says the feature moved,
+    and no code ever asked."""
+    failures = gates._declared_flag_failures(
+        {ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: _flags_tf(*_declared_keys(), "enable-nothing-at-all")}
+    )
+    assert [failure for failure in failures if "enable-nothing-at-all" in failure]
+    assert not [failure for failure in failures if "omits" in failure]
+
+
+def test_flag_gate_passes_where_the_two_lists_agree() -> None:
+    declared = _flags_tf(*_declared_keys())
+    assert gates._declared_flag_failures({ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: declared}) == []
+
+
+def test_flag_gate_names_an_environment_with_no_map_of_its_own() -> None:
+    """Each environment answers for itself: a root whose deploy reads flags and whose map is absent
+    would apply nothing, and every flag in it would read its default."""
+    failures = gates._declared_flag_failures(
+        {ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: "locals {\n  portal_flags = {\n  }\n}\n"}
+    )
+    assert len(failures) == 1 and "no portal_flags map for testing" in failures[0]
