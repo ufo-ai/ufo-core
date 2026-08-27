@@ -23,6 +23,12 @@ const PDF_MEDIA_TYPE = "application/pdf";
 const HTML_CSP =
   "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\">";
 
+/** What a picture whose link has expired says. Both containers that draw a shared picture — the
+ *  shelf's sheet and the viewer that fills the window — say it, and the answer is the same in each:
+ *  the src is a signed URL a listing minted, so reading the page again mints a live one. */
+export const PICTURE_DID_NOT_LOAD =
+  "The image did not load. Its link may have expired — reload the page.";
+
 export function isTextMedia(mediaType: string): boolean {
   return mediaType.startsWith("text/") || mediaType === "application/json";
 }
@@ -93,7 +99,7 @@ function FileBody({ file }: { file: SharedFile }) {
     return <FileNote>No preview for this file type. Download it to open it.</FileNote>;
   }
   if (failed) {
-    return <FileNote>The image did not load. Its link may have expired — reload the page.</FileNote>;
+    return <FileNote>{PICTURE_DID_NOT_LOAD}</FileNote>;
   }
   return (
     <img

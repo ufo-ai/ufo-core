@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/message-scroller";
 import { Reveal } from "@/components/ui/reveal";
 import { FileSheet } from "@/kernel/artifact";
+import { Lightbox } from "@/kernel/lightbox";
 import { AgentIcon } from "@/lib/agentIcon";
 import { BASE } from "@/lib/api";
 import { agentName } from "@/lib/agentName";
@@ -269,7 +270,7 @@ export function MessageLog({
   className?: string;
   children?: ReactNode;
 }) {
-  const [opened, setOpened] = useState<ChatFile | null>(null);
+  const [opened, setOpened] = useState<Opened | null>(null);
   const waiting = messages.findIndex(
     (message) => message.arrival_id !== undefined || message.queued === true,
   );
@@ -367,10 +368,20 @@ export function MessageLog({
         )}
         {children}
       </MessageScrollerContent>
-      {opened ? <AttachmentSheet file={opened} onClose={() => setOpened(null)} /> : null}
+      {opened ? (
+        <OpenedFile
+          opened={opened}
+          onMove={(at) => setOpened({ files: opened.files, at })}
+          onClose={() => setOpened(null)}
+        />
+      ) : null}
     </>
   );
 }
+
+/** The file a member pressed, in the set it was pressed out of: a turn's pictures open as one set
+ *  so the viewer can step between them, and every other file opens as a set of one. */
+type Opened = { files: ChatFile[]; at: number };
 
 type Row =
   | { at: number; said: Spoken; live?: undefined }
@@ -422,7 +433,7 @@ const TAP_FLOOR = "max-narrow:inline-flex max-narrow:min-h-(--size-control) max-
  *  other file follows in a card grid, including documents whose first page has a preview and images
  *  no preview was rendered for — only a drawable image belongs in the image carousel. Pressing an
  *  preview goes to `onOpen`, as does every file card. */
-function Files({ files, onOpen }: { files: ChatFile[]; onOpen: (file: ChatFile) => void }) {
+function Files({ files, onOpen }: { files: ChatFile[]; onOpen: (opened: Opened) => void }) {
   const images = files.filter(
     (file) => file.media_type.startsWith("image/") && file.preview_url !== null,
   );
@@ -431,14 +442,16 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen: (file: ChatFile) 
   );
   return (
     <>
-      {images.length === 1 ? <Picture file={images[0]} onOpen={onOpen} /> : null}
+      {images.length === 1 ? (
+        <Picture file={images[0]} onOpen={() => onOpen({ files: images, at: 0 })} />
+      ) : null}
       {images.length > 1 ? (
         <AttachmentGroup className="mt-2xs items-start">
           {images.map((file, index) => (
             <Picture
               key={file.filename + String(index)}
               file={file}
-              onOpen={onOpen}
+              onOpen={() => onOpen({ files: images, at: index })}
               grouped
             />
           ))}
@@ -450,7 +463,11 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen: (file: ChatFile) 
           className="mt-2xs grid grid-cols-2 items-start gap-lg max-narrow:grid-cols-1"
         >
           {documents.map((file, index) => (
-            <FileCard key={file.filename + String(index)} file={file} onOpen={onOpen} />
+            <FileCard
+              key={file.filename + String(index)}
+              file={file}
+              onOpen={() => onOpen({ files: [file], at: 0 })}
+            />
           ))}
         </div>
       ) : null}
@@ -458,7 +475,7 @@ function Files({ files, onOpen }: { files: ChatFile[]; onOpen: (file: ChatFile) 
   );
 }
 
-function FileCard({ file, onOpen }: { file: ChatFile; onOpen: (file: ChatFile) => void }) {
+function FileCard({ file, onOpen }: { file: ChatFile; onOpen: () => void }) {
   const thumbnail =
     file.preview_url === null ? null : (
       <AttachmentThumbnail filename={file.filename} previewUrl={file.preview_url} />
@@ -468,7 +485,7 @@ function FileCard({ file, onOpen }: { file: ChatFile; onOpen: (file: ChatFile) =
       {thumbnail === null ? null : (
         <button
           type="button"
-          onClick={() => onOpen(file)}
+          onClick={onOpen}
           aria-label={`Open ${file.filename}`}
           className="shrink-0 cursor-pointer border-0 bg-transparent p-0"
         >
@@ -479,7 +496,7 @@ function FileCard({ file, onOpen }: { file: ChatFile; onOpen: (file: ChatFile) =
         <AttachmentTitle>
           <button
             type="button"
-            onClick={() => onOpen(file)}
+            onClick={onOpen}
             className={cn("cursor-pointer border-0 bg-transparent p-0 text-inherit", TAP_FLOOR)}
           >
             {file.filename}
@@ -559,7 +576,7 @@ function Picture({
   grouped = false,
 }: {
   file: ChatFile;
-  onOpen: (file: ChatFile) => void;
+  onOpen: () => void;
   grouped?: boolean;
 }) {
   const badge = attachmentBadgeFor(file.filename);
@@ -583,7 +600,7 @@ function Picture({
   return (
     <button
       type="button"
-      onClick={() => onOpen(file)}
+      onClick={onOpen}
       className={cn(className, "cursor-pointer border-0 bg-transparent p-0")}
     >
       {drawn}
@@ -591,9 +608,31 @@ function Picture({
   );
 }
 
-function AttachmentSheet({ file, onClose }: { file: ChatFile; onClose: () => void }) {
-  const shared = { ...file, subject: null };
-  return <FileSheet file={shared} onClose={onClose} />;
+/** What pressing a shared file opens. A picture opens in the viewer that fills the window, because
+ *  reading a picture is a matter of size and the panel beside the transcript has none to give; every
+ *  other file opens in the shelf's own sheet, where its characters, its first page, or its download
+ *  is the whole of what there is to read. */
+function OpenedFile({
+  opened,
+  onMove,
+  onClose,
+}: {
+  opened: Opened;
+  onMove: (at: number) => void;
+  onClose: () => void;
+}) {
+  const file = opened.files[opened.at];
+  if (file.media_type.startsWith("image/") && file.preview_url !== null) {
+    return (
+      <Lightbox
+        files={opened.files.map((held) => ({ ...held, subject: null }))}
+        at={opened.at}
+        onMove={onMove}
+        onClose={onClose}
+      />
+    );
+  }
+  return <FileSheet file={{ ...file, subject: null }} onClose={onClose} />;
 }
 
 export function Meta({ children }: { children: ReactNode }) {
