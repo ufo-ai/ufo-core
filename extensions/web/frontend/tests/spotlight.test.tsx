@@ -102,8 +102,8 @@ function nothing() {
   });
 }
 
-/** The shipped apps whose panes hold the workspace's records: a file or task hit lands on the app
- *  that reads its kind, so the fixture set carries both. */
+/** The shipped app whose pane holds the workspace's files: a file hit lands on the app that reads
+ *  its kind. A task hit lands on the workspace's own tasks tab, which needs no app. */
 const ARTIFACTS_APP = {
   id: "7f1b9f6e-9f30-4f8f-9a6e-1d9d1c2b3a41",
   name: "artifacts",
@@ -112,18 +112,10 @@ const ARTIFACTS_APP = {
   icon: "stele",
   app: "artifacts",
 };
-const TASKS_APP = {
-  id: "8c2d0a7f-0a41-4b90-8b7f-2e0e2d3c4b52",
-  name: "tasks",
-  model: "auto",
-  main: false,
-  icon: "flange",
-  app: "tasks",
-};
 
 function portal() {
   render(
-    <App agents={[AGENT, SECOND, ARTIFACTS_APP, TASKS_APP]} member={MEMBER} onAgents={() => {}} />,
+    <App agents={[AGENT, SECOND, ARTIFACTS_APP]} member={MEMBER} onAgents={() => {}} />,
   );
 }
 
@@ -238,7 +230,7 @@ test("two agents' same-named records both stand, each opening its own", async ()
   expect(rows).toHaveLength(2);
 
   await userEvent.click(rows[1]);
-  expect(location.hash.startsWith("#/agents/" + TASKS_APP.id)).toBe(true);
+  expect(location.hash.startsWith("#/workspace/tasks")).toBe(true);
   expect(decodeURIComponent(location.hash)).toContain(
     "object/" + SECOND_ID + "/" + TASK_KIND.kind + "/nightly-deploy",
   );

@@ -15,12 +15,8 @@ import {
   MEMBER,
   NO_ARTIFACTS,
   NO_RUNS,
-  NO_TASKS,
-  NO_TRIGGERS,
   SECOND_ID,
   SITE_KIND,
-  TASK_KIND,
-  TRIGGER_KIND,
   TURN_ID,
   json,
   objectIndex,
@@ -143,16 +139,6 @@ test("the radar page mounts and draws its empty feed under its own band", async 
   expect(await screen.findByText(NO_RUNS)).toBeTruthy();
   expect(calls.some((url) => url.includes("/api/agents"))).toBe(false);
   expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);
-});
-
-test("the tasks page mounts and draws both of its listings", async () => {
-  await runPage("tasks", {
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
-    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-  });
-  expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
-  expect(await screen.findByText(NO_TASKS)).toBeTruthy();
-  expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
 });
 
 test("the wiki page mounts and draws the workspace article", async () => {

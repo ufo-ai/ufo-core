@@ -614,7 +614,7 @@ beside it, and pressing one opens it. The homepage read has three states, so the
 member is waiting for is not the page that is not there: `building` while the seed run that builds
 an agent's first homepage is still working, drawn as the shape a page takes; `set` once one is
 bound; and `none`, where the pane draws the conversation column alone. Eight applications are pages
-the deploy carries: the chat, radar, tasks, artifacts, wiki, meetings, issues, and metrics
+the deploy carries: the chat, radar, artifacts, wiki, meetings, issues, metrics, and code
 extensions ship one page source each, and the portal's build compiles them into one static tree of
 shared hashed chunks,
 published under the digest of its own bytes. The versioned document and hashed assets are public

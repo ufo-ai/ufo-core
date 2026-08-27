@@ -32,7 +32,6 @@
     "../../app_meetings/ufo_ext_app_meetings/skills/app-meetings-home/app.tsx",
     "../../app_metrics/ufo_ext_app_metrics/skills/app-metrics-home/app.tsx",
     "../../app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx",
-    "../../app_tasks/ufo_ext_app_tasks/skills/app-tasks-home/app.tsx",
     "../../app_wiki/ufo_ext_app_wiki/skills/app-wiki-home/app.tsx"
   ]
 }

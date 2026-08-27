@@ -7,7 +7,7 @@ assemble an install step, a link, or a request for a token here.
 
 ## Finding existing work
 
-Radar, Artifacts, and Tasks are under Apps in the web portal:
+Radar and Artifacts are under Apps in the web portal; Tasks is a tab on the Workspace page:
 
 - Radar opens each scheduled run as a full report with its files and conversation.
 - Artifacts lists shared files and hosted sites.

@@ -1,21 +1,11 @@
-// The tasks app's page: a static site built with the portal's app kit. Edit this file and redeploy
-// to change the page.
+import { useState } from "react";
 
-import {
-  Button,
-  Header,
-  ObjectDetail,
-  ObjectPane,
-  PanelEmpty,
-  SectionApp,
-  Sheet,
-  mountApp,
-  objectAt,
-  slotOf,
-  usePageHead,
-  useState,
-} from "ufo/kit";
-import type { Placement } from "ufo/kit";
+import { Button } from "@/components/ui/button";
+import { Sheet } from "@/components/ui/sheet";
+import { ObjectDetail, ObjectPane, objectAt, slotOf } from "@/kernel/objects";
+import type { Placement } from "@/kernel/pager";
+import { PanelEmpty } from "@/kernel/panel";
+import type { SpecValue } from "@/kernel/form";
 
 /** What is armed to run an agent when nobody is typing: a clock, or a source that changed. The two
  *  are one destination because a member asking what stands ready here asks one question, and an
@@ -36,12 +26,10 @@ const KINDS = [
 
 /** The workspace's standing orders. Both listings open their selected record in the page's one
  *  sheet. Closing it reads the listings again, so a changed or deleted row is stated as it is. */
-function Tasks({
-  title,
+export function Tasks({
   place,
   onPlace,
 }: {
-  title: string;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
@@ -52,10 +40,8 @@ function Tasks({
     onPlace({ opens: undefined });
     setGeneration((count) => count + 1);
   };
-  const band = usePageHead(<Header pinned heading={1} title={title} />);
   return (
     <>
-      {band}
       {KINDS.map((held) => (
         <ObjectPane
           key={held.kind + "/" + generation}
@@ -94,7 +80,7 @@ function TaskStateAction({
   onApply,
 }: {
   paused: boolean;
-  onApply: (spec: Record<string, string | boolean>) => Promise<unknown>;
+  onApply: (spec: Record<string, SpecValue>) => Promise<unknown>;
 }) {
   const [busy, setBusy] = useState(false);
   async function toggle() {
@@ -109,16 +95,3 @@ function TaskStateAction({
     </Button>
   );
 }
-
-mountApp(document.getElementById("root")!, (init) => (
-  <SectionApp
-    tab="tasks"
-    init={init}
-    view={{
-      label: "Tasks",
-      remountOnPlace: false,
-      ownsHeader: true,
-      render: (place, onPlace) => <Tasks title="Tasks" place={place} onPlace={onPlace} />,
-    }}
-  />
-));

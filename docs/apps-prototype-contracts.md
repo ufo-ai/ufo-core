@@ -122,7 +122,6 @@ Apps and their pages (prototype):
 |---|---|---|
 | app_chat | `api/chats`, the transcript read, the turn stream | one conversation whole — composer, streamed replies, starters; click → `navigate #/c/<id>` |
 | app_radar | `workspace/radar` | list digest entries; click → `navigate #/c/<id>`; "Rebuild" → the intents lane's fenced rebuild verb |
-| app_tasks | `objects/scheduled_task`, `objects/source_trigger` | list; pause/resume → `write scheduled_task` |
 | app_artifacts | `workspace/artifacts`, `objects/site` | list files+sites; click → open link |
 | app_wiki | `workspace/memory`, `objects/member` | list memory + roster; click a member → navigate |
 

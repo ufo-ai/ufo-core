@@ -240,7 +240,7 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
     <Viewer.Provider value={MEMBER.email}>
       <MainAgentProvider agents={[AGENT]}>
         <SectionApp
-          tab="tasks"
+          tab="wiki"
           init={{
             member: { email: MEMBER.email, admin: true },
             agents: [AGENT],
@@ -249,7 +249,7 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
             portal: location.origin,
           }}
           view={{
-            label: "Tasks",
+            label: "Wiki",
             remountOnPlace: false,
             render: (place, onPlace) => (
               <ObjectPane
@@ -264,7 +264,7 @@ test("a section app hosts a screen inside the portal's own section chrome", asyn
       </MainAgentProvider>
     </Viewer.Provider>,
   );
-  expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Wiki" })).toBeTruthy();
 });
 
 test("a page mounted through the kit alone greets the shell, reads over the bridge, and takes a frame", async () => {

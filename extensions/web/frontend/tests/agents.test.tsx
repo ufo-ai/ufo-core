@@ -792,7 +792,7 @@ test("the workspace Apps tab restores an archived app hidden from the Applicatio
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/apps";
+  location.hash = "#/workspace/apps?chip=Archived";
   render(
     <App
       agents={[AGENT]}
@@ -825,6 +825,32 @@ test("the workspace Apps tab restores an archived app hidden from the Applicatio
     { verb: "restore_application", app_id: SECOND_ID, name: "invoice-intake-2" },
   ]);
   expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("the workspace Apps tab lists every app and narrows to the member's own", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/workspace/apps";
+  render(
+    <App
+      agents={[AGENT, { ...RESEARCH, mine: true }]}
+      archived={[]}
+      member={ADMIN}
+      onAgents={() => {}}
+    />,
+  );
+  expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
+  const all = within(await screen.findByRole("table"));
+  expect(all.getByText("Assistant")).toBeTruthy();
+  expect(all.getByText("Research")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Created by me" }));
+  const own = within(await screen.findByRole("table"));
+  await waitFor(() => expect(own.queryByText("Assistant")).toBeNull());
+  expect(own.getByText("Research")).toBeTruthy();
+  expect(location.hash).toContain("chip=Created");
+
+  await userEvent.click(screen.getByRole("tab", { name: "Archived" }));
+  expect(await screen.findByText("No apps are archived.")).toBeTruthy();
 });
 
 test("scheduled task sheets close back to their settings list", async () => {

@@ -3,6 +3,7 @@ import { holdableTrack, unholdable } from "@/lib/tracks";
 export const WORKSPACE_TABS = [
   "team",
   "apps",
+  "tasks",
   "skills",
   "memory",
   "sources",
@@ -14,7 +15,7 @@ export const WORKSPACE_TABS = [
 /** Every top-level screen name the address codec reads and writes. The portal itself hosts only
  *  `connectors`; the rest are screens shipped as apps, and a section address naming one lands on
  *  that app with its place carried — the name outlives who renders it, so links keep working. */
-export const SECTIONS = ["wiki", "artifacts", "radar", "tasks", "connectors"] as const;
+export const SECTIONS = ["wiki", "artifacts", "radar", "connectors"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
@@ -385,14 +386,22 @@ const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
     WORKSPACE_PREFIX + view + serializePlace(place),
 );
 
-const SECTION = row(
+/* The door swings the other way too: tasks stood as its own section, shipped as an app, and links
+   to that address exist outside this code. Only a name that made that move answers here — every
+   other tab keeps `#/workspace/` as its one address — which is why this row, like the workspace
+   row, reads to either kind. */
+const TAB_SECTIONS: readonly WorkspaceTab[] = ["tasks"];
+
+const SECTION = row<"section" | "workspace", [Section, WorkspacePlace?]>(
   "section",
   new RegExp(`^#/(${SECTION_NAME})${PLACE_TAIL}`),
   (match) => {
     const name = match[1];
-    if (!isSection(name)) return null;
     const place = parsePlace(match[2]);
-    return place && { kind: "section", section: name, place };
+    if (!place) return null;
+    if (isSection(name)) return { kind: "section", section: name, place };
+    const moved = TAB_SECTIONS.find((tab) => tab === name);
+    return moved === undefined ? null : { kind: "workspace", view: moved, place };
   },
   (section: Section, place: WorkspacePlace = {}) => "#/" + section + serializePlace(place),
 );

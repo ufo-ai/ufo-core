@@ -116,7 +116,6 @@ export async function searchEverywhere(
    *  the app has no screen for the kind, so its group is dropped rather than pointed nowhere. */
   const app = (slug: string) => agents.find((agent) => agent.app === slug);
   const artifactsApp = app("artifacts");
-  const tasksApp = app("tasks");
   const [conversations, files, sites, memory, tasks] = await Promise.all([
     group<"conversations">(
       "Conversations",
@@ -182,11 +181,9 @@ export async function searchEverywhere(
         const kind = path.slice("/objects/".length).split("?")[0];
         return payload.objects.map((row) => ({
           key: row.agent_id + "/" + kind + "/" + row.name,
-          hash: tasksApp
-            ? agentHash(tasksApp.id, {
-                opens: [slotOf({ agent: row.agent_id, kind, name: row.name })],
-              })
-            : "",
+          hash: workspaceHash("tasks", {
+            opens: [slotOf({ agent: row.agent_id, kind, name: row.name })],
+          }),
           primary: row.name,
           fact: TASK_KINDS.find((entry) => entry.kind === kind)?.label ?? kind,
         }));
@@ -217,6 +214,6 @@ export async function searchEverywhere(
     conversations,
     ...(artifactsApp ? [artifacts] : []),
     memory,
-    ...(tasksApp ? [tasks] : []),
+    tasks,
   ].filter((entry) => entry.hits.length > 0 || entry.failed !== null);
 }

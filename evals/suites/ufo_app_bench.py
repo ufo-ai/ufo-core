@@ -111,7 +111,7 @@ COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read
 AUDIT_DIGEST = sha256(AUDIT_CONTENT).hexdigest()
 COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()
 APP_INDEX_CONTENT = (
-    files("ufo_ext_app_tasks").joinpath("skills/app-tasks-home/index.html").read_bytes()
+    files("ufo_ext_app_wiki").joinpath("skills/app-wiki-home/index.html").read_bytes()
 )
 APP_WORKSPACE_ROOT = "/workspace/ufo-app"
 APP_PREVIEW = rb"""<!doctype html>

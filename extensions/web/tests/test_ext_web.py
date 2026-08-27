@@ -2372,6 +2372,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
                 "icon": "compass",
                 "purpose": None,
                 "app": None,
+                "mine": False,
                 "homepage": {"state": "none"},
             }
         ],
@@ -2434,8 +2435,14 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             )
         )
     _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
-    _member_id, member_token = await _seed_member(workspace_id, "member@example.com")
+    member_id, member_token = await _seed_member(workspace_id, "member@example.com")
     await _grant_web_access(workspace_id, second_agent, "member@example.com")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(owner_member_id=member_id)
+            .where(tables.agent.c.id == second_agent)
+        )
     admin_view = await client.get(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
@@ -2453,6 +2460,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "icon": "compass",
             "purpose": None,
             "app": None,
+            "mine": False,
             "homepage": {"state": "none"},
             "web_audience": [],
         },
@@ -2464,6 +2472,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
             "icon": "telescope",
             "purpose": None,
             "app": None,
+            "mine": False,
             "homepage": {"state": "none"},
             "web_audience": ["member@example.com"],
         },
@@ -2472,9 +2481,9 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert member_view.json()["member"] == {"email": "member@example.com", "admin": False}
-    assert [a["id"] for a in member_view.json()["agents"]] == [
-        str(agent_id),
-        str(second_agent),
+    assert [(a["id"], a["mine"]) for a in member_view.json()["agents"]] == [
+        (str(agent_id), False),
+        (str(second_agent), True),
     ]
     assert all("web_audience" not in agent for agent in member_view.json()["agents"])
     reachable = await client.get(
@@ -6411,7 +6420,6 @@ def test_the_shipped_apps_tree_is_a_page_per_app_and_the_chunks_they_name() -> N
         "meetings",
         "metrics",
         "radar",
-        "tasks",
         "wiki",
     }
     for slug in sorted(apps.slugs):

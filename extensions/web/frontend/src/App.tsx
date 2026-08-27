@@ -34,7 +34,7 @@ import { Admin } from "@/views/Admin";
 import { AgentSetup } from "@/views/AgentSetup";
 
 import { Agents, AppsIndex } from "@/views/Agents";
-import { ArchivedAppsProvider } from "@/views/ArchivedApps";
+import { AppsProvider } from "@/views/Apps";
 import { Chat } from "@/views/Chat";
 import { ChatPane, ConversationSlot } from "@/views/ChatPane";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
@@ -233,7 +233,7 @@ export function App({ agents, archived = [], member, onAgents }: AppProps) {
                 narrow={narrow}
                 onBuild={startBuild}
               />
-              <ArchivedAppsProvider apps={archived} onRestored={onAgents}>
+              <AppsProvider agents={agents} archived={archived} onRestored={onAgents}>
                 <RoutedPane
                   route={route}
                   agents={agents}
@@ -244,7 +244,7 @@ export function App({ agents, archived = [], member, onAgents }: AppProps) {
                   onForwardAgents={forwardBuild}
                   buildWanted={wantedBuild}
                 />
-              </ArchivedAppsProvider>
+              </AppsProvider>
               <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
             </div>
           </DrawerHost>

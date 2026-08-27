@@ -53,7 +53,7 @@ TASK_SCHEDULING_SKILL_MD = (
 CREATE_APPLICATION_SKILL_MD = "core/src/ufo/skills/create-application/SKILL.md"
 RADAR_HOME = "extensions/app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx"
 ARTIFACTS_HOME = "extensions/app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx"
-TASKS_HOME = "extensions/app_tasks/ufo_ext_app_tasks/skills/app-tasks-home/app.tsx"
+TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"
 WEB_OBJECTS = "extensions/web/frontend/src/kernel/objects.tsx"
 MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
 WEB_MEMORY_VIEW = "extensions/web/frontend/src/views/Memory.tsx"
@@ -427,7 +427,7 @@ CLAIMS = (
         claim="Tasks lists scheduled work and source triggers",
         corpus="references/capabilities.md",
         phrase="Tasks lists recurring tasks and source triggers",
-        source=TASKS_HOME,
+        source=TASKS_VIEW,
         pattern=(
             r'\{ kind: "scheduled_task", label: "Scheduled" \},\n'
             r'\s+\{ kind: "source_trigger", label: "Triggers" \}'
@@ -437,14 +437,14 @@ CLAIMS = (
         claim="Tasks can pause or resume a scheduled task",
         corpus="references/capabilities.md",
         phrase="Tasks can also pause or resume a scheduled task",
-        source=TASKS_HOME,
+        source=TASKS_VIEW,
         pattern=r'\{paused \? "Resume" : "Pause"\}',
     ),
     Claim(
         claim="Tasks uses the editable object panel for its rows",
         corpus="references/capabilities.md",
         phrase="edit\nor delete a row",
-        source=TASKS_HOME,
+        source=TASKS_VIEW,
         pattern=r"<ObjectDetail",
     ),
     Claim(

@@ -27,6 +27,8 @@ export type Agent = {
    *  surface, the default pins — where the name is a member-visible string provisioning may
    *  suffix on collision. */
   app?: string | null;
+  /** Whether the signed-in member created this app — the fact the apps listing narrows on. */
+  mine?: boolean;
   web_audience?: string[];
 };
 

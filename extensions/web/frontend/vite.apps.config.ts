@@ -29,7 +29,6 @@ const APPS = [
   "meetings",
   "metrics",
   "radar",
-  "tasks",
   "wiki",
 ];
 const KIT = new URL("./src/apps/kit.ts", import.meta.url).pathname;

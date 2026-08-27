@@ -55,7 +55,6 @@ EXTENSIONS = (
     "app_meetings",
     "app_metrics",
     "app_radar",
-    "app_tasks",
     "app_wiki",
     "turbopuffer",
     "perplexity",

@@ -167,6 +167,23 @@ test("a screen moved off the workspace tabs still answers at the address it had"
   expect(parseHash("#/workspace/nothing")).toEqual({ kind: "bad-link" });
 });
 
+/** Tasks made the opposite move — off its own section, onto the workspace tabs — and the links to
+ *  its old address spell the section it was. Only a name that made that move answers there: every
+ *  other tab keeps `#/workspace/` as its one address. */
+test("a screen moved onto the workspace tabs still answers at the section address it had", () => {
+  expect(parseHash("#/tasks")).toEqual({ kind: "workspace", view: "tasks", place: {} });
+  expect(parseHash("#/tasks?q=nightly")).toEqual({
+    kind: "workspace",
+    view: "tasks",
+    place: { q: "nightly" },
+  });
+  expect(parseHash(workspaceHash("tasks"))).toEqual({
+    kind: "workspace",
+    view: "tasks",
+    place: {},
+  });
+});
+
 /** One table row holds the pattern, the read and the builder for a route, so every address the
  *  portal writes is one its own read answers with the route that wrote it. */
 test("a conversation slot has a builder, and it writes the address its own read takes", () => {

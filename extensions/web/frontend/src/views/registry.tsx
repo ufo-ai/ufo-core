@@ -4,8 +4,9 @@ import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
 import { WorkspaceConnectors } from "@/views/Connectors";
-import { ArchivedApps } from "@/views/ArchivedApps";
+import { Apps } from "@/views/Apps";
 import { Memory } from "@/views/Memory";
+import { Tasks } from "@/views/Tasks";
 import { SOURCES } from "@/views/Sources";
 import { Team } from "@/views/Team";
 import { WorkspaceSkills } from "@/views/WorkspaceSkills";
@@ -51,7 +52,12 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   apps: {
     label: "Apps",
     remountOnPlace: false,
-    render: () => <ArchivedApps />,
+    render: (place, onPlace) => <Apps place={place} onPlace={onPlace} />,
+  },
+  tasks: {
+    label: "Tasks",
+    remountOnPlace: false,
+    render: (place, onPlace) => <Tasks place={place} onPlace={onPlace} />,
   },
   skills: {
     label: "Skills",

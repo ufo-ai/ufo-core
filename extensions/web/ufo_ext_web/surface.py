@@ -995,6 +995,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                     "icon": agent.icon,
                     "purpose": agent.purpose,
                     "app": shipped_app_slug(agent.provisioned_by),
+                    "mine": agent.owner_member_id == member_id,
                     "homepage": homepages[agent.id],
                     **(
                         {"web_audience": list(grants.get(agent.id, ()))}
