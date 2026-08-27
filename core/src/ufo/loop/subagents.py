@@ -75,7 +75,11 @@ from ufo.tools.context import (
 )
 from ufo.turns.audience import Audience, audience_member
 from ufo.turns.cancellation import cancel_one_turn
-from ufo.turns.contracts import Contract, input_contract, output_contract
+from ufo.turns.contracts import (
+    Contract,
+    input_contract,
+    output_contract,
+)
 from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.turns.untrusted import wall
 
@@ -113,6 +117,15 @@ SUBAGENT_OUTPUT_DISCIPLINE = (
     .replace(CITATION_SLOT, CITATION_BLOCK)
     .replace(DELIVERY_REGISTER_SLOT, DELIVERY_REGISTER_BLOCK)
 )
+PARENT_HANDOFF_END = "</parent_handoff>"
+PARENT_HANDOFF_START_INDEX = SUBAGENT_OUTPUT_DISCIPLINE.index("<parent_handoff>")
+PARENT_HANDOFF_END_INDEX = SUBAGENT_OUTPUT_DISCIPLINE.index(PARENT_HANDOFF_END) + len(
+    PARENT_HANDOFF_END
+)
+UNCAPPED_SUBAGENT_OUTPUT_DISCIPLINE = (
+    SUBAGENT_OUTPUT_DISCIPLINE[:PARENT_HANDOFF_START_INDEX]
+    + SUBAGENT_OUTPUT_DISCIPLINE[PARENT_HANDOFF_END_INDEX:]
+).strip()
 CORE_SKILL_INDEX = tuple((skill.name, skill.description) for skill in CORE_SKILLS)
 
 
@@ -192,7 +205,12 @@ def subagent_system_prompt(
             f"{SKILL_INDEX_SLOT} slot"
         )
     body = profile.prompt.replace(SKILL_INDEX_SLOT, render_skill_index(skills))
-    if unresolved := frozenset(PROMPT_VAR_RE.findall(f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}")):
+    discipline = (
+        SUBAGENT_OUTPUT_DISCIPLINE
+        if profile.concise_parent_handoff
+        else UNCAPPED_SUBAGENT_OUTPUT_DISCIPLINE
+    )
+    if unresolved := frozenset(PROMPT_VAR_RE.findall(f"{body}\n\n{discipline}")):
         raise ValueError(f"subagent prompt has unresolved slots: {', '.join(sorted(unresolved))}")
     if preload:
         bodies = loaded_context(preload)
@@ -202,7 +220,7 @@ def subagent_system_prompt(
                 f"over the {PRELOAD_PROMPT_CHAR_BOUND} bound"
             )
         body = f"{body}\n\n---\n\nPreloaded skill(s):\n\n{bodies}"
-    return f"{body}\n\n{SUBAGENT_OUTPUT_DISCIPLINE}\n\n{FINISH_CONTRACT}"
+    return f"{body}\n\n{discipline}\n\n{FINISH_CONTRACT}"
 
 
 @dataclass(frozen=True)

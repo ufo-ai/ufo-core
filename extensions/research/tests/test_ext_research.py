@@ -384,6 +384,11 @@ def test_registers_the_research_and_deep_research_profiles() -> None:
     assert (
         "maxLength" not in RESEARCH_PROFILE.output_model.model_json_schema()["properties"]["result"]
     )
+    result_description = RESEARCH_PROFILE.output_model.model_json_schema()["properties"]["result"][
+        "description"
+    ]
+    assert "one parent-visible delivery" in result_description.casefold()
+    assert "at most 20 words" in result_description
     for tool_name in ("search_web", "search_vertical", "fetch_url"):
         assert tool_name in RESEARCH_TOOL_NAMES
     assert "ask_user" not in RESEARCH_TOOL_NAMES
@@ -403,6 +408,8 @@ def test_research_profile_prompt_wraps_with_citation_and_fills_the_skill_index()
         assert "<available_skills>" in prompt
         assert "- extension-skill: A turn-specific research workflow." in prompt
         assert "<citation_instructions>" in prompt
+        assert "<parent_handoff>" in prompt
+        assert "keep it within 20 words" in prompt
         assert "search_vertical" in prompt
         assert "list_skills" not in profile.tool_names
 

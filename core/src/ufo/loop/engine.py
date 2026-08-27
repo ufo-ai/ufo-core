@@ -158,7 +158,8 @@ from ufo.tools.context import (
 from ufo.tools.registry import REQUESTED_BY, TOOL_SEARCH, ToolRegistry
 from ufo.turns.activity import SKILL_LOAD_TOOL, ActivitySummarizer
 from ufo.turns.audience import Audience, audience_member, audience_subjects
-from ufo.turns.contracts import Contract
+from ufo.turns.contracts import Contract, freeform_result_contract
+from ufo.turns.delivery_register import DIRECT_PROSE_RESULT_MAX_CHARS
 from ufo.turns.transcript import Conversation
 from ufo.turns.untrusted import wall
 from ufo.turns.workspace_changes import WorkspaceChangeRecorder, change_targets
@@ -1524,14 +1525,14 @@ class TurnEngine:
         truncating exhausts its rounds and fails when the forced final round truncates too. Any
         other mid-stream model error fails immediately.
 
-        A spawned turn (`output_model` set) ends only through the finish tool: a lone finish call
-        whose args validate is the terminal, and its canonical JSON — never its narration — is
-        the answer the parent validates. A finish call with a bad payload or sharing its round
-        with other work comes back as an error result the model corrects; a turn that stops on
-        plain prose instead is closed by one forced finish round, so the terminal is schema-shaped
-        by construction — unless the prose closes a pending `ask_user`, which ends the turn with
-        its structured question on the terminal instead: the need bubbles to the spawning
-        conversation, and the answer continues this child through its next turn."""
+        A spawned turn (`output_model` set) ends with a schema-shaped terminal. A lone finish call
+        whose args validate is canonical JSON. The standard one-string `result` contract also
+        accepts a prose closing as that field, so the prose already produced becomes the parent
+        result without a second model round. Other prose closings get one forced finish round. A
+        finish call with a bad payload or sharing its round with other work comes back as an error
+        result the model corrects. A pending `ask_user` instead ends with its structured question:
+        the need bubbles to the spawning conversation, and the answer continues this child through
+        its next turn."""
         nudged = False
         question: AskUserInput | None = None
         credential_request: CredentialRequest | None = None
@@ -1589,6 +1590,22 @@ class TurnEngine:
             if not tool_calls:
                 if text.strip():
                     if self.output_model is not None and question is None:
+                        if (
+                            freeform_result_contract(self.output_model)
+                            and len(text) <= DIRECT_PROSE_RESULT_MAX_CHARS
+                        ):
+                            try:
+                                prose_output = self.output_model.model_validate({"result": text})
+                            except ValidationError:
+                                pass
+                            else:
+                                return (
+                                    messages,
+                                    prose_output.model_dump_json(),
+                                    None,
+                                    None,
+                                    None,
+                                )
                         messages = (
                             *messages,
                             Message(role="assistant", content=text),

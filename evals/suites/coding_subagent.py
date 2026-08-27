@@ -2,7 +2,9 @@
 
 import json
 import re
+from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from pydantic import TypeAdapter
 from ufo_ext_coding.manifest import SKILLS_ROOT
 
@@ -16,7 +18,11 @@ from evals.harness.capability import (
     WorkspaceFile,
     grading_statement,
 )
+from evals.harness.harness import JsonObject
 from evals.harness.scorers import combine, exact_scorer, lane_scorer, restraint_scorer
+from ufo.blob import WorkspaceBlobStore
+from ufo.db import workspace_tx
+from ufo.schema import tables
 from ufo.skills.runtime import LoadedSkill, loaded_context, parse_skill
 
 BACKGROUND_FLAG = TypeAdapter(bool)
@@ -63,6 +69,31 @@ BLOCKMUL_LAYERS = (
 )
 CODING_SKILL_DIR = SKILLS_ROOT / "coding"
 CODING_SKILL_CONTEXT = loaded_context((LoadedSkill(parse_skill(CODING_SKILL_DIR)),))
+STRUCTURED_REVIEW_RESULT: JsonObject = {
+    "head_sha": "52b8c52b2575d4eaa4403765de981824fe8c22bd",
+    "complete": True,
+    "findings": [
+        {
+            "path": "core/src/ufo/loop/subagents.py",
+            "line": 210,
+            "title": "The handoff word limit truncates the required review JSON object",
+            "trigger": (
+                "The Code app asks a coding reviewer to return a complete finding through finish."
+            ),
+            "failure": (
+                "The shared 20-word instruction conflicts with the required JSON and can truncate "
+                "its fields."
+            ),
+            "impact": "materially incorrect result or state for a supported workflow",
+        }
+    ],
+}
+STRUCTURED_REVIEW_OBJECTIVE = (
+    "Do not use tools. Return exactly the following complete JSON object through finish, with no "
+    "text before or after it. Preserve every field and value: "
+    + json.dumps(STRUCTURED_REVIEW_RESULT, separators=(",", ":"))
+)
+STRUCTURED_AGENT_NAME = "structured-worker"
 
 
 def _recommended_timeout_actions(text: str) -> tuple[str, ...]:
@@ -123,6 +154,117 @@ def profile_proxy_scorer(objective: str, grader: Grader) -> Grader:
     return DescribedGrader(
         f"one exact profile:coding spawn satisfies: {grading_statement(grader)}", grade
     )
+
+
+def structured_review_result_scorer(expected: JsonObject) -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        try:
+            result = json.loads(output.response)
+        except json.JSONDecodeError as error:
+            return CapabilityVerdict(False, f"the review result is not one JSON object: {error}")
+        words = len(output.response.split())
+        evidence: JsonObject = {"resultWords": words, "completeObject": result == expected}
+        if result != expected:
+            return CapabilityVerdict(
+                False, "the review result changed or truncated a field", evidence
+            )
+        return CapabilityVerdict(
+            True, "the coding child returned the complete review JSON", evidence
+        )
+
+    return DescribedGrader(
+        "one complete machine-readable review finding longer than the prose handoff cap", grade
+    )
+
+
+def workspace_agent_result_scorer(objective: str, expected: JsonObject) -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        spawns = tuple(call for call in output.own_calls if call.name == "spawn")
+        if len(spawns) != 1:
+            return CapabilityVerdict(False, f"the parent recorded {len(spawns)} spawns")
+        spawn = spawns[0]
+        payload = spawn.input.get("payload")
+        task = payload.get("task") if isinstance(payload, dict) else None
+        if (
+            not spawn.succeeded
+            or spawn.input.get("target") != f"agent:{STRUCTURED_AGENT_NAME}"
+            or not isinstance(task, str)
+            or not _same_transport_objective(objective, task)
+        ):
+            return CapabilityVerdict(False, "the parent changed the workspace-agent call")
+        try:
+            response = json.loads(output.response)
+            if isinstance(response, dict) and tuple(response) == ("result",):
+                response = json.loads(response["result"])
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            return CapabilityVerdict(False, f"the workspace agent returned invalid JSON: {error}")
+        evidence: JsonObject = {"completeObject": response == expected}
+        if response != expected:
+            return CapabilityVerdict(
+                False, "the workspace agent changed or truncated a field", evidence
+            )
+        return CapabilityVerdict(
+            True, "the workspace agent returned the complete review JSON", evidence
+        )
+
+    return DescribedGrader(
+        "one default-contract workspace agent returns a complete machine-readable review finding",
+        grade,
+    )
+
+
+async def _seed_structured_agent(
+    workspace_id: UUID, agent_id: UUID, _blob: WorkspaceBlobStore
+) -> None:
+    async with workspace_tx() as connection:
+        parent = (
+            await connection.execute(
+                sa.select(tables.agent.c.model, tables.agent.c.reasoning).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.id == agent_id,
+                )
+            )
+        ).one()
+        existing = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.name == STRUCTURED_AGENT_NAME,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    name=STRUCTURED_AGENT_NAME,
+                    prompt=(
+                        "Follow the task. Return its required machine-readable payload in full "
+                        "through finish."
+                    ),
+                    model=parent.model,
+                    reasoning=parent.reasoning,
+                    visibility="workspace",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        else:
+            await connection.execute(
+                sa.update(tables.agent)
+                .where(tables.agent.c.id == existing)
+                .values(
+                    prompt=(
+                        "Follow the task. Return its required machine-readable payload in full "
+                        "through finish."
+                    ),
+                    model=parent.model,
+                    reasoning=parent.reasoning,
+                    visibility="workspace",
+                    updated_at=sa.func.now(),
+                )
+            )
 
 
 def foreground_timeout_scorer() -> Grader:
@@ -1305,6 +1447,16 @@ PROVEN_LOCAL_INVENTORY_OBJECTIVE = (
 )
 
 CASES = (
+    CapabilityCase(
+        "workspace-agent-structured-result",
+        "Run exactly one spawn with target `agent:structured-worker`. Pass the text inside <task> "
+        "verbatim as `payload.task`; do not solve, summarize, or modify it. When its result "
+        "arrives, reply with that result verbatim.\n\n"
+        f"<task>\n{STRUCTURED_REVIEW_OBJECTIVE}\n</task>",
+        workspace_agent_result_scorer(STRUCTURED_REVIEW_OBJECTIVE, STRUCTURED_REVIEW_RESULT),
+        seed=_seed_structured_agent,
+        digest_tag="workspace-agent:structured-result:v1",
+    ),
     *(
         CapabilityCase(
             name, brief, grader, digest_tag=f"delegation:{name}:lane-success:head-budget"
@@ -1395,6 +1547,15 @@ CASES = (
 )
 
 PROFILE_CASES = (
+    CapabilityCase(
+        "coding-subagent-structured-review-result",
+        profile_proxy_message(STRUCTURED_REVIEW_OBJECTIVE),
+        profile_proxy_scorer(
+            STRUCTURED_REVIEW_OBJECTIVE,
+            structured_review_result_scorer(STRUCTURED_REVIEW_RESULT),
+        ),
+        digest_tag="coding-profile:structured-review-result:v1",
+    ),
     CapabilityCase(
         "coding-subagent-middleware-override-contract",
         profile_proxy_message(MIDDLEWARE_OVERRIDE_MESSAGE),

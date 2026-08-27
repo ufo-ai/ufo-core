@@ -133,7 +133,10 @@ terminal frame. A client's wait always ends — the terminal state commits on th
   tool subset, input/output schema; extensions register them) runs as a child turn under the
   spawning agent, in its sandbox: foreground awaits its validated output; background returns its
   identity at once and may deliver that same validated output to the parent's conversation when
-  it finishes — an arrival folded into the live turn or admitted as the next turn, so no parent
+  it finishes. A standard one-string `result` contract validates a prose closing of at most 400
+  characters as that field without a second model round; a longer closing and other contracts use
+  their typed `finish` call. The
+  result is an arrival folded into the live turn or admitted as the next turn, so no parent
   holds a turn open waiting on a child; the caller records whether anyone will await. A member
   message waiting on the parent's conversation ends a foreground wait: the child moves to the
   background — not cancelled, stamped to deliver its own result — and the tool answers with its

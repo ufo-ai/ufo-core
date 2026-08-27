@@ -54,6 +54,7 @@ from ufo.skills.runtime import RuntimeSkill, SkillCard
 from ufo.sources.sync import PageChange, SourceBackend
 from ufo.tools.registry import ToolDef
 from ufo.turns.audience import SHARED_AUDIENCE, Audience
+from ufo.turns.delivery_register import SUBAGENT_RESULT_DESCRIPTION
 
 
 @dataclass(frozen=True)
@@ -633,7 +634,9 @@ class SubagentProfile:
     `untrusted_output` declares the child's answer derives from untrusted content (web pages, third
     parties): every path that returns it to a parent — a foreground spawn, and the
     arrival a background child delivers — walls it as data, exactly as an untrusted tool's own
-    result is walled. `isolated_tools` makes
+    result is walled. `concise_parent_handoff` gives a member-facing profile the shared short
+    result discipline; machine-readable and workspace-agent results keep their full contract.
+    `isolated_tools` makes
     `tool_names` exact by excluding cross-extension grants and subagent defaults."""
 
     name: str
@@ -645,8 +648,27 @@ class SubagentProfile:
     model: str | None = None
     reasoning: ReasoningEffort | None = None
     untrusted_output: bool = False
+    concise_parent_handoff: bool = False
     isolated_tools: bool = False
     connector_read_only: bool = False
+
+    def __post_init__(self) -> None:
+        fields = self.output_model.model_fields
+        concise_contract = (
+            tuple(fields) == ("result",)
+            and fields["result"].annotation is str
+            and fields["result"].description == SUBAGENT_RESULT_DESCRIPTION
+        )
+        if self.concise_parent_handoff and not concise_contract:
+            raise ValueError(
+                f"subagent profile {self.name!r} marks a concise parent handoff but its output "
+                "does not carry the concise result contract"
+            )
+        if concise_contract and not self.concise_parent_handoff:
+            raise ValueError(
+                f"subagent profile {self.name!r} carries the concise result contract but does "
+                "not mark a concise parent handoff"
+            )
 
 
 @dataclass(frozen=True)

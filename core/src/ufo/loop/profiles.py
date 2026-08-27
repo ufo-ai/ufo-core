@@ -5,8 +5,8 @@ a more specific one.
 workspace. Its tool subset is the working set minus the tools a
 subagent must not hold — it never asks the user (`ask_user`), never delegates further
 (`spawn`), never messages or cancels a sibling (`message_spawn`, `cancel_spawn`),
-and never gates a member grant (`connect_account`). Its input and output are the same
-task/result contract an agent target defaults to. Every
+and never gates a member grant (`connect_account`). Its input is the default task contract; its
+output is the concise profile result contract. Every
 other profile is extension-provided through the manifest; this is the floor."""
 
 from ufo.loop.prompts.render import SKILL_INDEX_SLOT
@@ -75,6 +75,7 @@ GENERAL_PURPOSE_PROFILE = SubagentProfile(
     tool_names=GENERAL_PURPOSE_TOOLS,
     input_model=TaskInput,
     output_model=ResultOutput,
+    concise_parent_handoff=True,
 )
 
 CORE_SUBAGENT_PROFILES: tuple[SubagentProfile, ...] = (GENERAL_PURPOSE_PROFILE,)

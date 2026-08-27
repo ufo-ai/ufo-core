@@ -84,6 +84,8 @@ def test_coding_prompt_uses_the_shared_delivery_contract() -> None:
     assert "memory for a later model round in this turn" in coding.CODING_PROMPT
     prompt = subagent_system_prompt(coding.CODING_PROFILE)
     assert "A delivery crosses an agent boundary" in prompt
+    assert "<parent_handoff>" not in prompt
+    assert "keep it within 20 words" not in prompt
     assert prompt.endswith(FINISH_CONTRACT)
     assert "Only the `finish` payload is returned through the spawn" not in coding.CODING_PROMPT
     assert "# Returning to the parent" not in coding.CODING_PROMPT

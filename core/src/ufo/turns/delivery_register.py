@@ -7,3 +7,11 @@ extension assembling a direct model call reaches it through `ufo.sdk.delivery_re
 from pathlib import Path
 
 DELIVERY_REGISTER_BLOCK = (Path(__file__).parent / "delivery_register.md").read_text().strip()
+DIRECT_PROSE_RESULT_MAX_CHARS = 400
+SUBAGENT_RESULT_DESCRIPTION = (
+    "The one parent-visible delivery, at most 20 words. Choose its register from the shared "
+    "delivery register. Call finish as soon as work is complete; never write this result as "
+    "assistant prose first. For a required artifact, give the conclusion and absolute path "
+    "without restating its body. For a result-only task, give the result directly and create no "
+    "file."
+)

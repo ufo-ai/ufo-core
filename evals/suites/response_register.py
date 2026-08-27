@@ -347,6 +347,8 @@ def shared_report_scorer(
 def delegated_written_report_scorer(
     report_path: str,
     source_paths: tuple[str, ...],
+    profile_name: str,
+    task_field: str,
     task_max_words: int,
     result_max_words: int,
     result_max_lines: int,
@@ -393,17 +395,17 @@ def delegated_written_report_scorer(
             for index, call in enumerate(output.calls)
             if call.name == "spawn"
             and call.succeeded
-            and str(call.input.get("target", "")).removeprefix("profile:") == "general_purpose"
+            and str(call.input.get("target", "")).removeprefix("profile:") == profile_name
         )
         task_shape = None
         result_shape = None
         spawn_index = None
         if len(spawns) != 1:
-            failures.append(f"expected one general-purpose delegation, found {len(spawns)}")
+            failures.append(f"expected one {profile_name} delegation, found {len(spawns)}")
         else:
             spawn_index, spawn = spawns[0]
             payload = spawn.input.get("payload")
-            task = payload.get("task") if isinstance(payload, dict) else None
+            task = payload.get(task_field) if isinstance(payload, dict) else None
             if not isinstance(task, str):
                 failures.append("delegation has no prose task")
             else:
@@ -499,7 +501,8 @@ def delegated_written_report_scorer(
         )
 
     return DescribedGrader(
-        f"a three-hop delivery: a parent task of at most {task_max_words} words referencing source "
+        f"a three-hop delivery through {profile_name}: a parent task of at most {task_max_words} "
+        "words referencing source "
         f"artifacts, one parent-facing subagent result of at most {result_max_words} words "
         f"over at most {result_max_lines} lines referencing its report path, and a member-facing "
         f"summary of at most {summary_max_words} words that names the subagent's written report "
@@ -634,6 +637,72 @@ def delegated_inline_result_scorer(
     )
 
 
+def wide_research_structured_scorer(expected: JsonObject) -> Grader:
+    """A wide-research child keeps its short handoff while its complete JSON crosses by file."""
+    final_delivery = unwritten_reply_scorer(40, 4)
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        final = await final_delivery(output)
+        failures = [] if final.passed else [final.reason]
+        calls = tuple(
+            call for call in output.calls if call.name == "wide_research" and call.succeeded
+        )
+        if len(calls) != 1:
+            failures.append(f"expected one successful wide_research call, found {len(calls)}")
+        payload = None
+        if output.workspace_dir is None:
+            failures.append("workspace was not recorded")
+        else:
+            path = output.workspace_dir / "wide_research.json"
+            try:
+                payload = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                failures.append(f"wide_research.json is unavailable: {error}")
+        payload_fields = payload if isinstance(payload, dict) else {}
+        call_id = payload_fields.get("call_id")
+        rows = payload_fields.get("rows")
+        recovery_keyed = (
+            isinstance(call_id, str) and re.fullmatch(r"[0-9a-f]{64}", call_id) is not None
+        )
+        complete_row = (
+            recovery_keyed
+            and payload_fields.get("untrusted") is True
+            and payload_fields.get("source") == "wide_research"
+            and rows == [{"entity": "aster", "result": expected, "error": ""}]
+        )
+        if not complete_row:
+            failures.append("wide_research.json does not contain the complete structured row")
+        if len(output.handoffs) != 1:
+            failures.append(f"expected one research handoff, found {len(output.handoffs)}")
+        else:
+            handoff = output.handoffs[0]
+            if handoff.closing_chars > DELEGATED_CLOSING_MAX_CHARS:
+                failures.append(
+                    f"subagent left {handoff.closing_chars} characters of standing prose"
+                )
+            if handoff.duplication > DELEGATED_DUPLICATION_MAX:
+                failures.append(
+                    f"subagent repeated {handoff.duplication:.0%} of its standing prose"
+                )
+        evidence: JsonObject = {
+            "final": final.evidence,
+            "wideResearchCalls": len(calls),
+            "completeRow": complete_row,
+            "recoveryKeyed": recovery_keyed,
+            "handoffs": len(output.handoffs),
+        }
+        if failures:
+            return CapabilityVerdict(False, "wide research: " + "; ".join(failures), evidence)
+        return CapabilityVerdict(True, f"wide research: complete row; {final.reason}", evidence)
+
+    return DescribedGrader(
+        "one wide_research call that writes the complete schema-shaped entity result to "
+        "wide_research.json while the child returns one short handoff and the member receives "
+        "a chat reply with no shared file",
+        grade,
+    )
+
+
 REPORT_REPLY = (
     "## Recommendation\n"
     "Move to an event-driven queue where a job has a real upstream event, and keep cron for the "
@@ -727,6 +796,37 @@ for a file.
 """,
 )
 
+WIDE_RESEARCH_ENTITIES = _file("repo/data/wide-entities.txt", "aster")
+WIDE_RESEARCH_SCHEMA = _file(
+    "repo/data/company-schema.json",
+    """
+{
+  "company": "string",
+  "headquarters": "string",
+  "founded": "number",
+  "employees": "number",
+  "product": "string",
+  "customers": "array of strings",
+  "certifications": "array of strings",
+  "evidence": "string"
+}
+""",
+)
+WIDE_RESEARCH_EXPECTED: JsonObject = {
+    "company": "Aster Systems",
+    "headquarters": "Portland, Oregon",
+    "founded": 2012,
+    "employees": 184,
+    "product": "Managed cold-chain monitoring for regional food distributors",
+    "customers": ["Northbank Foods", "Willow Market Cooperative", "Cascade Produce"],
+    "certifications": ["SOC 2 Type II", "ISO 27001"],
+    "evidence": "Internal company record updated 2026-08-01",
+}
+WIDE_RESEARCH_RECORD = _file(
+    "repo/data/aster.json",
+    json.dumps(WIDE_RESEARCH_EXPECTED, indent=2),
+)
+
 NIGHTLY_RUNNER_REPORT = _file(
     "nightly-runner-queue.md",
     """
@@ -791,7 +891,7 @@ BANTER = (
 DELEGATED_CASES = (
     CapabilityCase(
         "delegated-pushback-artifact-self-description",
-        "Have a general-purpose subagent reconcile the claim in "
+        "Have the research subagent reconcile the claim in "
         "/workspace/repo/notes/change-412.md with the behavior in "
         "/workspace/repo/src/source_credentials.py. Have it write the complete evidence, "
         "uncertainty, and reasoning to /workspace/change-412-evidence.md. Then tell me whether "
@@ -803,6 +903,8 @@ DELEGATED_CASES = (
                 "/workspace/repo/notes/change-412.md",
                 "/workspace/repo/src/source_credentials.py",
             ),
+            profile_name="research",
+            task_field="objective",
             task_max_words=100,
             result_max_words=60,
             result_max_lines=6,
@@ -839,7 +941,7 @@ DELEGATED_CASES = (
     ),
     CapabilityCase(
         "delegated-pushback-artifact-delivered",
-        "Have a general-purpose subagent reconcile the claim in "
+        "Have the research subagent reconcile the claim in "
         "/workspace/repo/notes/change-412.md with the behavior in "
         "/workspace/repo/src/source_credentials.py. Have it write the complete evidence, "
         "uncertainty, and reasoning to /workspace/change-412-evidence.md. Send me that report "
@@ -851,6 +953,8 @@ DELEGATED_CASES = (
                 "/workspace/repo/notes/change-412.md",
                 "/workspace/repo/src/source_credentials.py",
             ),
+            profile_name="research",
+            task_field="objective",
             task_max_words=100,
             result_max_words=60,
             result_max_lines=6,
@@ -926,6 +1030,16 @@ DELEGATED_CASES = (
             "The answer keeps the finish result because it is the only result the parent reads.",
             "The answer removes the standing conclusion and the unrequested Markdown report.",
         ),
+    ),
+    CapabilityCase(
+        "delegated-wide-research-structured-result",
+        "Use wide_research once with /workspace/repo/data/wide-entities.txt as entities_file, "
+        "`Read /workspace/repo/data/{entity}.json and return every field exactly.` as "
+        "prompt_template, and /workspace/repo/data/company-schema.json as output_schema_file. "
+        "Then tell me the output file path. Do not share a file.",
+        wide_research_structured_scorer(WIDE_RESEARCH_EXPECTED),
+        digest_tag="register:delegated-wide-research-structured-result",
+        workspace_files=(WIDE_RESEARCH_ENTITIES, WIDE_RESEARCH_SCHEMA, WIDE_RESEARCH_RECORD),
     ),
 )
 

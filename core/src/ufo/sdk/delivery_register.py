@@ -5,3 +5,6 @@ call, so that call writes to the same register the shell and every subagent prom
 any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK as DELIVERY_REGISTER_BLOCK
+from ufo.turns.delivery_register import (
+    SUBAGENT_RESULT_DESCRIPTION as SUBAGENT_RESULT_DESCRIPTION,
+)

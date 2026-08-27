@@ -1739,6 +1739,9 @@ def test_application_builder_profile_is_typed_pinned_and_isolated() -> None:
     assert profile.untrusted_output is True
     assert profile.input_model is ApplicationBuilderTask
     assert profile.output_model is ApplicationBuilderResult
+    rendered_prompt = subagent_system_prompt(profile)
+    assert "<parent_handoff>" not in rendered_prompt
+    assert "at most 20 words" not in rendered_prompt
     assert "Inspect the needed connected sources" in profile.prompt
     assert "Call `qa_ufo_application`" in profile.prompt
     assert "Deploy only after product QA passes" in profile.prompt

@@ -187,6 +187,7 @@ from ufo.tools.context import (
 from ufo.tools.registry import DIRECT_TOOL_LIMIT, TOOL_SEARCH, ToolDef, ToolRegistry
 from ufo.turns.activity import ActivitySummarizer
 from ufo.turns.audience import Audience, audience_subjects, conversation_audience
+from ufo.turns.contracts import AgentResultOutput, ResultOutput
 from ufo.turns.transcript import CompactionSummary, Conversation
 from ufo.turns.untrusted import (
     UNTRUSTED_CLOSE,
@@ -604,6 +605,10 @@ class _Report(BaseModel):
     summary: str = Field(description=REPORT_SUMMARY_DESCRIPTION)
 
 
+class _ShortResult(BaseModel):
+    result: str = Field(max_length=7)
+
+
 def _tool_results(request: ModelRequest, errored: bool | None = None) -> bool:
     return any(
         isinstance(message.content, tuple)
@@ -638,15 +643,17 @@ class ProseThenForcedFinishModel:
     request so a test can assert the compulsion."""
 
     forced: ModelRequest | None = None
+    prose: str = "here is my prose answer"
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         if request.tool_choice is not None:
             self.forced = request
+            field_name = next(iter(request.tools[0].input_schema["properties"]))
             yield ToolCallStart(id="f1", name=FINISH_TOOL)
-            yield ToolCallDelta(id="f1", partial_json=json.dumps({"summary": "wrapped"}))
+            yield ToolCallDelta(id="f1", partial_json=json.dumps({field_name: "wrapped"}))
             yield Usage(input_tokens=1, output_tokens=1)
             return
-        yield TextDelta(text="here is my prose answer")
+        yield TextDelta(text=self.prose)
         yield Usage(input_tokens=1, output_tokens=1)
 
 
@@ -5251,6 +5258,52 @@ async def test_a_subagent_prose_ending_closes_through_one_forced_finish_round(
     assert model.forced.reasoning == "low"
     assert model.forced.messages[-1] == Message(role="user", content=FINISH_PROMPT)
     assert model.forced.messages[-2] == Message(role="assistant", content="here is my prose answer")
+
+
+async def test_a_standard_result_prose_ending_becomes_the_handoff_without_a_second_round(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = ProseThenForcedFinishModel()
+    engine = replace(_engine(turn, model, tmp_path), output_model=ResultOutput)
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.text == ResultOutput(result="here is my prose answer").model_dump_json()
+    assert model.forced is None
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert stored.messages[-1] == Message(role="assistant", content=frame.text)
+    assert all(message.content != "here is my prose answer" for message in stored.messages)
+
+
+async def test_an_oversized_unbounded_result_uses_the_forced_finish_round(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = ProseThenForcedFinishModel(prose="x" * 401)
+    engine = replace(_engine(turn, model, tmp_path), output_model=AgentResultOutput)
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.text == AgentResultOutput(result="wrapped").model_dump_json()
+    assert model.forced is not None
+
+
+async def test_a_result_prose_ending_that_fails_its_contract_uses_forced_finish(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+    model = ProseThenForcedFinishModel()
+    engine = replace(_engine(turn, model, tmp_path), output_model=_ShortResult)
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert frame.text == _ShortResult(result="wrapped").model_dump_json()
+    assert model.forced is not None
 
 
 async def test_a_finish_call_failing_the_schema_errors_back_and_retries(

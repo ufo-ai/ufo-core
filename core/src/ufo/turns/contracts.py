@@ -22,6 +22,8 @@ from pydantic_core import InitErrorDetails, PydanticCustomError
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 
+from ufo.turns.delivery_register import SUBAGENT_RESULT_DESCRIPTION
+
 DECLARED_SCHEMA_MAX_CHARS = 8_192
 REFUSED_KEYWORDS = frozenset({"$ref", "$dynamicRef", "pattern", "patternProperties"})
 
@@ -34,13 +36,13 @@ class TaskInput(BaseModel):
 
 class ResultOutput(BaseModel):
     result: str = Field(
-        description=(
-            "Parent-visible result governed by the shared delivery register, at most 60 words. "
-            "Call finish as soon as work is complete; never write this result as assistant prose "
-            "first. For a required artifact, give the conclusion and absolute path without "
-            "restating its body. For a result-only task, give the result directly and create no "
-            "file."
-        ),
+        description=SUBAGENT_RESULT_DESCRIPTION,
+    )
+
+
+class AgentResultOutput(BaseModel):
+    result: str = Field(
+        description="Freeform result governed by the shared delivery register.",
     )
 
 
@@ -125,12 +127,22 @@ class JsonContract:
 Contract = type[BaseModel] | JsonContract
 
 
+def freeform_result_contract(contract: Contract) -> bool:
+    """Whether a contract is the one freeform `result: str` handoff shape."""
+    match contract:
+        case type() as model:
+            fields = model.model_fields
+            return tuple(fields) == ("result",) and fields["result"].annotation is str
+        case _:
+            return False
+
+
 def input_contract(schema: Mapping[str, object] | None) -> Contract:
     return TaskInput if schema is None else JsonContract(schema)
 
 
 def output_contract(schema: Mapping[str, object] | None) -> Contract:
-    return ResultOutput if schema is None else JsonContract(schema)
+    return AgentResultOutput if schema is None else JsonContract(schema)
 
 
 def check_declared_schema(candidate: Mapping[str, object], field: str) -> None:

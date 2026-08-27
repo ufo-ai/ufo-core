@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ufo.sdk.delivery_register import SUBAGENT_RESULT_DESCRIPTION
 from ufo.sdk.manifest import SubagentProfile
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 
@@ -49,7 +50,7 @@ class ResearchInput(BaseModel):
 
 class ResearchOutput(BaseModel):
     result: str = Field(
-        description="Freeform result governed by the shared delivery register.",
+        description=SUBAGENT_RESULT_DESCRIPTION,
     )
 
 
@@ -60,6 +61,7 @@ RESEARCH_PROFILE = SubagentProfile(
     input_model=ResearchInput,
     output_model=ResearchOutput,
     model=RESEARCH_MODEL,
+    concise_parent_handoff=True,
 )
 DEEP_RESEARCH_PROFILE = SubagentProfile(
     name=DEEP_RESEARCH_PROFILE_NAME,
@@ -69,4 +71,5 @@ DEEP_RESEARCH_PROFILE = SubagentProfile(
     output_model=ResearchOutput,
     max_rounds=DEEP_RESEARCH_ROUND_LIMIT,
     model=RESEARCH_MODEL,
+    concise_parent_handoff=True,
 )

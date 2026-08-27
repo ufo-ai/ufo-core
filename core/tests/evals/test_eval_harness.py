@@ -3791,6 +3791,66 @@ def test_coding_profile_cases_are_explicit_and_pin_the_profile_target() -> None:
     }
 
 
+async def test_structured_review_result_scorer_requires_the_complete_long_object() -> None:
+    result = dumps(coding_subagent.STRUCTURED_REVIEW_RESULT)
+    scorer = coding_subagent.structured_review_result_scorer(
+        coding_subagent.STRUCTURED_REVIEW_RESULT
+    )
+
+    assert len(result.split()) > 20
+    assert (await scorer(CapabilityOutput(result, ()))).passed
+    assert not (await scorer(CapabilityOutput(result[:80], ()))).passed
+    assert not (await scorer(CapabilityOutput("{}", ()))).passed
+
+
+async def test_workspace_agent_result_scorer_requires_the_exact_default_contract_result() -> None:
+    objective = coding_subagent.STRUCTURED_REVIEW_OBJECTIVE
+    result = dumps(coding_subagent.STRUCTURED_REVIEW_RESULT)
+    spawn = ToolInvocation(
+        "spawn",
+        {
+            "target": "agent:structured-worker",
+            "payload": {"task": objective},
+        },
+        "running",
+        has_result=True,
+        call_id="agent-spawn",
+    )
+    scorer = coding_subagent.workspace_agent_result_scorer(
+        objective, coding_subagent.STRUCTURED_REVIEW_RESULT
+    )
+
+    assert (await scorer(CapabilityOutput(result, (spawn,), own_calls=(spawn,)))).passed
+    wrapped = dumps({"result": result})
+    assert (await scorer(CapabilityOutput(wrapped, (spawn,), own_calls=(spawn,)))).passed
+    assert not (await scorer(CapabilityOutput("{}", (spawn,), own_calls=(spawn,)))).passed
+
+
+async def test_workspace_agent_seed_is_repeatable(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+
+    await coding_subagent._seed_structured_agent(workspace_id, agent_id, blob)
+    await coding_subagent._seed_structured_agent(workspace_id, agent_id, blob)
+
+    async with workspace_tx() as connection:
+        agents = (
+            await connection.execute(
+                sa.select(tables.agent.c.name, tables.agent.c.prompt).where(
+                    tables.agent.c.workspace_id == workspace_id,
+                    tables.agent.c.name == coding_subagent.STRUCTURED_AGENT_NAME,
+                )
+            )
+        ).all()
+    assert agents == [
+        (
+            coding_subagent.STRUCTURED_AGENT_NAME,
+            "Follow the task. Return its required machine-readable payload in full through finish.",
+        )
+    ]
+
+
 async def test_profile_proxy_scorer_grades_the_exact_child_result() -> None:
     objective = "Choose the narrow fix."
     spawn = ToolInvocation(
@@ -5018,7 +5078,9 @@ async def test_unwritten_reply_scorer_closes_the_hole_the_chat_scorer_leaves(
 async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: Path) -> None:
     report_path = str(tmp_path / "evidence.md")
     sources = ("/workspace/note.md", "/workspace/code.py")
-    scorer = delegated_written_report_scorer(report_path, sources, 160, 100, 6, 25, 120, 6, 200, 3)
+    scorer = delegated_written_report_scorer(
+        report_path, sources, "general_purpose", "task", 160, 100, 6, 25, 120, 6, 200, 3
+    )
     report = (
         "## Evidence\n"
         + " ".join(["fact"] * 70)
@@ -5138,7 +5200,7 @@ async def test_delegated_written_report_scorer_proves_all_three_hops(tmp_path: P
         assert f"does not reference {path}" in missing_sources.reason
 
     failures = (
-        (replace(output, calls=(write,)), "expected one general-purpose delegation"),
+        (replace(output, calls=(write,)), "expected one general_purpose delegation"),
         (
             replace(output, calls=(with_task(None), write)),
             "delegation has no prose task",
@@ -5238,6 +5300,8 @@ async def test_delegated_shared_report_requires_the_named_report_to_arrive(tmp_p
     scorer = delegated_written_report_scorer(
         report_path,
         ("/workspace/note.md", "/workspace/code.py"),
+        "general_purpose",
+        "task",
         100,
         60,
         6,
@@ -5527,6 +5591,7 @@ def test_delegated_register_grades_the_unknown_incident_and_exact_task_budget() 
     grading = grading_statement(case.grader)
 
     assert "at most 100 words" in grading
+    assert "delivery through research" in grading
     assert "one parent-facing subagent result of at most 60 words" in grading
     assert "over at most 6 lines" in grading
     assert "summary of at most 80 words" in grading
@@ -5554,8 +5619,11 @@ def test_delegated_register_covers_file_and_result_only_handoffs() -> None:
         "delegated-pushback-artifact-delivered",
         "delegated-jsonl-result-only",
         "delegated-latency-result-only",
+        "delegated-wide-research-structured-result",
     }
     shared = cases["delegated-pushback-artifact-delivered"]
+    assert "Have the research subagent" in shared.message
+    assert "delivery through research" in grading_statement(shared.grader)
     assert "Send me that report file" in shared.message
     assert "and shares it" in grading_statement(shared.grader)
     assert shared.written_report == ""
@@ -5565,6 +5633,10 @@ def test_delegated_register_covers_file_and_result_only_handoffs() -> None:
         assert "result-only delegation" in grading
         assert "no file written" in grading
         assert case.artifact_rubric == ()
+    wide = cases["delegated-wide-research-structured-result"]
+    assert "one wide_research call" in grading_statement(wide.grader)
+    assert "complete schema-shaped entity result" in grading_statement(wide.grader)
+    assert len(wide.workspace_files) == 3
 
 
 async def test_rubric_parser_accepts_an_exactly_fenced_verdict() -> None:

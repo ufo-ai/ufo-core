@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from opentelemetry import trace
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 import ufo.loop.subagents as subagents_module
@@ -52,7 +52,7 @@ from ufo.turns.audience import (
     foreign_room_audience,
     room_audience,
 )
-from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
+from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK, SUBAGENT_RESULT_DESCRIPTION
 
 
 class _Task(BaseModel):
@@ -61,6 +61,14 @@ class _Task(BaseModel):
 
 class _Finding(BaseModel):
     finding: str
+
+
+class _FreeformResult(BaseModel):
+    result: str
+
+
+class _ConciseResult(BaseModel):
+    result: str = Field(description=SUBAGENT_RESULT_DESCRIPTION)
 
 
 def _profile(name: str) -> SubagentProfile:
@@ -99,8 +107,24 @@ def test_system_prompt_carries_instructions_and_the_finish_contract() -> None:
     prompt = subagent_system_prompt(_profile("research"))
     assert "research instructions" in prompt
     assert prompt.count(DELIVERY_REGISTER_BLOCK) == 1
-    assert "result returned to a parent" in prompt
+    assert "<parent_handoff>" not in prompt
+    assert "at most 20 words" not in prompt
     assert prompt.endswith(FINISH_CONTRACT)
+
+
+def test_freeform_profile_without_short_handoff_contract_has_no_word_cap() -> None:
+    profile = replace(_profile("coding"), output_model=_FreeformResult)
+    prompt = subagent_system_prompt(profile)
+    assert prompt.count(DELIVERY_REGISTER_BLOCK) == 1
+    assert "<parent_handoff>" not in prompt
+    assert "at most 20 words" not in prompt
+
+
+def test_concise_parent_handoff_requires_one_result_string() -> None:
+    with pytest.raises(ValueError, match="does not carry the concise result contract"):
+        replace(_profile("research"), concise_parent_handoff=True)
+    with pytest.raises(ValueError, match="does not mark a concise parent handoff"):
+        replace(_profile("research"), output_model=_ConciseResult)
 
 
 def test_system_prompt_governs_the_words_of_a_schema_owned_answer() -> None:
@@ -127,7 +151,7 @@ def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:
     result_description = profile.output_model.model_json_schema()["properties"]["result"][
         "description"
     ]
-    assert "at most 60 words" in result_description
+    assert "at most 20 words" in result_description
     assert "never write this result as assistant prose first" in result_description
     assert "For a required artifact" in result_description
     assert "For a result-only task" in result_description
@@ -205,6 +229,9 @@ def test_general_purpose_prompt_lists_the_loadable_skills_and_binds_its_output()
     assert "<available_skills>" in prompt
     assert "sandbox" in prompt
     assert FINISH_CONTRACT in prompt
+    assert "<parent_handoff>" in prompt
+    assert "keep it within 20 words" in prompt
+    assert "Everything outside `finish` is working text and reaches nobody" in prompt
 
 
 def test_core_ships_only_the_general_purpose_profile() -> None:

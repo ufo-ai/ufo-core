@@ -1,14 +1,16 @@
 import json
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ufo.turns.contracts import (
     DECLARED_SCHEMA_MAX_CHARS,
+    AgentResultOutput,
     JsonContract,
     ResultOutput,
     TaskInput,
     check_declared_schema,
+    freeform_result_contract,
     input_contract,
     output_contract,
 )
@@ -19,6 +21,10 @@ TRIAGE_SCHEMA = {
     "required": ["severity"],
     "additionalProperties": False,
 }
+
+
+class UnboundedResult(BaseModel):
+    result: str
 
 
 def test_json_contract_validates_conforming_payload() -> None:
@@ -48,9 +54,23 @@ def test_json_contract_round_trips_text() -> None:
 
 def test_contracts_default_to_task_and_result() -> None:
     assert input_contract(None) is TaskInput
-    assert output_contract(None) is ResultOutput
+    assert output_contract(None) is AgentResultOutput
     assert isinstance(input_contract(TRIAGE_SCHEMA), JsonContract)
     assert isinstance(output_contract(TRIAGE_SCHEMA), JsonContract)
+
+
+def test_freeform_result_contracts_are_structural() -> None:
+    assert freeform_result_contract(ResultOutput)
+    assert freeform_result_contract(UnboundedResult)
+    assert not freeform_result_contract(JsonContract(TRIAGE_SCHEMA))
+    assert freeform_result_contract(AgentResultOutput)
+
+
+def test_default_agent_result_has_no_subagent_word_cap() -> None:
+    description = AgentResultOutput.model_fields["result"].description
+    assert description is not None
+    assert "shared delivery register" in description
+    assert "word" not in description
 
 
 def test_json_contract_exposes_the_declared_schema() -> None:
