@@ -24,7 +24,7 @@ fn workspaces(base: &str) -> SharedWorkspaces {
 }
 
 #[test]
-fn every_domain_derives_the_workspace_python_derives() {
+fn every_signup_subject_derives_the_workspace_python_derives() {
     let raw = include_str!("onboard_contract.json");
     let vectors: BTreeMap<String, String> = serde_json::from_str(raw).expect("vectors parse");
     assert!(vectors.len() >= 4);
@@ -38,7 +38,7 @@ fn every_domain_derives_the_workspace_python_derives() {
 }
 
 #[tokio::test]
-async fn choices_asks_for_the_normalized_address_and_domain() {
+async fn choices_asks_for_the_normalized_address_and_subject() {
     let (base, log) = spawn_http(vec![(
         200,
         r#"{"choices":[{"workspace_id":"3e38d44d-322e-53af-97b6-6204849f6a5c","label":"acme.com","member":true}]}"#
@@ -46,7 +46,7 @@ async fn choices_asks_for_the_normalized_address_and_domain() {
     )])
     .await;
     let listed = workspaces(&base)
-        .choices("ACME.com", "  Founder@Acme.com ")
+        .choices("acme.com", "  Founder@Acme.com ")
         .await
         .unwrap();
     assert_eq!(listed.len(), 1);
@@ -65,10 +65,59 @@ async fn choices_asks_for_the_normalized_address_and_domain() {
         "{}",
         exchanges[0].path
     );
+    assert!(
+        exchanges[0].path.contains("signup_subject=acme.com"),
+        "{}",
+        exchanges[0].path
+    );
     assert_eq!(
         exchanges[0].authorization.as_deref(),
         Some(&format!("Bearer {TOKEN}")[..])
     );
+}
+
+#[tokio::test]
+async fn a_personal_mail_call_states_the_exact_address_as_the_previous_identity() {
+    // A serve pod of the release being replaced declares `domain` required and reads it as the
+    // whole signup identity. The exact-address subject lets that pod derive the personal workspace;
+    // stating `gmail.com` instead would resolve the sign-in by the shared provider.
+    let (base, log) = spawn_http(vec![
+        (200, r#"{"choices":[]}"#.to_string()),
+        (
+            200,
+            r#"{"workspace_id":"c9ff4df7-cade-5134-aa05-67f2689645d7","admin":true,"founding":true}"#
+                .to_string(),
+        ),
+    ])
+    .await;
+    let shared = workspaces(&base);
+    assert!(shared
+        .choices("carol@gmail.com", "  Carol@Gmail.com ")
+        .await
+        .unwrap()
+        .is_empty());
+    shared
+        .create("carol@gmail.com", "carol@gmail.com", None)
+        .await
+        .unwrap();
+
+    let exchanges = log.lock().unwrap();
+    assert!(
+        exchanges[0].path.contains("domain=carol%40gmail.com"),
+        "{}",
+        exchanges[0].path
+    );
+    assert!(
+        exchanges[0]
+            .path
+            .contains("signup_subject=carol%40gmail.com"),
+        "{}",
+        exchanges[0].path
+    );
+    let body: serde_json::Value = serde_json::from_str(&exchanges[1].body).unwrap();
+    assert_eq!(body["domain"], "carol@gmail.com");
+    assert_eq!(body["email"], "carol@gmail.com");
+    assert_eq!(body["signup_subject"], "carol@gmail.com");
 }
 
 #[tokio::test]
@@ -149,7 +198,7 @@ async fn create_sends_the_derived_workspace_and_the_intake_profile() {
         goals: "answer support mail".to_string(),
     };
     let ensured = workspaces(&base)
-        .create("ACME.com", "  Founder@Acme.com ", Some(&profile))
+        .create("acme.com", "  Founder@Acme.com ", Some(&profile))
         .await
         .unwrap();
     assert_eq!(ensured.workspace_id, "3e38d44d-322e-53af-97b6-6204849f6a5c");
@@ -161,6 +210,7 @@ async fn create_sends_the_derived_workspace_and_the_intake_profile() {
     assert_eq!(body["workspace_id"], "3e38d44d-322e-53af-97b6-6204849f6a5c");
     assert_eq!(body["domain"], "acme.com");
     assert_eq!(body["email"], "founder@acme.com");
+    assert_eq!(body["signup_subject"], "acme.com");
     assert_eq!(body["profile"]["business"], "we sell widgets");
     assert_eq!(body["profile"]["goals"], "answer support mail");
 }

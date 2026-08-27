@@ -1,4 +1,4 @@
-//! The work-email policy, the SigV4 signer, and the two AWS calls a send makes.
+//! The signup-email policy, the SigV4 signer, and the two AWS calls a send makes.
 //!
 //! The SES and STS halves run against a local server rather than a stubbed client: the signed
 //! headers and the form body are what AWS refuses or accepts, so the test asserts the bytes that
@@ -12,8 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use ufo_control::email::{
     apex_host, email_sender_from_env, invite_email, normalize_email, parse_assume_role_credentials,
-    sigv4_headers, AwsEndpoints, EmailSender, SesCredentials, SesEmailSender, WorkEmailError,
-    WorkEmailPolicy, AWS_ROLE_ARN_ENV, AWS_WEB_IDENTITY_TOKEN_FILE_ENV, CONSOLE_EMAIL_MODE,
+    sigv4_headers, AwsEndpoints, EmailError, EmailSender, SesCredentials, SesEmailSender,
+    SignupEmailPolicy, AWS_ROLE_ARN_ENV, AWS_WEB_IDENTITY_TOKEN_FILE_ENV, CONSOLE_EMAIL_MODE,
     DEFAULT_SES_REGION, DISPOSABLE_EMAIL_DOMAINS, EMAIL_MODE_ENV, FREE_EMAIL_DOMAINS,
     SES_REGION_ENV, SES_SENDER_ENV,
 };
@@ -149,28 +149,34 @@ fn sigv4_headers_sign_the_session_token() {
 }
 
 #[test]
-fn a_denylisted_domain_is_refused_however_it_is_dressed() {
-    let policy = WorkEmailPolicy::default();
-    for email in [
-        "someone@gmail.com",
-        "Someone@GMAIL.com",
-        // a trailing FQDN root dot — the same mailbox as gmail.com
-        "someone@gmail.com.",
-        "someone@GMAIL.COM.",
-        // disposable, trailing dot
-        "founder@mailinator.com.",
-        "someone+tag@gmail.com",
+fn a_personal_domain_uses_the_exact_normalized_address_as_its_subject() {
+    let policy = SignupEmailPolicy::default();
+    for (email, subject) in [
+        ("someone@gmail.com", "someone@gmail.com"),
+        ("Someone@GMAIL.com", "someone@gmail.com"),
+        ("someone@gmail.com.", "someone@gmail.com"),
+        ("someone+tag@gmail.com", "someone+tag@gmail.com"),
     ] {
-        assert!(
-            matches!(policy.validate(email), Err(WorkEmailError::NotWork(_))),
-            "{email} slipped past the denylist"
-        );
+        let signup = policy.validate(email).unwrap();
+        assert_eq!(signup.domain, "gmail.com");
+        assert_eq!(signup.subject, subject);
     }
 }
 
 #[test]
+fn a_disposable_domain_is_refused() {
+    let refused = SignupEmailPolicy::default()
+        .validate("founder@mailinator.com.")
+        .unwrap_err();
+    assert_eq!(
+        refused,
+        EmailError::Disposable("mailinator.com".to_string())
+    );
+}
+
+#[test]
 fn a_malformed_address_is_refused_before_any_send() {
-    let policy = WorkEmailPolicy::default();
+    let policy = SignupEmailPolicy::default();
     for email in [
         "someone@gmail.com..", // an empty label
         "<someone@gmail.com>", // a stray bracket in the domain
@@ -182,7 +188,7 @@ fn a_malformed_address_is_refused_before_any_send() {
     ] {
         assert_eq!(
             policy.validate(email),
-            Err(WorkEmailError::Malformed),
+            Err(EmailError::Malformed),
             "{email} was not refused as malformed"
         );
     }
@@ -190,7 +196,7 @@ fn a_malformed_address_is_refused_before_any_send() {
 
 #[test]
 fn a_work_domain_passes_with_its_root_dot_normalized() {
-    let policy = WorkEmailPolicy::default();
+    let policy = SignupEmailPolicy::default();
     for (email, domain) in [
         ("founder@acme.io", "acme.io"),
         ("founder@sub.acme.io", "sub.acme.io"),
@@ -199,7 +205,9 @@ fn a_work_domain_passes_with_its_root_dot_normalized() {
         // punycode is a valid LDH label
         ("founder@xn--80ak6aa92e.com", "xn--80ak6aa92e.com"),
     ] {
-        assert_eq!(policy.validate(email).unwrap(), domain);
+        let signup = policy.validate(email).unwrap();
+        assert_eq!(signup.domain, domain);
+        assert_eq!(signup.subject, domain);
         assert_eq!(normalize_email(email).unwrap().1, domain);
     }
 }
@@ -534,10 +542,8 @@ fn an_unknown_mode_fails_loud_rather_than_defaulting() {
 }
 
 #[test]
-fn a_shared_consumer_domain_is_refused_whatever_country_it_serves() {
-    // The join door founds a workspace behind this list alone, and a shared mail domain that slips
-    // through becomes one workspace that every later stranger at that domain is seated in.
-    let policy = WorkEmailPolicy::default();
+fn a_shared_consumer_domain_never_becomes_the_workspace_subject() {
+    let policy = SignupEmailPolicy::default();
     for email in [
         "someone@web.de",
         "someone@gmx.net",
@@ -563,7 +569,6 @@ fn a_shared_consumer_domain_is_refused_whatever_country_it_serves() {
         "someone@bigpond.com",
         "someone@rediffmail.com",
         "someone@tutanota.com",
-        "someone@1secmail.com",
         // A brand already on the list, under a country domain the first pass missed. The sweep is
         // by brand and country now, so a listed provider is listed wherever it operates.
         "someone@protonmail.ch",
@@ -573,16 +578,14 @@ fn a_shared_consumer_domain_is_refused_whatever_country_it_serves() {
         "someone@yahoo.co.za",
         "someone@outlook.co.nz",
     ] {
-        assert!(
-            matches!(policy.validate(email), Err(WorkEmailError::NotWork(_))),
-            "{email} slipped past the denylist"
-        );
+        let signup = policy.validate(email).unwrap();
+        assert_eq!(signup.subject, email, "{email} claimed its provider domain");
     }
 }
 
 #[test]
-fn the_denylist_names_each_domain_once() {
-    // Two lists, one membership test. A name in both reads as a disagreement about what it is.
+fn the_domain_lists_name_each_domain_once() {
+    // A name in both reads as a disagreement about what it is.
     let mut seen = std::collections::HashSet::new();
     for domain in FREE_EMAIL_DOMAINS.iter().chain(DISPOSABLE_EMAIL_DOMAINS) {
         assert!(seen.insert(*domain), "{domain} is listed twice");

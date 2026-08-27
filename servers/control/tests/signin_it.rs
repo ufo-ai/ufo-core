@@ -324,10 +324,10 @@ async fn starting_a_claim_writes_it_and_asks_workos_to_mail_the_code() {
 }
 
 #[tokio::test]
-async fn a_non_work_address_never_reaches_workos() {
+async fn a_disposable_address_never_reaches_workos() {
     let (flow, store) = workflow(vec![]).await;
     let refused = flow
-        .start("someone@gmail.com", WEB_CHANNEL, "session-1")
+        .start("someone@mailinator.com", WEB_CHANNEL, "session-1")
         .await
         .unwrap_err();
     assert!(matches!(refused, ClaimError::Email(_)), "{refused}");
@@ -476,12 +476,12 @@ async fn the_browser_claim_arrives_verified_and_a_repeat_callback_resolves_it() 
 }
 
 #[tokio::test]
-async fn the_browser_claim_still_runs_the_work_email_policy() {
-    // A personal Google account passes WorkOS and must still be refused here.
+async fn the_browser_claim_uses_the_address_for_a_personal_mail_subject() {
     let (flow, _store) = workflow(vec![]).await;
-    let refused = flow
+    let admitted = flow
         .admit_verified("someone@gmail.com", WEB_CHANNEL, "session-1")
         .await
-        .unwrap_err();
-    assert!(matches!(refused, ClaimError::Email(_)), "{refused}");
+        .unwrap();
+    assert_eq!(admitted.email_domain, "gmail.com");
+    assert_eq!(admitted.signup_subject, "someone@gmail.com");
 }

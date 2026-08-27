@@ -3514,10 +3514,10 @@ class SurfaceContext:
         )
 
     async def workspace_domain(self) -> str | None:
-        """The workspace's own email domain — its first member's, the vetted domain a sign-in
-        resolves a workspace by and a chat-surface join matches against. None only when the
-        workspace has no member yet, since every stored address carries a domain; a caller reading
-        None has no domain to match against and joins nobody."""
+        """The workspace's domain signup subject, which a chat-surface join may match.
+
+        Personal-mail workspaces are keyed by the founder's exact address and answer None, so a
+        shared provider domain grants nobody access."""
         async with workspace_tx() as connection:
             return await workspace_domain(connection, self.workspace_id)
 

@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
-from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -37,7 +37,7 @@ from ufo.o11y import warn
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
-from ufo.seats import create_member, email_domain
+from ufo.seats import create_member, email_domain, signup_workspace_id, workspace_subject
 from ufo.turns.untrusted import wall
 from ufo.workspace import ws
 
@@ -75,21 +75,24 @@ CHOICES_SQL = (
     "with first_member as ("
     "  select distinct on (workspace_id) workspace_id, email"
     "  from member order by workspace_id, created_at, id), "
-    "domain_workspace as ("
+    "subject_workspace as ("
     "  select id as workspace_id from workspace where id = :deterministic "
     "  union "
     "  select workspace_id from first_member "
-    "  where lower(split_part(email, '@', 2)) = :domain) "
+    "  where :signup_subject = :domain "
+    "    and lower(split_part(email, '@', 2)) = :domain) "
     "select matching.workspace_id, "
-    "  lower(split_part(first_member.email, '@', 2)) as label, "
-    "  false as domain_match, matching.created_at "
+    "  first_member.email as first_email, "
+    "  false as subject_match, matching.created_at "
     "from member matching "
     "join first_member on first_member.workspace_id = matching.workspace_id "
     "where matching.email = :member "
     "union all "
-    "select workspace_id, :domain as label, true as domain_match, null as created_at "
-    "from domain_workspace "
-    "order by domain_match, created_at nulls last, workspace_id"
+    "select subject_workspace.workspace_id, first_member.email as first_email, "
+    "  true as subject_match, null as created_at "
+    "from subject_workspace "
+    "join first_member on first_member.workspace_id = subject_workspace.workspace_id "
+    "order by subject_match, created_at nulls last, workspace_id"
 )
 
 
@@ -105,8 +108,18 @@ class SignupProfile(BaseModel):
 
 class SeatRequest(BaseModel):
     workspace_id: UUID
-    domain: str
+    # Optional because the verified address already carries it, and because the two images either
+    # side of a rollout state a different half of this pair. A gateway pod from the release being
+    # replaced states the claim ledger's identity as `domain` and no subject; that identity may be
+    # the exact address when a pod of this release wrote the claim. A pod of this release states the
+    # subject, and states the domain only where the subject is that domain — a serve pod of the
+    # release being replaced requires the field and reads it as the whole identity, so a
+    # personal-mail call states none and is refused there rather than resolved by a shared provider.
+    domain: str | None = None
     email: str
+    # Optional for the mirror of that reason: absent, the subject is the verified domain — the rule
+    # `ufo_control.fill_signup_subject` applies to the rows that same pod writes.
+    signup_subject: str | None = None
     profile: SignupProfile | None = None
 
 
@@ -195,30 +208,32 @@ def agent_prompt(profile: SignupProfile | None) -> str:
     )
 
 
-def deterministic_workspace_id(domain: str) -> UUID:
-    """The workspace one verified domain names. Both ends derive it — the Rust caller to send it,
-    this end to write under it — so one domain always resolves to one workspace."""
-    return uuid5(NAMESPACE_DNS, domain.lower())
-
-
-def _labelled(rows: Sequence[sa.RowMapping], domain: str) -> list[WorkspaceChoice]:
-    """The candidate list a member picks from. A domain resolving to more than one workspace is a
+def _labelled(rows: Sequence[sa.RowMapping], subject: str) -> list[WorkspaceChoice]:
+    """The candidate list a member picks from. A subject resolving to more than one workspace is a
     fleet nothing can sign into unambiguously, so it raises rather than guessing. A label two
-    workspaces share takes a uuid prefix, so the member can tell them apart."""
-    domain_rows = [row for row in rows if row["domain_match"]]
-    if len(domain_rows) > 1:
+    workspaces share takes a uuid prefix, so the member can tell them apart.
+
+    A subject match is granted only by the workspace's own subject, so a domain never matches a
+    workspace its founder's exact address names. The query cannot derive that subject itself —
+    `uuid5` lives here — so the rows it offers are held to it here."""
+    own = {
+        row["workspace_id"]: workspace_subject(row["first_email"], row["workspace_id"])
+        for row in rows
+    }
+    subject_rows = [
+        row for row in rows if row["subject_match"] and own[row["workspace_id"]] == subject
+    ]
+    if len(subject_rows) > 1:
         raise HTTPException(
             status_code=409,
-            detail=f"domain {domain} maps to {len(domain_rows)} workspaces",
+            detail=f"signup subject {subject} maps to {len(subject_rows)} workspaces",
         )
-    member_ids = {row["workspace_id"] for row in rows if not row["domain_match"]}
+    member_ids = {row["workspace_id"] for row in rows if not row["subject_match"]}
     found: dict[UUID, str] = {
-        row["workspace_id"]: row["label"] or str(row["workspace_id"])
-        for row in rows
-        if not row["domain_match"]
+        row["workspace_id"]: own[row["workspace_id"]] for row in rows if not row["subject_match"]
     }
-    if domain_rows:
-        found.setdefault(domain_rows[0]["workspace_id"], domain)
+    if subject_rows:
+        found.setdefault(subject_rows[0]["workspace_id"], subject)
     counts: dict[str, int] = {}
     for label in found.values():
         counts[label] = counts.get(label, 0) + 1
@@ -230,6 +245,28 @@ def _labelled(rows: Sequence[sa.RowMapping], domain: str) -> list[WorkspaceChoic
         )
         for workspace_id, label in found.items()
     ]
+
+
+def _verified_signup(
+    email: str, domain: str | None, signup_subject: str | None
+) -> tuple[str, str, str]:
+    member = email.strip().lower()
+    verified_domain = email_domain(member)
+    stated_domain = None if domain is None else domain.strip().lower()
+    subject = None if signup_subject is None else signup_subject.strip().lower()
+    if not verified_domain:
+        raise HTTPException(status_code=422, detail="domain must match the verified email")
+    if stated_domain not in (None, verified_domain, member):
+        raise HTTPException(status_code=422, detail="domain must match the verified email")
+    if stated_domain == member and subject not in (None, member):
+        raise HTTPException(status_code=422, detail="domain must match the verified email")
+    subject = subject or (member if stated_domain == member else verified_domain)
+    if subject not in (verified_domain, member):
+        raise HTTPException(
+            status_code=422,
+            detail="signup_subject must be the verified domain or email",
+        )
+    return member, verified_domain, subject
 
 
 @dataclass(frozen=True)
@@ -253,12 +290,13 @@ class OnboardControl:
             raise HTTPException(status_code=401, detail="onboard control token required")
 
     async def _seat(self, request: SeatRequest) -> EnsuredWorkspace:
-        """Create the workspace this verified domain names, or join one already there, and seat the
-        member either way. What the intake form collected opens the main agent's prompt, so the
-        agent knows who it works for from its first turn instead of asking for what this customer
-        already told us."""
-        member = request.email.strip().lower()
-        domain = request.domain.lower()
+        """Create the workspace this verified signup subject names, or join one already there, and
+        seat the member either way. What the intake form collected opens the main agent's prompt,
+        so the agent knows who it works for from its first turn instead of asking for what this
+        customer already told us."""
+        member, _, signup_subject = _verified_signup(
+            request.email, request.domain, request.signup_subject
+        )
         workspace_id = request.workspace_id
         with ws(workspace_id):
             async with workspace_tx() as connection:
@@ -279,6 +317,11 @@ class OnboardControl:
                     .where(tables.workspace.c.id == workspace_id)
                     .with_for_update()
                 )
+                if founded and signup_workspace_id(signup_subject) != workspace_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"workspace {workspace_id} does not belong to {signup_subject}",
+                    )
                 first_email = (
                     await connection.execute(
                         sa.select(tables.member.c.email)
@@ -287,10 +330,13 @@ class OnboardControl:
                         .limit(1)
                     )
                 ).scalar_one_or_none()
-                if first_email is not None and email_domain(first_email) != domain:
+                first_subject = (
+                    None if first_email is None else workspace_subject(first_email, workspace_id)
+                )
+                if first_subject is not None and first_subject.lower() != signup_subject:
                     raise HTTPException(
                         status_code=409,
-                        detail=f"workspace {workspace_id} no longer belongs to {domain}",
+                        detail=f"workspace {workspace_id} no longer belongs to {signup_subject}",
                     )
                 member_id = await create_member(
                     connection,
@@ -355,24 +401,32 @@ class OnboardControl:
             )
         return Membership(admin=admin)
 
-    async def _choices(self, email: str, domain: str) -> WorkspaceChoices:
+    async def _choices(
+        self, email: str, domain: str | None = None, signup_subject: str | None = None
+    ) -> WorkspaceChoices:
         """Every workspace this address may enter: its exact memberships plus the one its verified
-        domain names. Membership grants only that workspace; a domain match grants its
-        workspace."""
-        member = email.strip().lower()
-        normalized = domain.lower()
-        warn(CROSS_WORKSPACE_READ, route="choices", domain=normalized)
+        signup subject names. Membership grants only that workspace; a subject match grants its
+        workspace.
+
+        Both fields are optional for the same reason they are optional on `seat`: the two gateway
+        images either side of a rollout state a different half of the pair, and the verified address
+        carries its own domain anyway. A gateway pod from the release being replaced asks with
+        `email` and the claim ledger's identity in `domain`; a pod of this release asks by subject,
+        and states the domain only where the subject is that domain."""
+        member, verified_domain, subject = _verified_signup(email, domain, signup_subject)
+        warn(CROSS_WORKSPACE_READ, route="choices", domain=verified_domain)
         async with owner_tx() as connection:
             result = await connection.execute(
                 sa.text(CHOICES_SQL),
                 {
                     "member": member,
-                    "deterministic": deterministic_workspace_id(normalized),
-                    "domain": normalized,
+                    "deterministic": signup_workspace_id(subject),
+                    "domain": verified_domain,
+                    "signup_subject": subject,
                 },
             )
             rows = result.mappings().all()
-        return WorkspaceChoices(choices=_labelled(rows, normalized))
+        return WorkspaceChoices(choices=_labelled(rows, subject))
 
     async def _fleet(self) -> Fleet:
         """One craft per workspace, for the landing page's live fleet."""
@@ -401,7 +455,7 @@ class OnboardControl:
         workspace row lock, so a member stamped earlier can commit after one stamped later, and a
         mark carried between walks would step past them.
 
-        The workspace is labelled by its first member's domain, the same label `choices` offers, so
+        The workspace is labelled by its signup subject, the same label `choices` offers, so
         the workspace an invitation names reads identically to the one its recipient picks at
         sign-in."""
         cursor = (after_invited_at, after_workspace_id, after_email)
@@ -425,9 +479,7 @@ class OnboardControl:
                 invited.c.workspace_id,
                 invited.c.email,
                 inviter.c.email.label("invited_by"),
-                sa.func.lower(sa.func.split_part(first_member.c.email, "@", 2)).label(
-                    "workspace_label"
-                ),
+                first_member.c.email.label("first_email"),
                 invited.c.invited_at,
             )
             .select_from(invited)
@@ -453,7 +505,7 @@ class OnboardControl:
                     workspace_id=str(row.workspace_id),
                     email=row.email,
                     invited_by=row.invited_by,
-                    workspace_label=row.workspace_label,
+                    workspace_label=workspace_subject(row.first_email, row.workspace_id),
                     invited_at=row.invited_at,
                 )
                 for row in rows

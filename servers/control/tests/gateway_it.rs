@@ -430,24 +430,34 @@ async fn an_oversized_body_is_refused_rather_than_graded() {
 }
 
 #[tokio::test]
-async fn an_empty_first_turn_asks_for_the_work_email() {
+async fn an_empty_first_turn_asks_for_the_email() {
     let rig = rig(vec![], vec![], true).await;
     let screen = turn(&rig, "session-1", "").await;
     assert!(screen.contains("say\tflyingobject.ai"), "{screen}");
-    assert!(screen.contains("ask\tEnter your work email:"), "{screen}");
+    assert!(screen.contains("ask\tEnter your email:"), "{screen}");
 }
 
 #[tokio::test]
-async fn a_denylisted_address_is_refused_with_no_code_sent() {
-    // No WorkOS response is queued, so a code that was mailed would hang the turn.
+async fn a_disposable_address_is_refused_with_no_code_sent() {
     let rig = rig(vec![], vec![], true).await;
-    let screen = turn(&rig, "session-1", "someone@gmail.com").await;
-    assert!(screen.contains("not a work email domain"), "{screen}");
-    assert!(screen.contains("ask\tEnter your work email:"), "{screen}");
+    let screen = turn(&rig, "session-1", "someone@mailinator.com").await;
+    assert!(screen.contains("disposable email domain"), "{screen}");
+    assert!(screen.contains("ask\tEnter your email:"), "{screen}");
 }
 
 #[tokio::test]
-async fn a_work_address_earns_a_code_prompt() {
+async fn a_personal_address_earns_a_code_prompt() {
+    let rig = rig(vec![(200, r#"{"id":"m1"}"#.to_string())], vec![], true).await;
+    let screen = turn(&rig, "session-1", "  Someone@Gmail.com ").await;
+    assert!(
+        screen.contains("say\tWe emailed a code to someone@gmail.com"),
+        "{screen}"
+    );
+    assert!(screen.contains("ask\tEnter the code:"), "{screen}");
+}
+
+#[tokio::test]
+async fn an_organization_address_earns_a_code_prompt() {
     let rig = rig(vec![(200, r#"{"id":"m1"}"#.to_string())], vec![], true).await;
     let screen = turn(&rig, "session-1", "  Founder@Acme.com ").await;
     assert!(
@@ -548,7 +558,7 @@ async fn a_teammate_joining_an_existing_workspace_carries_no_first_run() {
     let rig = rig(
         vec![
             (200, r#"{"id":"m1"}"#.to_string()),
-            (200, r#"{"user":{"email":"second@acme.com"}}"#.to_string()),
+            (200, r#"{"user":{"email":"second@gmail.com"}}"#.to_string()),
         ],
         vec![
             (
@@ -562,10 +572,10 @@ async fn a_teammate_joining_an_existing_workspace_carries_no_first_run() {
     )
     .await;
 
-    turn(&rig, "session-2", "second@acme.com").await;
+    turn(&rig, "session-2", "second@gmail.com").await;
     let screen = turn(&rig, "session-2", "123456").await;
     assert!(
-        screen.contains("say\tSigned in: second@acme.com"),
+        screen.contains("say\tSigned in: second@gmail.com"),
         "{screen}"
     );
     // The first run belongs to the sign-in that founded the workspace. A teammate joining one that
@@ -1200,6 +1210,50 @@ async fn the_signup_key_founds_the_domain_workspace_with_no_operator_grant() {
 }
 
 #[tokio::test]
+async fn the_signup_key_founds_an_address_workspace_for_gmail() {
+    let rig = rig(
+        vec![
+            (200, r#"{"id":"m1"}"#.to_string()),
+            (200, r#"{"user":{"email":"someone@gmail.com"}}"#.to_string()),
+        ],
+        vec![
+            (200, r#"{"choices":[]}"#.to_string()),
+            (
+                200,
+                r#"{"workspace_id":"c9ff4df7-cade-5134-aa05-67f2689645d7","admin":true,"founding":true}"#
+                    .to_string(),
+            ),
+        ],
+        true,
+    )
+    .await;
+    let (_, cookie) = join(&rig, SIGNUP_KEY).await;
+    let cookie = cookie.expect("the door binds a session");
+    let (_, carried) = web_turn(&rig, Some(&cookie), "someone@gmail.com").await;
+    let cookie = carried.unwrap_or(cookie);
+    let (payload, _) = web_turn(&rig, Some(&cookie), "123456").await;
+    assert!(
+        payload.to_string().contains("\"verb\":\"token\""),
+        "{payload}"
+    );
+
+    // Both identity columns carry the subject: `email_domain` is the one the release being replaced
+    // looks a grant up by, and `gmail.com` there is a grant it hands to any `@gmail.com` arrival.
+    let connection = rig.pool.get().await.unwrap();
+    let filed = connection
+        .query_one(
+            "select signup_subject, email_domain from ufo_control.invite_code where email = $1",
+            &[&"someone@gmail.com"],
+        )
+        .await
+        .unwrap();
+    let subject: String = filed.get("signup_subject");
+    let identity: String = filed.get("email_domain");
+    assert_eq!(subject, "someone@gmail.com");
+    assert_eq!(identity, "someone@gmail.com");
+}
+
+#[tokio::test]
 async fn a_browser_that_never_opened_the_join_link_is_still_refused() {
     let rig = rig(
         vec![
@@ -1321,7 +1375,7 @@ async fn a_keyed_session_writes_no_second_grant_over_a_spent_one() {
     let invites = InviteCodes::new(rig.pool.clone());
     invites.mint(None, "founder@acme.com", None).await.unwrap();
     invites
-        .redeem("acme.com", uuid::Uuid::new_v4())
+        .redeem("founder@acme.com", uuid::Uuid::new_v4())
         .await
         .unwrap();
 

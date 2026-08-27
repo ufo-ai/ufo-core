@@ -1,8 +1,9 @@
-//! Work-email policy and the outbound mail sender.
+//! Signup-email policy and the outbound mail sender.
 //!
-//! `WorkEmailPolicy` rejects free, personal, and disposable domains so a workspace maps to a real
-//! organization — the denylist fails CLOSED and a malformed address is rejected up front. The
-//! sender delivers a rendered subject, a plain-text body, and the HTML alternative beside it where
+//! `SignupEmailPolicy` rejects disposable domains and maps a shared personal-mail domain to the
+//! exact address rather than granting that domain authority over a workspace. A malformed address
+//! is rejected up front. The sender delivers a rendered subject, a plain-text body, and the HTML
+//! alternative beside it where
 //! one is rendered, through SESv2, carrying no message shape of its own
 //! beyond `invite_email`, the grant's own invitation; the teammate invitation renders in
 //! `invite_delivery`, and WorkOS delivers the sign-in code.
@@ -710,51 +711,68 @@ const STS_SESSION_NAME: &str = "ufo-gateway-email";
 const STS_SESSION_SECONDS: u32 = 900;
 const STS_TIMEOUT_SECONDS: u64 = 10;
 
-/// The email is not an acceptable work email — bad format or a denylisted domain.
+/// The email is not an acceptable signup identity.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum WorkEmailError {
+pub enum EmailError {
     #[error("The email address is malformed.")]
     Malformed,
-    #[error("{0} is not a work email domain.")]
-    NotWork(String),
+    #[error("{0} is a disposable email domain.")]
+    Disposable(String),
 }
 
 /// Lowercased (address, domain), the domain a strict hostname with its FQDN root dot dropped — so a
-/// trailing-dot or otherwise malformed domain cannot carry a denylisted address (`gmail.com.`) past
-/// the policy.
-pub fn normalize_email(email: &str) -> Result<(String, String), WorkEmailError> {
+/// trailing-dot domain cannot change how an address such as `someone@gmail.com.` is classified.
+pub fn normalize_email(email: &str) -> Result<(String, String), EmailError> {
     let candidate = email.trim().to_lowercase();
     let captures = EMAIL_PATTERN
         .captures(&candidate)
-        .ok_or(WorkEmailError::Malformed)?;
+        .ok_or(EmailError::Malformed)?;
     let domain = captures[1].to_string();
-    Ok((candidate, domain))
+    let local = candidate
+        .split_once('@')
+        .map(|(local, _)| local)
+        .ok_or(EmailError::Malformed)?;
+    Ok((format!("{local}@{domain}"), domain))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignupEmail {
+    pub address: String,
+    pub domain: String,
+    pub subject: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct WorkEmailPolicy {
-    denylist: HashSet<&'static str>,
+pub struct SignupEmailPolicy {
+    personal_domains: HashSet<&'static str>,
+    disposable_domains: HashSet<&'static str>,
 }
 
-impl Default for WorkEmailPolicy {
+impl Default for SignupEmailPolicy {
     fn default() -> Self {
         Self {
-            denylist: FREE_EMAIL_DOMAINS
-                .iter()
-                .chain(DISPOSABLE_EMAIL_DOMAINS)
-                .copied()
-                .collect(),
+            personal_domains: FREE_EMAIL_DOMAINS.iter().copied().collect(),
+            disposable_domains: DISPOSABLE_EMAIL_DOMAINS.iter().copied().collect(),
         }
     }
 }
 
-impl WorkEmailPolicy {
-    pub fn validate(&self, email: &str) -> Result<String, WorkEmailError> {
-        let (_, domain) = normalize_email(email)?;
-        if self.denylist.contains(domain.as_str()) {
-            return Err(WorkEmailError::NotWork(domain));
+impl SignupEmailPolicy {
+    pub fn validate(&self, email: &str) -> Result<SignupEmail, EmailError> {
+        let (address, domain) = normalize_email(email)?;
+        if self.disposable_domains.contains(domain.as_str()) {
+            return Err(EmailError::Disposable(domain));
         }
-        Ok(domain)
+        let subject = if self.personal_domains.contains(domain.as_str()) {
+            address.clone()
+        } else {
+            domain.clone()
+        };
+        Ok(SignupEmail {
+            address,
+            domain,
+            subject,
+        })
     }
 }
 
@@ -789,7 +807,7 @@ pub fn invite_email(
     expires_at: DateTime<Utc>,
     apex_host: &str,
     workspace_url: &str,
-) -> Result<InviteEmail, WorkEmailError> {
+) -> Result<InviteEmail, EmailError> {
     normalize_email(email)?;
     let expires = expires_at.format("%Y-%m-%d %H:%M");
     let workspace_url = workspace_url.trim_end_matches('/');

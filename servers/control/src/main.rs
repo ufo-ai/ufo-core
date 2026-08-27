@@ -48,7 +48,7 @@ enum Verb {
     Gateway,
     /// Shape the platform control schema — every gateway ledger, as the database owner.
     Migrate,
-    /// Grant an email domain one new workspace and email it the invitation.
+    /// Grant an address's signup subject one new workspace and email it the invitation.
     ///
     /// Both intake answers open the new workspace's main agent prompt. They travel together: a
     /// grant describes this customer completely or not at all. `--object` names a waitlist object

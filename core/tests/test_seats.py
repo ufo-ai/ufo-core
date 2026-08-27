@@ -30,6 +30,7 @@ from ufo.seats import (
     gate_member,
     member_by_email,
     member_is_admin,
+    signup_workspace_id,
     workspace_by_domain,
     workspace_domain,
 )
@@ -40,8 +41,8 @@ ADMIN_EMAIL = "owner@example.com"
 TEAMMATE_EMAIL = "teammate@example.com"
 
 
-async def _workspace() -> UUID:
-    workspace_id = uuid4()
+async def _workspace(subject: str | None = None) -> UUID:
+    workspace_id = signup_workspace_id(subject) if subject else uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -478,6 +479,16 @@ async def test_only_the_first_member_names_the_workspace(db: None) -> None:
     async with owner_tx() as connection:
         assert await workspace_by_domain(connection, "acme.com") == workspace_id
         assert await workspace_by_domain(connection, "other.com") is None
+
+
+async def test_a_personal_mail_workspace_has_no_domain_authority(db: None) -> None:
+    workspace_id = await _workspace("owner@gmail.com")
+    await _member(workspace_id, "owner@gmail.com")
+    async with owner_tx() as connection:
+        assert await workspace_by_domain(connection, "gmail.com") is None
+    async with workspace_tx() as connection:
+        with ws(workspace_id):
+            assert await workspace_domain(connection, workspace_id) is None
 
 
 async def test_the_oldest_seating_wins_a_domain_two_workspaces_share(db: None) -> None:

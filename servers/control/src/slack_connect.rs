@@ -79,14 +79,20 @@ pub fn channel_name_sql() -> String {
     )
 }
 
-/// Every domain that earned a channel: one holding a live or spent grant, plus one whose claim
-/// actually opened a workspace. A member who joined an existing workspace appears in neither.
+/// Every organization domain that earned a channel: one holding a live or spent domain grant,
+/// plus one whose domain claim actually opened a workspace. Personal-mail subjects name one
+/// address rather than a customer domain and earn no shared channel, and a subject that is the
+/// member's own address is exactly what names one — both ledgers file a row under its subject, so
+/// the key a channel is derived from is a customer domain or nothing.
 pub fn earned_sql() -> String {
     format!(
         "select email_domain, email, created_at from {INVITE_TABLE} \
-           where consumed_at is not null or expires_at > now() \
+           where (consumed_at is not null or expires_at > now()) \
+             and signup_subject <> email \
          union all \
-         select email_domain, email, created_at from {CLAIM_TABLE} where created_workspace"
+         select email_domain, email, created_at from {CLAIM_TABLE} \
+           where created_workspace \
+             and signup_subject <> email"
     )
 }
 

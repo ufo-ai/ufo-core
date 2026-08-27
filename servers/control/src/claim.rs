@@ -1,4 +1,4 @@
-//! Work-email verification through WorkOS, under a claim time-to-live.
+//! Signup-email verification through WorkOS, under a claim time-to-live.
 //!
 //! The time-to-live is the Magic Auth code's own ten minutes. WorkOS answers a code it will not
 //! redeem the same way whether the digits are wrong or the code has died, so the claim's window is
@@ -8,7 +8,7 @@
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-use crate::email::{WorkEmailError, WorkEmailPolicy};
+use crate::email::{EmailError, SignupEmailPolicy};
 use crate::store::{OnboardClaim, OnboardStore, StoreError};
 use crate::workos::{VerificationError, Verifier};
 
@@ -23,7 +23,7 @@ pub enum ClaimError {
     #[error("{0}")]
     Refused(String),
     #[error(transparent)]
-    Email(#[from] WorkEmailError),
+    Email(#[from] EmailError),
     #[error("the claim ledger is unreachable: {0}")]
     Store(String),
 }
@@ -40,7 +40,7 @@ impl From<StoreError> for ClaimError {
 #[derive(Debug, Clone)]
 pub struct ClaimWorkflow {
     pub store: OnboardStore,
-    pub email_policy: WorkEmailPolicy,
+    pub email_policy: SignupEmailPolicy,
     pub verifier: Verifier,
     pub claim_ttl: Duration,
 }
@@ -49,7 +49,7 @@ impl ClaimWorkflow {
     pub fn new(store: OnboardStore, verifier: Verifier) -> Self {
         Self {
             store,
-            email_policy: WorkEmailPolicy::default(),
+            email_policy: SignupEmailPolicy::default(),
             verifier,
             claim_ttl: Duration::minutes(CLAIM_TTL_MINUTES),
         }
@@ -64,18 +64,18 @@ impl ClaimWorkflow {
         surface: &str,
         surface_ref: &str,
     ) -> Result<String, ClaimError> {
-        let domain = self.email_policy.validate(email)?;
-        let claim = self.claim(email, &domain, surface, surface_ref, None);
+        let signup = self.email_policy.validate(email)?;
+        let claim = self.claim(&signup, surface, surface_ref, None);
         self.store.insert_claim(&claim).await?;
         if let Err(VerificationError(message)) = self.verifier.begin(&claim.email).await {
             self.store.delete_claim(claim.claim_id).await?;
             tracing::warn!(
                 target: "ufo_control::claim",
-                "onboard.verify.begin_failed domain={domain} surface={surface}"
+                "onboard.verify.begin_failed domain={} surface={surface}", signup.domain
             );
             return Err(ClaimError::Refused(message));
         }
-        Ok(domain)
+        Ok(signup.domain)
     }
 
     /// Grade one code against a live claim. Each refusal takes the claim only if this attempt is the
@@ -121,27 +121,27 @@ impl ClaimWorkflow {
         surface: &str,
         surface_ref: &str,
     ) -> Result<OnboardClaim, ClaimError> {
-        let domain = self.email_policy.validate(email)?;
+        let signup = self.email_policy.validate(email)?;
         if let Some(existing) = self.store.live_claim(surface, surface_ref).await? {
             return Ok(existing);
         }
-        let claim = self.claim(email, &domain, surface, surface_ref, Some(Utc::now()));
+        let claim = self.claim(&signup, surface, surface_ref, Some(Utc::now()));
         self.store.insert_claim(&claim).await?;
         Ok(claim)
     }
 
     fn claim(
         &self,
-        email: &str,
-        domain: &str,
+        signup: &crate::email::SignupEmail,
         surface: &str,
         surface_ref: &str,
         verified_at: Option<DateTime<Utc>>,
     ) -> OnboardClaim {
         OnboardClaim {
             claim_id: Uuid::new_v4(),
-            email: email.trim().to_lowercase(),
-            email_domain: domain.to_string(),
+            email: signup.address.clone(),
+            email_domain: signup.domain.clone(),
+            signup_subject: signup.subject.clone(),
             surface: surface.to_string(),
             surface_ref: surface_ref.to_string(),
             expires_at: Utc::now() + self.claim_ttl,

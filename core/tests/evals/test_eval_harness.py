@@ -257,7 +257,6 @@ from ufo.models.interface import (
 from ufo.models.pricing import ModelPrice, pricing_from
 from ufo.models.registry import ModelRegistry
 from ufo.object_name import ObjectRef, validate_object_name
-from ufo.onboard.onboard_control import deterministic_workspace_id
 from ufo.schema import tables
 from ufo.schema.records import (
     DELIVERY_DELIVERED,
@@ -270,6 +269,7 @@ from ufo.schema.records import (
     TurnStatus,
     Usage,
 )
+from ufo.seats import signup_workspace_id
 from ufo.surfaces.admission import Admission, AdmissionInvoker
 from ufo.turns.transcript import (
     CompactionSummary,
@@ -7009,7 +7009,7 @@ async def test_remote_workspace_provisioner_reserves_the_run_budget(
 ) -> None:
     run_id = UUID("11111111-2222-3333-4444-555555555555")
     domain = f"{run_id.hex}.eval.invalid"
-    expected = deterministic_workspace_id(domain)
+    expected = signup_workspace_id(domain)
     received: list[tuple[str, dict[str, object], str]] = []
 
     async with workspace_tx() as connection:
@@ -7051,6 +7051,7 @@ async def test_remote_workspace_provisioner_reserves_the_run_budget(
                 "workspace_id": str(expected),
                 "domain": domain,
                 "email": f"swebench@{domain}",
+                "signup_subject": domain,
                 "profile": None,
             },
             "Bearer control-token",
@@ -7164,7 +7165,7 @@ async def test_remote_workspace_provisioner_rejects_a_non_founding_response(
     invalid: str,
 ) -> None:
     run_id = UUID("11111111-2222-3333-4444-555555555555")
-    expected = deterministic_workspace_id(f"{run_id.hex}.eval.invalid")
+    expected = signup_workspace_id(f"{run_id.hex}.eval.invalid")
     body = {"workspace_id": str(expected), "admin": True, "founding": True}
     if invalid == "workspace":
         body["workspace_id"] = str(uuid4())

@@ -129,6 +129,65 @@ async fn a_member_who_joined_an_existing_workspace_earns_no_channel() {
 }
 
 #[tokio::test]
+async fn a_personal_mail_grant_earns_no_shared_customer_channel() {
+    let pool = ledger_pool().await;
+    InviteCodes::new(pool.clone())
+        .mint(None, "someone@gmail.com", None)
+        .await
+        .unwrap();
+    let worker = inviter(pool.clone(), vec![]).await;
+    worker.poll().await.unwrap();
+
+    let count: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select count(*) from ufo_control.slack_connect_delivery",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn a_personal_mail_workspace_earns_no_shared_customer_channel() {
+    let pool = ledger_pool().await;
+    // A founding claim as this image files one: the identity column carries the signup subject, and
+    // a personal-mail subject is the member's own address. A channel derived from the provider
+    // instead would be one channel every customer at that provider shares.
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            "insert into ufo_control.onboard_claim \
+             (id, email, email_domain, surface, surface_ref, expires_at, created_workspace) \
+             values (gen_random_uuid(), 'someone@gmail.com', 'someone@gmail.com', 'web', 's2', \
+                     now() + interval '10 minutes', true)",
+            &[],
+        )
+        .await
+        .unwrap();
+    let worker = inviter(pool.clone(), vec![]).await;
+    worker.poll().await.unwrap();
+
+    let count: i64 = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select count(*) from ufo_control.slack_connect_delivery",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0, "a personal-mail subject earns no shared channel");
+}
+
+#[tokio::test]
 async fn a_full_delivery_opens_the_channel_invites_and_greets() {
     let pool = ledger_pool().await;
     InviteCodes::new(pool.clone())

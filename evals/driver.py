@@ -41,7 +41,6 @@ from ufo.object_name import validate_object_name
 from ufo.onboard.onboard_control import (
     EnsuredWorkspace,
     SeatRequest,
-    deterministic_workspace_id,
 )
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -61,6 +60,7 @@ from ufo.sdk.models import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from ufo.seats import signup_workspace_id
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.turns.cancellation import cancel_one_turn
 from ufo.turns.transcript import Conversation, TranscriptDecodeError, decode, encode, transcript_key
@@ -93,11 +93,12 @@ class RemoteWorkspaceProvisioner:
     async def provision(self, run_id: UUID) -> UUID:
         """Found one clean hosted workspace whose identity is derived from the eval run."""
         domain = f"{run_id.hex}.{REMOTE_EVAL_DOMAIN}"
-        workspace_id = deterministic_workspace_id(domain)
+        workspace_id = signup_workspace_id(domain)
         request = SeatRequest(
             workspace_id=workspace_id,
             domain=domain,
             email=f"swebench@{domain}",
+            signup_subject=domain,
         )
         response = await self.client.post(
             "/internal/onboard/seat",

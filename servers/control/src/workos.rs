@@ -1,7 +1,7 @@
 //! WorkOS custody of email verification: Magic Auth for the email and code both the browser and the
 //! terminal collect on our own pages, and a Google OAuth hop (`provider=GoogleOAuth`) for the
 //! browser's `Continue with Google`. WorkOS answers one question — does this person control this
-//! email — and no hosted WorkOS page collects the address: our gateway does, so the work-email
+//! email — and no hosted WorkOS page collects the address: our gateway does, so the signup-email
 //! policy runs before any code is mailed.
 //!
 //! `confirm` grades the member's code: WorkOS answers a code it will not redeem with the OAuth

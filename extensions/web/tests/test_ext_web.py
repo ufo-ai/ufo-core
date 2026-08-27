@@ -3420,12 +3420,18 @@ async def test_imessage_claim_reads_the_member_s_own_phone_claim(
 
     now = datetime.now(UTC)
 
-    async def _claim(member: UUID, *, expires_at: datetime | None, proved_by: str | None) -> None:
+    async def _claim(
+        member: UUID,
+        address: str,
+        *,
+        expires_at: datetime | None,
+        proved_by: str | None,
+    ) -> None:
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.insert(tables.surface_address).values(
                     surface="imessage",
-                    address=f"+1559425999{member.int % 10}",
+                    address=address,
                     workspace_id=workspace_id,
                     member_id=member,
                     claim_expires_at=expires_at,
@@ -3435,11 +3441,16 @@ async def test_imessage_claim_reads_the_member_s_own_phone_claim(
                 )
             )
 
-    await _claim(member_id, expires_at=now + timedelta(minutes=30), proved_by=None)
+    await _claim(
+        member_id,
+        "+15594259991",
+        expires_at=now + timedelta(minutes=30),
+        proved_by=None,
+    )
     held = await client.get(path, headers=cookie)
     assert held.json() == {"state": "pending"}
 
-    await _claim(other_id, expires_at=None, proved_by="turn-1")
+    await _claim(other_id, "+15594259992", expires_at=None, proved_by="turn-1")
     teammate = await client.get(path, headers=cookie)
     assert teammate.json() == {"state": "pending"}
     proven = await client.get(path, headers=other_cookie)

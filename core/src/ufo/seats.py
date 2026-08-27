@@ -11,7 +11,7 @@ lets them speak."""
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -25,7 +25,7 @@ SEAT_REFUSAL_MESSAGE = (
     "A workspace admin removed your seat, so I can't answer you. Ask them to restore it."
 )
 UNRESOLVED_SPEAKER_MESSAGE = (
-    "I can only answer workspace members, and I couldn't verify who you are. Make sure your work "
+    "I can only answer workspace members, and I couldn't verify who you are. Make sure your "
     "email is confirmed and visible on your profile, then try again — or ask a workspace admin "
     "to add you."
 )
@@ -228,13 +228,28 @@ def email_domain(email: str) -> str:
     return domain
 
 
+def signup_workspace_id(subject: str) -> UUID:
+    """The hosted workspace one verified signup subject names."""
+    return uuid5(NAMESPACE_DNS, subject.lower())
+
+
+def workspace_subject(first_email: str, workspace_id: UUID) -> str:
+    """The signup subject a seated workspace belongs to, derived from its first member: that
+    member's exact address when the address names the workspace, and their domain otherwise.
+
+    The one derivation every consumer reads, so the label `choices` offers, the label an invitation
+    prints, and the subject a seat is checked against cannot diverge. A personal-mail workspace
+    answers its founder's address, so a shared provider domain matches nothing here."""
+    if signup_workspace_id(first_email) == workspace_id:
+        return first_email
+    return email_domain(first_email)
+
+
 async def workspace_domain(connection: AsyncConnection, workspace_id: UUID) -> str | None:
-    """The workspace's own email domain: its first member's, the vetted domain a sign-in resolves
-    a workspace by and a chat-surface join matches against. The one derivation every consumer
-    reads — what `join_member` matches and what the operator check compares cannot diverge. None
-    only when the workspace has no member yet, the state a chat-surface join meets before anyone has
-    onboarded: every stored address carries a domain, because `create_member` admits none that does
-    not."""
+    """The workspace's own email domain when that domain is its signup subject.
+
+    A hosted personal-mail workspace is keyed by its founder's exact address, so its provider
+    domain grants no auto-join authority and this answers None."""
     email = (
         await connection.execute(
             sa.select(tables.member.c.email)
@@ -245,18 +260,17 @@ async def workspace_domain(connection: AsyncConnection, workspace_id: UUID) -> s
     ).scalar_one_or_none()
     if email is None:
         return None
-    return email_domain(email) or None
+    domain = email_domain(email)
+    if not domain or signup_workspace_id(email) == workspace_id:
+        return None
+    return domain
 
 
 async def workspace_by_domain(connection: AsyncConnection, domain: str) -> UUID | None:
-    """The workspace a domain addresses: the one whose first member holds it — the exact inverse of
-    `workspace_domain`, so a domain an operator types or a directory prints resolves back to the
-    workspace it names, never to a second workspace derived from the same text.
+    """The workspace a domain addresses through its first member.
 
-    A cross-workspace read, so it runs on an `owner_tx` connection: the address is the predicate and
-    a workspace id is the whole result, so no row's contents cross a tenant boundary. Two workspaces
-    seated at one domain is the fleet a sign-in refuses to choose between; here the oldest seating
-    wins, so an operator reading the directory reaches a workspace rather than nothing."""
+    A personal-mail workspace is instead addressed by its founder's exact email signup subject and
+    is skipped, so a provider domain never resolves to one of its customers."""
     wanted = email_domain(f"anyone@{domain.strip()}")
     if not wanted:
         return None
@@ -272,17 +286,20 @@ async def workspace_by_domain(connection: AsyncConnection, domain: str) -> UUID 
         )
         .label("seniority"),
     ).subquery()
-    return (
+    rows = (
         await connection.execute(
-            sa.select(ranked.c.workspace_id)
+            sa.select(ranked.c.workspace_id, ranked.c.email)
             .where(
                 ranked.c.seniority == 1,
                 sa.func.lower(ranked.c.email).like(f"%@{escaped}", escape="\\"),
             )
             .order_by(ranked.c.created_at.asc(), ranked.c.workspace_id.asc())
-            .limit(1)
         )
-    ).scalar_one_or_none()
+    ).all()
+    return next(
+        (row.workspace_id for row in rows if signup_workspace_id(row.email) != row.workspace_id),
+        None,
+    )
 
 
 async def member_by_email(

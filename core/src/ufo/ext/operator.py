@@ -75,7 +75,8 @@ async def resolve_operator_workspace(
     whole authorization: the verified bearer's email domain must equal the operator's domain before
     `?ws=` may re-scope the request to any workspace in the fleet — a raw workspace UUID, or the
     domain its members are seated at, which `workspace_by_domain` resolves to that workspace's own
-    id so an address the fleet directory prints reaches the workspace the directory lists it as.
+    id so an address the fleet directory prints reaches the workspace the directory lists it as;
+    an exact-address personal workspace is never resolved through its provider domain.
     A domain no workspace is seated at falls to `uuid5(NAMESPACE_DNS, domain)`, the id a workspace
     provisioned for that domain is created under, so a tenant reached before anyone has onboarded
     still resolves. Without `?ws=` the bearer's own workspace claim is the scope.

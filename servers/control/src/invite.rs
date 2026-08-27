@@ -1,8 +1,8 @@
-//! One-time new-workspace invites, each a grant to one email domain.
+//! One-time new-workspace invites, each a grant to one signup subject.
 //!
-//! A verified email whose domain already has a workspace joins ungranted; only the flow that
+//! A verified email whose subject already has a workspace joins ungranted; only the flow that
 //! creates a workspace consults the ledger. `ufo-control invite <object-number> <email>` grants a
-//! waitlist object's domain and emails it the invitation. Redeeming consumes the grant —
+//! waitlist object's signup subject and emails it the invitation. Redeeming consumes the grant —
 //! `consumed_at` claimed under a row lock while still null, so two concurrent flows can never both
 //! open a workspace on one grant — and stamps the claim's `invite_id` in the same transaction, so a
 //! crash can never leave a consumed grant detached from its claim. The consumption lands before the
@@ -14,21 +14,25 @@
 //! against a ledger no agent can read. Postgres treats nulls as distinct, so any number of
 //! unnumbered grants coexist while the waitlist's own numbers stay one to one.
 //!
-//! A grant names a domain rather than travelling as a bearer secret. The member proves the granted
-//! domain by verifying their own email, so the invitation carries nothing to retype, a forwarded
-//! invitation reaches only the company it was issued to, and the colleague who actually runs the
-//! installer is identified without a second grant.
+//! A company grant names its domain; a personal-mail grant names the exact address. The member
+//! proves that subject by verifying their own email, so the invitation carries nothing to retype
+//! and a forwarded invitation grants nothing.
+//!
+//! `email_domain` is written with that same subject, for the reason `store` states about the claim
+//! ledger: it is the column the release being replaced looks a grant up by, and a personal-mail
+//! grant filed under `gmail.com` is one that release hands to any `@gmail.com` arrival, and one its
+//! Slack Connect sweep opens a channel named for the provider from.
 
 use chrono::{DateTime, Duration, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
-use crate::email::{normalize_email, WorkEmailError, WorkEmailPolicy};
+use crate::email::{EmailError, SignupEmailPolicy};
 use crate::store::{StoreError, TABLE as CLAIM_TABLE};
 
 pub const TABLE: &str = "ufo_control.invite_code";
 pub const LIVE_OBJECT_INDEX: &str = "invite_code_live_object";
-pub const LIVE_DOMAIN_INDEX: &str = "invite_code_live_domain";
+pub const LIVE_SUBJECT_INDEX: &str = "invite_code_live_subject";
 pub const INVITE_TTL_DAYS: i64 = 14;
 pub const MAX_PROFILE_CHARS: usize = 500;
 
@@ -38,6 +42,7 @@ pub const DDL: &[&str] = &[
        object_number integer check (object_number > 0),\
        email text not null,\
        email_domain text not null,\
+       signup_subject text not null,\
        business text,\
        goals text,\
        expires_at timestamptz not null,\
@@ -45,8 +50,6 @@ pub const DDL: &[&str] = &[
        created_at timestamptz not null default now())",
     "create unique index if not exists invite_code_live_object \
        on ufo_control.invite_code (object_number) where consumed_at is null",
-    "create unique index if not exists invite_code_live_domain \
-       on ufo_control.invite_code (email_domain) where consumed_at is null",
 ];
 
 /// What the intake form collected about one customer: what their company does, and what they want
@@ -82,7 +85,7 @@ pub struct InviteAccepted {
     pub consumed_at: DateTime<Utc>,
 }
 
-/// Granting refused: the object or the domain is already identified, or already holds a live grant.
+/// Granting refused: the object or signup subject is already identified, or holds a live grant.
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
     #[error("{0} is already identified")]
@@ -92,7 +95,7 @@ pub enum InviteError {
     #[error("each profile field is 1 to {MAX_PROFILE_CHARS} characters")]
     ProfileLength,
     #[error(transparent)]
-    Email(#[from] WorkEmailError),
+    Email(#[from] EmailError),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -115,33 +118,36 @@ impl InviteCodes {
         }
     }
 
-    /// Whether this domain holds a live grant that can create its workspace.
-    pub async fn available(&self, email_domain: &str) -> Result<bool, InviteError> {
+    /// Whether this address's signup subject holds a live grant that can create its workspace.
+    pub async fn available(&self, email: &str) -> Result<bool, InviteError> {
+        let signup = SignupEmailPolicy::default().validate(email)?;
         let connection = self.pool.get().await?;
         let row = connection
             .query_opt(
                 &format!(
                     "select 1 from {TABLE} \
-                     where email_domain = $1 and consumed_at is null and expires_at > now()"
+                     where signup_subject = $1 \
+                       and consumed_at is null and expires_at > now()"
                 ),
-                &[&email_domain],
+                &[&signup.subject],
             )
             .await?;
         Ok(row.is_some())
     }
 
-    /// What the newest grant for this domain recorded, or None when the form collected nothing. The
-    /// newest grant wins: a re-granted domain describes the customer as they are now.
-    pub async fn profile(&self, email_domain: &str) -> Result<Option<SignupProfile>, InviteError> {
+    /// What the newest grant for this address's subject recorded, or None when the form collected
+    /// nothing. The newest grant wins.
+    pub async fn profile(&self, email: &str) -> Result<Option<SignupProfile>, InviteError> {
+        let signup = SignupEmailPolicy::default().validate(email)?;
         let connection = self.pool.get().await?;
         let row = connection
             .query_opt(
                 &format!(
                     "select business, goals from {TABLE} \
-                     where email_domain = $1 and business is not null \
+                     where signup_subject = $1 and business is not null \
                      order by created_at desc, id desc limit 1"
                 ),
-                &[&email_domain],
+                &[&signup.subject],
             )
             .await?;
         Ok(row.map(|row| SignupProfile {
@@ -156,8 +162,7 @@ impl InviteCodes {
         email: &str,
         profile: Option<&SignupProfile>,
     ) -> Result<MintedInvite, InviteError> {
-        let (address, domain) = normalize_email(email)?;
-        WorkEmailPolicy::default().validate(&address)?;
+        let signup = SignupEmailPolicy::default().validate(email)?;
         if let Some(profile) = profile {
             let sized = |field: &str| (1..=MAX_PROFILE_CHARS).contains(&field.chars().count());
             if !sized(&profile.business) || !sized(&profile.goals) {
@@ -178,29 +183,38 @@ impl InviteCodes {
             )
             .await?;
         }
-        refuse_standing(&transaction, "email_domain", &domain, &domain, now).await?;
+        refuse_standing(
+            &transaction,
+            "signup_subject",
+            &signup.subject,
+            &signup.subject,
+            now,
+        )
+        .await?;
         transaction
             .execute(
                 &format!(
                     "delete from {TABLE} \
-                     where (object_number = $1 or email_domain = $2) \
+                     where (object_number = $1 \
+                            or signup_subject = $2) \
                        and consumed_at is null and expires_at <= $3"
                 ),
-                &[&object_number, &domain, &now],
+                &[&object_number, &signup.subject, &now],
             )
             .await?;
         let inserted = transaction
             .execute(
                 &format!(
                     "insert into {TABLE} \
-                     (id, object_number, email, email_domain, expires_at, business, goals) \
-                     values ($1, $2, $3, $4, $5, $6, $7)"
+                     (id, object_number, email, email_domain, signup_subject, expires_at, business, \
+                      goals) values ($1, $2, $3, $4, $5, $6, $7, $8)"
                 ),
                 &[
                     &Uuid::new_v4(),
                     &object_number,
-                    &address,
-                    &domain,
+                    &signup.address,
+                    &signup.subject,
+                    &signup.subject,
                     &expires_at,
                     &profile.map(|profile| profile.business.as_str()),
                     &profile.map(|profile| profile.goals.as_str()),
@@ -209,11 +223,11 @@ impl InviteCodes {
             .await;
         if let Err(raced) = inserted {
             // The partial unique indexes are the arbiter, so a grant that raced another to the same
-            // object or domain is refused here rather than doubling one.
+            // object or subject is refused here rather than doubling one.
             if raced.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
                 let subject = match object_number {
-                    Some(number) => format!("object #{number} or {domain}"),
-                    None => domain,
+                    Some(number) => format!("object #{number} or {}", signup.subject),
+                    None => signup.subject,
                 };
                 return Err(InviteError::LiveGrant {
                     subject,
@@ -225,30 +239,27 @@ impl InviteCodes {
         transaction.commit().await?;
         Ok(MintedInvite {
             object_number,
-            email: address,
+            email: signup.address,
             expires_at,
         })
     }
 
-    /// Spend this domain's grant for one claim, under a row lock so two flows cannot both open a
+    /// Spend this address's subject grant for one claim, under a row lock so two flows cannot open a
     /// workspace on it. The claim's `invite_id` is stamped in the same transaction, so a consumed
     /// grant is never detached from the claim that spent it.
-    pub async fn redeem(
-        &self,
-        email_domain: &str,
-        claim_id: Uuid,
-    ) -> Result<Redemption, InviteError> {
+    pub async fn redeem(&self, email: &str, claim_id: Uuid) -> Result<Redemption, InviteError> {
+        let signup = SignupEmailPolicy::default().validate(email)?;
         let mut connection = self.pool.get().await?;
         let transaction = connection.transaction().await?;
         let Some(row) = transaction
             .query_opt(
                 &format!(
                     "select id, object_number, expires_at, consumed_at from {TABLE} \
-                     where email_domain = $1 \
+                     where signup_subject = $1 \
                      order by (consumed_at is not null) desc, expires_at desc limit 1 \
                      for update"
                 ),
-                &[&email_domain],
+                &[&signup.subject],
             )
             .await?
         else {
@@ -307,7 +318,7 @@ impl InviteCodes {
     }
 }
 
-/// Refuse a grant whose object or domain is already spoken for: a consumed grant identifies the
+/// Refuse a grant whose object or subject is already spoken for: a consumed grant identifies the
 /// customer for good, and a live one has to expire or be spent before another can be issued.
 async fn refuse_standing(
     transaction: &deadpool_postgres::Transaction<'_>,

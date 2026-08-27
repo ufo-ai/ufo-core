@@ -11,11 +11,14 @@ use ufo_control::store::{OnboardClaim, OnboardStore};
 use uuid::Uuid;
 
 fn claim(surface_ref: &str, email: &str) -> OnboardClaim {
-    let (_, domain) = ufo_control::email::normalize_email(email).unwrap();
+    let signup = ufo_control::email::SignupEmailPolicy::default()
+        .validate(email)
+        .unwrap();
     OnboardClaim {
         claim_id: Uuid::new_v4(),
-        email: email.to_string(),
-        email_domain: domain,
+        email: signup.address,
+        email_domain: signup.domain,
+        signup_subject: signup.subject,
         surface: "web".to_string(),
         surface_ref: surface_ref.to_string(),
         expires_at: Utc::now() + Duration::minutes(15),
@@ -39,6 +42,51 @@ async fn shaping_twice_is_a_no_op_and_leaves_the_schema_required() {
             .get(0);
         assert!(present.is_some(), "{table} is absent after shaping");
     }
+}
+
+#[tokio::test]
+async fn reshape_fills_a_subject_omitted_by_either_ledger_writer() {
+    let pool = ledger_pool().await;
+    let client = pool.get().await.unwrap();
+    let claim_id = Uuid::new_v4();
+    let invite_id = Uuid::new_v4();
+    let expires_at = Utc::now() + Duration::minutes(15);
+    client
+        .execute(
+            "insert into ufo_control.onboard_claim \
+             (id, email, email_domain, surface, surface_ref, expires_at) \
+             values ($1, 'founder@acme.com', 'acme.com', 'web', 'session', $2)",
+            &[&claim_id, &expires_at],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "insert into ufo_control.invite_code \
+             (id, email, email_domain, expires_at) \
+             values ($1, 'founder@beta.com', 'beta.com', $2)",
+            &[&invite_id, &expires_at],
+        )
+        .await
+        .unwrap();
+    let claim_subject: String = client
+        .query_one(
+            "select signup_subject from ufo_control.onboard_claim where id = $1",
+            &[&claim_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let invite_subject: String = client
+        .query_one(
+            "select signup_subject from ufo_control.invite_code where id = $1",
+            &[&invite_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(claim_subject, "acme.com");
+    assert_eq!(invite_subject, "beta.com");
 }
 
 #[tokio::test]
@@ -91,6 +139,65 @@ async fn a_claim_is_written_read_back_and_verified_once() {
     assert!(!store.mark_verified(written.claim_id).await.unwrap());
     let read = store.live_claim("web", "session-a").await.unwrap().unwrap();
     assert!(read.verified_at.is_some());
+}
+
+#[tokio::test]
+async fn a_personal_mail_claim_is_filed_under_the_subject_the_previous_image_reads() {
+    let pool = ledger_pool().await;
+    let store = OnboardStore::new(pool.clone());
+    let written = claim("session-personal", "carol@gmail.com");
+    store.insert_claim(&written).await.unwrap();
+
+    // `email_domain` is the column the release being replaced selects and reads as the whole signup
+    // identity. Holding `gmail.com`, a gateway pod of that release picking up this session would
+    // resolve it by the shared provider: a stranger's workspace as the only candidate, or
+    // `uuid5(gmail.com)` founded on a personal member.
+    let filed: String = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select email_domain from ufo_control.onboard_claim where id = $1",
+            &[&written.claim_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(filed, "carol@gmail.com");
+
+    let read = store
+        .live_claim("web", "session-personal")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.signup_subject, "carol@gmail.com");
+    assert_eq!(
+        read.email_domain, "gmail.com",
+        "the domain read back is the verified address's own"
+    );
+}
+
+#[tokio::test]
+async fn a_personal_mail_grant_is_filed_under_the_subject_too() {
+    let pool = ledger_pool().await;
+    InviteCodes::new(pool.clone())
+        .mint(None, "carol@gmail.com", None)
+        .await
+        .unwrap();
+    // The same column, in the ledger the previous image looks a grant up by: filed under
+    // `gmail.com` it is a grant that image hands to any `@gmail.com` arrival.
+    let filed: String = pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "select email_domain from ufo_control.invite_code where email = $1",
+            &[&"carol@gmail.com"],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(filed, "carol@gmail.com");
 }
 
 #[tokio::test]
@@ -164,7 +271,7 @@ async fn an_unverified_claim_deletes_and_a_verified_one_does_not() {
 async fn a_grant_opens_its_domain_and_a_second_live_grant_is_refused() {
     let pool = ledger_pool().await;
     let invites = InviteCodes::new(pool);
-    assert!(!invites.available("acme.com").await.unwrap());
+    assert!(!invites.available("founder@acme.com").await.unwrap());
 
     let minted = invites
         .mint(Some(7), "founder@acme.com", None)
@@ -172,7 +279,7 @@ async fn a_grant_opens_its_domain_and_a_second_live_grant_is_refused() {
         .unwrap();
     assert_eq!(minted.object_number, Some(7));
     assert_eq!(minted.email, "founder@acme.com");
-    assert!(invites.available("acme.com").await.unwrap());
+    assert!(invites.available("founder@acme.com").await.unwrap());
 
     let refused = invites
         .mint(Some(8), "other@acme.com", None)
@@ -185,22 +292,20 @@ async fn a_grant_opens_its_domain_and_a_second_live_grant_is_refused() {
 }
 
 #[tokio::test]
-async fn a_grant_refuses_a_non_work_domain_before_touching_the_ledger() {
+async fn personal_mail_grants_are_isolated_by_address() {
     let pool = ledger_pool().await;
     let invites = InviteCodes::new(pool);
-    let refused = invites
-        .mint(None, "someone@gmail.com", None)
-        .await
-        .unwrap_err();
-    assert!(matches!(refused, InviteError::Email(_)), "{refused}");
-    assert!(!invites.available("gmail.com").await.unwrap());
+    invites.mint(None, "first@gmail.com", None).await.unwrap();
+    invites.mint(None, "second@gmail.com", None).await.unwrap();
+    assert!(invites.available("first@gmail.com").await.unwrap());
+    assert!(invites.available("second@gmail.com").await.unwrap());
 }
 
 #[tokio::test]
 async fn the_intake_profile_rides_the_grant() {
     let pool = ledger_pool().await;
     let invites = InviteCodes::new(pool);
-    assert!(invites.profile("acme.com").await.unwrap().is_none());
+    assert!(invites.profile("founder@acme.com").await.unwrap().is_none());
 
     let collected = SignupProfile {
         business: "we sell widgets".to_string(),
@@ -211,13 +316,17 @@ async fn the_intake_profile_rides_the_grant() {
         .await
         .unwrap();
     assert_eq!(
-        invites.profile("acme.com").await.unwrap().unwrap(),
+        invites.profile("founder@acme.com").await.unwrap().unwrap(),
         collected
     );
 
     // A grant the form never described leaves the agent on the core default.
     invites.mint(None, "founder@other.com", None).await.unwrap();
-    assert!(invites.profile("other.com").await.unwrap().is_none());
+    assert!(invites
+        .profile("founder@other.com")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -250,7 +359,10 @@ async fn a_regranted_domain_describes_the_customer_as_they_are_now() {
         .mint(None, "founder@acme.com", Some(&fresh))
         .await
         .unwrap();
-    assert_eq!(invites.profile("acme.com").await.unwrap().unwrap(), fresh);
+    assert_eq!(
+        invites.profile("founder@acme.com").await.unwrap().unwrap(),
+        fresh
+    );
 }
 
 #[tokio::test]
@@ -262,7 +374,10 @@ async fn a_consumed_grant_identifies_its_domain_for_good() {
 
     let opened = claim("session-p", "founder@acme.com");
     store.insert_claim(&opened).await.unwrap();
-    invites.redeem("acme.com", opened.claim_id).await.unwrap();
+    invites
+        .redeem("founder@acme.com", opened.claim_id)
+        .await
+        .unwrap();
 
     let refused = invites
         .mint(None, "founder@acme.com", None)
@@ -308,7 +423,10 @@ async fn redeeming_spends_the_grant_once_and_stamps_the_claim() {
 
     let mine = claim("session-r", "founder@acme.com");
     store.insert_claim(&mine).await.unwrap();
-    let Redemption::Accepted(accepted) = invites.redeem("acme.com", mine.claim_id).await.unwrap()
+    let Redemption::Accepted(accepted) = invites
+        .redeem("founder@acme.com", mine.claim_id)
+        .await
+        .unwrap()
     else {
         panic!("a live grant is accepted");
     };
@@ -319,13 +437,19 @@ async fn redeeming_spends_the_grant_once_and_stamps_the_claim() {
     assert_eq!(read.invite_id, Some(accepted.invite_id));
 
     // The same claim redeeming again is accepted; a different claim finds it consumed.
-    let again = invites.redeem("acme.com", mine.claim_id).await.unwrap();
+    let again = invites
+        .redeem("founder@acme.com", mine.claim_id)
+        .await
+        .unwrap();
     assert_eq!(again, Redemption::Accepted(accepted));
 
     let theirs = claim("session-s", "second@acme.com");
     store.insert_claim(&theirs).await.unwrap();
     assert_eq!(
-        invites.redeem("acme.com", theirs.claim_id).await.unwrap(),
+        invites
+            .redeem("second@acme.com", theirs.claim_id)
+            .await
+            .unwrap(),
         Redemption::Consumed
     );
 }
@@ -339,7 +463,10 @@ async fn an_ungranted_domain_and_an_expired_grant_read_apart() {
     store.insert_claim(&mine).await.unwrap();
 
     assert_eq!(
-        invites.redeem("nowhere.com", mine.claim_id).await.unwrap(),
+        invites
+            .redeem("founder@nowhere.com", mine.claim_id)
+            .await
+            .unwrap(),
         Redemption::Unknown
     );
 
@@ -353,10 +480,13 @@ async fn an_ungranted_domain_and_an_expired_grant_read_apart() {
         .await
         .unwrap();
     assert!(matches!(
-        invites.redeem("acme.com", mine.claim_id).await.unwrap(),
+        invites
+            .redeem("founder@acme.com", mine.claim_id)
+            .await
+            .unwrap(),
         Redemption::Expired { .. }
     ));
-    assert!(!invites.available("acme.com").await.unwrap());
+    assert!(!invites.available("founder@acme.com").await.unwrap());
 }
 
 #[tokio::test]

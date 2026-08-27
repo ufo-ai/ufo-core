@@ -1,10 +1,10 @@
 //! The hosted onboarding server and shared-workspace resolver.
 //!
 //! One state machine serves every surface. `Onboarding::advance` reads the claim a session holds and
-//! answers with directive lines: no claim collects the work email, an unverified claim grades the
+//! answers with directive lines: no claim collects the email, an unverified claim grades the
 //! code WorkOS mailed, and a verified claim resolves a workspace and mints the bearer. The terminal
 //! renders those lines as a screen and the browser renders them as a transcript — two renderers,
-//! never two machines, so nothing outside this file ever collects an address and the work-email
+//! never two machines, so nothing outside this file ever collects an address and the signup-email
 //! policy runs before any code is sent.
 
 use std::collections::HashMap;
@@ -17,9 +17,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 
-use crate::claim::{ClaimError, ClaimWorkflow};
+use crate::claim::ClaimWorkflow;
 use crate::directives::{client_install, directive, render, PROMPT};
-use crate::email::WorkEmailError;
 use crate::invite::{InviteCodes, InviteError, Redemption, SignupProfile};
 use crate::shared::{EnsuredWorkspace, SeatError, SharedWorkspaces, WorkspaceChoice};
 use crate::store::{OnboardClaim, OnboardStore};
@@ -116,11 +115,11 @@ pub struct Onboarding {
 }
 
 impl Onboarding {
-    /// One machine for every surface. A session with no claim collects the work email and the code
+    /// One machine for every surface. A session with no claim collects the email and the code
     /// WorkOS mailed for it — the browser on our own `/login` page, exactly as the terminal does — a
     /// verified claim resolves a workspace and mints the bearer. The browser reaches a verified claim
     /// either that way or from the Google hop the callback stamps; nothing outside this machine ever
-    /// collects the address, so the work-email policy runs before any code.
+    /// collects the address, so the signup-email policy runs before any code.
     pub async fn advance(
         &self,
         channel: &str,
@@ -142,8 +141,8 @@ impl Onboarding {
     }
 
     /// The email step both surfaces share: an empty turn asks for the address, a submitted one
-    /// validates the work-email policy through `ClaimWorkflow::start` and, only once it passes, has
-    /// WorkOS mail the code — so a denylisted address is refused with no code sent.
+    /// validates the signup-email policy through `ClaimWorkflow::start` and, only once it passes, has
+    /// WorkOS mail the code — so a refused address causes no code send.
     async fn collect_email(
         &self,
         channel: &str,
@@ -155,14 +154,14 @@ impl Onboarding {
             return render(&[
                 install.to_vec(),
                 directive("say", &[&self.apex_host]),
-                directive("ask", &["Enter your work email:"]),
+                directive("ask", &["Enter your email:"]),
             ]);
         }
         if let Err(error) = self.claims.start(body, channel, session).await {
             return render(&[
                 install.to_vec(),
                 directive("say", &[&error.to_string()]),
-                directive("ask", &["Enter your work email:"]),
+                directive("ask", &["Enter your email:"]),
             ]);
         }
         render(&[
@@ -200,7 +199,7 @@ impl Onboarding {
         let prompt = if current.is_some() {
             "Enter the code:"
         } else {
-            "Enter your work email:"
+            "Enter your email:"
         };
         render(&[
             install.to_vec(),
@@ -209,13 +208,13 @@ impl Onboarding {
         ])
     }
 
-    /// A verified claim, resolved to one workspace. With no candidate the domain founds its own
-    /// (behind the invite gate); with candidates the member picks, and the create option appears only
-    /// where a grant would actually admit it.
+    /// A verified claim, resolved to one workspace. With no candidate the signup subject founds its
+    /// own (behind the invite gate); with candidates the member picks, and the create option appears
+    /// only where a grant would actually admit it.
     async fn resolve(&self, claim: &OnboardClaim, body: &str, install: &[u8]) -> Vec<u8> {
         let choices = match self
             .workspaces
-            .choices(&claim.email_domain, &claim.email)
+            .choices(&claim.signup_subject, &claim.email)
             .await
         {
             Ok(choices) => choices,
@@ -261,19 +260,19 @@ impl Onboarding {
     ) -> Result<Chosen, SeatError> {
         let create_available = claim.invite_id.is_some()
             || self.keyed(&claim.surface_ref)
-            || self
-                .invites
-                .available(&claim.email_domain)
-                .await
-                .unwrap_or(false);
+            || self.invites.available(&claim.email).await.unwrap_or(false);
         if choices.len() == 1 && !create_available {
             let ensured = self
                 .workspaces
-                .join(&choices[0], &claim.email_domain, &claim.email)
+                .join(&choices[0], &claim.signup_subject, &claim.email)
                 .await?;
             return Ok(Chosen::Ensured(ensured, false));
         }
-        let create_label = format!("Create {} workspace", claim.email_domain);
+        let create_label = if claim.signup_subject == claim.email {
+            "Create new workspace".to_string()
+        } else {
+            format!("Create {} workspace", claim.email_domain)
+        };
         let mut options: Vec<String> = choices.iter().map(|choice| choice.label.clone()).collect();
         if create_available {
             options.push(create_label.clone());
@@ -301,7 +300,7 @@ impl Onboarding {
         };
         let ensured = self
             .workspaces
-            .join(selected, &claim.email_domain, &claim.email)
+            .join(selected, &claim.signup_subject, &claim.email)
             .await?;
         Ok(Chosen::Ensured(ensured, false))
     }
@@ -318,17 +317,17 @@ impl Onboarding {
     }
 
     /// The grant a member who came through the join door writes for themselves. The address is
-    /// verified by now and the domain is that address's own, so the grant names exactly the
+    /// verified by now, so its signup subject names exactly the
     /// workspace this turn is about to open and the ordinary redemption spends it: the same row,
     /// the same burn, the same `invite_id` on the claim as a grant an operator wrote — so the
     /// ledger, the Slack Connect delivery, and the audit read no differently.
     ///
-    /// It answers a domain with no grant and a domain whose grant expired unspent alike, because
+    /// It answers a subject with no grant and one whose grant expired unspent alike, because
     /// the member holds the same authority either way and the refusal an expired row draws — reply
     /// to your invite email — names something they never had. `mint` is the only thing that clears
-    /// an expired unconsumed row, so a gate that skipped it would refuse that domain for good.
+    /// an expired unconsumed row, so a gate that skipped it would refuse that subject for good.
     ///
-    /// A domain that already holds a grant is not an error here. Both shapes — one still live,
+    /// A subject that already holds a grant is not an error here. Both shapes — one still live,
     /// one already spent on a workspace that exists — are answered by the redemption that follows,
     /// so a member who joins twice and two turns that race land on one grant rather than two.
     async fn self_grant(&self, claim: &OnboardClaim) -> Result<Redemption, InviteError> {
@@ -341,30 +340,25 @@ impl Onboarding {
             Err(InviteError::LiveGrant { .. } | InviteError::AlreadyIdentified(_)) => {}
             Err(error) => return Err(error),
         }
-        self.invites
-            .redeem(&claim.email_domain, claim.claim_id)
-            .await
+        self.invites.redeem(&claim.email, claim.claim_id).await
     }
 
-    /// Open this domain's workspace with whatever the intake form recorded about the customer, so
-    /// their agent opens knowing who it works for.
+    /// Open this signup subject's workspace with whatever the intake form recorded about the
+    /// customer, so their agent opens knowing who it works for.
     async fn create(&self, claim: &OnboardClaim) -> Result<EnsuredWorkspace, SeatError> {
-        let profile: Option<SignupProfile> = self
-            .invites
-            .profile(&claim.email_domain)
-            .await
-            .unwrap_or(None);
+        let profile: Option<SignupProfile> =
+            self.invites.profile(&claim.email).await.unwrap_or(None);
         let carried = profile.map(|profile| crate::shared::SignupProfile {
             business: profile.business,
             goals: profile.goals,
         });
         self.workspaces
-            .create(&claim.email_domain, &claim.email, carried.as_ref())
+            .create(&claim.signup_subject, &claim.email, carried.as_ref())
             .await
     }
 
-    /// A refusal screen, or `None` when the flow may open the workspace. The verified email domain is
-    /// the whole answer: a live grant for it opens the workspace with nothing to type, and every
+    /// A refusal screen, or `None` when the flow may open the workspace. The verified signup subject
+    /// is the whole answer: a live grant for it opens the workspace with nothing to type, and every
     /// refusal ends the session rather than prompting, because the member holds no secret that could
     /// change the outcome. The claim keeps its verified email, so re-running the installer once a
     /// grant lands resolves the same claim. A session the join door marked writes its own grant
@@ -374,8 +368,8 @@ impl Onboarding {
         if claim.invite_id.is_some() {
             return None;
         }
-        let domain = &claim.email_domain;
-        let redemption = match self.invites.redeem(domain, claim.claim_id).await {
+        let subject = &claim.signup_subject;
+        let redemption = match self.invites.redeem(&claim.email, claim.claim_id).await {
             Ok(redemption) => redemption,
             Err(InviteError::Pool(_) | InviteError::Query(_)) => {
                 return Some(self.failed(install, "the invite ledger is unreachable"))
@@ -401,7 +395,7 @@ impl Onboarding {
                 directive(
                     "say",
                     &[&format!(
-                        "The invite for {domain} expired {} UTC.",
+                        "The invite for {subject} expired {} UTC.",
                         expires_at.format("%Y-%m-%d %H:%M")
                     )],
                 ),
@@ -412,14 +406,14 @@ impl Onboarding {
                 install.to_vec(),
                 directive(
                     "say",
-                    &[&format!("The invite for {domain} was already used.")],
+                    &[&format!("The invite for {subject} was already used.")],
                 ),
                 directive("say", &["Contact us if you cannot sign in."]),
                 directive("exit", &["0"]),
             ])),
             Redemption::Unknown => Some(render(&[
                 install.to_vec(),
-                directive("say", &[&format!("{domain} has no invite.")]),
+                directive("say", &[&format!("{subject} has no invite.")]),
                 directive(
                     "say",
                     &[&format!("Join the waitlist: https://{}", self.apex_host)],
@@ -782,11 +776,11 @@ fn share(card: &'static [u8]) -> Response {
         .into_response()
 }
 
-/// The signup key's door. A member who holds the link founds their domain's workspace with nobody to
+/// The signup key's door. A member who holds the link founds their subject's workspace with nobody to
 /// approve them: the door binds a session marked with that authority and sends them to the ordinary
 /// sign-in page, and the gate mints the grant once WorkOS says the address is theirs. So the key
-/// authorizes founding a workspace for a domain the member proves they own, and nothing else — it
-/// mails no invitation and names no domain of its own.
+/// authorizes founding the workspace the member's verified address names, and nothing else — it
+/// mails no invitation and names no signup subject of its own.
 ///
 /// A key that does not match is answered exactly as an unrouted path is, and so is every request
 /// when the deploy configures none, because a 403 would tell a caller the door is there. The key
@@ -855,8 +849,8 @@ async fn auth_start(
     response
 }
 
-/// The local stand-in for the Google hop, mounted only under `WORKOS_MODE=console`: the dev enters a
-/// work email that the callback reads as the code. The cookie the start path set still binds the
+/// The local stand-in for the Google hop, mounted only under `WORKOS_MODE=console`: the dev enters an
+/// email that the callback reads as the code. The cookie the start path set still binds the
 /// return, so the walk past this page is a real return's own.
 async fn auth_console(Query(query): Query<HashMap<String, String>>) -> Response {
     let state = query.get("state").cloned().unwrap_or_default();
@@ -871,8 +865,7 @@ async fn auth_console(Query(query): Query<HashMap<String, String>>) -> Response 
 /// gateway signed, and the session it names has to be the one the start path bound as the cookie, so
 /// a state a caller wrote — or one of ours replayed anywhere else — verifies nothing and writes no
 /// claim under a session someone chose. The email the Google account carries passes the same
-/// work-email policy a typed address does, so a personal `@gmail.com` Google account is refused; the
-/// refusal rides back to the page as a sentence rather than a status. A callback for a session that
+/// signup-email policy a typed address does. A callback for a session that
 /// already holds a claim resolves that claim, so a repeated return signs the same member in.
 async fn auth_callback(
     State(state): State<GatewayState>,
@@ -915,9 +908,6 @@ async fn auth_callback(
                     .await
                 {
                     Ok(_) => None,
-                    Err(ClaimError::Email(WorkEmailError::NotWork(domain))) => {
-                        Some(format!("{domain} is not a work email domain."))
-                    }
                     Err(error) => Some(error.to_string()),
                 },
                 Err(error) => Some(error.to_string()),
@@ -1309,7 +1299,7 @@ mod tests {
                 vec![("debug", "1")],
                 vec![("a", "/artifacts/1/report.pdf")],
                 vec![("invite", "1")],
-                vec![("error", "That address is not a work email.")],
+                vec![("error", "That address cannot be used to sign in.")],
                 vec![("c", CONVERSATION), ("a", "/artifacts/1/report.pdf")],
             ] {
                 assert_eq!(landing(Some(&held), &asked), None, "{asked:?}");

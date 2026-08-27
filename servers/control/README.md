@@ -4,9 +4,10 @@ The hosted gateway and database bootstrap for ufo's shared workspace fleet, a st
 
 One `ufoctl serve` fleet hosts every workspace. A signed bearer selects the workspace before the
 request reaches core, and Postgres row-level security enforces the same scope on every transaction.
-The gateway verifies a work email, gates new workspace creation on a one-time grant to that email's
-domain, has core create the workspace and default agent, and returns the bearer consumed by the
-`ufo` surface.
+The gateway verifies an email, gates new workspace creation on a one-time grant to its signup
+subject, has core create the workspace and default agent, and returns the bearer consumed by the
+`ufo` surface. A company address's subject is its domain; a personal-mail address's is the full
+normalized address.
 
 **Control's SQL reaches its own tables and nothing else.** Its role is granted the
 `ufo_control` schema and no privilege on any table in `public`, so every read and write of a core
@@ -20,7 +21,7 @@ agent's prompt — where they already live.
 |---|---|
 | `ufo-control gateway` | Serves `/ufo`, `/fleet`, `/login`, the WorkOS paths, and `/v1/onboard/{channel}`. |
 | `ufo-control migrate` | Shapes the `ufo_control` schema — the ledgers below — as the database owner. |
-| `ufo-control invite <email>` | Grants an email domain one new workspace and emails it the invitation. |
+| `ufo-control invite <email>` | Grants the address's signup subject one new workspace and emails it the invitation. |
 | `ufo-control slack-connect-retry <domain>` | Re-arms one failed signup Slack Connect delivery. |
 | `ufo-control invite-delivery-retry <workspace> <email>` | Re-arms one failed teammate invitation email. |
 | `ufo-control rls-bootstrap` | Creates the `ufo_serve` and `ufo_control` roles, the DBOS database, grants, and workspace policies. |
@@ -35,11 +36,11 @@ agent's prompt — where they already live.
 | `src/workos.rs` | Magic Auth, the Google hop, and the signed state and cookie seals. |
 | `src/web.rs`, `src/login.html` | The browser's renderer and the page it serves. |
 | `src/shared.rs` | The onboarding RPC client — every core table is reached through it. |
-| `src/invite.rs` | One-time domain-grant custody. |
+| `src/invite.rs` | One-time signup-grant custody. |
 | `src/store.rs` | The platform onboarding ledger. |
 | `src/slack_connect.rs` | The signup Slack Connect channel and its delivery poller. |
 | `src/invite_delivery.rs` | The teammate invitation email and its delivery poller. |
-| `src/email.rs` | Work-email policy and SES delivery. |
+| `src/email.rs` | Signup-email policy and SES delivery. |
 | `src/schema.rs` | The `ufo_control` schema, shaped by the deploy; the gateway only requires it. |
 | `src/rls.rs` | Shared database role and policy bootstrap. |
 | `src/db.rs` | The pool over control's own ledgers. |
@@ -77,18 +78,18 @@ and WorkOS delivers the sign-in code. `UFO_CONTROL_EMAIL_MODE=console` logs a me
 local stack with no SES account.
 
 `UFO_INVITE_REQUIRED` defaults to `true`: creating a new workspace demands a live grant for the
-member's verified email domain. The local hosted stack (root README) sets it `false` so signup needs
+member's verified signup subject. The local hosted stack (root README) sets it `false` so signup needs
 no grant; unset means required, so a deploy never opens signup by forgetting the knob.
 
 `UFO_SIGNUP_KEY` is the path segment that opens the join door, `GET /join/<key>`. A member who holds
-that link founds their own domain's workspace with nobody to approve them: the door binds a session
+that link founds their subject's workspace with nobody to approve them: the door binds a session
 carrying that authority and sends them to `/login?join=1`, and the gate writes them the grant their
-verified domain names, then spends it the ordinary way. The authority is a mark inside the sealed
+verified address names, then spends it the ordinary way. The authority is a mark inside the sealed
 session — the key under a signature, plus an expiry — so emptying or rotating the knob closes the
 door for the marks already out, and a captured one stops counting after
-`SIGNUP_MARK_TTL_MINUTES`. So the key authorizes founding a workspace
-for a domain the member proves they own, and nothing else — it mails no invitation and names no
-domain of its own. Empty or unset serves no door, and a key that does not match is answered as an
+`SIGNUP_MARK_TTL_MINUTES`. So the key authorizes founding the workspace the verified address names,
+and nothing else — it mails no invitation and names no subject of its own. Empty or unset serves no
+door, and a key that does not match is answered as an
 unrouted path, so a caller learns nothing about whether one is configured. Everyone without the
 link is refused exactly as before, which is why the gate stays required.
 

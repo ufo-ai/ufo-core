@@ -1,4 +1,11 @@
 //! Postgres custody of the hosted onboarding claim ledger. `schema` shapes `DDL`.
+//!
+//! Two columns hold one fact. `signup_subject` is the honest name for the identity a claim carries;
+//! `email_domain` predates personal-mail signup, when that identity could only ever be a domain,
+//! and it is the column the release being replaced selects and reads as the identity. Neither
+//! image can be taught the other's column name mid-rollout, so both are written with the subject
+//! and the domain is derived from the verified address instead. `email_domain` is droppable once
+//! no pod of that release is left to read it.
 
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
@@ -13,6 +20,7 @@ pub const DDL: &[&str] = &[
        id uuid primary key,\
        email text not null,\
        email_domain text not null,\
+       signup_subject text not null,\
        surface text not null,\
        surface_ref text not null,\
        expires_at timestamptz not null,\
@@ -26,14 +34,20 @@ pub const DDL: &[&str] = &[
        where resulting_workspace_id is null",
 ];
 
-const COLUMNS: &str =
-    "id, email, email_domain, surface, surface_ref, expires_at, verified_at, invite_id";
+// The domain is read back off the verified address rather than out of `email_domain`: that column
+// carries the signup subject, which for a personal-mail address is the address itself. See
+// `insert_claim`.
+const COLUMNS: &str = "id, email, split_part(email, '@', 2) as email_domain, signup_subject, \
+                       surface, surface_ref, expires_at, verified_at, invite_id";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnboardClaim {
     pub claim_id: Uuid,
     pub email: String,
+    /// The verified address's own domain. It is what a company signup is identified by and is never
+    /// the identity of a personal-mail signup — `signup_subject` is that.
     pub email_domain: String,
+    pub signup_subject: String,
     pub surface: String,
     pub surface_ref: String,
     pub expires_at: DateTime<Utc>,
@@ -59,19 +73,30 @@ impl OnboardStore {
         Self { pool }
     }
 
+    /// Write the claim. The `email_domain` column is written with the signup subject rather than
+    /// with the domain: it is the column the release being replaced reads as the whole signup
+    /// identity — that image declares no `signup_subject` — and the identity of a personal-mail
+    /// address is that address.
+    ///
+    /// Left as the shared provider domain, a gateway pod of that release picking up this session
+    /// mid-rollout carries `gmail.com` as the identity: it lists every workspace whose first member
+    /// is at `gmail.com` as a candidate, and founds `uuid5(gmail.com)` on a personal member, which
+    /// hands every `@gmail.com` stranger a domain match on that workspace for good. Written as the
+    /// subject, every request that pod can build names this member's own subject and nobody else's.
     pub async fn insert_claim(&self, claim: &OnboardClaim) -> Result<(), StoreError> {
         let connection = self.pool.get().await?;
         connection
             .execute(
                 &format!(
                     "insert into {TABLE} \
-                     (id, email, email_domain, surface, surface_ref, expires_at, verified_at) \
-                     values ($1, $2, $3, $4, $5, $6, $7)"
+                     (id, email, email_domain, signup_subject, surface, surface_ref, expires_at, \
+                      verified_at) values ($1, $2, $3, $4, $5, $6, $7, $8)"
                 ),
                 &[
                     &claim.claim_id,
                     &claim.email,
-                    &claim.email_domain,
+                    &claim.signup_subject,
+                    &claim.signup_subject,
                     &claim.surface,
                     &claim.surface_ref,
                     &claim.expires_at,
@@ -103,6 +128,7 @@ impl OnboardStore {
             claim_id: row.get("id"),
             email: row.get("email"),
             email_domain: row.get("email_domain"),
+            signup_subject: row.get("signup_subject"),
             surface: row.get("surface"),
             surface_ref: row.get("surface_ref"),
             expires_at: row.get("expires_at"),

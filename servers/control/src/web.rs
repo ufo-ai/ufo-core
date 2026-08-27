@@ -4,7 +4,7 @@
 //! one that already holds a session to the portal instead; `POST /v1/onboard/web` advances the
 //! identical onboarding state machine (the claim row keyed by the onboarding session) and returns the
 //! directive lines as JSON — a second renderer, never a second machine. The browser collects the
-//! work email and the code inline, exactly as the terminal does: the machine's `say`/`ask`
+//! email and the code inline, exactly as the terminal does: the machine's `say`/`ask`
 //! directives render as the transcript and the next input, so the page reads and answers them and
 //! never leaves for a hosted sign-in page. The session is the `__Host-ufo_onboard` cookie the
 //! gateway mints and seals server-side — `__Host-`, so the browser keeps it host-only and refuses to
@@ -243,10 +243,10 @@ mod tests {
         // The card states each step in its own words and reads the machine's question only to know
         // which step it stands on, so the terminal keeps its own wording and neither copies the
         // other's fragments.
-        assert!(LOGIN_PAGE.contains("'Enter your work email to continue.'"));
+        assert!(LOGIN_PAGE.contains("'Enter your email to continue.'"));
         assert!(LOGIN_PAGE
             .contains("const sent = 'Enter the verification code we sent to your email address';"));
-        assert!(!LOGIN_PAGE.contains("Enter your work email:"));
+        assert!(!LOGIN_PAGE.contains("Enter your email:"));
         assert!(!LOGIN_PAGE.contains("Enter the code:"));
     }
 

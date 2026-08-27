@@ -492,8 +492,8 @@ reply, which carries what the turn has not already delivered; a live surface sho
 its stream, so there the closing reply carries those words too — **identity** resolution (an
 external id → member + conversation,
 linking a `surface_identity` on first contact — `join_member` also creates the member when a
-channel-verified email matches the workspace's own domain, the first member's vetted email domain,
-so only that initial member onboards through provisioning — and `adopt_identity` to span a member across
+channel-verified email matches the workspace's domain signup subject; a personal-mail workspace has
+no domain subject, so only an exact member joins it — and `adopt_identity` to span a member across
 surfaces), **stop** (`stop_turn` ends a running turn of a conversation the surface authorized —
 the web stop button, the terminal's Esc — cancelling it durably and publishing its cancelled
 terminal so every live tail ends now; descendants are the cancel reconciler's, as for every cancel
@@ -734,13 +734,20 @@ Adding someone is `add_member`, the one verb that mints a member before their fi
 speaking admin on the main agent names an email at any domain and may make them an admin in the same
 act. The member row records who added them and when, and that stamp is what the gateway reads to
 email that person who added them and where to sign in; an admin who will tell them personally adds
-them with `notify` false and no stamp is written. The hosted sign-in resolves the verified address
-to every exact `member.email` row plus the workspace its domain names. One candidate opens directly; several are offered for the member to
-choose before the workspace-scoped token is minted. An exact membership grants only its workspace,
-while a domain match grants the domain's workspace. With no candidate, the domain needs a live
-invite before its workspace is created. A live invite remains a creation choice when the address
-already belongs to another workspace, so neither authority captures the other. A domain claimed by
-two workspaces fails loud as fleet data that needs operator repair. An address that is already a
+them with `notify` false and no stamp is written. Hosted sign-in verifies one normalized,
+non-disposable address and derives its **signup subject**: the full address for a common personal
+mailbox domain (`someone@gmail.com`), otherwise its domain (`acme.com`). The workspace id is
+`uuid5(NAMESPACE_DNS, signup_subject)`. Exact `member.email` rows are always candidates. A company
+domain subject additionally matches its workspace and lets a channel-verified colleague join on
+first contact; a personal subject matches only that address, so two Gmail founders create separate
+workspaces and no Gmail stranger auto-joins either. Candidate labels are the company domain or,
+for a personal workspace, its founder's address. One candidate opens directly; several are offered
+before the workspace-scoped token is minted. With no candidate, the signup subject needs a live
+invite before its workspace is created. Grants and intake profiles key on that same subject, so a
+company invite may be redeemed by a verified colleague while a personal invite belongs to its
+exact address. A live invite remains a creation choice when the address already belongs to another
+workspace, so neither authority captures the other. A subject claimed by two workspaces fails loud
+as fleet data that needs operator repair. An address that is already a
 member is refused rather than silently promoted; changing an existing member's role or seat stays
 the `member` kind's admin-gated apply. The new member is auto-seated while an included seat is open
 and the verb reports which happened, because an unseated member is one the agent refuses. The
@@ -862,8 +869,9 @@ The debug and memory-explorer surfaces are the operator-audience surfaces — th
 audience, not a member action. They share one operator web session (`ufo.sdk.operator`, one
 `ufo_debug` cookie): the operator-domain bearer's `identify` is the entire authorization — it picks
 the target workspace (a UUID, or a customer domain, which resolves to the workspace whose first
-member is seated at that domain, and to `uuid5(NAMESPACE_DNS, domain)` only when no workspace is
-seated there), core binds it, and every read is RLS-scoped by construction. The debugger reads a
+member is seated at that domain while an exact-address personal workspace is never domain-addressed,
+and to `uuid5(NAMESPACE_DNS, domain)` only when no workspace is seated there), core binds it, and
+every read is RLS-scoped by construction. The debugger reads a
 workspace's sessions (conversations, turns with terminal outcomes and subagent children,
 transcripts, compaction records, workspace files, a live SSE tail); the memory explorer reads its
 durable memory store — every `memory_item`, shared and per-member, live and superseded, indexed

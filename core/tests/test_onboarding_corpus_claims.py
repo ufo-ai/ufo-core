@@ -93,14 +93,11 @@ CLAIMS = (
         pattern=r"pub async fn redeem\(",
     ),
     Claim(
-        claim="an invitation works once per email domain",
+        claim="an invitation works once per signup subject, a work address's own domain",
         corpus="references/getting-started.md",
         phrase="works once per domain",
         source=INVITES,
-        pattern=(
-            r"invite_code_live_domain \\\n\s+on ufo_control\.invite_code \(email_domain\) "
-            r"where consumed_at is null"
-        ),
+        pattern=r'refuse_standing\(\n\s+&transaction,\n\s+"signup_subject",\n',
     ),
     Claim(
         claim="an unused invitation lapses after a couple of weeks",
@@ -117,11 +114,11 @@ CLAIMS = (
         pattern=r'directive\("exit", &\["0"\]\)',
     ),
     Claim(
-        claim="one workspace per email domain",
+        claim="one workspace per signup subject, a work address's own domain",
         corpus="references/not-yet.md",
         phrase="One workspace exists per email domain",
         source=GATEWAY,
-        pattern=r"\.create\(&claim\.email_domain",
+        pattern=r"\.create\(\s*&claim\.signup_subject,",
     ),
     Claim(
         claim="a sign-in offers every workspace the verified address can enter",
@@ -171,10 +168,12 @@ CLAIMS = (
             r"pub fn earned_sql\(\) -> String \{\n"
             r"\s+format!\(\n"
             r'\s+"select email_domain, email, created_at from \{INVITE_TABLE\} \\\n'
-            r"\s+where consumed_at is not null or expires_at > now\(\) \\\n"
+            r"\s+where \(consumed_at is not null or expires_at > now\(\)\) \\\n"
+            r"\s+and signup_subject <> email \\\n"
             r"\s+union all \\\n"
-            r"\s+select email_domain, email, created_at from \{CLAIM_TABLE\} "
-            r'where created_workspace"'
+            r"\s+select email_domain, email, created_at from \{CLAIM_TABLE\} \\\n"
+            r"\s+where created_workspace \\\n"
+            r'\s+and signup_subject <> email"'
         ),
     ),
     Claim(

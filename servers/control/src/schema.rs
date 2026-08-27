@@ -86,6 +86,55 @@ pub fn reshape() -> Vec<String> {
             "alter table {} add column if not exists invite_id uuid",
             store::TABLE
         ),
+        format!(
+            "alter table {} add column if not exists signup_subject text",
+            store::TABLE
+        ),
+        format!(
+            "alter table {} add column if not exists signup_subject text",
+            invite::TABLE
+        ),
+        format!(
+            "update {} set signup_subject = email_domain where signup_subject is null",
+            store::TABLE
+        ),
+        format!(
+            "update {} set signup_subject = email_domain where signup_subject is null",
+            invite::TABLE
+        ),
+        "create or replace function ufo_control.fill_signup_subject() returns trigger \
+         language plpgsql as $$ begin if new.signup_subject is null then \
+         new.signup_subject := new.email_domain; end if; return new; end $$"
+            .to_string(),
+        format!(
+            "drop trigger if exists onboard_claim_signup_subject on {}; \
+             create trigger onboard_claim_signup_subject before insert on {} for each row \
+             execute function ufo_control.fill_signup_subject()",
+            store::TABLE,
+            store::TABLE
+        ),
+        format!(
+            "drop trigger if exists invite_code_signup_subject on {}; \
+             create trigger invite_code_signup_subject before insert on {} for each row \
+             execute function ufo_control.fill_signup_subject()",
+            invite::TABLE,
+            invite::TABLE
+        ),
+        format!(
+            "alter table {} alter column signup_subject set not null",
+            store::TABLE
+        ),
+        format!(
+            "alter table {} alter column signup_subject set not null",
+            invite::TABLE
+        ),
+        format!(
+            "drop index if exists ufo_control.invite_code_live_domain; \
+             create unique index if not exists {} on {} \
+             (signup_subject) where consumed_at is null",
+            invite::LIVE_SUBJECT_INDEX,
+            invite::TABLE
+        ),
     ]
 }
 

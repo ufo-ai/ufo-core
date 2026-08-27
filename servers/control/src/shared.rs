@@ -19,16 +19,16 @@ pub const SERVE_INTERNAL_URL_ENV: &str = "UFO_CONTROL_SERVE_INTERNAL_URL";
 pub const WORKSPACE_BASE_URL_ENV: &str = "UFO_WORKSPACE_BASE_URL";
 pub const SEAT_TIMEOUT_SECONDS: u64 = 15;
 
-/// The namespace `uuid5` derives a domain's workspace under — `NAMESPACE_DNS`, the same constant
-/// core uses, so one domain resolves to one workspace on both ends.
+/// The namespace `uuid5` derives a signup subject's workspace under — `NAMESPACE_DNS`, the same
+/// constant core uses, so one subject resolves to one workspace on both ends.
 const NAMESPACE_DNS: Uuid = Uuid::from_bytes([
     0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
 ]);
 
-/// The workspace one verified domain names. Derived here so the caller can send it and core can
+/// The workspace one verified signup subject names. Derived here so the caller can send it and core can
 /// write under it, rather than each end deriving its own and hoping they agree.
-pub fn deterministic_workspace_id(domain: &str) -> Uuid {
-    Uuid::new_v5(&NAMESPACE_DNS, domain.to_lowercase().as_bytes())
+pub fn deterministic_workspace_id(subject: &str) -> Uuid {
+    Uuid::new_v5(&NAMESPACE_DNS, subject.to_lowercase().as_bytes())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,8 +91,12 @@ struct Fleet {
 #[derive(Serialize)]
 struct SeatRequest<'a> {
     workspace_id: Uuid,
+    /// The release being replaced named the signup identity `domain`. State the subject under that
+    /// wire name too, so both images derive the same workspace: an organization sends its domain
+    /// and a personal address sends that exact address, never its shared provider.
     domain: &'a str,
     email: &'a str,
+    signup_subject: &'a str,
     profile: Option<&'a SignupProfile>,
 }
 
@@ -123,21 +127,22 @@ pub struct SharedWorkspaces {
 
 impl SharedWorkspaces {
     /// Every workspace this address may enter: its exact memberships plus the one its verified
-    /// domain names. Membership grants only that workspace; a domain match grants its workspace.
+    /// signup subject names. Membership grants only that workspace; a subject match grants its
+    /// workspace. The subject rides under both wire names so either serve image reads the same
+    /// identity during a rollout.
     pub async fn choices(
         &self,
-        domain: &str,
+        signup_subject: &str,
         email: &str,
     ) -> Result<Vec<WorkspaceChoice>, SeatError> {
-        let listed: WorkspaceChoices = self
-            .get(
-                "choices",
-                &[
-                    ("email", &email.trim().to_lowercase()),
-                    ("domain", &domain.to_lowercase()),
-                ],
-            )
-            .await?;
+        let member = email.trim().to_lowercase();
+        let subject = signup_subject.trim().to_lowercase();
+        let query = [
+            ("email", &member),
+            ("domain", &subject),
+            ("signup_subject", &subject),
+        ];
+        let listed: WorkspaceChoices = self.get("choices", &query).await?;
         Ok(listed.choices)
     }
 
@@ -173,15 +178,20 @@ impl SharedWorkspaces {
         Ok(listed.invitations)
     }
 
-    /// Create the workspace identified by this verified domain and seat its first member.
+    /// Create the workspace identified by this verified signup subject and seat its first member.
     pub async fn create(
         &self,
-        domain: &str,
+        signup_subject: &str,
         email: &str,
         profile: Option<&SignupProfile>,
     ) -> Result<EnsuredWorkspace, SeatError> {
-        self.seat(deterministic_workspace_id(domain), domain, email, profile)
-            .await
+        self.seat(
+            deterministic_workspace_id(signup_subject),
+            signup_subject,
+            email,
+            profile,
+        )
+        .await
     }
 
     /// Seat this verified address in one workspace its candidates authorized. An address already
@@ -189,14 +199,14 @@ impl SharedWorkspaces {
     pub async fn join(
         &self,
         choice: &WorkspaceChoice,
-        domain: &str,
+        signup_subject: &str,
         email: &str,
     ) -> Result<EnsuredWorkspace, SeatError> {
         let workspace_id = choice.workspace_id.parse::<Uuid>().map_err(|_| {
             SeatError::Refused(format!("{} is not a workspace", choice.workspace_id))
         })?;
         if !choice.member {
-            return self.seat(workspace_id, domain, email, None).await;
+            return self.seat(workspace_id, signup_subject, email, None).await;
         }
         let membership: Membership = self
             .get(
@@ -217,14 +227,16 @@ impl SharedWorkspaces {
     async fn seat(
         &self,
         workspace_id: Uuid,
-        domain: &str,
+        signup_subject: &str,
         email: &str,
         profile: Option<&SignupProfile>,
     ) -> Result<EnsuredWorkspace, SeatError> {
+        let subject = signup_subject.trim().to_lowercase();
         let body = SeatRequest {
             workspace_id,
-            domain: &domain.to_lowercase(),
+            domain: &subject,
             email: &email.trim().to_lowercase(),
+            signup_subject: &subject,
             profile,
         };
         let response = self
@@ -295,14 +307,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_domain_derives_the_same_workspace_core_derives() {
+    fn a_subject_derives_the_same_workspace_core_derives() {
         // uuid5 over NAMESPACE_DNS. The literal is checked against Python's own output in
         // `tests/contract.rs`, so a wrong namespace constant is a failing test rather than a
         // second workspace for the same customer.
         assert_eq!(
             deterministic_workspace_id("acme.com"),
             deterministic_workspace_id("ACME.COM"),
-            "the domain is lowercased before it is hashed"
+            "the subject is lowercased before it is hashed"
         );
         assert_ne!(
             deterministic_workspace_id("acme.com"),

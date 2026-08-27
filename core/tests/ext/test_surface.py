@@ -98,6 +98,7 @@ from ufo.schema.records import (
     ToolIntent,
     TurnContext,
 )
+from ufo.seats import signup_workspace_id
 from ufo.sources.backend import binding_name
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
@@ -224,8 +225,11 @@ async def _unused_identify(request: object, auth: object) -> None:
     raise AssertionError("identify is not exercised by the poller tests")
 
 
-async def _seed(*, member_email: str | None = None) -> tuple[UUID, UUID, UUID | None]:
-    workspace_id, agent_id = uuid4(), uuid4()
+async def _seed(
+    *, member_email: str | None = None, workspace_subject: str | None = None
+) -> tuple[UUID, UUID, UUID | None]:
+    workspace_id = signup_workspace_id(workspace_subject) if workspace_subject else uuid4()
+    agent_id = uuid4()
     member_id = uuid4() if member_email is not None else None
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1744,7 +1748,7 @@ async def test_write_workspace_file_refuses_an_uncapped_stream_while_it_accumula
 
 
 async def test_join_member_creates_a_same_domain_member_and_links(db: None, tmp_path) -> None:
-    workspace_id, _, _ = await _seed()
+    workspace_id, _, _ = await _seed(workspace_subject="example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     early = datetime(2026, 1, 1, tzinfo=UTC)
     async with workspace_tx() as connection:
@@ -1797,6 +1801,16 @@ async def test_join_member_refuses_without_a_domain_match(db: None, tmp_path) ->
             )
         ).scalar_one()
     assert members == 1
+
+
+async def test_join_member_does_not_treat_gmail_as_workspace_authority(db: None, tmp_path) -> None:
+    workspace_id, _, owner_id = await _seed(
+        member_email="owner@gmail.com", workspace_subject="owner@gmail.com"
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    assert await context.join_member("UOTHER", "other@gmail.com") is None
+    assert await context.linked_member("UOTHER") is None
+    assert owner_id is not None
 
 
 async def test_is_operator_workspace_matches_the_owner_email_domain(db: None, tmp_path) -> None:

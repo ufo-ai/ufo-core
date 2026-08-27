@@ -24,12 +24,11 @@ from ufo.onboard.onboard_control import (
     OnboardControl,
     SignupProfile,
     agent_prompt,
-    deterministic_workspace_id,
 )
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
-from ufo.seats import create_member
+from ufo.seats import create_member, signup_workspace_id
 from ufo.workspace import ws
 
 CONTROL_TOKEN = "onboard-control-token"
@@ -60,7 +59,7 @@ async def test_the_guard_refuses_a_request_carrying_no_token(db: None) -> None:
 async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
     onboard_client: AsyncClient,
 ) -> None:
-    workspace_id = deterministic_workspace_id("acme.com")
+    workspace_id = signup_workspace_id("acme.com")
     async with onboard_client as client:
         response = await client.post(
             "/internal/onboard/seat",
@@ -68,6 +67,7 @@ async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
                 "workspace_id": str(workspace_id),
                 "domain": "acme.com",
                 "email": "founder@acme.com",
+                "signup_subject": "acme.com",
             },
         )
     assert response.status_code == 200
@@ -108,11 +108,12 @@ async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
 
 
 async def test_seat_grants_the_signup_balance_once(onboard_client: AsyncClient) -> None:
-    workspace_id = deterministic_workspace_id("acme.com")
+    workspace_id = signup_workspace_id("acme.com")
     body = {
         "workspace_id": str(workspace_id),
         "domain": "acme.com",
         "email": "founder@acme.com",
+        "signup_subject": "acme.com",
     }
     async with onboard_client as client:
         assert (await client.post("/internal/onboard/seat", json=body)).status_code == 200
@@ -150,7 +151,7 @@ async def test_seat_grants_the_signup_balance_once(onboard_client: AsyncClient) 
 async def test_seat_refuses_a_workspace_its_domain_no_longer_names(
     onboard_client: AsyncClient,
 ) -> None:
-    workspace_id = deterministic_workspace_id("acme.com")
+    workspace_id = signup_workspace_id("acme.com")
     async with onboard_client as client:
         await client.post(
             "/internal/onboard/seat",
@@ -158,6 +159,7 @@ async def test_seat_refuses_a_workspace_its_domain_no_longer_names(
                 "workspace_id": str(workspace_id),
                 "domain": "acme.com",
                 "email": "founder@acme.com",
+                "signup_subject": "acme.com",
             },
         )
         # A different domain arriving at a workspace whose first member is someone else's is a
@@ -168,16 +170,43 @@ async def test_seat_refuses_a_workspace_its_domain_no_longer_names(
                 "workspace_id": str(workspace_id),
                 "domain": "other.com",
                 "email": "founder@other.com",
+                "signup_subject": "other.com",
             },
         )
     assert refused.status_code == 409
     assert "no longer belongs to other.com" in refused.json()["detail"]
 
 
+async def test_seat_refuses_an_identity_with_a_mismatched_domain(
+    onboard_client: AsyncClient,
+) -> None:
+    async with onboard_client as client:
+        seat = await client.post(
+            "/internal/onboard/seat",
+            json={
+                "workspace_id": str(signup_workspace_id("acme.com")),
+                "domain": "acme.com",
+                "email": "founder@other.com",
+                "signup_subject": "acme.com",
+            },
+        )
+        choices = await client.get(
+            "/internal/onboard/choices",
+            params={
+                "email": "founder@other.com",
+                "domain": "acme.com",
+                "signup_subject": "acme.com",
+            },
+        )
+    for refused in (seat, choices):
+        assert refused.status_code == 422
+        assert refused.json()["detail"] == "domain must match the verified email"
+
+
 async def test_the_intake_profile_opens_the_main_agents_prompt(
     onboard_client: AsyncClient,
 ) -> None:
-    workspace_id = deterministic_workspace_id("acme.com")
+    workspace_id = signup_workspace_id("acme.com")
     async with onboard_client as client:
         await client.post(
             "/internal/onboard/seat",
@@ -185,6 +214,7 @@ async def test_the_intake_profile_opens_the_main_agents_prompt(
                 "workspace_id": str(workspace_id),
                 "domain": "acme.com",
                 "email": "founder@acme.com",
+                "signup_subject": "acme.com",
                 "profile": {"business": "we sell widgets", "goals": "answer support mail"},
             },
         )
@@ -224,7 +254,7 @@ async def test_choices_offers_the_domain_workspace_and_every_exact_membership(
 ) -> None:
     if not database_url.startswith("postgresql"):
         pytest.skip("the candidate read is postgres SQL, for a fleet sqlite never serves")
-    domain_workspace = deterministic_workspace_id("acme.com")
+    domain_workspace = signup_workspace_id("acme.com")
     other_workspace = uuid4()
     for workspace_id, email in (
         (domain_workspace, "founder@acme.com"),
@@ -246,7 +276,11 @@ async def test_choices_offers_the_domain_workspace_and_every_exact_membership(
     async with onboard_client as client:
         response = await client.get(
             "/internal/onboard/choices",
-            params={"email": "contractor@acme.com", "domain": "acme.com"},
+            params={
+                "email": "contractor@acme.com",
+                "domain": "acme.com",
+                "signup_subject": "acme.com",
+            },
         )
     assert response.status_code == 200
     by_id = {choice["workspace_id"]: choice for choice in response.json()["choices"]}
@@ -275,7 +309,11 @@ async def test_choices_refuses_a_domain_that_maps_to_two_workspaces(
     async with onboard_client as client:
         refused = await client.get(
             "/internal/onboard/choices",
-            params={"email": "someone@acme.com", "domain": "acme.com"},
+            params={
+                "email": "someone@acme.com",
+                "domain": "acme.com",
+                "signup_subject": "acme.com",
+            },
         )
     assert refused.status_code == 409
     assert "maps to 2 workspaces" in refused.json()["detail"]
@@ -308,13 +346,255 @@ async def test_two_workspaces_sharing_a_label_are_told_apart(
     async with onboard_client as client:
         response = await client.get(
             "/internal/onboard/choices",
-            params={"email": "contractor@zeta.com", "domain": "zeta.com"},
+            params={
+                "email": "contractor@zeta.com",
+                "domain": "zeta.com",
+                "signup_subject": "zeta.com",
+            },
         )
     assert response.status_code == 200, response.json()
     labels = {choice["label"] for choice in response.json()["choices"]}
     # Both workspaces label as `acme.com`, so neither may be offered bare — the member has to be
     # able to tell them apart.
     assert labels == {f"acme.com ({str(workspace_id)[:8]})" for workspace_id in ids}
+
+
+async def test_personal_mail_addresses_create_separate_workspaces(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the candidate read is postgres SQL, for a fleet sqlite never serves")
+    first = "first@gmail.com"
+    second = "second@gmail.com"
+    async with onboard_client as client:
+        created = await client.post(
+            "/internal/onboard/seat",
+            json={
+                "workspace_id": str(signup_workspace_id(first)),
+                "domain": "gmail.com",
+                "email": first,
+                "signup_subject": first,
+            },
+        )
+        assert created.status_code == 200, created.json()
+        unrelated = await client.get(
+            "/internal/onboard/choices",
+            params={
+                "email": second,
+                "domain": "gmail.com",
+                "signup_subject": second,
+            },
+        )
+        assert unrelated.json() == {"choices": []}
+        second_created = await client.post(
+            "/internal/onboard/seat",
+            json={
+                "workspace_id": str(signup_workspace_id(second)),
+                "domain": "gmail.com",
+                "email": second,
+                "signup_subject": second,
+            },
+        )
+    assert second_created.status_code == 200, second_created.json()
+    assert signup_workspace_id(first) != signup_workspace_id(second)
+
+
+async def test_a_personal_mail_member_can_enter_the_workspace_they_were_added_to(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the candidate read is postgres SQL, for a fleet sqlite never serves")
+    workspace_id = signup_workspace_id("acme.com")
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                )
+            )
+            await create_member(connection, workspace_id, "founder@acme.com", is_admin=True)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await create_member(connection, workspace_id, "member@gmail.com")
+    async with onboard_client as client:
+        response = await client.get(
+            "/internal/onboard/choices",
+            params={
+                "email": "member@gmail.com",
+                "domain": "gmail.com",
+                "signup_subject": "member@gmail.com",
+            },
+        )
+    assert response.json() == {
+        "choices": [{"workspace_id": str(workspace_id), "label": "acme.com", "member": True}]
+    }
+
+
+async def test_the_previous_gateway_shape_is_still_answered_across_a_rollout(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    """A migration meets the image it replaces. The migrate Job commits before either Deployment
+    rolls and both roll with no unavailable pods, so a gateway pod from the release being replaced
+    asks with `domain` and `email` alone for the whole window. Both routes take the verified domain
+    as the subject then — the rule `ufo_control.fill_signup_subject` applies to the rows that same
+    pod writes — rather than refusing the body and the query with 422."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the candidate read is postgres SQL, for a fleet sqlite never serves")
+    workspace_id = signup_workspace_id("acme.com")
+    async with onboard_client as client:
+        seated = await client.post(
+            "/internal/onboard/seat",
+            json={
+                "workspace_id": str(workspace_id),
+                "domain": "acme.com",
+                "email": "founder@acme.com",
+            },
+        )
+        assert seated.status_code == 200, seated.json()
+        assert seated.json()["workspace_id"] == str(workspace_id)
+        offered = await client.get(
+            "/internal/onboard/choices",
+            params={"email": "teammate@acme.com", "domain": "acme.com"},
+        )
+    assert offered.status_code == 200, offered.json()
+    assert offered.json() == {
+        "choices": [{"workspace_id": str(workspace_id), "label": "acme.com", "member": False}]
+    }
+
+
+async def test_the_previous_gateway_shape_continues_a_personal_claim(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    """A pod of this release files a personal claim's exact address in the column the gateway pod
+    being replaced reads as `domain`. When that pod continues the session against this release's
+    serve endpoint, the exact address is accepted as the subject and never as provider authority."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the candidate read is postgres SQL, for a fleet sqlite never serves")
+    founder = "carol@gmail.com"
+    workspace_id = signup_workspace_id(founder)
+    async with onboard_client as client:
+        seated = await client.post(
+            "/internal/onboard/seat",
+            json={
+                "workspace_id": str(workspace_id),
+                "domain": founder,
+                "email": founder,
+            },
+        )
+        offered = await client.get(
+            "/internal/onboard/choices",
+            params={"email": founder, "domain": founder},
+        )
+        stranger = await client.get(
+            "/internal/onboard/choices",
+            params={"email": "dave@gmail.com", "domain": "dave@gmail.com"},
+        )
+    assert seated.status_code == 200, seated.json()
+    assert seated.json() == {
+        "workspace_id": str(workspace_id),
+        "admin": True,
+        "founding": True,
+    }
+    assert offered.json() == {
+        "choices": [{"workspace_id": str(workspace_id), "label": founder, "member": True}]
+    }
+    assert stranger.json() == {"choices": []}
+
+
+async def test_the_previous_gateway_shape_reaches_no_personal_mail_workspace(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    """The two images serve the same window, so a workspace a new pod founds for one exact address
+    is already there while an old pod still sends the provider domain as the whole identity. That
+    domain is nobody's authority over it: the founder's address is the workspace's own subject, so
+    the stranger is offered nothing and seating them into it is refused."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the candidate read is postgres SQL, for a fleet sqlite never serves")
+    founder = "first@gmail.com"
+    personal = signup_workspace_id(founder)
+    async with onboard_client as client:
+        created = await client.post(
+            "/internal/onboard/seat",
+            json={
+                "workspace_id": str(personal),
+                "domain": "gmail.com",
+                "email": founder,
+                "signup_subject": founder,
+            },
+        )
+        assert created.status_code == 200, created.json()
+        offered = await client.get(
+            "/internal/onboard/choices",
+            params={"email": "second@gmail.com", "domain": "gmail.com"},
+        )
+        refused = await client.post(
+            "/internal/onboard/seat",
+            json={
+                "workspace_id": str(personal),
+                "domain": "gmail.com",
+                "email": "second@gmail.com",
+            },
+        )
+    assert offered.json() == {"choices": []}
+    assert refused.status_code == 409
+    assert f"workspace {personal} no longer belongs to gmail.com" in refused.json()["detail"]
+
+
+async def test_a_personal_mail_call_states_its_exact_identity(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    """This release's gateway states the signup subject under both wire names. A serve pod of the
+    release being replaced reads `domain` as the whole identity, so an exact personal address lets
+    it derive that address's workspace without ever receiving the shared provider. Core derives the
+    verified domain from the email and offers no workspace to a stranger at that provider."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the candidate read is postgres SQL, for a fleet sqlite never serves")
+    founder = "carol@gmail.com"
+    personal = signup_workspace_id(founder)
+    async with onboard_client as client:
+        created = await client.post(
+            "/internal/onboard/seat",
+            json={
+                "workspace_id": str(personal),
+                "domain": founder,
+                "email": founder,
+                "signup_subject": founder,
+            },
+        )
+        assert created.status_code == 200, created.json()
+        offered = await client.get(
+            "/internal/onboard/choices",
+            params={"email": founder, "domain": founder, "signup_subject": founder},
+        )
+        stranger = await client.get(
+            "/internal/onboard/choices",
+            params={
+                "email": "dave@gmail.com",
+                "domain": "dave@gmail.com",
+                "signup_subject": "dave@gmail.com",
+            },
+        )
+    assert created.json() == {"workspace_id": str(personal), "admin": True, "founding": True}
+    assert offered.json() == {
+        "choices": [{"workspace_id": str(personal), "label": founder, "member": True}]
+    }
+    assert stranger.json() == {"choices": []}
+
+
+async def test_a_call_stating_no_domain_still_refuses_an_address_that_is_not_one(
+    onboard_client: AsyncClient,
+) -> None:
+    """The domain check is what holds a malformed address out of a member row, so a call stating no
+    domain must not pass it by default. The derivation answers the empty domain for anything that is
+    not one `local@domain`, and the empty domain is refused."""
+    async with onboard_client as client:
+        seated = await client.post(
+            "/internal/onboard/seat",
+            json={"workspace_id": str(uuid4()), "email": "carol@gmail.com@evil.com"},
+        )
+        offered = await client.get("/internal/onboard/choices", params={"email": "not an address"})
+    assert seated.status_code == 422
+    assert offered.status_code == 422
 
 
 async def test_choices_is_empty_for_an_address_nothing_holds(
@@ -325,7 +605,11 @@ async def test_choices_is_empty_for_an_address_nothing_holds(
     async with onboard_client as client:
         response = await client.get(
             "/internal/onboard/choices",
-            params={"email": "nobody@nowhere.com", "domain": "nowhere.com"},
+            params={
+                "email": "nobody@nowhere.com",
+                "domain": "nowhere.com",
+                "signup_subject": "nowhere.com",
+            },
         )
     assert response.json() == {"choices": []}
 
@@ -377,9 +661,9 @@ async def test_the_fleet_counts_every_workspace(onboard_client: AsyncClient) -> 
     assert after == before + 3
 
 
-def test_the_workspace_derivation_matches_the_rust_contract() -> None:
+def test_the_signup_subject_derivation_matches_the_rust_contract() -> None:
     """`servers/control/tests/onboard_contract.json` holds the same vectors the Rust client
-    asserts. One domain has to derive one workspace on both ends, or a customer signing in through
+    asserts. One subject has to derive one workspace on both ends, or a customer signing in through
     the gateway would be seated in a workspace the portal never shows them."""
     import json
     from pathlib import Path
@@ -387,8 +671,8 @@ def test_the_workspace_derivation_matches_the_rust_contract() -> None:
     contract = Path(__file__).parents[3] / "servers" / "control" / "tests" / "onboard_contract.json"
     vectors: dict[str, str] = json.loads(contract.read_text())
     assert len(vectors) >= 4
-    for domain, expected in vectors.items():
-        assert deterministic_workspace_id(domain) == UUID(expected), domain
+    for subject, expected in vectors.items():
+        assert signup_workspace_id(subject) == UUID(expected), subject
 
 
 STAMP = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)
@@ -407,7 +691,7 @@ async def test_invitations_lists_the_teammates_an_admin_added(
 ) -> None:
     if not database_url.startswith("postgresql"):
         pytest.skip("the invitation read is postgres SQL, for a fleet sqlite never serves")
-    workspace_id = deterministic_workspace_id("acme.com")
+    workspace_id = signup_workspace_id("acme.com")
     with ws(workspace_id):
         async with workspace_tx() as connection:
             await connection.execute(
@@ -451,7 +735,7 @@ async def test_the_invitation_page_cursor_walks_past_a_shared_stamp(
     # second behind it.
     if not database_url.startswith("postgresql"):
         pytest.skip("the invitation read is postgres SQL, for a fleet sqlite never serves")
-    workspace_id = deterministic_workspace_id("acme.com")
+    workspace_id = signup_workspace_id("acme.com")
     with ws(workspace_id):
         async with workspace_tx() as connection:
             await connection.execute(
@@ -506,7 +790,11 @@ async def test_the_invitation_page_logs_no_cross_workspace_read_warning(
             await client.get("/internal/onboard/fleet")
             await client.get(
                 "/internal/onboard/choices",
-                params={"email": "founder@acme.com", "domain": "acme.com"},
+                params={
+                    "email": "founder@acme.com",
+                    "domain": "acme.com",
+                    "signup_subject": "acme.com",
+                },
             )
 
     assert page.status_code == 200
