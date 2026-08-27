@@ -483,6 +483,7 @@ def test_manifest_registers_slug_pinned_specs() -> None:
         "google/gemini-2.5-pro",
         "z-ai/glm-5.2",
         "z-ai/glm-5.3",
+        "z-ai/glm-5.3-flash",
         "moonshotai/kimi-k3",
         "anthropic/claude-fable-5",
         "openai/gpt-5.6-sol",
@@ -511,6 +512,25 @@ def test_gemini_37_flash_spec_carries_its_route_price_window_and_reasoning() -> 
     assert spec.price.input == 375_000
     assert spec.price.output == 1_875_000
     assert spec.price.cache_read == 37_500
+    assert spec.context_window == 1_048_576
+    assert spec.knowledge_cutoff == "2026-03"
+    assert spec.reasoning.default_on
+    assert not spec.reasoning.can_disable
+    assert spec.accepts_image_input
+    assert spec.wire_reasoning("off", ()) == "low"
+    assert spec.wire_reasoning("high", ()) == "high"
+
+
+def test_glm_53_flash_spec_carries_its_undiscounted_price_window_and_required_reasoning() -> None:
+    """The rates are the ones a route bills without the 0.5 promotional discount the listing shows,
+    which no route is held to, and the window is the 1,048,576 tokens every route but Cloudflare's
+    serves. The model reasons on every call, so a row that let an agent write `off` would send a
+    budget it refuses. Unlike `z-ai/glm-5.3`, this route takes image input."""
+    spec = {s.id: s for s in openrouter.manifest().models}["z-ai/glm-5.3-flash"]
+    assert openrouter.openrouter_slug(spec.id) == "z-ai/glm-5.3-flash"
+    assert spec.price.input == 150_000
+    assert spec.price.output == 500_000
+    assert spec.price.cache_read == 30_000
     assert spec.context_window == 1_048_576
     assert spec.knowledge_cutoff == "2026-03"
     assert spec.reasoning.default_on

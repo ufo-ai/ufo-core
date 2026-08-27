@@ -621,6 +621,16 @@ OPENROUTER_MODEL_SPECS = (
         reasoning=_REQUIRED_REASONS,
         accepts_image_input=False,
     ),
+    # Every route but Cloudflare's serves 1,048,576 tokens, so the listing's 1,310,720 is one
+    # route's window and not this id's. The listing halves these rates under a 0.5 promotional
+    # discount that no route is held to. The listing publishes no cutoff; the family's holds.
+    _openrouter(
+        "z-ai/glm-5.3-flash",
+        ModelPrice(150_000, 500_000, 30_000, 0, 0),
+        "2026-03",
+        context_window=1_048_576,
+        reasoning=_REQUIRED_REASONS,
+    ),
     _openrouter(
         "moonshotai/kimi-k3",
         ModelPrice(3_000_000, 15_000_000, 300_000, 0, 0),
