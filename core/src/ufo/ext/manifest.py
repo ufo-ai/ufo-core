@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 from uuid import UUID
 
+from openfeature.provider import FeatureProvider
 from pydantic import BaseModel
 from starlette.requests import Request
 from starlette.responses import Response
@@ -290,6 +291,22 @@ class AuthProxySpec:
 
 
 @dataclass(frozen=True)
+class FlagProviderSpec:
+    """A feature-flag provider an extension registers, selected by `config.flags.backend`. `backend`
+    is the name; `build` constructs the process-wide OpenFeature provider once at boot, only when
+    selected, from `config.flags.cache_ttl_seconds` — the window it may answer a flag out of its own
+    response cache. Core ships no backend and reads every flag through `ufo.flags.flag_enabled`, so
+    a deploy swaps providers with a config line.
+
+    `build` returns None when the deploy carries no credential for the backend. Flags then resolve
+    to the default each call site passes rather than failing the boot: a flag says whether a feature
+    is offered, and a deploy that cannot read one offers what its code defaults to."""
+
+    backend: str
+    build: Callable[[float], FeatureProvider | None]
+
+
+@dataclass(frozen=True)
 class CdpProviderSpec:
     """A cdp provider an extension registers, selected by `config.browser.cdp_provider`. `backend`
     is the name; `build` constructs the process-wide CdpProvider once at boot, only when selected,
@@ -547,13 +564,20 @@ class AgentProvision:
     `icon` names the portal mark the created row draws — a tabler outline slug or one of the
     portal's own pack, never a URL or markup; unset, the row is dealt one from the pack.
     `spec.purpose` is required here and nowhere else: an agent a member built has its author to
-    ask, and a shipped one has nobody."""
+    ask, and a shipped one has nobody.
+    `flag` names a boolean feature flag the provision waits on: the row is created only for a
+    workspace the flag is on for, so an app ships dark and a deploy decides when it appears. The
+    read fails closed (`ufo.flags.flag_enabled` with default False), so a deploy with no flag
+    backend never provisions a flagged app. Empty is an unflagged provision, applied to every
+    workspace. A row already created stands whatever the flag says later — the workspace owns it
+    from the moment it exists, exactly as it owns every other shipped row."""
 
     name: str
     spec: AgentSpec
     tools: tuple[str, ...] | None = None
     setup: AgentSetup = field(default_factory=AgentSetup)
     icon: str | None = None
+    flag: str = ""
 
     def __post_init__(self) -> None:
         if not AGENT_NAME_RE.match(self.name):
@@ -711,6 +735,7 @@ class Manifest:
     carriers: tuple[CarrierSpec, ...] = ()
     auth_proxies: tuple[AuthProxySpec, ...] = ()
     search_providers: tuple[SearchProviderSpec, ...] = ()
+    flag_providers: tuple[FlagProviderSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     conversation_slots: tuple[ConversationSlotProvider, ...] = ()
     member_context_read: bool = False

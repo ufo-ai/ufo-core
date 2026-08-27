@@ -35,7 +35,7 @@ from ufo.ext.surface import TurnTailer
 from ufo.hub import Hub, Terminal
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.kinds.agent_setup import setup_skill
-from ufo.kinds.provisioning import AgentProvisioning
+from ufo.kinds.provisioning import WITHHELD, AgentProvisioning
 from ufo.loop.compaction import Compaction
 from ufo.loop.engine import (
     ADOPTED_CLAIM,
@@ -295,10 +295,18 @@ async def _apply_provisions(runtime: "Runtime", workspace_id: UUID) -> None:
 
     Onboarding covers a new workspace. The first turn of each workspace also applies the idempotent
     provisions. A name the workspace already uses sends the shipped agent to a free variant, so a
-    collision costs the member's turn nothing."""
+    collision costs the member's turn nothing.
+
+    A pass that withheld a flagged provision is not a settled workspace, so it is not recorded: the
+    next turn reads that flag again, and turning a flag on ships the app on that workspace's next
+    turn rather than at the next pod restart. Such a pass repeats the reads of every other provision
+    too, which write nothing while nothing changed — the price of a flag a deploy may turn on at any
+    moment."""
     if workspace_id in _provisioned_workspaces:
         return
-    await AgentProvisioning(runtime.manifests).apply(workspace_id)
+    outcomes = await AgentProvisioning(runtime.manifests).apply(workspace_id)
+    if any(outcome.result == WITHHELD for outcome in outcomes):
+        return
     _provisioned_workspaces.add(workspace_id)
 
 

@@ -615,6 +615,20 @@ wheels = [
 ]
 
 [[package]]
+name = "cloudflare-flagship"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cachetools" },
+    { name = "httpx" },
+    { name = "openfeature-sdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2c/f5/1486fff7818522f5d4357c31cf8b92c72da6dda92ebf068656babaa3c232/cloudflare_flagship-0.4.0.tar.gz", hash = "sha256:a38d97dea70fbee3a276c92a84b114d7bcc167828da142e326ff169e1697a5b4", size = 14314, upload-time = "2026-06-24T11:47:14.756Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e6/db/801d6dccc8b95195e9cf45cd3958ffdcbc40652b42d4f3eebbbf595a4560/cloudflare_flagship-0.4.0-py3-none-any.whl", hash = "sha256:9df7d804ca60cf94276a56745d4eaf90b2f1b00d904bae17e3a396ed921cf41c", size = 17787, upload-time = "2026-06-24T11:47:13.738Z" },
+]
+
+[[package]]
 name = "cobble"
 version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1882,6 +1896,15 @@ wheels = [
 ]
 
 [[package]]
+name = "openfeature-sdk"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/30/cfc684b7d8314398d476ae8ed515c10db99c4d7f950989db464b4ded12ce/openfeature_sdk-0.10.0.tar.gz", hash = "sha256:938c2540bdea4da3b01ef507517ee636f223a35abaaca845c5587e594151b052", size = 33516, upload-time = "2026-06-01T19:45:35.136Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/44/8a4f5225e930ff0d999fd43f5d743a4babeb6c7e76dddc00f0e118878ef3/openfeature_sdk-0.10.0-py3-none-any.whl", hash = "sha256:75497ea75d73f684eef509a25f79ad6386368862e050af80ab70a44ae49b33e4", size = 38941, upload-time = "2026-06-01T19:45:33.011Z" },
+]
+
+[[package]]
 name = "openpyxl"
 version = "3.1.5"
 source = { registry = "https://pypi.org/simple" }
@@ -2865,8 +2888,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "sys_platform != 'win32'" },
-    { name = "jeepney", marker = "sys_platform != 'win32'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
@@ -3128,6 +3151,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "botocore", extra = ["crt"] },
     { name = "click" },
+    { name = "cloudflare-flagship" },
     { name = "croniter" },
     { name = "cryptography" },
     { name = "dbos" },
@@ -3140,6 +3164,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "lz4" },
     { name = "openai" },
+    { name = "openfeature-sdk" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
@@ -3187,6 +3212,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "botocore", extras = ["crt"], specifier = ">=1.43.0" },
     { name = "click", specifier = ">=8.1" },
+    { name = "cloudflare-flagship", specifier = ">=0.4" },
     { name = "croniter", specifier = ">=2.0" },
     { name = "cryptography", specifier = ">=49.0.0" },
     { name = "dbos", specifier = ">=2.28" },
@@ -3199,6 +3225,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "lz4", specifier = ">=4.3" },
     { name = "openai", specifier = ">=1.50" },
+    { name = "openfeature-sdk", specifier = ">=0.10" },
     { name = "opentelemetry-api", specifier = ">=1.43" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.43" },
     { name = "opentelemetry-sdk", specifier = ">=1.43" },

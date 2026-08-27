@@ -95,6 +95,13 @@ spec:
     - {secretKey: GITHUB_APP_CLIENT_ID, remoteRef: {key: ${secret_api_keys}, property: github-app-client-id}}
     - {secretKey: GITHUB_APP_CLIENT_SECRET, remoteRef: {key: ${secret_api_keys}, property: github-app-client-secret}}
     - {secretKey: GITHUB_APP_PRIVATE_KEY, remoteRef: {key: ${secret_api_keys}, property: github-app-private-key}}
+    # The Flagship app this deploy reads feature flags from ([flags] backend): the app id and the
+    # account name it, the token carries the Flagship Evaluate permission. All three or none — serve
+    # builds no flag provider without them and every flag resolves to the closed default its call
+    # site passes, so an unseeded key ships the flagged features dark instead of failing a boot.
+    - {secretKey: CLOUDFLARE_FLAGSHIP_APP_ID, remoteRef: {key: ${secret_api_keys}, property: cloudflare-flagship-app-id}}
+    - {secretKey: CLOUDFLARE_ACCOUNT_ID, remoteRef: {key: ${secret_api_keys}, property: cloudflare-account-id}}
+    - {secretKey: CLOUDFLARE_FLAGSHIP_TOKEN, remoteRef: {key: ${secret_api_keys}, property: cloudflare-flagship-token}}
     # Serve trusts the proxy certificate; only the proxy receives the key.
     - {secretKey: UFO_EGRESS_CA_CERT, remoteRef: {key: ${secret_platform}, property: egress-ca-cert}}
     - {secretKey: UFO_TOKEN_SECRET, remoteRef: {key: ${secret_platform}, property: ufo-token-secret}}

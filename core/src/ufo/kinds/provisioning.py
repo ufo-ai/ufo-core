@@ -13,6 +13,12 @@ changes reaches new workspaces only, and the member's own edits are never overwr
 A shipped agent is identified by the extension that ships it and the name that extension declared,
 never by the row's own name. A name already in use — by a member's agent or by a second extension's
 — sends the shipped agent to a free variant. Nothing is overwritten and nothing is stuck.
+
+A provision naming a feature flag is applied only where that flag is on, and the read fails closed:
+an app ships dark, and a deploy with no flag backend creates none of it. The flag decides creation
+only — a row a workspace already holds is that workspace's, whatever the flag says afterwards.
+Withholding decides nothing beyond that pass: the caller reads the flag again on the workspace's
+next turn, so a flag turned on ships the app without a restart.
 """
 
 from dataclasses import dataclass
@@ -25,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
 from ufo.ext.manifest import AgentProvision, Manifest
+from ufo.flags import flag_enabled
 from ufo.schema import tables
 from ufo.schema.records import auto_agent_icon
 from ufo.workspace import ws
@@ -32,6 +39,7 @@ from ufo.workspace import ws
 CREATED = "created"
 ADOPTED = "adopted"
 PRESENT = "present"
+WITHHELD = "withheld"
 FREE_NAME_LIMIT = 50
 
 
@@ -62,6 +70,8 @@ class AgentProvisioning:
         self, workspace_id: UUID, manifest: Manifest, provision: AgentProvision
     ) -> ProvisionOutcome:
         extension = manifest.name
+        if provision.flag and not await flag_enabled(provision.flag, default=False):
+            return ProvisionOutcome(extension, provision.name, WITHHELD)
         member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
         async with workspace_tx() as connection:
             shipped = (

@@ -1442,12 +1442,13 @@ def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
 
 def _provider_names(manifest: Manifest) -> list[tuple[str, str]]:
     """Every registered provider name a manifest declares, paired with the point it came from —
-    reading each spec type's own identifier field (cdp and search carry it as `backend`, carrier,
-    embed, and index as `name`)."""
+    reading each spec type's own identifier field (cdp, search, and flag carry it as `backend`,
+    carrier, embed, and index as `name`)."""
     return [
         *(("cdp_providers", spec.backend) for spec in manifest.cdp_providers),
         *(("carriers", spec.name) for spec in manifest.carriers),
         *(("search_providers", spec.backend) for spec in manifest.search_providers),
+        *(("flag_providers", spec.backend) for spec in manifest.flag_providers),
         *(("embeds", spec.name) for spec in manifest.embeds),
         *(("indexes", spec.name) for spec in manifest.indexes),
     ]
@@ -1455,8 +1456,8 @@ def _provider_names(manifest: Manifest) -> list[tuple[str, str]]:
 
 def _naming_failures(manifests: tuple[Manifest, ...], packs: tuple[Pack, ...]) -> list[str]:
     """Every name a subsystem selects a component by uses `_`, never `-`: an extension name, a pack
-    name, and each provider name across the cdp/carrier/search/embed/index points. A `-` fractures
-    the selector — a config `cdp_provider = "sandbox_chrome"` would never match a provider
+    name, and each provider name across the cdp/carrier/search/flag/embed/index points. A `-`
+    fractures the selector — a config `cdp_provider = "sandbox_chrome"` would never match a provider
     registered as `sandbox-chrome` — so it is refused at the registration seam, not left to surface
     as a boot miss."""
     failures = [

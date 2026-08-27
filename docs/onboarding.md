@@ -300,6 +300,13 @@ seeded out-of-band like `ufo/<env>/gateway-workos`. A required property with no 
 deploy at `Write testing runtime secrets`, naming the property, before the apply rolls the pods that
 would read it empty.
 
+The flag backend's three keys (`cloudflare-flagship-app-id`, `cloudflare-account-id`,
+`cloudflare-flagship-token`) are the one family neither deploy requires: both write them empty when
+the document lacks them, because the cluster projects each one by name and a property Secrets
+Manager does not hold leaves the ExternalSecret unready. Seed all three to read flags; leave them
+and serve builds no flag provider, so every flag resolves to the closed default its call site
+passes.
+
 ## Web login
 
 The whole browser sign-in flow is same-origin on the **app host** (`app.<apex>`), the sole

@@ -112,6 +112,9 @@ from ufo.ext.manifest import (
     EmbedBackendSpec as EmbedBackendSpec,
 )
 from ufo.ext.manifest import (
+    FlagProviderSpec as FlagProviderSpec,
+)
+from ufo.ext.manifest import (
     HookContext as HookContext,
 )
 from ufo.ext.manifest import (

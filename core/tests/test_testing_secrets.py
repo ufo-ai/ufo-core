@@ -8,6 +8,7 @@ import pytest
 import infra.testing_secrets as testing_secrets
 from infra.testing_secrets import (
     DEPLOYMENT_ID_ENV,
+    FAIL_CLOSED_PROPERTIES,
     REQUIRED_PROPERTIES,
     SECRET_ID_ENV,
     SECRET_INPUTS,
@@ -17,6 +18,7 @@ from infra.testing_secrets import (
 _SEEDED = {name: f"{name}-value" for name in sorted(REQUIRED_PROPERTIES - set(SECRET_INPUTS))} | {
     "retired-api-key": ""
 }
+_FILLED = dict.fromkeys(sorted(FAIL_CLOSED_PROPERTIES), "")
 
 
 def _environment() -> dict[str, str]:
@@ -37,7 +39,7 @@ def _document(**overrides: str) -> bytes:
 def test_testing_secret_write_preserves_the_live_document() -> None:
     raw = _document(**{"existing-api-key": "existing-value"})
     write = testing_secrets.testing_secret_write(_environment(), raw)
-    assert json.loads(write.payload) == _SEEDED | {
+    assert json.loads(write.payload) == _SEEDED | _FILLED | {
         "existing-api-key": "existing-value",
         "anthropic-api-key": "anthropic-value",
         "perplexity-api-key": "perplexity-value",
@@ -96,6 +98,24 @@ def test_testing_secret_write_names_every_empty_required_property() -> None:
     )
 
 
+def test_testing_secret_write_fills_an_unseeded_flag_key_rather_than_stopping_the_deploy() -> None:
+    """The cluster projects each flag key by name, so a property Secrets Manager does not hold
+    leaves the ExternalSecret unready and times out the forced re-sync before the apply. An empty
+    value costs testing nothing: serve builds no flag provider without all three, so every flag
+    resolves to the closed default its call site passes."""
+    write = testing_secrets.testing_secret_write(_environment(), _document())
+    written = json.loads(write.payload)
+    assert {written[name] for name in FAIL_CLOSED_PROPERTIES} == {""}
+    assert not FAIL_CLOSED_PROPERTIES & REQUIRED_PROPERTIES
+
+
+def test_testing_secret_write_preserves_a_seeded_flag_key() -> None:
+    raw = _document(**{"cloudflare-flagship-token": "cf-flagship-token"})
+    written = json.loads(testing_secrets.testing_secret_write(_environment(), raw).payload)
+    assert written["cloudflare-flagship-token"] == "cf-flagship-token"
+    assert written["cloudflare-flagship-app-id"] == ""
+
+
 def test_main_reads_and_writes_through_stdin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -132,7 +152,7 @@ def test_main_reads_and_writes_through_stdin(
     assert len(calls) == 2
     assert calls[0]["argv"][1] == "get-secret-value"
     assert calls[1]["argv"][1] == "put-secret-value"
-    assert json.loads(calls[1]["stdin"]) == _SEEDED | {
+    assert json.loads(calls[1]["stdin"]) == _SEEDED | _FILLED | {
         "existing-api-key": "existing-value",
         "anthropic-api-key": "anthropic-value",
         "perplexity-api-key": "perplexity-value",

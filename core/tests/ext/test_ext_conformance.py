@@ -23,6 +23,7 @@ import ufo_pack_sample as sample_pack
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from openfeature.provider.in_memory_provider import InMemoryProvider
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer
@@ -44,6 +45,7 @@ from ufo.config import (
     Config,
     ConnectorsConfig,
     DatabaseConfig,
+    FlagsConfig,
     HubConfig,
     ResearchConfig,
     SandboxConfig,
@@ -107,6 +109,7 @@ from ufo.serve import (
     _mount_shared_surfaces,
     _select_auth_proxy,
     _select_cdp_provider,
+    _select_flag_provider,
     _select_hub,
     _select_search_provider,
     _select_terminal_transport,
@@ -328,6 +331,7 @@ async def test_sample_is_discovered_via_its_entry_point() -> None:
     assert {carrier.name for carrier in manifest.carriers} == {sample.CARRIER_NAME}
     assert {spec.backend for spec in manifest.auth_proxies} == {sample.AUTH_PROXY_BACKEND}
     assert {spec.backend for spec in manifest.search_providers} == {sample.SEARCH_PROVIDER}
+    assert {spec.backend for spec in manifest.flag_providers} == {sample.FLAG_BACKEND}
 
 
 @pytest.mark.parametrize("topic", ["", "\n", " \t"])
@@ -618,6 +622,31 @@ def test_core_selects_a_manifest_contributed_search_provider() -> None:
         _select_search_provider(_search_config(sample.SEARCH_PROVIDER), (manifest, manifest), store)
     with pytest.raises(RuntimeError, match="needs a credential key"):
         _select_search_provider(_search_config(sample.SEARCH_PROVIDER), (manifest,), None)
+
+
+def _flags_config(backend: str | None, cache_ttl_seconds: float = 30.0) -> Config:
+    return Config(
+        database=DatabaseConfig(url="sqlite+aiosqlite:///dev.db"),
+        blob=BlobConfig(backend="filesystem", root=Path()),
+        flags=FlagsConfig(backend=backend, cache_ttl_seconds=cache_ttl_seconds),
+    )
+
+
+def test_core_selects_a_manifest_contributed_flag_provider() -> None:
+    """The `flag_providers` seam end to end: core ships no flag backend, so resolving the sample's
+    backend name proves the Manifest `flag_providers` point flowed into selection, built with the
+    deploy's cache window. An unset knob yields None — the deploy then reads every flag as its code
+    default — while a name no extension registers and a name two register each fail loud, because a
+    deploy that thinks it reads flags and reads none would gate features on nothing."""
+    manifest = _sample_manifest()
+
+    assert _select_flag_provider(_flags_config(None), (manifest,)) is None
+    selected = _select_flag_provider(_flags_config(sample.FLAG_BACKEND), (manifest,))
+    assert isinstance(selected, InMemoryProvider)
+    with pytest.raises(RuntimeError, match="no extension registers it"):
+        _select_flag_provider(_flags_config("nope"), (manifest,))
+    with pytest.raises(RuntimeError, match="two extensions register flag provider"):
+        _select_flag_provider(_flags_config(sample.FLAG_BACKEND), (manifest, manifest))
 
 
 async def test_sample_search_provider_answers_a_query_and_fetches() -> None:

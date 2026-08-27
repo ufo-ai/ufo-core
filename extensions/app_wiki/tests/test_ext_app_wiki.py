@@ -18,7 +18,16 @@ def test_app_wiki_ships_one_workspace_agent() -> None:
     assert provision.icon == "book"
     assert provision.spec.visibility == "workspace"
     assert "app-wiki-home" in provision.spec.prompt
+    assert provision.flag == app_wiki.WIKI_APP_FLAG
     assert {path.name for path in (spec.path for spec in manifest.skills)} == {"app-wiki-home"}
+
+
+def test_the_app_ships_dark_behind_the_wiki_app_flag() -> None:
+    """The provision names a flag, so the app reaches a workspace only where the deploy's flag
+    backend turns `wiki-app` on. The read fails closed, so a deploy with no flag backend creates no
+    wiki agent at all — which is what lets the app ship before it is offered."""
+    assert app_wiki.WIKI_APP_FLAG == "wiki-app"
+    assert app_wiki.manifest().agents[0].flag == app_wiki.WIKI_APP_FLAG
 
 
 def test_the_built_page_is_the_apps_own_tsx() -> None:

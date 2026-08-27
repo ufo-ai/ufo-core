@@ -30,6 +30,9 @@ API_KEYS_PROPERTIES = frozenset(
         "anthropic-api-key",
         "bedrock-api-key",
         "browserbase-api-key",
+        "cloudflare-account-id",
+        "cloudflare-flagship-app-id",
+        "cloudflare-flagship-token",
         "composio-api-key",
         "datadog-api-key",
         "e2b-api-key",
@@ -53,6 +56,19 @@ API_KEYS_PROPERTIES = frozenset(
         "stripe-billing-portal-configuration-id",
         "stripe-secret-key",
         "turbopuffer-api-key",
+    }
+)
+# The flag backend's three keys (`[flags] backend = "flagship"`, infra/envs/*/ufo.tf), seeded
+# out-of-band like every other production-owned property. A document that carries none of them is
+# filled with empty strings here instead of failing the deploy: the extension builds no provider
+# unless all three are set, so every flag resolves to the closed default its call site passes, and
+# the ExternalSecret projecting them still publishes a ready version. Requiring them would stop a
+# deploy over a feature service the fleet runs perfectly well without.
+FAIL_CLOSED_PROPERTIES = frozenset(
+    {
+        "cloudflare-account-id",
+        "cloudflare-flagship-app-id",
+        "cloudflare-flagship-token",
     }
 )
 GATEWAY_PROPERTIES = frozenset({"bot-token"})
@@ -148,9 +164,10 @@ def production_secret_writes(
     gateway_secret_id = _required(environment, GATEWAY_SECRET_ID_ENV)
     api_keys = _payload(
         api_keys_payload,
-        API_KEYS_PROPERTIES - API_KEY_INPUTS.keys(),
+        API_KEYS_PROPERTIES - API_KEY_INPUTS.keys() - FAIL_CLOSED_PROPERTIES,
         api_keys_secret_id,
     )
+    api_keys.update({name: api_keys.get(name, "") for name in FAIL_CLOSED_PROPERTIES})
     api_keys.update(
         {name: _required(environment, input_name) for name, input_name in API_KEY_INPUTS.items()}
     )

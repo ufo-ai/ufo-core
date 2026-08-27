@@ -119,6 +119,9 @@ locals {
     [browser]
     cdp_provider = "browserbase"
 
+    [flags]
+    backend = "flagship"
+
     [serve]
     host = "0.0.0.0"
     port = 8710

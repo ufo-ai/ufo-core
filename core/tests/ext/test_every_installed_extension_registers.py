@@ -36,6 +36,7 @@ from ufo.config import (
     ConnectConfig,
     ConnectorsConfig,
     DatabaseConfig,
+    FlagsConfig,
     HubConfig,
     ResearchConfig,
     SandboxConfig,
@@ -73,6 +74,7 @@ from ufo.serve import (
     _mount_shared_surfaces,
     _select_auth_proxy,
     _select_cdp_provider,
+    _select_flag_provider,
     _select_hub,
     _select_search_provider,
     _source_backends,
@@ -99,6 +101,7 @@ def _config(
     sandbox_backend: str = "local",
     auth_backend: str | None = None,
     search_provider: str | None = None,
+    flag_backend: str | None = None,
 ) -> Config:
     return Config(
         database=DatabaseConfig(url="sqlite+aiosqlite:///:memory:"),
@@ -109,6 +112,7 @@ def _config(
         sandbox=SandboxConfig(backend=sandbox_backend),
         connectors=ConnectorsConfig(auth_backend=auth_backend),
         research=ResearchConfig(search_provider=search_provider),
+        flags=FlagsConfig(backend=flag_backend),
     )
 
 
@@ -223,6 +227,13 @@ def _check_search_providers(manifest: Manifest, store: CredentialStore) -> None:
             lambda spec=spec: _select_search_provider(
                 _config(search_provider=spec.backend), (manifest,), store
             )
+        )
+
+
+def _check_flag_providers(manifest: Manifest) -> None:
+    for spec in manifest.flag_providers:
+        _resolve_backend(
+            lambda spec=spec: _select_flag_provider(_config(flag_backend=spec.backend), (manifest,))
         )
 
 
@@ -371,6 +382,7 @@ def test_installed_extension_registers_every_declared_point(name: str, tmp_path:
     _check_sources(manifest)
     _check_auth_proxies(manifest, store)
     _check_search_providers(manifest, store)
+    _check_flag_providers(manifest)
     _check_memory_search(manifest, store)
     _check_surfaces(manifest, store, tmp_path)
     _check_routes(manifest, store)

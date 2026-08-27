@@ -29,6 +29,19 @@ REQUIRED_PROPERTIES = frozenset(SECRET_INPUTS) | {
     "e2b-api-key",
     "turbopuffer-api-key",
 }
+# The flag backend's three keys (`[flags] backend = "flagship"`, infra/envs/testing/ufo.tf), seeded
+# out-of-band. They are filled with empty strings when the document lacks them, because the cluster
+# projects each one by name: a property Secrets Manager does not hold leaves the ExternalSecret
+# unready and stops the deploy at the forced re-sync. Empty is a state this family answers by
+# itself — the extension builds no provider unless all three are set, so every flag reads its closed
+# default — which is why they stay out of REQUIRED_PROPERTIES.
+FAIL_CLOSED_PROPERTIES = frozenset(
+    {
+        "cloudflare-account-id",
+        "cloudflare-flagship-app-id",
+        "cloudflare-flagship-token",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +90,7 @@ def testing_secret_write(environment: Mapping[str, str], raw: bytes) -> SecretWr
         raise RuntimeError(f"{secret_id} must contain valid JSON") from error
     if not isinstance(value, dict) or any(not isinstance(item, str) for item in value.values()):
         raise RuntimeError(f"{secret_id} must contain string properties")
+    value.update({name: value.get(name, "") for name in FAIL_CLOSED_PROPERTIES})
     value.update(
         {name: _required(environment, input_name) for name, input_name in SECRET_INPUTS.items()}
     )

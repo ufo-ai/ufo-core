@@ -19,6 +19,7 @@ from typing import ClassVar
 from uuid import UUID
 
 import sqlalchemy as sa
+from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.audience import conversation_audience
@@ -59,6 +60,7 @@ from ufo.sdk.manifest import (
     CredentialSlot,
     Deny,
     EmbedBackendSpec,
+    FlagProviderSpec,
     HookContext,
     HookOutcome,
     HookSpec,
@@ -238,6 +240,11 @@ SAMPLE_MEMORY_BODY_MAX_CHARS = 64
 MEMORY_SEARCH_KEY = "memory_search"
 MEMORY_RECENT_KEY = "memory_recent"
 MEMORY_SEARCH_PROVIDER = "sample"
+FLAG_BACKEND = "sample_flags"
+FLAG_ON = "sample-flag-on"
+FLAG_OFF = "sample-flag-off"
+ON_VARIANT = "on"
+OFF_VARIANT = "off"
 CONVERSATION_SLOT = "sample_changes"
 SAMPLE_FETCH_TEXT = "the sample search backend fetched a canned page"
 WIDGET_KIND = "sample_widget"
@@ -1027,6 +1034,20 @@ class SampleSearchProvider:
         return FetchedPage(url=request.url, text=SAMPLE_FETCH_TEXT)
 
 
+def build_flag_provider(_cache_ttl_seconds: float) -> InMemoryProvider:
+    """The OpenFeature provider the probe registers through the `flag_providers` Manifest point:
+    `sample-flag-on` resolves true and `sample-flag-off` false, so a flagged path is driven both
+    ways through the real SDK. It answers from memory, so the deploy's cache window has nothing to
+    hold; the Flagship backend keeps the HTTP proof."""
+    variants = {ON_VARIANT: True, OFF_VARIANT: False}
+    return InMemoryProvider(
+        {
+            FLAG_ON: InMemoryFlag(default_variant=ON_VARIANT, variants=variants),
+            FLAG_OFF: InMemoryFlag(default_variant=OFF_VARIANT, variants=variants),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class SampleMemorySearch:
     """Record a scoped search and return one result through the public provider seam."""
@@ -1356,6 +1377,7 @@ def manifest() -> Manifest:
                 backend=SEARCH_PROVIDER, build=lambda credentials: SampleSearchProvider()
             ),
         ),
+        flag_providers=(FlagProviderSpec(backend=FLAG_BACKEND, build=build_flag_provider),),
         memory_search=(
             MemorySearchProviderSpec(name=MEMORY_SEARCH_PROVIDER, build=SampleMemorySearch),
         ),

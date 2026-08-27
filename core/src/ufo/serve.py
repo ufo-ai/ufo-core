@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from dbos import DBOS, DBOSClient
 from fastapi import FastAPI
+from openfeature.provider import FeatureProvider
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
@@ -93,6 +94,7 @@ from ufo.ext.loader import (
 from ufo.ext.manifest import (
     AuthProxySpec,
     CdpProviderSpec,
+    FlagProviderSpec,
     Manifest,
     SearchProviderSpec,
     conversation_slot_declarations,
@@ -113,6 +115,7 @@ from ufo.ext.surface import (
     mid_turn_reply_workspaces,
     writeback_workspaces,
 )
+from ufo.flags import init_flags
 from ufo.hub import Hub, InProcessHub
 from ufo.indexing import EmbedClient, IndexBackend
 from ufo.loop.delivery import DeliverySweep
@@ -129,7 +132,7 @@ from ufo.models.catalog_skill import model_catalog_skill
 from ufo.models.interface import AUTO_MODEL
 from ufo.models.pricing import Pricing
 from ufo.models.registry import model_registry
-from ufo.o11y import init_o11y, init_service_checks, log
+from ufo.o11y import init_o11y, init_service_checks, log, warn
 from ufo.objects import BoundKind
 from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV, OnboardControl
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
@@ -244,6 +247,7 @@ def run() -> None:
     validate_ext_tools(manifests, credentials)
     _validate_requires(config, manifests, credentials)
     init_workspace_credentials(credentials)
+    init_flags(_select_flag_provider(config, manifests))
     blob_backend = blob_store_for(config.blob)
     blob = WorkspaceBlobStore(backend=blob_backend)
     fleet_blob = FleetBlobStore(backend=blob_backend)
@@ -830,6 +834,36 @@ def _require_search_provider(
             "research tools have a provider"
         )
     _select_search_provider(config, manifests, credentials)
+
+
+def _select_flag_provider(
+    config: Config, manifests: tuple[Manifest, ...]
+) -> FeatureProvider | None:
+    """The process-wide OpenFeature provider the deploy selects (by `[flags] backend`), built once
+    at boot — or None when the knob is unset or the selected backend carries no credential, in which
+    case every flag resolves to the default its call site passes. Selecting a name no extension
+    registers, or a name two register, fails loud: a deploy that thinks it reads flags and silently
+    reads none would gate features on nothing."""
+    specs: dict[str, FlagProviderSpec] = {}
+    for manifest in manifests:
+        for spec in manifest.flag_providers:
+            if spec.backend in specs:
+                raise RuntimeError(
+                    f"two extensions register flag provider backend {spec.backend!r}"
+                )
+            specs[spec.backend] = spec
+    if config.flags.backend is None:
+        return None
+    selected = specs.get(config.flags.backend)
+    if selected is None:
+        raise NotRegisteredError(
+            f"config selects flag provider backend {config.flags.backend!r} but no extension "
+            "registers it"
+        )
+    provider = selected.build(config.flags.cache_ttl_seconds)
+    if provider is None:
+        warn("flags.backend_unkeyed", backend=config.flags.backend)
+    return provider
 
 
 def _require_memory_search(

@@ -19,6 +19,7 @@ DEFAULT_AMBIENT_REPLY_MODEL = "gpt-5.6-luna"
 DEFAULT_BACKGROUND_JOBS_MODEL = "gpt-5.6-luna"
 DEFAULT_PROXY_PORT = 8888
 DEFAULT_INGRESS_PORT = 8100
+DEFAULT_FLAG_CACHE_TTL_SECONDS = 30.0
 
 
 class DatabaseConfig(BaseModel):
@@ -360,6 +361,21 @@ class ResearchConfig(BaseModel):
     search_provider: str | None = None
 
 
+class FlagsConfig(BaseModel):
+    """Feature flags. `backend` names a flag provider an extension registers through its Manifest
+    `flag_providers` point (the `flagship` extension registers Cloudflare Flagship); unset selects
+    none, and every flag resolves to the default its call site passes — the closed state, which is
+    what a deploy carrying no flag service runs on. `cache_ttl_seconds` is how long the selected
+    backend may answer a flag out of its own response cache before evaluating it again, so a turn
+    reading a flag pays one round trip per window rather than one per read; 0 evaluates every read.
+    A backend that cannot answer inside `ufo.flags.FLAG_TIMEOUT_SECONDS` holds no turn open — that
+    read falls back to the same default."""
+
+    model_config = ConfigDict(extra="forbid")
+    backend: str | None = None
+    cache_ttl_seconds: float = Field(default=DEFAULT_FLAG_CACHE_TTL_SECONDS, ge=0)
+
+
 class PackConfig(BaseModel):
     """The active pack. `name` selects one pack a workspace member under `packs/<name>/` registers
     through the `ufo.pack` entry point; activating it narrows the deploy to exactly the
@@ -389,6 +405,7 @@ class Config(BaseModel):
     browser: BrowserConfig = BrowserConfig()
     connectors: ConnectorsConfig = ConnectorsConfig()
     research: ResearchConfig = ResearchConfig()
+    flags: FlagsConfig = FlagsConfig()
     pack: PackConfig = PackConfig()
     sources: tuple[SourceEntry, ...] = ()
 

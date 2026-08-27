@@ -17,6 +17,7 @@ from infra.production_secrets import (
     API_KEYS_PROPERTIES,
     API_KEYS_SECRET_ID_ENV,
     DEPLOYMENT_ID_ENV,
+    FAIL_CLOSED_PROPERTIES,
     GATEWAY_PROPERTIES,
     GATEWAY_SECRET_ID_ENV,
     main,
@@ -54,6 +55,40 @@ def _output(source: str, name: str) -> str:
 
 def _projected(template: str, secret: str) -> set[str]:
     return set(re.findall(rf"remoteRef: \{{key: \$\{{{secret}\}}, property: ([^}}]+)\}}", template))
+
+
+def _serve_config(environment: str) -> dict[str, object]:
+    """The backends one hosted environment's terraform selects in the `ufo.toml` it renders. Only
+    the sections above `[serve]` are read as TOML: everything below interpolates terraform
+    expressions."""
+    source = (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text()
+    _, start, remainder = source.partition("  serve_config = <<-TOML\n")
+    config_source, end, _ = remainder.partition("  TOML\n")
+    assert start and end
+    providers_source, serve, _ = textwrap.dedent(config_source).partition("\n[serve]\n")
+    assert serve
+    return tomllib.loads(providers_source)
+
+
+def _platform_projections() -> dict[str, str]:
+    """Every environment variable `ufo-platform-secrets` publishes to the fleet, mapped to the
+    Secrets Manager property it reads."""
+    manifests = list(
+        yaml.safe_load_all(
+            re.sub(
+                r"\$\{([^}]+)\}",
+                r"\1",
+                (ROOT / "infra" / "templates" / "cluster-services.yaml.tpl").read_text(),
+            )
+        )
+    )
+    platform = next(
+        document
+        for document in manifests
+        if document.get("kind") == "ExternalSecret"
+        and document["metadata"]["name"] == "ufo-platform-secrets"
+    )
+    return {item["secretKey"]: item["remoteRef"]["property"] for item in platform["spec"]["data"]}
 
 
 def test_secret_schema_matches_terraform() -> None:
@@ -116,36 +151,13 @@ def test_production_selects_the_redis_terminal_transport() -> None:
 
 
 def test_configured_production_backends_receive_platform_credentials() -> None:
-    source = (ROOT / "infra" / "envs" / "prod" / "ufo.tf").read_text()
-    _, start, remainder = source.partition("  serve_config = <<-TOML\n")
-    config_source, end, _ = remainder.partition("  TOML\n")
-    assert start and end
-    providers_source, serve, _ = textwrap.dedent(config_source).partition("\n[serve]\n")
-    assert serve
-    config = tomllib.loads(providers_source)
+    config = _serve_config("prod")
     providers = (
         (config["memory"]["index_backend"], "indexes"),
         (config["research"]["search_provider"], "search"),
         (config["browser"]["cdp_provider"], "cdp"),
     )
-    manifests = list(
-        yaml.safe_load_all(
-            re.sub(
-                r"\$\{([^}]+)\}",
-                r"\1",
-                (ROOT / "infra" / "templates" / "cluster-services.yaml.tpl").read_text(),
-            )
-        )
-    )
-    platform = next(
-        document
-        for document in manifests
-        if document.get("kind") == "ExternalSecret"
-        and document["metadata"]["name"] == "ufo-platform-secrets"
-    )
-    projections = {
-        item["secretKey"]: item["remoteRef"]["property"] for item in platform["spec"]["data"]
-    }
+    projections = _platform_projections()
     hosted = re.sub(
         r"(?m)^%\{ [^}]*\}\n?",
         "",
@@ -173,6 +185,50 @@ def test_configured_production_backends_receive_platform_credentials() -> None:
         property_name = slot.name.replace("_", "-")
         assert projections[environment_name] == property_name
         assert API_KEY_INPUTS[property_name] == environment_name
+
+
+def test_the_configured_flag_backend_receives_its_deploy_keys() -> None:
+    """Both hosted environments select a flag backend, and the fleet is handed every deploy key that
+    backend reads — the producer of the three keys beside their consumer. A key the projection omits
+    would leave serve with no provider to build, so every flagged feature would stay dark on a
+    deploy that holds the credential."""
+    projections = _platform_projections()
+    for environment in ("prod", "testing"):
+        backend = _serve_config(environment)["flags"]["backend"]
+        manifest = importlib.import_module(f"ufo_ext_{backend}").manifest()
+        assert any(spec.backend == backend for spec in manifest.flag_providers), environment
+        assert manifest.deploy_keys
+        for name in manifest.deploy_keys:
+            assert projections[name] in API_KEYS_PROPERTIES
+            assert projections[name] in FAIL_CLOSED_PROPERTIES
+
+
+def test_an_unseeded_flag_key_reads_closed_instead_of_failing_the_deploy() -> None:
+    """A flag key nobody seeded is written as an empty string rather than refused. The cluster
+    projects each one by name, so a property the document lacks would leave the ExternalSecret
+    unready and time the deploy out; an empty one projects fine and serve builds no flag provider,
+    which is the closed state every flag already falls back to."""
+    unseeded = _payload(API_KEYS_PROPERTIES - FAIL_CLOSED_PROPERTIES)
+    (api_keys, _gateway) = production_secret_writes(
+        _environment(), unseeded, _payload(GATEWAY_PROPERTIES)
+    )
+    written = json.loads(api_keys.payload)
+    assert set(written) == API_KEYS_PROPERTIES
+    assert {written[name] for name in FAIL_CLOSED_PROPERTIES} == {""}
+
+
+def test_a_seeded_flag_key_is_carried_to_the_fleet() -> None:
+    seeded = json.dumps(
+        {name: f"owned-{name}" for name in sorted(API_KEYS_PROPERTIES - FAIL_CLOSED_PROPERTIES)}
+        | {"cloudflare-flagship-app-id": "flagship-app-7", "cloudflare-account-id": "cf-account-42"}
+    ).encode()
+    (api_keys, _gateway) = production_secret_writes(
+        _environment(), seeded, _payload(GATEWAY_PROPERTIES)
+    )
+    written = json.loads(api_keys.payload)
+    assert written["cloudflare-flagship-app-id"] == "flagship-app-7"
+    assert written["cloudflare-account-id"] == "cf-account-42"
+    assert written["cloudflare-flagship-token"] == ""
 
 
 def test_production_secret_writes_preserve_owned_values() -> None:
