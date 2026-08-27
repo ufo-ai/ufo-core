@@ -541,9 +541,7 @@ def _utf8_header(request: Request, name: str) -> str:
 
 def _stale_client(request: Request) -> bool:
     """Whether this client's x-ufo-script version differs from the client the deploy serves
-    (`UFO_CLIENT_VERSION`) — unset in local dev, so no install is ever pushed there. A stale
-    client is stopped before admitting or tailing a turn; its new binary must run before it can
-    receive this deploy's operations."""
+    (`UFO_CLIENT_VERSION`) — unset in local dev, so no install is ever pushed there."""
     served = os.environ.get(CLIENT_VERSION_ENV, "")
     return bool(served) and request.headers.get(SCRIPT_HEADER, "").strip() != served
 
@@ -649,20 +647,22 @@ async def channel(ctx: SurfaceContext, request: Request) -> Response:
         if stale:
             return PlainTextResponse(_client_update())
     else:
-        if stale:
-            return PlainTextResponse(_client_update())
         body = (await request.body()).decode("utf-8", "replace").strip()
         if not body:
             resumed = True
             turn_id = await ctx.latest_turn(conversation_id)
+            named, _, held = request.headers.get(SINCE_HEADER, "").strip().partition(":")
+            if stale and (marked or turn_id is None or named != str(turn_id)):
+                return PlainTextResponse(_client_update())
             if turn_id is None:
                 return PlainTextResponse(directive("ask", PROMPT))
-            named, _, held = request.headers.get(SINCE_HEADER, "").strip().partition(":")
             if marked and named == str(turn_id) and await ctx.turn_is_terminal(turn_id):
                 return PlainTextResponse(
                     directive("since", named, held) + directive("listen", str(LISTEN_SECONDS))
                 )
         else:
+            if stale:
+                return PlainTextResponse(_client_update())
             if len(body.encode()) > MAX_MESSAGE_BYTES:
                 return PlainTextResponse("message too large", status_code=413)
             if cwd and await ctx.claim_terminal(conversation_id, cwd):

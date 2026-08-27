@@ -1676,6 +1676,40 @@ async def test_a_stale_client_is_told_to_install_except_on_an_op_reply(
     assert ["install"] not in _lines(current.content)
 
 
+async def test_a_client_finishes_its_admitted_turn_across_a_deploy(
+    ufo: tuple[AsyncClient, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    headers = {"authorization": f"Bearer {token}", "x-ufo-script": "1.2.3"}
+    monkeypatch.setenv("UFO_CLIENT_VERSION", "1.2.3")
+    STREAM_GATE.arm()
+    admitted = await client.post(
+        "/surface/ufo/deploy",
+        content=b"hello",
+        headers={**headers, "x-ufo-send": "1", "x-ufo-send-id": str(uuid4())},
+    )
+    turn_id = _lines(admitted.content)[0][1]
+
+    monkeypatch.setenv("UFO_CLIENT_VERSION", "1.2.4")
+    finished = await client.post(
+        "/surface/ufo/deploy",
+        content=b"",
+        headers={**headers, "x-ufo-since": f"{turn_id}:"},
+    )
+
+    lines = _lines(finished.content)
+    assert ["install"] not in lines
+    assert ["ask", ">"] in lines
+    next_session = await client.post("/surface/ufo/deploy", content=b"next", headers=headers)
+    assert _lines(next_session.content) == [
+        ["install"],
+        ["say", "Updated ufo. Run ufo again."],
+    ]
+    assert await _turn_count(workspace_id) == 1
+
+
 async def test_empty_body_polls_without_admitting_a_turn(ufo: tuple[AsyncClient, UUID]) -> None:
     client, workspace_id = ufo
     await _seed_member(workspace_id, "owner@example.com")
