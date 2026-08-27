@@ -43,13 +43,24 @@ TIMEOUT_ACTION_NEGATION = re.compile(
 GENERIC_ADD_LAYERS = (
     "matadd",
     "matexpr",
+    "matrixbase._eval_matrix_mul",
     "matrix-expression add",
     "matrix expression add",
     "add constructor",
     "add postprocessor",
     "add post-processing",
+    "add reduction",
+    "add accumulation",
 )
-BLOCKMUL_LAYERS = ("blockmatrix._blockmul", "blockmatrix _blockmul", "_blockmul")
+BLOCKMUL_LAYERS = (
+    "blockmatrix._blockmul",
+    "blockmatrix _blockmul",
+    "_blockmul",
+    "blockmatrix.rowblocksizes",
+    "blockmatrix.colblocksizes",
+    "blockmatrix.__new__",
+    "blockmatrix normalization",
+)
 CODING_SKILL_DIR = SKILLS_ROOT / "coding"
 CODING_SKILL_CONTEXT = loaded_context((LoadedSkill(parse_skill(CODING_SKILL_DIR)),))
 
@@ -215,6 +226,80 @@ NotImplementedError contract for composite m. For prime p, nthroot_mod(17*17, 5,
 and the same call with all_roots=True must return [0]. The current residue test can reject this zero
 case before the root algorithm runs."""
 
+MIDDLEWARE_OVERRIDE_MESSAGE = """You are at the failing-test diagnosis step of a coding task. Do
+not use tools or implement. Return only the contract owner, the complete production edit scope,
+the rejected patch location, and focused regression coverage.
+
+A Django patch changes BaseHandler.load_middleware() so it commits an adapted handler only after a
+middleware constructor succeeds. Request-chain tests pass, but MiddlewareMixinTests.test_coroutine
+still reports CacheMiddleware, FetchFromCacheMiddleware, SecurityMiddleware, and
+UpdateCacheMiddleware instances are not coroutine functions when constructed with an async
+get_response. MiddlewareMixin.__init__ owns get_response assignment and its async classification.
+Several built-in subclasses override __init__. State the root cause and the complete generic repair
+rather than adding another handler adaptation."""
+
+MIDDLEWARE_LOCAL_MESSAGE = """You are at the failing-test diagnosis step of a coding task. Do not
+use tools or implement. Return only the smallest production edit and focused regression test.
+
+All built-in MiddlewareMixin subclasses pass the shared sync/async constructor contract. One local
+CustomAuditMiddleware override assigns get_response itself and does not call MiddlewareMixin's
+constructor, so only that custom class is not recognized as a coroutine for async get_response.
+Keep the already-proven built-in and handler paths unchanged."""
+
+ANNOTATION_ACTIVE_STATE_MESSAGE = """You are at the failing-test diagnosis step of a coding task.
+Do not use tools or implement. Return only the authoritative state, the rejected state source, the
+minimal production edit, and one SQL-shape regression.
+
+A Django count() optimization tries to prune unused annotations, but the hidden acceptance still
+observes two SELECT statements for Book.objects.alias(chapter_count=Count('chapters')).count(). The
+patch decides whether aggregation exists by scanning self.annotations. The alias is registered but
+is not selected, filtered, ordered, or referenced by another expression. Identify the narrower
+source of truth that must drive the decision and the expected SQL shape."""
+
+ANNOTATION_REFERENCED_MESSAGE = """You are at the implementation-boundary decision step of a coding
+task. Do not use tools or implement. Return only the authoritative state and the required query
+shape.
+
+A queryset defines chapter_count=Count('chapters') as an alias and filters on
+chapter_count__gt=1 before count(). The alias is not selected, but the HAVING predicate depends on
+it. State why this case must retain the aggregation path and how reference closure constrains
+annotation pruning. Do not propose unconditional pruning of unselected aliases."""
+
+PYREVERSE_CONSUMER_MESSAGE = """You are at the failing-test diagnosis step of a coding task. Do not
+use tools or implement. Return only the public boundary, required producers and consumers, rejected
+partial location, and focused regression coverage.
+
+A Pylint pyreverse patch adds get_annotation() and infer_node() to inspector.py and uses them only
+from Linker. The acceptance imports both helpers from pylint.pyreverse.utils and expects generated
+DOT class labels to include parameter and return annotations. Collection fails at that import, and
+the writer has no annotation rendering change. Give the smallest complete change across the
+declared output path; an inspector-only answer is incomplete."""
+
+PYREVERSE_LOCAL_MESSAGE = """You are at the implementation-boundary decision step of a coding task.
+Do not use tools or implement. Return only the smallest edit and direct regression test.
+
+A private Linker branch in inspector.py must treat one new astroid node kind like its existing
+neighbors. No external module imports the branch, and writer output is unchanged by contract. Keep
+the edit and its direct test local to inspector.py; do not create public utility helpers or alter
+DOT rendering."""
+
+MRO_PRECEDENCE_MESSAGE = """You are at the failing-test diagnosis step of a coding task. Do not use
+tools or implement. Return only the ordering rule, attribute-read rule, companion write-path edit,
+and focused regression coverage.
+
+Pytest must collect marks from class C(A, B). C, A, and B directly declare xfail('c'), xfail('a'),
+and xfail('b'). A proposed get_unpacked_marks() walks reversed(C.__mro__) and reads each class's
+direct pytestmark. The hidden acceptance expects c, a, b but receives b, a, c. store_mark() must not
+copy inherited marks onto the decorated class. State the generic precedence-preserving repair."""
+
+BASE_FIRST_PRECEDENCE_MESSAGE = """You are at the implementation-boundary decision step of a coding
+task. Do not use tools or implement. Return only the ordering rule and focused regression test.
+
+A serializer's documented merge contract is explicitly base-to-derived: defaults from Base, then
+Left, then Child, so later classes override earlier keys. Direct-state reads are already proven.
+State the traversal for Child(Left, Base) and preserve the documented base-first contract; do not
+replace it with Python lookup precedence."""
+
 
 def _response_evidence_scorer(
     statement: str,
@@ -286,6 +371,10 @@ def direct_error_emitter_scorer() -> Grader:
                     "scheme before super",
                     "scheme directly raises",
                     "bad-scheme branch",
+                    "scheme check that runs before the regex",
+                    "scheme check runs before regex",
+                    "this raise returns first",
+                    "bad-scheme error",
                 ),
             ),
             ("params with value", ("params={'value': value}", 'params={"value": value}')),
@@ -364,6 +453,8 @@ def prime_zero_boundary_scorer() -> Grader:
                     "before residue",
                     "before the prime-modulus residue test",
                     "if a and not is_nthpow_residue",
+                    "handle the zero case ahead of that test",
+                    "before the is_nthpow_residue gate",
                 ),
             ),
             (
@@ -389,6 +480,209 @@ def prime_zero_boundary_scorer() -> Grader:
             "crt",
             "cartesian",
             "composite solver",
+        ),
+    )
+
+
+def middleware_override_scorer(*, repository_wide: bool) -> Grader:
+    if repository_wide:
+        return _response_evidence_scorer(
+            "the answer repairs every constructor that bypasses the shared middleware contract",
+            (
+                (
+                    "the shared contract owner",
+                    ("middlewaremixin.__init__", "middlewaremixin constructor"),
+                ),
+                (
+                    "the bypassed async classification",
+                    ("_async_check", "async classification", "coroutine classification"),
+                ),
+                (
+                    "delegation from every override",
+                    (
+                        "every override",
+                        "all overrides",
+                        "every built-in",
+                        "all built-in",
+                        "every subclass",
+                        "any middlewaremixin subclass",
+                    ),
+                ),
+                ("super constructor calls", ("super.__init__", "call super")),
+                (
+                    "the affected constructor family",
+                    ("cachemiddleware", "fetchfromcachemiddleware", "securitymiddleware"),
+                ),
+                (
+                    "sync and async constructor coverage",
+                    ("sync and async", "sync/async", "both sync and async", "both directions"),
+                ),
+                (
+                    "rejection of the handler patch",
+                    (
+                        "not basehandler",
+                        "reject basehandler",
+                        "basehandler is not",
+                        "rejected patch location",
+                        "cannot fix this test",
+                        "not the fix",
+                    ),
+                ),
+            ),
+        )
+    return _response_evidence_scorer(
+        "the answer keeps a proven shared contract local to the one violating subclass",
+        (
+            ("the local class", ("customauditmiddleware",)),
+            ("the shared constructor call", ("super.__init__", "call super")),
+            ("a direct coroutine regression", ("coroutine", "async get_response")),
+        ),
+        (
+            "change basehandler",
+            "edit basehandler",
+            "update basehandler",
+            "update every built-in",
+            "change every built-in",
+        ),
+    )
+
+
+def annotation_state_scorer(*, referenced: bool) -> Grader:
+    if referenced:
+        return _response_evidence_scorer(
+            "the answer retains an unselected alias when an active predicate references it",
+            (
+                ("the HAVING dependency", ("having", "filter")),
+                ("reference closure", ("reference closure", "dependency closure", "referenced")),
+                ("the aggregation path", ("retain", "keep", "subquery")),
+                ("the aliased aggregate", ("chapter_count", "chapter count")),
+            ),
+            ("prune every unselected", "prune all unselected", "unconditionally prune"),
+        )
+    return _response_evidence_scorer(
+        "the answer distinguishes registered annotations from the active selected state",
+        (
+            ("the active source of truth", ("annotation_select",)),
+            (
+                "rejection of the broad registry",
+                (
+                    "not self.annotations",
+                    "self.annotations is",
+                    "registered",
+                    "rejected state source",
+                ),
+            ),
+            (
+                "the unused alias",
+                ("chapter_count", "chapter count", "registered-only alias", "aliased count"),
+            ),
+            (
+                "the direct count shape",
+                ("one select", "single select", "no subquery", "without a subquery"),
+            ),
+        ),
+    )
+
+
+def pyreverse_consumer_scorer(*, public_output: bool) -> Grader:
+    if public_output:
+        return _response_evidence_scorer(
+            "the answer wires the declared helper boundary through the rendered output consumer",
+            (
+                ("the public helper module", ("pylint.pyreverse.utils", "pyreverse/utils.py")),
+                ("the Linker producer", ("linker", "inspector")),
+                ("the DOT writer consumer", ("writer", "dot")),
+                ("parameter annotations", ("parameter", "argument")),
+                ("return annotations", ("return annotation", "return type")),
+                (
+                    "output-level regression coverage",
+                    (
+                        "dot fixture",
+                        "dot output",
+                        "generated dot",
+                        "generate dot",
+                        "writer test",
+                    ),
+                ),
+                (
+                    "rejection of the partial patch",
+                    (
+                        "inspector-only",
+                        "inspector only",
+                        "implementation only in inspector.py",
+                        "incomplete",
+                    ),
+                ),
+            ),
+        )
+    return _response_evidence_scorer(
+        "the answer keeps a proven private branch and its test in the inspector",
+        (
+            ("the local implementation", ("inspector.py",)),
+            ("the private Linker branch", ("linker",)),
+            ("a direct regression", ("direct test", "inspector test", "unit test")),
+            (
+                "the unchanged writer boundary",
+                (
+                    "writer unchanged",
+                    "writer output is unchanged",
+                    "no writer",
+                    "do not alter writer",
+                ),
+            ),
+            (
+                "no invented public helper",
+                (
+                    "no public helper",
+                    "no public utility helper",
+                    "no new helper",
+                    "do not create a public helper",
+                ),
+            ),
+        ),
+    )
+
+
+def precedence_scorer(*, python_mro: bool) -> Grader:
+    if python_mro:
+        return _response_evidence_scorer(
+            "the answer preserves Python MRO precedence without inheriting state during reads",
+            (
+                ("Python MRO traversal", ("c.__mro__", "obj.__mro__")),
+                (
+                    "no reversed traversal",
+                    (
+                        "do not reverse",
+                        "not reversed",
+                        "remove reversed",
+                        "without reversed",
+                        "unreversed",
+                        "drop the reversal",
+                        "drop reversal",
+                    ),
+                ),
+                ("direct class state", ("__dict__", "direct pytestmark")),
+                ("the expected order", ("c, a, b", "['c', 'a', 'b']", "c then a then b")),
+                (
+                    "the local store path",
+                    ("consider_mro=false", "consider_mro = false", "direct marks in store_mark"),
+                ),
+            ),
+        )
+    return _response_evidence_scorer(
+        "the answer preserves an explicit base-first merge contract",
+        (
+            (
+                "base-first traversal",
+                ("reversed", "base, left, child", "base then left then child"),
+            ),
+            ("the override rule", ("later", "override")),
+            ("a precedence regression", ("test", "regression")),
+        ),
+        (
+            "use python lookup precedence",
+            "walk child, left, base",
+            "traverse child, left, base",
         ),
     )
 
@@ -530,15 +824,15 @@ def root_location_scorer(*, generic_add: bool) -> Grader:
         rejected_match = REJECTED_LAYER.search(output.response)
         if root_match is None or rejected_match is None:
             return CapabilityVerdict(False, "the coding response omitted a layer decision")
-        root = root_match.group(1).casefold()
-        rejected = rejected_match.group(1).casefold()
+        root = root_match.group(1).casefold().replace("`", "")
+        rejected = rejected_match.group(1).casefold().replace("`", "")
         evidence = {"root_layer": root, "rejected_layer": rejected}
         root_generic = any(term in root for term in GENERIC_ADD_LAYERS)
         root_blockmul = any(term in root for term in BLOCKMUL_LAYERS)
         rejected_generic = any(term in rejected for term in GENERIC_ADD_LAYERS)
         rejected_blockmul = any(term in rejected for term in BLOCKMUL_LAYERS)
         if generic_add:
-            if not root_generic or root_blockmul:
+            if not root_generic:
                 return CapabilityVerdict(
                     False, "the plan did not locate generic matrix addition", evidence
                 )
@@ -779,6 +1073,66 @@ CASES = (
 )
 
 PROFILE_CASES = (
+    CapabilityCase(
+        "coding-subagent-middleware-override-contract",
+        profile_proxy_message(MIDDLEWARE_OVERRIDE_MESSAGE),
+        profile_proxy_scorer(
+            MIDDLEWARE_OVERRIDE_MESSAGE, middleware_override_scorer(repository_wide=True)
+        ),
+        digest_tag="coding-profile:middleware-override-contract:v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-middleware-proven-local",
+        profile_proxy_message(MIDDLEWARE_LOCAL_MESSAGE),
+        profile_proxy_scorer(
+            MIDDLEWARE_LOCAL_MESSAGE, middleware_override_scorer(repository_wide=False)
+        ),
+        digest_tag="coding-profile:middleware-override-contract:proven-local-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-annotation-active-state",
+        profile_proxy_message(ANNOTATION_ACTIVE_STATE_MESSAGE),
+        profile_proxy_scorer(
+            ANNOTATION_ACTIVE_STATE_MESSAGE, annotation_state_scorer(referenced=False)
+        ),
+        digest_tag="coding-profile:annotation-active-state:v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-annotation-referenced-state",
+        profile_proxy_message(ANNOTATION_REFERENCED_MESSAGE),
+        profile_proxy_scorer(
+            ANNOTATION_REFERENCED_MESSAGE, annotation_state_scorer(referenced=True)
+        ),
+        digest_tag="coding-profile:annotation-active-state:referenced-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-pyreverse-consumer-boundary",
+        profile_proxy_message(PYREVERSE_CONSUMER_MESSAGE),
+        profile_proxy_scorer(
+            PYREVERSE_CONSUMER_MESSAGE, pyreverse_consumer_scorer(public_output=True)
+        ),
+        digest_tag="coding-profile:pyreverse-consumer-boundary:v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-pyreverse-proven-local",
+        profile_proxy_message(PYREVERSE_LOCAL_MESSAGE),
+        profile_proxy_scorer(
+            PYREVERSE_LOCAL_MESSAGE, pyreverse_consumer_scorer(public_output=False)
+        ),
+        digest_tag="coding-profile:pyreverse-consumer-boundary:proven-local-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-mro-precedence",
+        profile_proxy_message(MRO_PRECEDENCE_MESSAGE),
+        profile_proxy_scorer(MRO_PRECEDENCE_MESSAGE, precedence_scorer(python_mro=True)),
+        digest_tag="coding-profile:mro-precedence:v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-base-first-precedence",
+        profile_proxy_message(BASE_FIRST_PRECEDENCE_MESSAGE),
+        profile_proxy_scorer(BASE_FIRST_PRECEDENCE_MESSAGE, precedence_scorer(python_mro=False)),
+        digest_tag="coding-profile:mro-precedence:base-first-v1",
+    ),
     CapabilityCase(
         "coding-subagent-composite-modulus-boundary",
         profile_proxy_message(COMPOSITE_MODULUS_MESSAGE),

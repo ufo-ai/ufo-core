@@ -127,6 +127,15 @@ def openai_sdk_client(api_key: str, base_url: str | None = None) -> openai.Async
     )
 
 
+def _status_retry_wait(error: openai.APIStatusError, delay: float) -> float:
+    header = error.response.headers.get("retry-after")
+    try:
+        retry_after = max(float(header), 0.0) if header is not None else delay
+    except ValueError:
+        retry_after = delay
+    return max(retry_after, delay)
+
+
 def _openai_image(source: ImageSource) -> dict[str, object]:
     return {
         "type": "image_url",
@@ -548,11 +557,7 @@ class OpenAIClient:
                         status_code=error.status_code,
                     )
                     raise
-                header = error.response.headers.get("retry-after")
-                try:
-                    wait = max(float(header), 0.0) if header is not None else delay
-                except ValueError:
-                    wait = delay
+                wait = _status_retry_wait(error, delay)
                 log(
                     "model.provider_status_retry",
                     provider=self.spec.provider,
@@ -756,11 +761,7 @@ class OpenAIClient:
                         status_code=error.status_code,
                     )
                     raise
-                header = error.response.headers.get("retry-after")
-                try:
-                    wait = max(float(header), 0.0) if header is not None else delay
-                except ValueError:
-                    wait = delay
+                wait = _status_retry_wait(error, delay)
                 log(
                     "model.provider_status_retry",
                     provider=self.spec.provider,

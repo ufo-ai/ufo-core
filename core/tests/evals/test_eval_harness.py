@@ -3542,6 +3542,11 @@ async def test_direct_error_emitter_scorer_rejects_cross_layer_scope_inflation()
         "URLValidator.__call__ owns the bad-scheme branch. Raise with "
         'params={"value": value}. Set validator = URLValidator(schemes=["http"]), then assert '
         'validator("ftp://example.com") raises the rendered custom message.',
+        "URLValidator.__call__ raises the bad-scheme error. Add params={'value': value}. Call "
+        "URLValidator with ftp://example.com and assert the rendered message.",
+        "URLValidator.__call__ has a scheme check that runs before the regex. This raise returns "
+        "first, so add params={'value': value}. Call URLValidator with ftp://example.com and "
+        "assert the rendered message.",
     ),
 )
 async def test_direct_error_emitter_scorer_accepts_explicit_direct_calls(response: str) -> None:
@@ -3617,6 +3622,12 @@ async def test_prime_zero_boundary_scorer_rejects_composite_scope_growth() -> No
         "For the prime-modulus path, handle `a % p == 0` before the prime-modulus residue test. "
         "Return 0 when all_roots=False and [0] when all_roots=True. Keep composite behavior "
         "unchanged. Test nthroot_mod(17 * 17, 5, 17).",
+        "Keep composite behavior unchanged with if not isprime(p). Handle the zero case ahead of "
+        "that test because a % p == 0. Return [0] if all_roots else 0. Test "
+        "nthroot_mod(17*17, 5, 17).",
+        "Keep the prime modulus and composite exception boundary. Handle a % p == 0 before the "
+        "is_nthpow_residue gate. Return [0] if all_roots else 0. Test "
+        "nthroot_mod(17*17, 5, 17).",
     ),
 )
 async def test_prime_zero_boundary_scorer_accepts_guard_and_early_return_forms(

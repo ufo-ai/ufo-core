@@ -864,7 +864,10 @@ async def test_rejected_key_names_the_slot_and_env_it_came_from(
 
 
 @pytest.mark.parametrize("harness", PROVIDERS)
-async def test_retries_exhaust_after_max(harness: ProviderHarness) -> None:
+async def test_retries_exhaust_after_max(
+    harness: ProviderHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zero_backoff(monkeypatch)
     errors = [provider_error(harness.error_type, 429) for _ in range(harness.max_retries + 1)]
     create = ScriptedCreate(*errors)
     with pytest.raises(harness.error_type):

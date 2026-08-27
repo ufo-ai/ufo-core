@@ -18,6 +18,25 @@ def output_for(result: str) -> CapabilityOutput:
             True,
         ),
         (
+            "The failing caller only exposes the lost shape.\n"
+            "ROOT_LAYER: Add summation in MatrixBase._eval_matrix_mul used by "
+            "BlockMatrix._blockmul\n"
+            "REJECTED_LAYER: BlockMatrix.rowblocksizes or BlockMatrix.__new__ normalization",
+            True,
+        ),
+        (
+            "The primitive emits the wrong type.\n"
+            "ROOT_LAYER: scalar Add reduction of the block-entry dot product\n"
+            "REJECTED_LAYER: the subsequent BlockMatrix._blockmul .cols access",
+            True,
+        ),
+        (
+            "The reducer emits the scalar.\n"
+            "ROOT_LAYER: scalar `Add` accumulation in the explicit matrix block dot-product\n"
+            "REJECTED_LAYER: the next BlockMatrix._blockmul .cols access",
+            True,
+        ),
+        (
             "Repair the first caller.\n"
             "ROOT_LAYER: BlockMatrix._blockmul\n"
             "REJECTED_LAYER: MatAdd postprocessor",

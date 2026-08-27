@@ -557,7 +557,13 @@ async def test_responses_path_retries_status_then_succeeds(
     ]
 
 
-async def test_responses_path_honors_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("retry_after", "expected"),
+    (("0.25", 2.0), ("42", 42.0), ("invalid", 2.0)),
+)
+async def test_responses_path_uses_exponential_floor_for_retry_after(
+    retry_after: str, expected: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
     waits: list[float] = []
 
     async def sleep(delay: float) -> None:
@@ -565,10 +571,10 @@ async def test_responses_path_honors_retry_after(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr("ufo.models.openai.asyncio.sleep", sleep)
     scripted = ScriptedResponses(
-        _provider_error(429, retry_after="0.25"), (_completed_events(), None)
+        _provider_error(429, retry_after=retry_after), (_completed_events(), None)
     )
     [event async for event in _responses_client(scripted).complete(_request())]
-    assert waits == [0.25]
+    assert waits == [expected]
 
 
 async def test_responses_path_does_not_retry_client_error() -> None:
