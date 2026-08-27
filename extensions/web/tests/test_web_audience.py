@@ -221,6 +221,56 @@ async def test_admin_grant_and_revoke_shape_the_member_audience(db: None, tmp_pa
         assert [agent.id for agent in remaining.agents] == [main_agent]
 
 
+async def test_the_wiki_app_is_private_and_reachable_by_its_audience_only(
+    db: None, tmp_path
+) -> None:
+    """The wiki app provisions a private agent (#2530): no workspace-visible row ships it to every
+    member. The private rung still reaches it — the owner, a workspace admin, and a member granted
+    web access — while an uninvolved member is left with the main agent alone."""
+    workspace_id, main_agent, _second_agent = await _seed()
+    wiki_agent = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=wiki_agent,
+                workspace_id=workspace_id,
+                name="wiki",
+                prompt="be the wiki",
+                model="claude-sonnet-5",
+                icon="book",
+                visibility="private",
+                provisioned_by="app_wiki",
+                provisioned_name="wiki",
+                provisioned_version="0.1.0",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
+    await _member(workspace_id, MEMBER_EMAIL)
+    await _member(workspace_id, "carol@example.com")
+    with ws(workspace_id):
+        surface = _surface(workspace_id, tmp_path)
+        extension = context_for(NAME, frozenset())
+        audience = await web_audience(surface, extension, MEMBER_EMAIL)
+        assert [agent.id for agent in audience.agents] == [main_agent]
+        assert not audience.allows(wiki_agent)
+        admin_view = await web_audience(surface, extension, ADMIN_EMAIL)
+        assert admin_view.admin
+        assert wiki_agent in {agent.id for agent in admin_view.agents}
+        granted = await GRANT.handler(
+            _tool_ctx(workspace_id, wiki_agent, admin_id),
+            WebAccessInput(email=MEMBER_EMAIL),
+        )
+        assert not granted.is_error
+        widened = await web_audience(surface, extension, MEMBER_EMAIL)
+        assert [agent.id for agent in widened.agents] == [main_agent, wiki_agent]
+        assert widened.allows(wiki_agent)
+        assert wiki_agent not in {agent.id for agent in widened.conversation_agents}
+        other = await web_audience(surface, extension, "carol@example.com")
+        assert [agent.id for agent in other.agents] == [main_agent]
+
+
 async def test_a_workspace_visible_agent_joins_the_roster_without_a_grant(
     db: None, tmp_path
 ) -> None:

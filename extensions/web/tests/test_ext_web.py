@@ -10243,6 +10243,35 @@ async def test_homepage_read_serves_a_row_less_shipped_app_page(
     assert payload["deploy_generation"] == int(digest[:13], 16)
 
 
+async def test_a_private_apps_shipped_page_reaches_the_member_it_was_granted_to(
+    web_apps: tuple[AsyncClient, UUID, UUID, "FleetBlobStore"],
+) -> None:
+    """A private app agent (the wiki app is one) reaches its owner, the workspace's admins, and the
+    members a grant put in its web audience. The page is the app, so the read has to answer that
+    same audience: a granted member reads `set` from the boot index and from the granular route.
+    The shipped bundle is the deploy's own code and the frame gates it on nothing, so the read is
+    handing out a link the frame opens. A member with no grant never reaches the route at all."""
+    client, workspace_id, app_agent, _fleet = web_apps
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .where(tables.agent.c.id == app_agent)
+            .values(visibility="private")
+        )
+    _member_id, token = await _seed_member(workspace_id, "granted-app@example.com")
+    path = f"/surface/web/agents/{app_agent}/homepage"
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    assert (await client.get(path, headers=cookie)).status_code == 404
+
+    await _grant_web_access(workspace_id, app_agent, "granted-app@example.com")
+    opened = await client.get(path, headers=cookie)
+    assert opened.status_code == 200
+    assert opened.json()["state"] == "set"
+    boot = (await client.get("/surface/web/api/agents", headers=cookie)).json()
+    homepages = {agent["app"]: agent["homepage"]["state"] for agent in boot["agents"]}
+    assert homepages["radar"] == "set"
+
+
 async def test_homepage_seed_leaves_a_refused_agent_unmarked_and_retries(db: None) -> None:
     workspace_id, main_agent = await _seed_workspace()
     unseated = uuid4()

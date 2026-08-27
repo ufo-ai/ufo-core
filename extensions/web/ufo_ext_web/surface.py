@@ -4573,11 +4573,13 @@ async def _has_own_page(ctx: SurfaceContext, agent_id: UUID, member_id: UUID) ->
 
 async def homepage(ctx: SurfaceContext, request: Request) -> Response:
     """The selected agent's homepage: the frame link of the hosted site `set_homepage` bound.
-    Its audience is the agent's — every member for a workspace-visible agent, the owner and
-    admins for a private one — the same rule the frame gates each visit on, so the read never
-    hands out a link that renders a refusal. The binding is read past the row gate (the row's
-    own column is dormant while bound) and this handler applies the agent rule itself; a binding
-    that no longer resolves and an agent that never bound one answer the same absent state.
+    Its audience is the one the frame admits, so the read never hands out a link that renders a
+    refusal: a forked row follows the agent — every member for a workspace-visible agent, the
+    owner and admins for a private one — and a shipped app bundle follows the member's web
+    audience alone, which is the whole gate the frame puts on the deploy's own code. The binding
+    is read past the row gate (the row's own column is dormant while bound) and this handler
+    applies the agent rule itself; a binding that no longer resolves and an agent that never
+    bound one answer the same absent state.
 
     Two states: `set` once a page is bound or shipped, and `none` where none exists yet. A first
     build in flight is simply a page not there yet, never a state of its own."""
@@ -4602,11 +4604,13 @@ async def _homepage_state(
     serving) so it answers `set` throughout. The boot index carries it on the agent object, so a
     screen paints the page from what boot resolved; the granular route begins polling after its
     first interval, avoiding a duplicate initial read while still landing a deployment without a
-    reload. The agent rule gates the read — a private agent's page answers `none` to anyone but its
-    owner and an admin. A shipped page's `deploy_generation` is the digest folded to a JS-safe int,
+    reload. Each page is gated the way the frame gates it. A forked row takes the agent rule — a
+    private agent's own page answers `none` to anyone but its owner and an admin — while the
+    shipped bundle is the deploy's code, identical for every workspace and holding no data, which
+    the frame hands to whoever asks: it answers every member whose web audience already holds the
+    agent, the member a grant put there included, because the reader passed that gate to reach
+    this read at all. A shipped page's `deploy_generation` is the digest folded to a JS-safe int,
     so the frame's identity moves onto the new bundle across the next answer."""
-    if summary.visibility != "workspace" and member_id != summary.owner_member_id and not admin:
-        return {"state": "none"}
     page = await ctx.list_member_objects(
         SITE_KIND,
         summary.id,
@@ -4620,6 +4624,8 @@ async def _homepage_state(
         else None
     )
     if bound is not None:
+        if summary.visibility != "workspace" and member_id != summary.owner_member_id and not admin:
+            return {"state": "none"}
         site_url = bound.fields["site_url"]
         if not isinstance(site_url, str):
             raise TypeError("site_url must be a string")

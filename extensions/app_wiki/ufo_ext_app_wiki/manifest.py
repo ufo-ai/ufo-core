@@ -1,11 +1,14 @@
-"""The wiki app: a workspace agent whose homepage reads the workspace's shared memory as a document
+"""The wiki app: a private agent whose homepage reads the workspace's shared memory as a document
 and the member roster. It ships as an `agents` provision on the shared apps infrastructure; its
 homepage is the static page this extension ships, edited and redeployed from the chat column beside
 it.
 
-Every workspace is provisioned the agent. Whether a member is shown it is the portal's read of
-`enable-wiki-app` — the one flag there that reads closed, because this app has never been offered
-and a deploy that cannot answer must not be the one that offers it."""
+Every workspace is provisioned the agent, and the provision is private: it reaches the workspace's
+admins and the members granted web access in its own conversation, and nobody else — a
+workspace-visible row stands in every member's portal whatever the lists withhold, since the boot
+payload carries it and its address opens the page. Whether a member is shown it is then the
+portal's read of `enable-wiki-app` — the one flag there that reads closed, because this app has
+never been offered and a deploy that cannot answer must not be the one that offers it."""
 
 from pathlib import Path
 
@@ -38,7 +41,7 @@ WIKI_APP_AGENT = AgentProvision(
         model="auto",
         reasoning="medium",
         internet_access_allowed=False,
-        visibility="workspace",
+        visibility="private",
     ),
     icon="book",
 )
