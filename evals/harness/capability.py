@@ -478,6 +478,7 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
             calls.append(
                 {
                     "name": call.name,
+                    "callId": call.call_id,
                     "input": call.input,
                     "result": call.result,
                     "hasResult": call.has_result,

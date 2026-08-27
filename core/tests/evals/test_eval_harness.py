@@ -2150,6 +2150,7 @@ async def test_capability_case_runs_through_invoke_and_scores_the_trajectory(
     attempts = cast(list[dict[str, object]], result.evidence["attempts"])
     calls = cast(list[dict[str, object]], attempts[0]["calls"])
     assert [call["name"] for call in calls] == ["search_web", "memory_update"]
+    assert [call["callId"] for call in calls] == ["s1", "m1"]
     assert attempts[0]["response"] == "Done — found it and remembered it for the team."
     trajectory = cast(dict[str, object], attempts[0]["trajectory"])
     assert trajectory["conversation_id"]
