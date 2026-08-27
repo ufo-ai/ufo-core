@@ -1,641 +1,736 @@
-# Conversation admission, queueing, cancellation, and live streaming  `stage-6`
+# Authenticated Ingress and User Surfaces  `stage-6`
 
-This stage is the traffic controller for conversations after an incoming member event has been accepted. It sits in the main work path, just before and during a “turn,” meaning one user request and the system’s process of answering it. Its job is to decide what should happen next: start a fresh turn, attach the message to one already running, wait because limits are reached, cancel work, or save the message for later.
+This stage is the system’s set of guarded front doors. It runs during normal use, whenever a request arrives from a browser, Slack, iMessage, the terminal, a shared artifact link, an OAuth return page, or a hosted site. Its first job is to check who is knocking, then connect that request to the right workspace, member, conversation, or operator view.
 
-The admission code is the front door that makes this decision in one safe, locked place, so two messages do not confuse the same conversation. Ambient reply logic is the “should we speak?” filter for group chats, avoiding unnecessary work when the agent was not really addressed. Stop and cancellation code provide the brake pedal: they check permission, tell running work to halt, update records, and notify listeners. The external surface bridge connects web or chat clients to these core actions.
+The Browser Web Portal Surface handles the main signed-in web app: chat, settings, admin pages, memory views, usage pages, and live screens. Chat, Terminal, and Messaging Surfaces adapt Slack, iMessage, and command-line messages into the system’s common conversation shape, then send replies back out. Artifact, OAuth, Site, and Debugger Routes are side doors for shared files, login handoffs, public hosted sites, and safe read-only inspection.
 
-Live update support then acts like a broadcast system, streaming progress, reconnecting clients, and sharing updates across server processes.
+The shared surface bridge is the adapter layer between these outside surfaces and the core system. The operator support file adds stricter login rules for powerful internal tools and builds a fleet directory of workspaces and conversations. The package marker simply makes the surfaces code importable.
 
 ## Sub-stages
 
-- [Live turn updates and terminal coordination](stage-6.1.md) `stage-6.1` — 4 files
+- [Browser Web Portal Surface](stage-6.1.md) `stage-6.1` — 7 files
+- [Chat, Terminal, and Messaging Surfaces](stage-6.2.md) `stage-6.2` — 6 files
+- [Artifact, OAuth, Site, and Debugger Routes](stage-6.3.md) `stage-6.3` — 5 files
 
 ## Files in this stage
 
-### Turn admission policy
-Rules for deciding whether incoming conversation activity should start work, merge into existing work, wait, or stay silent.
+### Surface Authentication Bridge
+Shared operator login rules and external surface adapters authenticate incoming users, map them to workspace context, and expose the surfaces package for import.
 
-### `core/src/ufo/surfaces/admission.py`
-
-`domain_logic` · `request handling and background turn admission`
-
-A “turn” is one unit of conversation work: a member message, a scheduled wake-up, or an internal result that needs the agent to respond. This file makes sure every such turn enters the system through the same gate. That matters because this is where costs, seat access, conversation order, duplicate delivery, and queueing are all checked together. Without this file, two messages could get the same sequence number, a spending cap could be bypassed, a duplicate retry could start duplicate work, or a reply could close while an unread message was still waiting.
-
-The main class, `Admission`, works like a traffic controller at a single-lane bridge. It locks the conversation row in the database, checks who is allowed to speak, checks budget and balance rules, assigns the next sequence number, and decides whether to create a new turn or add the message to the current live turn’s inbound queue. If the turn should run now, it is placed on the durable DBOS workflow queue. DBOS is the background workflow system that later executes the turn.
-
-The wrapper classes narrow what different callers are allowed to do. `MemberAdmission` lets surfaces admit only member-spoken messages. `AdmissionInvoker` lets jobs and extensions admit internal turns without pretending to be a member. `ConnectResume` feeds an account-connection result back into the conversation that requested it, but avoids doing that in special prepared-intent lanes where nobody would read the resulting free-text turn.
-
-#### Function details
-
-##### `_refused`  (lines 90–101)
-
-```
-def _refused(holds_work_already_done: bool, message: str) -> tuple[TurnStatus, TerminalFrame | None]
-```
-
-**Purpose**: Decides what should happen when a turn is not allowed to proceed because of a seat or spending refusal. If the turn already represents paid-for finished work, it parks the turn instead of throwing the result away; otherwise it cancels the turn with a message the user can see.
-
-**Data flow**: It receives a flag saying whether the turn contains work already completed, plus the refusal message. If there is completed work, it returns a parked status and no final message. If not, it builds a terminal cancellation frame containing the refusal text and returns that with a cancelled status.
-
-**Call relations**: `Admission._admit` uses this helper whenever a seat gate, balance gate, or spend decision refuses a turn. The helper keeps that policy in one place so admission treats ordinary new messages and already-completed internal results differently for the right reason.
-
-*Call graph*: called by 1 (_admit); 1 external calls (__init__).
-
-
-##### `Admission.admit_member`  (lines 110–135)
-
-```
-async def admit_member(self, workspace_id: UUID, conversation_id: UUID, body: str, speaker_member_id: UUID | None, idempotency_key: str | None=None, context: TurnContext | None=None, intent: ToolInten
-```
-
-**Purpose**: Admits a message that came from a real workspace member through a surface such as chat or another user-facing channel. It also validates prepared tool intents, so the stored envelope and the message body cannot disagree.
-
-**Data flow**: It takes the workspace, conversation, message body, optional speaker, optional duplicate-protection key, context, and optional tool intent. It checks that tool intents have a speaker and that the body exactly matches the serialized intent. Then it opens an observation span and passes the request to the shared admission path, marking it as member admission. The result says which turn accepted the message and whether a new run was opened.
-
-**Call relations**: `Admission.redispatch` calls this when it re-admits a pending member message. User-facing surfaces normally enter through this path, which then hands all real decisions to `Admission._admit` so member messages cannot bypass seat, spending, ordering, or deduplication rules.
-
-*Call graph*: calls 1 internal fn (_admit); called by 1 (redispatch); 2 external calls (model_dump_json, span).
-
-
-##### `Admission.redispatch`  (lines 137–186)
-
-```
-async def redispatch(self, workspace_id: UUID, conversation_id: UUID) -> tuple[UUID, UUID] | None
-```
-
-**Purpose**: Gives an old, still-unconsumed member message another chance to run. This is used when a message was waiting behind a turn that later ended or was cancelled, so the pending message should either start its own turn or fold into whatever is now live.
-
-**Data flow**: It opens a workspace database transaction, finds the oldest unconsumed inbound message from a member in the conversation, and locks that row. If the row has no idempotency key, it stamps one onto it so retries stay safe. Then it calls `admit_member` with the saved body, speaker, key, and context. It returns the new turn and arrival row only if this redispatch actually opened a run; otherwise it returns nothing.
-
-**Call relations**: This function reuses the normal member admission route instead of inventing a separate retry path. That means an old queued arrival faces the same live-turn folding, seat checks, spending checks, and duplicate handling as a freshly delivered message.
-
-*Call graph*: calls 1 internal fn (admit_member); 4 external calls (model_validate, select, update, workspace_tx).
-
-
-##### `Admission.invoke`  (lines 188–259)
-
-```
-async def invoke(self, workspace_id: UUID, conversation_id: UUID, agent_id: UUID, body: str, idempotency_key: str | None=None, context: TurnContext | None=None, on_behalf_of_member_id: UUID | None=Non
-```
-
-**Purpose**: Admits an internal turn, such as a scheduled wake-up, an extension-triggered message, or a subagent result. It can also refuse to run if a member has spoken since the caller started waiting, which prevents both a timer and a member reply from resuming the same wait.
-
-**Data flow**: It receives the workspace, conversation, asserted agent, message body, optional idempotency key, context, member authority, scheduling flag, and optional member-message watermarks. It passes these to the shared `_admit` method. If `_admit` reports that a newer member message already superseded the request, this function returns `None`; otherwise it returns the admitted turn id.
-
-**Call relations**: Jobs and extension workflows use this path for non-member work. It delegates to `Admission._admit` so internal work still obeys the conversation’s bound agent, the durable queue rules, spending limits, seat rules when acting for a member, and idempotency rules.
-
-*Call graph*: calls 1 internal fn (_admit).
-
-
-##### `Admission._admit`  (lines 261–706)
-
-```
-async def _admit(self, workspace_id: UUID, conversation_id: UUID, asserted_agent_id: UUID | None, body: str, speaker_member_id: UUID | None, idempotency_key: str | None, context: TurnContext | None, o
-```
-
-**Purpose**: This is the central admission decision-maker. It is the single place that turns an incoming message into one of several outcomes: duplicate of an existing turn, folded arrival on a live turn, newly queued turn, parked turn, or cancelled turn.
-
-**Data flow**: It receives all details about the attempted admission: workspace, conversation, asserted agent, body, speaker, idempotency key, context, source type, spending and seat flags, and optional member-wait watermarks. Inside one database transaction, it locks the conversation, confirms the agent binding, checks the speaker and updates their timezone when provided, looks for duplicate turn or queued-message keys, checks whether a member has superseded an internal wait, and looks for a live turn that can absorb this message. If folding is allowed, it writes an inbound-message row. If a new turn is needed, it assigns the next sequence number, checks seats and spending, inserts the turn, optionally creates a durable writeback row, and decides whether the turn should be enqueued now. After the transaction, it enqueues runnable work and returns an `Admitted` result describing what happened.
-
-**Call relations**: `Admission.admit_member` and `Admission.invoke` both funnel into this method so all admission sources follow the same rules. It uses `_refused` to choose between cancellation and parking on refusal, and `_enqueue` to hand runnable turns to the background workflow queue after the database commit has recorded the turn safely.
-
-*Call graph*: calls 2 internal fn (_enqueue, _refused); called by 2 (admit_member, invoke); 20 external calls (__init__, __init__, __init__, __init__, __init__, __init__, model_dump, model_validate, delete, exists (+10 more)).
-
-
-##### `Admission._enqueue`  (lines 708–748)
-
-```
-async def _enqueue(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID, workflow_id: str | None=None) -> None
-```
-
-**Purpose**: Places a queued turn onto the DBOS background workflow queue so a worker can execute it. It also carefully undoes the “enqueue was attempted” marker if the enqueue call is cancelled or fails, so another attempt can happen later.
-
-**Data flow**: It takes the workspace id, conversation id, turn id, and optionally a workflow id. It builds queue options including the queue name, workflow name, workflow id, conversation partition key, and app version, then asks DBOS to enqueue the workflow. If the caller is cancelled or DBOS raises an error, it reopens a transaction and clears the turn’s dispatch timestamp while the turn is still queued. On ordinary errors it logs that enqueueing was deferred instead of crashing the admission result.
-
-**Call relations**: `Admission._admit` calls this only after it has committed the database changes that make the turn real. This separation keeps the database as the source of truth: if the queue offer fails, the turn remains queued in storage and can be retried.
-
-*Call graph*: called by 1 (_admit); 3 external calls (update, workspace_tx, log).
-
-
-##### `AdmissionInvoker.invoke`  (lines 759–784)
-
-```
-async def invoke(self, conversation_id: UUID, agent_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, on_behalf_of_member_id: UUID | None=None, holds_work_alr
-```
-
-**Purpose**: Provides a workspace-bound way for internal jobs and extensions to admit turns. It deliberately does not expose the member-admission path, so internal callers cannot claim that their message was spoken directly by a member.
-
-**Data flow**: It receives a conversation, agent, message, optional idempotency key, context, member authority, scheduling flag, and optional wait watermarks. It adds the workspace id stored on the wrapper and forwards everything to `Admission.invoke`. The output is the admitted turn id, or `None` if a member message superseded the internal wait.
-
-**Call relations**: This is a small capability wrapper around `Admission.invoke`. The bigger system can hand this object to trusted internal code when that code should be able to wake or continue a conversation, but only within one workspace and only through the internal admission rules.
-
-
-##### `MemberAdmission.admit`  (lines 795–813)
-
-```
-async def admit(self, conversation_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None) -> Adm
-```
-
-**Purpose**: Provides a workspace-bound way for user-facing surfaces to admit member messages. It forces the caller to supply the speaking member, which lets admission apply seat checks and avoid treating an unknown speaker as a real participant.
-
-**Data flow**: It receives the conversation, message, optional duplicate key, context, required speaker member id, and optional tool intent. It adds the wrapper’s workspace id and forwards the call to `Admission.admit_member`. The result tells the surface which turn or arrival accepted the message and whether a new run started.
-
-**Call relations**: Surfaces receive this narrower wrapper instead of the full `Admission` object. That design keeps surface code on the safe member-message path, where `Admission.admit_member` and then `_admit` enforce speaker, seat, spending, folding, and queueing rules.
-
-
-##### `ConnectResume.resume`  (lines 841–876)
-
-```
-async def resume(self, conversation_id: UUID, message: str, *, speaker_member_id: UUID, idempotency_key: str) -> bool
-```
-
-**Purpose**: Feeds the result of an account-connection callback back into the conversation that asked for it. It returns a simple success flag so the web page can tell the member whether the system actually accepted the resume message.
-
-**Data flow**: It takes the conversation id, resume message, speaking member id, and idempotency key. First it reads the latest turn in that conversation to see whether the conversation is a prepared-intent lane; if so, it logs a decline and returns `False` because a free-text resume there would not be read properly. Otherwise it reads the current workspace, admits the message as that member through `Admission.admit_member`, and returns `True`. If admission fails, it logs the failure and returns `False`.
-
-**Call relations**: This function is used after an external connect or consent flow has already committed the grant. It hands the outcome back through normal member admission, so a still-running turn can absorb it or an ended conversation can start again, while preserving the same duplicate and queueing protections as any other member message.
-
-*Call graph*: 4 external calls (select, workspace_tx, log, ws_current).
-
-
-### `core/src/ufo/ambient_reply.py`
-
-`domain_logic` · `request handling, before starting a new agent turn`
-
-In a busy chat thread, people may talk to the agent, talk about the agent, or talk only to each other. This file is the small gatekeeper that decides which kind of message has arrived before the system starts a full agent turn. Without it, every unmentioned reply in a thread could become a costly agent response, even when two humans are simply continuing their own conversation.
-
-The key idea is to ask a cheap model one narrow question: should the agent reply, yes or no? The file defines the exact instructions for that model. Those instructions tell it to look at the recent thread, apply ordered rules, and answer with only `REPLY` or `NO_REPLY`. The model is given a short history window, not the whole thread, so the check stays bounded and cheap.
-
-Messages are packaged carefully. Each message records who spoke, whether it was written by the agent, and the text. The text is put into JSON, which is a structured data format, and wrapped between fence lines so that a user’s message cannot pretend to be part of the system instructions. If the model gives an unreadable answer, this code raises an error instead of silently choosing. The caller can then choose the safer path: admit the turn rather than accidentally ignore someone who needed the agent.
-
-#### Function details
-
-##### `MeteredModel.model`  (lines 94–94)
-
-```
-def model(self) -> str
-```
-
-**Purpose**: This property tells the classifier which model name it should use for the cheap reply-or-stay-quiet decision. It is part of a small interface, meaning this file only requires that any supplied model object can reveal its model name.
-
-**Data flow**: The classifier has a model-like object. It reads this property to get a model identifier, then places that identifier into the request it sends for the decision. Nothing is changed by reading it.
-
-**Call relations**: When `AmbientReplyClassifier.decide` builds the model request, it uses this property so the request goes to the intended ambient-reply classifier model rather than hard-coding that choice here.
-
-
-##### `MeteredModel.complete`  (lines 96–96)
-
-```
-async def complete(self, request: ModelRequest) -> str
-```
-
-**Purpose**: This method represents the one-shot call to the language model that returns the decision text. The classifier depends on it to ask, in a controlled and metered way, whether the agent should reply.
-
-**Data flow**: A prepared `ModelRequest` goes in. The model provider reads the prompt and thread payload, then returns text that should contain `REPLY` or `NO_REPLY`. This protocol does not say how the provider works internally; it only states what the classifier needs from it.
-
-**Call relations**: `AmbientReplyClassifier.decide` calls this method after building the request. The returned text is then checked by `decide` to extract the final decision.
-
-
-##### `_entry`  (lines 99–104)
-
-```
-def _entry(message: AmbientMessage) -> dict[str, object]
-```
-
-**Purpose**: This helper turns one chat message into a small, safe dictionary for the model payload. It keeps only the speaker, whether the agent wrote it, and a shortened copy of the text.
-
-**Data flow**: An `AmbientMessage` goes in. The function copies its speaker, own-message flag, and text, trimming the text to the configured character limit. A plain dictionary comes out, ready to be turned into JSON.
-
-**Call relations**: `AmbientReplyClassifier._payload` calls this for each recent history message and for the new message. It is the small adapter that makes the thread data uniform before JSON serialization.
-
-*Call graph*: called by 1 (_payload).
-
-
-##### `AmbientReplyClassifier.decide`  (lines 117–133)
-
-```
-async def decide(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> AmbientDecision
-```
-
-**Purpose**: This is the main decision function. Given a new ambient message and recent thread history, it asks the cheap classifier model whether the agent should start a new turn.
-
-**Data flow**: The new message and recent history go in. The function builds a fenced JSON payload with `_payload`, places it inside a model request together with the system rules, and sends it to the configured model. It then scans the model’s answer for `REPLY` or `NO_REPLY`; if it cannot find either, it raises an error instead of guessing. The output is the final decision word.
-
-**Call relations**: This function is the entry point for callers that need the gatekeeping decision. It hands the message packaging work to `AmbientReplyClassifier._payload`, uses `Message` and `ModelRequest` to form the model call, then relies on `MeteredModel.complete` to get the answer.
-
-*Call graph*: calls 1 internal fn (_payload); 2 external calls (__init__, __init__).
-
-
-##### `AmbientReplyClassifier._payload`  (lines 135–151)
-
-```
-def _payload(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> str
-```
-
-**Purpose**: This function prepares the thread data that the model will read. It turns recent messages and the new message into a compact JSON object and wraps it in clear boundary lines.
-
-**Data flow**: The current message and full available history go in. The function keeps only the last configured number of history messages, converts each message with `_entry`, serializes the result to JSON, and chooses a fence string that does not already appear in the payload. It returns one string containing the fence, the JSON, and the same fence again.
-
-**Call relations**: `AmbientReplyClassifier.decide` calls this just before making the model request. Inside, it calls `_entry` to standardize each message and `json.dumps` to produce the JSON text the model will receive.
-
-*Call graph*: calls 1 internal fn (_entry); called by 1 (decide); 1 external calls (dumps).
-
-
-### Turn cancellation
-Member stop requests and shared cancellation mechanics for safely ending running work.
-
-### `core/src/ufo/surfaces/stop.py`
+### `core/src/ufo/ext/operator.py`
 
 `domain_logic` · `request handling`
 
-A “turn” is one running unit of conversation work. This file exists for the moment when a member presses stop. Stopping is not just flipping a switch: the system must first make sure the turn really belongs to the conversation the member is viewing, then cancel it in durable storage, then wake up anyone watching that turn so their screen does not sit waiting.
+Operator tools, such as a debugger or memory explorer, need stronger access than normal user pages. This file answers two questions for those tools: “Is this request really from an operator?” and “Which workspace is the operator looking at?” It accepts a bearer token from the Authorization header, from a secure session cookie, or from the one form post that starts a session. It deliberately refuses query-string tokens, because URLs often end up in logs, browser history, and shared links.
 
-The main piece is `MemberStop`, a small workflow object with three collaborators. It uses the database to check ownership, a shared cancellation primitive to end the turn, an admission component to start or redispatch the next turn when a pending member message already exists, and a hub to publish live updates. The hub is like a noticeboard for running clients: when a terminal message is posted, listeners know the turn is over.
+Once a token is verified, the file checks that the user’s email belongs to the operator email domain. That domain check is the gate. After passing it, the operator can choose a workspace with `?ws=`, using either a workspace ID or a tenant domain. If no workspace is requested, the token’s own workspace is used.
 
-One important detail is ordering. If a follow-up turn is created, this file publishes that new turn’s absorbed arrival before publishing the cancelled terminal for the old turn. That way, anyone woken by the cancellation can immediately see that the conversation has already moved on. If the turn already ended by itself, stopping does nothing harmful and reports that nothing was newly ended.
-
-#### Function details
-
-##### `MemberStop.stop`  (lines 38–61)
-
-```
-async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> Stopped
-```
-
-**Purpose**: Stops one running turn, but only if it belongs to the requested conversation in the requested workspace. It safely cancels the turn, optionally starts a follow-up turn, publishes live updates, and returns a `Stopped` result telling the caller what happened.
-
-**Data flow**: It receives a workspace ID, conversation ID, and turn ID. First it opens a workspace database transaction and reads which conversation owns that turn. If the turn is not part of the given conversation, it raises an error instead of cancelling the wrong work. If ownership is correct, it asks the shared cancellation routine to cancel the turn. If that routine says the turn was already finished, it returns `ended=False`. Otherwise it asks admission to redispatch any pending member message into a new turn. If a new turn is founded, it publishes an `Absorbed` notice for that new turn. Finally it publishes a `Terminal` notice for the cancelled old turn and returns `ended=True`, including the new turn ID when there is one.
-
-**Call relations**: This is the end-to-end stop path used when the surface layer wants to stop a member’s running turn. It relies on `workspace_tx` and `sqlalchemy.select` to prove the turn belongs to the conversation before acting. It then hands cancellation to `cancel_one_turn`, wraps live-update messages as `Absorbed` and `Terminal`, and returns a `Stopped` answer for the surface to use when updating the member’s view.
-
-*Call graph*: 6 external calls (__init__, __init__, __init__, select, cancel_one_turn, workspace_tx).
-
-
-### `core/src/ufo/cancellation.py`
-
-`domain_logic` · `cancel handling`
-
-A “turn” is a unit of work, and some turns can start child turns that run as their own durable workflows. Cancelling a parent does not automatically stop those children, so this file focuses on one clear job: cancel exactly one turn, in a way every caller can trust. Think of it like stamping a work order “cancelled” only after you have first sent the stop order to the crew doing the work.
-
-The important rule here is order. The code first checks the turn row in the database. If the turn does not exist, or if it has already finished, failed, or otherwise reached an end state, it leaves it alone. If the turn is still active, it asks DBOS, the durable workflow system, to cancel the workflow for that turn. Only after that cancellation request is durably recorded does it update the turn row to the terminal status “cancelled.”
-
-This protects the system during crashes or races. If something goes wrong between asking DBOS to cancel and updating the database, the row is still non-terminal, so recovery or reconciliation can find it later. It avoids the dangerous opposite case: a database row claiming “cancelled” when the workflow was never actually told to stop. The function also records what objects the turn had already created, so observers still learn what came out of a partially completed turn.
+The other major piece is `FleetDirectory`. Think of it like a front desk directory for the whole deployment. It lists every workspace, how many members and conversations it has, and the most recently active threads across the fleet. It reads broad identifiers first, then re-enters each workspace separately to read human-facing details under normal workspace security rules. It also ignores subagent child turns so internal background work does not crowd out real user-facing conversations.
 
 #### Function details
 
-##### `cancel_one_turn`  (lines 23–83)
+##### `operator_claims`  (lines 45–63)
 
 ```
-async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | None
+async def operator_claims(request: Request) -> tuple[str, str] | None
 ```
 
-**Purpose**: Cancels one turn safely and records that cancellation in the database if the turn was still unfinished. It returns the final cancellation frame only when this call actually changed the turn to cancelled; otherwise it returns nothing.
+**Purpose**: This function tries to prove who the operator request belongs to. It looks for a valid bearer token in safe places only: first the Authorization header, then the operator session cookie, then the posted login form.
 
-**Data flow**: It receives a DBOS client and a turn id. It reads the turn’s current database row to see whether the turn exists and is still non-terminal, meaning not already finished. If it is eligible, it asks DBOS to cancel the workflow named by that turn id, then reads the objects the turn already created, builds a cancelled terminal record from them, and tries to update the row to cancelled. If that update succeeds, it emits a metric counting the cancelled turn and returns the terminal record; if another process finished or cancelled the turn first, it returns null instead.
+**Data flow**: It receives a web request. It reads the Authorization header and asks `_candidate_claims` whether the token is valid. If that fails, it tries the session cookie. If that also fails and the request is a POST, it reads the form body and tries the posted token. It returns a pair containing the claimed workspace and email address, or returns nothing if no valid token can be found.
 
-**Call relations**: This is the shared cancellation primitive used by higher-level cancel paths, such as a user-facing cancel action, an evaluation driver, or a reconciler that cleans up descendant turns. Inside its flow it opens database transactions with `workspace_tx`, uses SQLAlchemy queries to read and update the turn row, asks `DBOSClient.cancel_workflow_async` to stop the durable workflow, builds a `TerminalFrame` containing validated `ObjectRef` entries for already-created objects, and finally reports the outcome through `emit_metric` with profile details from `turn_profile`.
+**Call relations**: This is the first step used by `resolve_operator_workspace` when an operator-only page or API request arrives. It delegates the actual token checking to `_candidate_claims`, and it reads the request form only for the special POST that opens a session.
 
-*Call graph*: 8 external calls (__init__, model_validate, cancel_workflow_async, select, update, workspace_tx, emit_metric, turn_profile).
+*Call graph*: calls 1 internal fn (_candidate_claims); called by 1 (resolve_operator_workspace); 1 external calls (form).
 
 
-### Surface integration bridge
-External chat and web surface orchestration for member identity, conversations, admitted messages, live streams, replies, and portal data.
-
-### `core/src/ufo/ext/surface.py`
-
-`orchestration` · `cross-cutting: request handling, live streaming, credential handoff, portal reads, and background delivery`
-
-A “surface” is any outside-facing place where a member interacts with UFO, such as Slack, iMessage, the web app, or a persistent listener. This file defines the privileged doorway those surfaces use. That matters because surfaces are allowed to say who a user is and submit messages as that user, which ordinary extensions are not allowed to do.
-
-The file has three large jobs. First, it prepares inbound member text safely: it wraps the member’s words and attachments in unique markers, cleans attachment filenames, and can later recover just what the member said. Second, it defines SurfaceContext, a large toolbox handed to surface code. Through it, a surface can link an external identity to a workspace member, create or find conversations, admit turns, tail live updates, read transcripts, list agents and files, mint download links, handle credential handoffs, and query admin portal views. Third, it runs background delivery for durable surfaces. A durable surface cannot keep a browser-like connection open, so the WritebackPoller and MidTurnReplyPoller repeatedly claim undelivered replies from the database, call the surface’s send functions, and mark success or schedule retry.
-
-Think of this file as the guarded service desk between UFO’s private machinery and the public counters where members talk to it.
-
-#### Function details
-
-##### `mint_marker`  (lines 201–211)
+##### `_candidate_claims`  (lines 66–68)
 
 ```
-def mint_marker() -> str
+def _candidate_claims(candidate: str) -> tuple[str, str] | None
 ```
 
-**Purpose**: Creates a short random marker used to label one member message’s wrapper tags. The marker makes it extremely unlikely that text typed by a member can accidentally imitate the system’s own message boundary.
+**Purpose**: This small helper cleans up a possible token and verifies it. It exists so every token source is treated the same way.
 
-**Data flow**: It takes no input, asks the secrets library for random bytes written as hex text, and returns that marker string.
+**Data flow**: It receives a possible token string. It trims surrounding spaces. If the result is empty, it returns nothing. Otherwise it passes the token to `verified_claims`, which checks the signature and returns the trusted claims if the token is valid.
 
-**Call relations**: It is used when preparing inbound text before a surface admits a member message.
+**Call relations**: `operator_claims` calls this helper for each possible token source: header, cookie, and posted form field. `_candidate_claims` hands the real verification work to `verified_claims`, keeping this file from storing or owning the signing secret.
 
-*Call graph*: 1 external calls (token_hex).
-
-
-##### `fence_member_message`  (lines 214–227)
-
-```
-def fence_member_message(marker: str, ambient: str, body: str, attachments: str) -> str
-```
-
-**Purpose**: Builds the exact text that enters the transcript for one member message. It separates ambient context, the member’s own words, and attachment output into clearly named sections.
-
-**Data flow**: It receives a marker, ambient text, message body, and attachment text. It wraps the body and optional attachments in marker-specific tags and returns one combined string.
-
-**Call relations**: Surface ingests use this before admission so later transcript readers can distinguish what the member actually said from context and attachment material.
+*Call graph*: called by 1 (operator_claims); 1 external calls (verified_claims).
 
 
-##### `inbox_name`  (lines 230–259)
+##### `resolve_operator_workspace`  (lines 71–110)
 
 ```
-def inbox_name(raw: str, used: set[str]) -> str
+async def resolve_operator_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
 ```
 
-**Purpose**: Turns an untrusted incoming filename into a safe file leaf name for the workspace. It prevents path tricks, unsafe characters, overlong names, and duplicate names in one batch.
+**Purpose**: This function decides which workspace an operator request is allowed to use. It verifies the operator identity, applies the operator email-domain gate, and turns the requested `?ws=` value into a workspace ID.
 
-**Data flow**: It receives the raw filename and a set of names already used. It strips path parts, replaces unsafe characters, preserves useful suffixes where possible, adds a number if needed, updates the used set, and returns the safe name.
+**Data flow**: It receives the request and the surface authentication context. It asks `operator_claims` for verified workspace-and-email claims. If no claims are found, a plain GET for an operator page is redirected to the shared login page; other requests are rejected by returning nothing. If claims exist, it checks the email domain. Then it reads `?ws=`: without it, it uses the workspace from the token; with it, it accepts a workspace UUID, or looks up a workspace by domain, or finally creates the standard UUID that would belong to that domain. The result is either a workspace ID, a redirect response, or nothing.
 
-**Call relations**: All surfaces should use this shared helper when storing attached files so each surface follows the same safety rule.
+**Call relations**: Operator surfaces call this during request authentication to decide the workspace scope. It depends on `operator_claims` for identity, `email_domain` for the operator-domain check, and `workspace_by_domain` inside an owner-level database transaction when a domain must be resolved.
 
-*Call graph*: 1 external calls (contained_leaf).
-
-
-##### `member_message_text`  (lines 262–276)
-
-```
-def member_message_text(inbound: str) -> str
-```
-
-**Purpose**: Extracts just the member’s own words from an admitted inbound message. This is useful when a display should show what the person said, not the hidden context the engine also saw.
-
-**Data flow**: It receives the stored inbound text, removes known engine context wrappers, looks for the marker-based member-message wrapper, and returns either the inner text or the original text if no wrapper is present.
-
-**Call relations**: conversation_name calls it to title new conversations from the member’s words rather than surrounding context.
-
-*Call graph*: called by 1 (conversation_name).
+*Call graph*: calls 1 internal fn (operator_claims); 6 external calls (owner_tx, RedirectResponse, email_domain, workspace_by_domain, UUID, uuid5).
 
 
-##### `MemberAdmitter.admit`  (lines 313–322)
+##### `bind_operator_session`  (lines 113–131)
 
 ```
-async def admit(self, conversation_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None) -> Adm
+async def bind_operator_session(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Defines the interface for admitting a member message into UFO’s durable turn queue. Concrete implementations decide whether the message starts a new turn or joins an existing live one.
+**Purpose**: This function turns a posted bearer token into a browser session cookie for operator tools. It lets an operator sign in once and then browse all shared operator surfaces without putting the token in the URL.
 
-**Data flow**: It receives conversation identity, message text, optional idempotency key, context, speaker member id, and optional prepared tool intent. It returns an Admitted result naming the turn and whether a run was opened.
+**Data flow**: It receives the surface context and the request. It reads the form body and looks for the `token` field. If the token is missing or blank, it returns a JSON error. If present, it creates a redirect back to the same URL and attaches an HTTP-only session cookie containing the token, using the surface’s secure-cookie setting. The browser receives the redirect and comes back carrying the cookie.
 
-**Call relations**: SurfaceContext.admit delegates to this protocol so surfaces do not directly touch the queue implementation.
+**Call relations**: This is used by the session-opening POST after the token has already been verified by the authentication resolver. It calls `Request.form` to read the submitted token, uses `RedirectResponse` or `JSONResponse` to build the reply, and uses `set_session_cookie` to store the session safely.
 
+*Call graph*: 4 external calls (JSONResponse, RedirectResponse, form, set_session_cookie).
 
-##### `TurnTailer.tail`  (lines 334–336)
 
-```
-def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
-```
-
-**Purpose**: Defines the interface for reading live frames from a running turn. Live surfaces use it to stream updates to a member while the turn is still running.
-
-**Data flow**: It receives a turn id and optional cursor, opens an async scope, and yields frame cursor plus frame pairs until the turn ends or the scope closes.
-
-**Call relations**: SurfaceContext.tail exposes this to web, debugger, sample, and UFO surfaces without exposing the hub directly.
-
-
-##### `TurnStopper.stop`  (lines 346–346)
-
-```
-async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> 'Stopped'
-```
-
-**Purpose**: Defines the interface for stopping a running turn at a member’s request. It also reports whether a pending follow-up message founded a next turn.
-
-**Data flow**: It receives workspace, conversation, and turn ids. It cancels or observes the turn and returns a Stopped result.
-
-**Call relations**: SurfaceContext.stop_turn delegates here after the surface has already authorized the acting member.
-
-
-##### `_media_predicate`  (lines 372–388)
-
-```
-def _media_predicate(column: sa.ColumnElement[str], media: str) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds a database filter for artifact media categories such as image, document, or other. It lets artifact listings narrow results without duplicating media-type rules.
-
-**Data flow**: It receives a database media-type column and a requested category. It returns a SQL condition matching that category, or raises an error for an unknown category.
-
-**Call relations**: SurfaceContext.list_artifacts calls it when the portal filters shared files by media type.
-
-*Call graph*: called by 1 (list_artifacts); 3 external calls (and_, not_, or_).
-
-
-##### `conversation_name`  (lines 492–497)
-
-```
-def conversation_name(inbound: str) -> str
-```
-
-**Purpose**: Creates a bounded title for a conversation from the opening inbound message. It focuses on the member’s words, not added ambient context.
-
-**Data flow**: It receives inbound text, extracts member text, trims whitespace, cuts it to the title length limit, and returns it.
-
-**Call relations**: Conversation-creation paths use this naming rule so member-started and agent-spawned conversations are titled consistently.
-
-*Call graph*: calls 1 internal fn (member_message_text).
-
-
-##### `retitle_conversation`  (lines 500–517)
-
-```
-async def retitle_conversation(workspace_id: UUID, conversation_id: UUID, title: str) -> None
-```
-
-**Purpose**: Changes a conversation’s stored title when a surface has a better name for it. Empty titles are ignored.
-
-**Data flow**: It receives workspace id, conversation id, and proposed title. It trims and bounds the title, then updates the matching database row if one exists.
-
-**Call relations**: SurfaceContext.retitle_conversation wraps this helper for the current workspace.
-
-*Call graph*: called by 1 (retitle_conversation); 2 external calls (update, workspace_tx).
-
-
-##### `summarize_conversation_title`  (lines 520–540)
-
-```
-async def summarize_conversation_title(workspace_id: UUID, conversation_id: UUID, title: str) -> None
-```
-
-**Purpose**: Stores the title generated by a background summarizing job and records that the job has run. This avoids paying to summarize the same opening exchange repeatedly.
-
-**Data flow**: It receives workspace id, conversation id, and summary title. It writes the nonblank title or keeps the existing one, and marks title_summarized true.
-
-**Call relations**: Titling jobs call this after producing a summary.
-
-*Call graph*: 2 external calls (update, workspace_tx).
-
-
-##### `AgentDetail._aware_utc`  (lines 596–597)
-
-```
-def _aware_utc(cls, value: datetime) -> datetime
-```
-
-**Purpose**: Ensures the agent update time has timezone information. This prevents displays and APIs from mixing timezone-aware and timezone-less dates.
-
-**Data flow**: It receives a datetime. If it already has a timezone it returns it; otherwise it marks it as UTC.
-
-**Call relations**: Pydantic calls this automatically when creating AgentDetail values.
-
-*Call graph*: 1 external calls (replace).
-
-
-##### `ConnectionView._aware_utc`  (lines 641–642)
-
-```
-def _aware_utc(cls, value: datetime) -> datetime
-```
-
-**Purpose**: Ensures a connection timestamp is treated as UTC when the database returned a timezone-less value.
-
-**Data flow**: It receives connected_at and returns the same instant with UTC attached if needed.
-
-**Call relations**: Pydantic runs it while building ConnectionView rows for the portal.
-
-*Call graph*: 1 external calls (replace).
-
-
-##### `ConnectionPoolView._aware_utc`  (lines 662–663)
-
-```
-def _aware_utc(cls, value: datetime) -> datetime
-```
-
-**Purpose**: Normalizes connection-pool timestamps to timezone-aware UTC values.
-
-**Data flow**: It receives connected_at, keeps it if timezone-aware, or attaches UTC if not.
-
-**Call relations**: Pydantic runs it when SurfaceContext.list_connections builds pool entries.
-
-*Call graph*: 1 external calls (replace).
-
-
-##### `_binding_fields`  (lines 722–750)
-
-```
-def _binding_fields(backend: str, config: dict[str, JsonValue]) -> _BindingFields
-```
-
-**Purpose**: Extracts the identity fields for a connector-backed source binding. These fields let the portal submit actions against exactly the same source object it listed.
-
-**Data flow**: It receives a backend name and stored JSON config. If the config validates as a connector source, it returns the binding name and important spec fields; otherwise it returns None values.
-
-**Call relations**: SurfaceContext.list_sources uses it to enrich SourceView rows.
-
-*Call graph*: called by 1 (list_sources); 2 external calls (model_validate, binding_name).
-
-
-##### `SourceView._aware_utc`  (lines 776–777)
-
-```
-def _aware_utc(cls, value: datetime) -> datetime
-```
-
-**Purpose**: Normalizes a source’s next sync time to UTC-aware form.
-
-**Data flow**: It receives next_sync_at and returns it unchanged if timezone-aware, or with UTC added if not.
-
-**Call relations**: Pydantic runs it when creating SourceView records.
-
-*Call graph*: 1 external calls (replace).
-
-
-##### `ConversationSummary._aware_utc`  (lines 795–798)
+##### `FleetWorkspace._aware_utc`  (lines 149–150)
 
 ```
 def _aware_utc(cls, value: datetime | None) -> datetime | None
 ```
 
-**Purpose**: Normalizes conversation timestamps while allowing the last-turn time to be absent.
+**Purpose**: This validator makes sure a workspace activity time has a time zone. If the database gives a plain timestamp, it treats it as UTC so later display and sorting do not become ambiguous.
 
-**Data flow**: It receives a datetime or None. None stays None; a timezone-less datetime is marked UTC.
+**Data flow**: It receives the `last_turn_at` value while a `FleetWorkspace` model is being created. If the value is missing, it leaves it alone. If it already has a time zone, it leaves it alone. If it has no time zone, it returns a copy marked as UTC.
 
-**Call relations**: Pydantic applies it to ConversationSummary date fields.
+**Call relations**: Pydantic, the data validation library used by `FleetWorkspace`, calls this automatically when building the model. It uses `datetime.replace` only when it needs to attach the UTC time zone.
 
 *Call graph*: 1 external calls (replace).
 
 
-##### `record_transcript_access`  (lines 811–872)
-
-```
-async def record_transcript_access(workspace_id: UUID, conversation_id: UUID, agent_id: UUID, member_id: UUID) -> TranscriptAccess | None
-```
-
-**Purpose**: Records that an admin acknowledged they are opening another member’s private transcript. The record both audits the act and temporarily permits the read.
-
-**Data flow**: It receives workspace, conversation, agent, and reader member ids. It verifies the conversation belongs to the agent and is another member’s private conversation, writes an access row, logs the disclosure, and returns the reader and subject emails; otherwise it returns None.
-
-**Call relations**: The portal reaches this through a prepared intent before serving private transcript content.
-
-*Call graph*: 9 external calls (__init__, now, insert, select, audience_member, parse_audience, workspace_tx, log, uuid4).
-
-
-##### `LedgerEntry._aware_utc`  (lines 933–934)
+##### `FleetThread._aware_utc`  (lines 168–169)
 
 ```
 def _aware_utc(cls, value: datetime) -> datetime
 ```
 
-**Purpose**: Makes an accounting timestamp timezone-aware as UTC.
+**Purpose**: This validator makes sure a recent thread’s last-activity time has a time zone. That prevents a timestamp from being silently interpreted differently by different parts of the system.
 
-**Data flow**: It receives created_at and returns it with UTC attached if needed.
+**Data flow**: It receives the thread’s `last_turn_at` value while a `FleetThread` model is being created. If the timestamp already has a time zone, it is returned unchanged. If it does not, the function returns a UTC-marked version.
 
-**Call relations**: Pydantic runs it for ledger rows inside turn details.
+**Call relations**: Pydantic calls this automatically during `FleetThread` creation, including when `FleetDirectory.read` builds the list of recent threads. It calls `datetime.replace` to attach UTC when needed.
 
 *Call graph*: 1 external calls (replace).
 
 
-##### `_fulfilled_marker_key`  (lines 990–995)
+##### `FleetDirectory.read`  (lines 201–232)
+
+```
+async def read(self) -> FleetListing
+```
+
+**Purpose**: This is the main reader for the operator’s fleet directory. It returns the list of workspaces and the recent conversation threads an operator can click into.
+
+**Data flow**: It starts by calling `_enumerate` to get broad activity facts: which workspaces exist and which conversations were recently active. It groups the wanted conversation IDs by workspace. Then, for each workspace, it temporarily scopes execution to that workspace and calls `_scoped` to fetch readable details such as domain, member count, conversation count, surface, queue key, and title. Finally it combines those pieces into a `FleetListing` containing `FleetWorkspace` and `FleetThread` objects.
+
+**Call relations**: This is the public entry point of `FleetDirectory`. It coordinates the two-pass design: `_enumerate` performs the owner-level sweep, `ws` re-binds execution to one workspace at a time, and `_scoped` reads details under workspace-level rules. It then constructs the final listing models for operator surfaces to render.
+
+*Call graph*: calls 2 internal fn (_enumerate, _scoped); 3 external calls (__init__, __init__, ws).
+
+
+##### `FleetDirectory._enumerate`  (lines 234–272)
+
+```
+async def _enumerate(self) -> tuple[Sequence[sa.Row[Any]], Sequence[sa.Row[Any]]]
+```
+
+**Purpose**: This function performs the broad fleet-wide scan. It gathers only identifiers and ordering timestamps, enough to know what exists and what moved recently without reading workspace-specific text.
+
+**Data flow**: It builds database queries for all workspaces and for the most recently active conversations, counting only root turns and skipping child turns from subagents. It runs those queries inside an owner-level database transaction. It returns two row lists: workspace activity rows and recent conversation rows.
+
+**Call relations**: `FleetDirectory.read` calls this first. It uses SQLAlchemy to build the queries and `owner_tx` to run them with the kind of access intended for cross-workspace identifiers.
+
+*Call graph*: called by 1 (read); 2 external calls (select, owner_tx).
+
+
+##### `FleetDirectory._scoped`  (lines 274–322)
+
+```
+async def _scoped(self, workspace_id: UUID, last_turn_at: datetime | None, conversation_ids: Sequence[UUID]) -> tuple[FleetWorkspace, dict[UUID, sa.Row[Any]]]
+```
+
+**Purpose**: This function reads the human-visible details for one workspace in the fleet directory. It does so while scoped to that workspace, so the read follows the same boundary as normal workspace access.
+
+**Data flow**: It receives a workspace ID, that workspace’s last activity time, and the conversation IDs that need details. Inside a workspace transaction, it finds the workspace domain, counts members, counts non-subagent conversations, and loads title and routing details for the requested conversations. It returns a `FleetWorkspace` summary plus a dictionary of opened conversation rows keyed by conversation ID.
+
+**Call relations**: `FleetDirectory.read` calls this once per workspace after setting the current workspace with `ws`. It uses `workspace_tx` for the scoped database transaction, `workspace_domain` for the display domain, SQL queries for counts and conversation details, and `FleetWorkspace` to package the workspace summary.
+
+*Call graph*: called by 1 (read); 4 external calls (__init__, select, workspace_tx, workspace_domain).
+
+
+### `core/src/ufo/ext/surface.py`
+
+`orchestration` · `cross-cutting`
+
+A “surface” is any outside place where a member meets the agent: Slack, iMessage, the web portal, a terminal-like live channel, and similar integrations. This file is the doorway those surfaces use. It matters because surfaces are trusted in a special way: they can say who a member is and can put that member’s message onto the durable turn queue. Ordinary extensions are not allowed to do that.
+
+The file provides three big sets of tools. First, it defines small data shapes used by surfaces, such as conversation summaries, shared files, spend reports, connector views, and turn details. These are the safe “view models” the portal and integrations render. Second, it defines `SurfaceContext`, the main object handed to a surface handler. Through it, a surface can link external identities to workspace members, create or find conversations, admit messages, stream live turn frames, stop turns, fetch transcripts, list agents, read workspace files, and mint download or sandbox links. Third, it runs background delivery loops for durable surfaces. Durable surfaces cannot rely on live in-memory events, so `WritebackPoller` and `MidTurnReplyPoller` repeatedly claim database rows, call the surface’s delivery functions, record success, and retry failures without sending two workers to do the same job.
+
+An everyday analogy: this file is both the front desk and the mailroom. The front desk checks who someone is and routes their request to the right workspace conversation. The mailroom makes sure completed replies and attachments eventually reach external systems, even if a worker crashes or Slack briefly refuses a message.
+
+#### Function details
+
+##### `mint_marker`  (lines 196–206)
+
+```
+def mint_marker() -> str
+```
+
+**Purpose**: Creates a short random marker used to wrap one member message safely inside text sent to the model. The marker makes the wrapper unique, so a user cannot accidentally or deliberately close another message’s wrapper.
+
+**Data flow**: It takes no input, asks the secure random-token library for a few bytes, and returns them as hexadecimal text.
+
+**Call relations**: It is a small helper used when building fenced inbound messages. It hands a fresh marker to code that later calls `fence_member_message`.
+
+*Call graph*: 1 external calls (token_hex).
+
+
+##### `fence_member_message`  (lines 209–222)
+
+```
+def fence_member_message(marker: str, ambient: str, body: str, attachments: str) -> str
+```
+
+**Purpose**: Builds the full text that represents one incoming member message, separating background context, the member’s own words, and attachment text. This gives the model a clear transcript without editing the member’s words.
+
+**Data flow**: It receives a marker, ambient context text, the message body, and attachment text. It wraps the body and optional attachments in marker-named tags and returns one combined string.
+
+**Call relations**: Surface ingest code uses this before admitting a member message. Later projection helpers, especially `member_message_text`, can pull the member’s own words back out.
+
+
+##### `inbox_name`  (lines 225–254)
+
+```
+def inbox_name(raw: str, used: set[str]) -> str
+```
+
+**Purpose**: Turns an untrusted attachment filename into a safe filename for the workspace. It prevents path tricks, keeps useful extensions, caps length, and avoids duplicates within one batch.
+
+**Data flow**: It receives a raw filename and a set of names already used. It strips path parts, replaces unsafe characters, trims the name, adds a number if needed, records the chosen name in `used`, and returns it.
+
+**Call relations**: Surface upload and attachment-download paths rely on this shared rule so each integration treats dangerous filenames the same way.
+
+*Call graph*: 1 external calls (contained_leaf).
+
+
+##### `member_message_text`  (lines 257–271)
+
+```
+def member_message_text(inbound: str) -> str
+```
+
+**Purpose**: Extracts the member’s actual words from the larger inbound text that may include system context or surface wrappers. It is used when a UI wants to show what the person said, not the hidden prompt scaffolding.
+
+**Data flow**: It receives inbound text, removes known engine context at the front and injected context at the end, then looks for the marker-wrapped member-message section. It returns that inner text when found, otherwise the cleaned input.
+
+**Call relations**: `conversation_name` calls it to name new conversations from the member’s words rather than from Slack channel context or model-injected recall.
+
+*Call graph*: called by 1 (conversation_name).
+
+
+##### `MemberAdmitter.admit`  (lines 325–335)
+
+```
+async def admit(self, conversation_id: UUID, message: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None, commen
+```
+
+**Purpose**: Defines the contract for admitting a member message into the turn system. Concrete implementations use it to create, resume, or join a turn as the named speaker.
+
+**Data flow**: It accepts a conversation id, message body, optional idempotency key, context, speaker member id, optional prepared tool intent, and optional comment. It returns an `Admitted` result describing the turn and whether a run was opened.
+
+**Call relations**: `SurfaceContext.admit` delegates to whatever concrete `MemberAdmitter` core injected, so surfaces never create turn rows directly.
+
+
+##### `TurnTailer.tail`  (lines 349–351)
+
+```
+def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
+```
+
+**Purpose**: Defines how a live surface streams frames from a running turn. A frame is a live event, such as progress or a partial reply, that the member’s held connection can render.
+
+**Data flow**: It receives a turn id and optional cursor, opens an async scoped stream, and yields cursor-frame pairs until the turn ends or the caller leaves the scope.
+
+**Call relations**: `SurfaceContext.tail` exposes this injected tailer to web, CLI-like, debugger, and other live surfaces.
+
+
+##### `TurnTailer.latest_activity`  (lines 353–353)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: Defines a quick peek at what a running turn is currently doing without opening a stream. It helps status pages show live activity.
+
+**Data flow**: It receives a turn id and returns the newest retained activity frame, or nothing if there is no retained activity.
+
+**Call relations**: `SurfaceContext.latest_activity` passes this through to callers such as the web agents-status view.
+
+
+##### `TurnStopper.stop`  (lines 363–363)
+
+```
+async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> 'Stopped'
+```
+
+**Purpose**: Defines how a surface asks core to stop a running turn. It also reports whether stopping founded a follow-up turn from a message that was already waiting.
+
+**Data flow**: It receives workspace, conversation, and turn ids. It cancels or observes the turn and returns a `Stopped` result with the outcome.
+
+**Call relations**: `SurfaceContext.stop_turn` delegates to this concrete stopper after the surface has already checked the acting member.
+
+
+##### `TurnStepSource.read`  (lines 369–369)
+
+```
+async def read(self, workflow_id: str) -> tuple['TurnStep', ...]
+```
+
+**Purpose**: Defines how to read durable workflow steps for one turn attempt. These steps are used by debugging and inspection views.
+
+**Data flow**: It receives a workflow id and returns an ordered tuple of `TurnStep` records.
+
+**Call relations**: `SurfaceContext.turn_steps` uses this injected reader after confirming the turn belongs to the workspace.
+
+
+##### `SurfaceModel.model`  (lines 399–399)
+
+```
+def model(self) -> str
+```
+
+**Purpose**: Names the model backing surface-side one-shot model calls. This lets the call be labelled and billed.
+
+**Data flow**: It reads model identity from the concrete implementation and returns it as text.
+
+**Call relations**: Surface routes access it through `SurfaceContext.model` when they need optional model help.
+
+
+##### `SurfaceModel.turn`  (lines 401–401)
+
+```
+async def turn(self, request: ModelRequest) -> Message
+```
+
+**Purpose**: Defines a one-shot model call available to a surface route. It is for small surface-owned tasks where the route can still answer if the call fails.
+
+**Data flow**: It receives a `ModelRequest`, sends it to the configured model, and returns a model `Message`.
+
+**Call relations**: Concrete model access is injected into `SurfaceContext`; route code calls it only after checking that a model exists.
+
+
+##### `shared_artifact_link`  (lines 486–497)
+
+```
+def shared_artifact_link(secret: str, public_base_url: str | None, workspace_id: UUID, artifact: SharedArtifact) -> str | None
+```
+
+**Purpose**: Creates a temporary signed download link for a shared file. If public file delivery is not configured, it returns nothing so the surface can still show the filename.
+
+**Data flow**: It receives a signing secret, public base URL, workspace id, and artifact. It computes an expiry, signs a download path, joins it to the public base, and returns the URL or `None`.
+
+**Call relations**: `SurfaceContext.artifact_link` wraps this with the current workspace and configured secrets.
+
+*Call graph*: called by 1 (artifact_link); 3 external calls (now, artifact_url_expiry, mint_artifact_url).
+
+
+##### `shared_artifact_preview_link`  (lines 500–522)
+
+```
+def shared_artifact_preview_link(secret: str, public_base_url: str | None, workspace_id: UUID, artifact: SharedArtifact) -> str | None
+```
+
+**Purpose**: Creates a signed preview-image link for an artifact when the artifact can safely be shown as a raster image. It avoids pretending a non-image file is an image.
+
+**Data flow**: It receives signing settings, workspace id, and artifact. It chooses the preview blob if present, verifies the declared image type matches the key, and returns a preview URL or `None`.
+
+**Call relations**: `SurfaceContext.artifact_preview_link` calls this for web file cards and conversation-slot projections.
+
+*Call graph*: called by 1 (artifact_preview_link); 2 external calls (mint_image_preview_url, raster_image_media_type).
+
+
+##### `_scheduled_runs_query`  (lines 525–561)
+
+```
+def _scheduled_runs_query(workspace_id: UUID, member_id: UUID, agent_id: UUID | None) -> sa.Select[Any]
+```
+
+**Purpose**: Builds the database query for scheduled turns a member is allowed to see. It keeps the permission logic in one place for the scheduled-run feed.
+
+**Data flow**: It receives workspace id, member id, and optional agent id. It returns a SQL query limited to terminal scheduled turns in readable conversations, including failures and successful runs that shared files.
+
+**Call relations**: `scheduled_runs` starts with this query and then adds optional filters, ordering, and result shaping.
+
+*Call graph*: called by 1 (scheduled_runs); 3 external calls (or_, select, readable_audiences).
+
+
+##### `scheduled_runs`  (lines 564–640)
+
+```
+async def scheduled_runs(workspace_id: UUID, member_id: UUID, *, limit: int, agent_id: UUID | None=None, turn_id: UUID | None=None, subjects: frozenset[str] | None=None) -> tuple[ScheduledRun, ...]
+```
+
+**Purpose**: Reads the newest completed scheduled runs visible to a member. This powers feeds that show what automated tasks fired, what they said, and which files they shared.
+
+**Data flow**: It receives workspace and reader information plus filters. It queries matching turns, loads their shared artifacts, resolves conversation sources, and returns `ScheduledRun` objects.
+
+**Call relations**: It calls `_scheduled_runs_query`, builds `SharedArtifact` rows, and asks `ConversationDirectory.sources` for links back to the originating conversation.
+
+*Call graph*: calls 1 internal fn (_scheduled_runs_query); 6 external calls (__init__, __init__, __init__, model_validate, select, workspace_tx).
+
+
+##### `conversation_name`  (lines 689–694)
+
+```
+def conversation_name(inbound: str) -> str
+```
+
+**Purpose**: Derives a new conversation title from the member’s own opening words. It avoids using ambient channel context as the title.
+
+**Data flow**: It receives inbound text, extracts the member-message portion, trims whitespace, caps the length, and returns the title text.
+
+**Call relations**: Conversation-opening paths call this when naming a conversation consistently across surfaces.
+
+*Call graph*: calls 1 internal fn (member_message_text).
+
+
+##### `retitle_conversation`  (lines 697–714)
+
+```
+async def retitle_conversation(workspace_id: UUID, conversation_id: UUID, title: str) -> None
+```
+
+**Purpose**: Updates a conversation title when a surface has a better name for it. Blank titles are ignored.
+
+**Data flow**: It receives workspace id, conversation id, and title. It trims and caps the title, then updates the matching conversation row if the title is non-empty.
+
+**Call relations**: `SurfaceContext.retitle_conversation` delegates here so direct and context-based title updates share the same rule.
+
+*Call graph*: called by 1 (retitle_conversation); 2 external calls (update, workspace_tx).
+
+
+##### `summarize_conversation_title`  (lines 717–737)
+
+```
+async def summarize_conversation_title(workspace_id: UUID, conversation_id: UUID, title: str) -> None
+```
+
+**Purpose**: Stores the title generated by an automatic titling job and records that summarization has been attempted. This prevents paying to summarize the same conversation repeatedly.
+
+**Data flow**: It receives workspace id, conversation id, and proposed title. It writes the title if non-blank and always marks the row as summarized.
+
+**Call relations**: Titling jobs call it after model summarization; listing views later read the title from the conversation row.
+
+*Call graph*: 2 external calls (update, workspace_tx).
+
+
+##### `AgentDetail._aware_utc`  (lines 810–811)
+
+```
+def _aware_utc(cls, value: datetime) -> datetime
+```
+
+**Purpose**: Normalizes agent update timestamps so they always include timezone information. This avoids ambiguous times in API responses.
+
+**Data flow**: It receives a datetime. If it lacks timezone data, it marks it as UTC; otherwise it returns it unchanged.
+
+**Call relations**: Pydantic calls it automatically while building `AgentDetail` values.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `ConnectionView._aware_utc`  (lines 859–860)
+
+```
+def _aware_utc(cls, value: datetime) -> datetime
+```
+
+**Purpose**: Ensures connection timestamps are timezone-aware. This keeps the portal from receiving bare local-looking times.
+
+**Data flow**: It receives a datetime and returns the same time with UTC added if no timezone is present.
+
+**Call relations**: Pydantic runs it whenever `ConnectionView` is created.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `ConnectionPoolView._aware_utc`  (lines 886–887)
+
+```
+def _aware_utc(cls, value: datetime) -> datetime
+```
+
+**Purpose**: Ensures connection-pool timestamps include timezone information. It makes the listing safe to compare and display.
+
+**Data flow**: It receives a datetime and returns it unchanged if aware, or tagged as UTC if naive.
+
+**Call relations**: Pydantic applies it during `ConnectionPoolView` construction.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `_binding_fields`  (lines 946–974)
+
+```
+def _binding_fields(backend: str, config: dict[str, JsonValue]) -> _BindingFields
+```
+
+**Purpose**: Extracts the editable identity fields for a source binding from stored connector configuration. This lets portal actions submit a complete source identity instead of accidentally dropping hidden fields.
+
+**Data flow**: It receives a backend name and config dictionary. It validates connector config; if valid, it returns binding name, stream, account, base URL, and backfill setting, otherwise `None` fields.
+
+**Call relations**: `SurfaceContext.list_sources` calls it for each source row before building `SourceView`.
+
+*Call graph*: called by 1 (list_sources); 2 external calls (model_validate, binding_name).
+
+
+##### `SourceView._aware_utc`  (lines 1006–1007)
+
+```
+def _aware_utc(cls, value: datetime) -> datetime
+```
+
+**Purpose**: Normalizes the next-sync timestamp for source rows. It ensures UI code sees UTC-aware times.
+
+**Data flow**: It receives a datetime and adds UTC if the timestamp has no timezone.
+
+**Call relations**: Pydantic invokes it when `SourceView` objects are created.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `ConversationSummary._aware_utc`  (lines 1025–1028)
+
+```
+def _aware_utc(cls, value: datetime | None) -> datetime | None
+```
+
+**Purpose**: Normalizes conversation creation and last-turn timestamps. It also preserves missing last-turn values.
+
+**Data flow**: It receives a datetime or `None`. It returns `None` unchanged, returns aware datetimes unchanged, and tags naive datetimes as UTC.
+
+**Call relations**: Pydantic runs it for conversation summary objects built by directory and context listing methods.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `record_transcript_access`  (lines 1041–1102)
+
+```
+async def record_transcript_access(workspace_id: UUID, conversation_id: UUID, agent_id: UUID, member_id: UUID) -> TranscriptAccess | None
+```
+
+**Purpose**: Records that an admin acknowledged reading another member’s private conversation. The record becomes the temporary permission gate and an audit trail.
+
+**Data flow**: It receives workspace, conversation, agent, and reader ids. It verifies the conversation belongs to the agent and is another member’s private conversation, inserts an access row, logs the disclosure, and returns reader and subject emails or `None` if refused.
+
+**Call relations**: Prepared-intent flows call it before serving private transcript content; `SurfaceContext.readable_conversation` later checks the recorded row.
+
+*Call graph*: 9 external calls (__init__, now, insert, select, workspace_tx, log, audience_member, parse_audience, uuid4).
+
+
+##### `ConversationDirectory.list`  (lines 1160–1284)
+
+```
+async def list(self, agent_id: UUID, member_id: UUID, *, admin: bool, limit: int, surface: str | None=None, conversation_id: UUID | None=None, participation: Literal['mine', 'others'] | None=None, sea
+```
+
+**Purpose**: Lists conversations for one agent in the way the portal needs: newest first, permission-aware, and optionally filtered. It keeps all conversation listing behavior consistent.
+
+**Data flow**: It receives agent, member, admin flag, limit, and optional filters. It queries conversation metadata, applies audience and search rules, fetches content-only extras for readable rows, and returns `ListedConversation` objects.
+
+**Call relations**: It calls helper predicates for participation and search, then calls `sources` and `speakers` to enrich only conversations whose content the reader may see.
+
+*Call graph*: calls 6 internal fn (_matches, _member_admitted, _others, _participated, sources, speakers); 8 external calls (__init__, __init__, select, workspace_tx, audience_member, conversation_audience, parse_audience, readable_audiences).
+
+
+##### `ConversationDirectory.sources`  (lines 1286–1323)
+
+```
+async def sources(self, listed: Sequence[UUID]) -> dict[UUID, str | None]
+```
+
+**Purpose**: Finds the source link or origin reported by the first turn in each listed conversation. This lets a UI link back to the Slack thread or other surface origin.
+
+**Data flow**: It receives conversation ids. It finds each conversation’s earliest turn, reads its stored context, extracts the source field, and returns a dictionary by conversation id.
+
+**Call relations**: `ConversationDirectory.list`, `scheduled_runs`, and artifact listings use it to add origin links without duplicating the query.
+
+*Call graph*: called by 1 (list); 4 external calls (model_validate, and_, select, workspace_tx).
+
+
+##### `ConversationDirectory.speakers`  (lines 1325–1381)
+
+```
+async def speakers(self, listed: Sequence[UUID]) -> dict[UUID, tuple[ConversationSpeaker, ...]]
+```
+
+**Purpose**: Finds the first few members who spoke in each conversation. It gives conversation lists human context without loading full transcripts.
+
+**Data flow**: It receives conversation ids. It queries member turns, keeps each speaker’s first appearance, caps the count, and returns speaker email plus optional surface-reported sender name.
+
+**Call relations**: `ConversationDirectory.list` calls it only for conversations whose content the reader may access.
+
+*Call graph*: called by 1 (list); 4 external calls (__init__, model_validate, select, workspace_tx).
+
+
+##### `ConversationDirectory._member_admitted`  (lines 1383–1396)
+
+```
+def _member_admitted(self) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds a query condition meaning a member’s own message ever opened a turn in the conversation. This separates real member conversations from machine-only lanes.
+
+**Data flow**: It reads the surrounding conversation row and returns a SQL `exists` condition over turns with member admission.
+
+**Call relations**: `ConversationDirectory.list` uses it when the caller asks for member-admitted conversations only.
+
+*Call graph*: called by 1 (list); 2 external calls (literal, select).
+
+
+##### `ConversationDirectory._spoken`  (lines 1398–1419)
+
+```
+def _spoken(self, member_id: UUID | None) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds a query condition meaning someone, or a specific member, spoke in the conversation. It is optimized as a per-conversation existence check.
+
+**Data flow**: It receives an optional member id. It returns a SQL condition that checks for a matching speaker turn in the current conversation.
+
+**Call relations**: `_participated` and `_others` compose this helper to define participation filters.
+
+*Call graph*: called by 2 (_others, _participated); 2 external calls (literal, select).
+
+
+##### `ConversationDirectory._participated`  (lines 1421–1429)
+
+```
+def _participated(self, member_id: UUID) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds a query condition for conversations a member participated in. A member counts if the conversation is bound to them or if they spoke in it.
+
+**Data flow**: It receives a member id and returns a SQL OR condition over conversation ownership and spoken turns.
+
+**Call relations**: `ConversationDirectory.list` uses it for the `mine` participation filter.
+
+*Call graph*: calls 1 internal fn (_spoken); called by 1 (list); 1 external calls (or_).
+
+
+##### `ConversationDirectory._others`  (lines 1431–1443)
+
+```
+def _others(self, member_id: UUID) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds a query condition for conversations where other members spoke and this member did not participate. It supports the portal’s “others” rail.
+
+**Data flow**: It receives a member id and returns a SQL condition excluding conversations bound to or spoken in by that member while requiring some member speech.
+
+**Call relations**: `ConversationDirectory.list` uses it for the `others` participation filter.
+
+*Call graph*: calls 1 internal fn (_spoken); called by 1 (list); 2 external calls (and_, not_).
+
+
+##### `ConversationDirectory._matches`  (lines 1445–1474)
+
+```
+def _matches(self, search: str, member_id: UUID) -> sa.ColumnElement[bool]
+```
+
+**Purpose**: Builds the search condition for conversation lists. It carefully avoids leaking private conversation content through search results.
+
+**Data flow**: It receives search text and member id. It matches visible metadata for all listed rows, and matches titles or speaker emails only when the member can read the content.
+
+**Call relations**: `ConversationDirectory.list` applies it before limiting results so search finds the right row rather than filtering an already-cut page.
+
+*Call graph*: called by 1 (list); 5 external calls (and_, literal, or_, select, readable_audiences).
+
+
+##### `LedgerEntry._aware_utc`  (lines 1488–1489)
+
+```
+def _aware_utc(cls, value: datetime) -> datetime
+```
+
+**Purpose**: Normalizes accounting timestamps to UTC-aware datetimes. This helps billing and debugging displays sort correctly.
+
+**Data flow**: It receives a datetime and returns it with UTC timezone if it was missing one.
+
+**Call relations**: Pydantic invokes it when `LedgerEntry` values are built in `SurfaceContext.turn_detail`.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `TurnStep._aware_utc`  (lines 1505–1508)
+
+```
+def _aware_utc(cls, value: datetime | None) -> datetime | None
+```
+
+**Purpose**: Normalizes workflow step timestamps while allowing missing start or completion times. This keeps step timelines consistent.
+
+**Data flow**: It receives a datetime or `None`. It returns `None`, an already-aware datetime, or the same time marked as UTC.
+
+**Call relations**: Pydantic applies it to `TurnStep` records returned by `TurnStepSource` implementations.
+
+*Call graph*: 1 external calls (replace).
+
+
+##### `_fulfilled_marker_key`  (lines 1564–1569)
 
 ```
 def _fulfilled_marker_key(sealed: str, slot: str) -> str
 ```
 
-**Purpose**: Builds the blob-store key that records one fulfilled credential prompt. It is keyed by the sealed request and slot so sibling prompts remain independent.
+**Purpose**: Creates the blob-store key used to remember that one credential prompt slot was fulfilled. It lets one slot stop prompting while another slot in the same request still asks.
 
-**Data flow**: It receives the sealed request string and slot name, hashes the seal, and returns a marker path.
+**Data flow**: It receives a sealed request string and slot name. It hashes the seal, combines it with the slot, and returns a stable marker path.
 
-**Call relations**: SurfaceContext.credential_prompt_pending checks this marker, and fulfill_credential_request writes it.
+**Call relations**: `SurfaceContext.credential_prompt_pending` checks this marker, and `SurfaceContext.fulfill_credential_request` writes it after storing a credential.
 
 *Call graph*: called by 2 (credential_prompt_pending, fulfill_credential_request); 1 external calls (sha256).
 
 
-##### `_main_agent`  (lines 998–1011)
+##### `_main_agent`  (lines 1572–1585)
 
 ```
 async def _main_agent(workspace_id: UUID) -> UUID
 ```
 
-**Purpose**: Finds the workspace’s main agent. This is the fallback agent when a surface installation has no explicit binding.
+**Purpose**: Finds the workspace’s main agent. Surfaces use it as the fallback agent when no installation binding names one.
 
-**Data flow**: It receives a workspace id, queries the agent table for the main agent, and returns its id or raises an error if none exists.
+**Data flow**: It receives a workspace id, queries the agent table for the main row, and returns its id. If none exists, it raises an error because the workspace is malformed.
 
-**Call relations**: _bind_surface_installation and SurfaceContext._surface_agent call it.
+**Call relations**: `_bind_surface_installation` and `SurfaceContext._surface_agent` call it when they need the default agent.
 
 *Call graph*: called by 2 (_surface_agent, _bind_surface_installation); 2 external calls (select, workspace_tx).
 
 
-##### `_bind_surface_installation`  (lines 1014–1046)
+##### `_bind_surface_installation`  (lines 1588–1627)
 
 ```
-async def _bind_surface_installation(workspace_id: UUID, surface: str, installation_id: str) -> None
+async def _bind_surface_installation(workspace_id: UUID, surface: str, installation_id: str, *, routes_ingress: bool) -> None
 ```
 
-**Purpose**: Creates or updates the record that ties an external surface installation, such as a Slack team, to a workspace. It keeps the existing agent binding when rebinding the installation identity.
+**Purpose**: Creates or replaces the binding between a workspace and a surface installation, such as a Slack team. This is how incoming provider traffic later resolves to the right workspace.
 
-**Data flow**: It receives workspace id, surface name, and installation id. It validates the id, chooses the main agent for a new row, upserts the installation row, and converts uniqueness conflicts into SurfaceInstallationConflict.
+**Data flow**: It receives workspace id, surface name, installation id, and whether the installation routes ingress. It validates the id, finds the main agent for new rows, upserts the binding, and converts uniqueness conflicts into `SurfaceInstallationConflict`.
 
-**Call relations**: SurfaceContext.bind_installation and SurfaceInstallationAccess.bind both use this shared writer.
+**Call relations**: `SurfaceContext.bind_installation` uses it from surface OAuth callbacks, and `SurfaceInstallationAccess.bind` uses it from tool-driven installation flows.
 
 *Call graph*: calls 1 internal fn (_main_agent); called by 2 (bind_installation, bind); 2 external calls (__init__, workspace_tx).
 
 
-##### `SurfaceContext.fleet_blob`  (lines 1098–1101)
+##### `SurfaceContext.fleet_blob`  (lines 1696–1699)
 
 ```
 def fleet_blob(self) -> FleetBlobStore
@@ -643,2265 +738,2485 @@ def fleet_blob(self) -> FleetBlobStore
 
 **Purpose**: Returns a deploy-wide blob-store view for shared fleet assets. It is separate from the workspace-scoped blob view.
 
-**Data flow**: It reads the backend from the context’s workspace blob store and wraps it as a FleetBlobStore.
+**Data flow**: It reads the backend from the workspace blob store and wraps it in a `FleetBlobStore`.
 
-**Call relations**: Surface code can call this when it needs shared static data rather than workspace data.
+**Call relations**: Surface code can use this property when it needs static or shared assets rather than workspace data.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `SurfaceContext.conversation_slots`  (lines 1104–1106)
+##### `SurfaceContext.conversation_slots`  (lines 1702–1704)
 
 ```
 def conversation_slots(self) -> tuple['BoundConversationSlot', ...]
 ```
 
-**Purpose**: Exposes the fixed set of extension-provided conversation slots available to this surface.
+**Purpose**: Returns the conversation-slot providers installed for this deploy. These slots are extension-provided extra panes or summaries tied to conversations.
 
-**Data flow**: It reads the tuple stored on the context and returns it unchanged.
+**Data flow**: It reads the prevalidated tuple stored on the context and returns it unchanged.
 
-**Call relations**: Web surface code uses this list when rendering conversation slot features.
+**Call relations**: Web surface routes inspect this before calling the slot read and summarize methods.
 
 
-##### `SurfaceContext.read_conversation_slot`  (lines 1108–1113)
+##### `SurfaceContext.read_conversation_slot`  (lines 1706–1711)
 
 ```
 async def read_conversation_slot(self, bound: 'BoundConversationSlot', context: 'ConversationSlotContext') -> 'ConversationSlotPayload'
 ```
 
-**Purpose**: Reads one conversation slot while binding execution to the conversation’s agent. This keeps agent-scoped providers looking at the right agent namespace.
+**Purpose**: Runs one conversation-slot read under the conversation’s agent identity. Binding the agent makes provider code see the same namespace a turn would use.
 
-**Data flow**: It receives a bound slot and slot context, temporarily sets the active agent id, calls the provider’s read method, and returns the payload.
+**Data flow**: It receives a bound slot and slot context, enters the agent scope from the context, calls the provider’s read method, and returns its payload.
 
-**Call relations**: The web surface calls it when serving a conversation slot.
+**Call relations**: The web surface’s conversation-slot route calls this after it has authorized the conversation.
 
 *Call graph*: called by 1 (conversation_slot); 1 external calls (agent).
 
 
-##### `SurfaceContext.summarize_conversation_slot`  (lines 1115–1120)
+##### `SurfaceContext.summarize_conversation_slot`  (lines 1713–1718)
 
 ```
 async def summarize_conversation_slot(self, bound: 'BoundConversationSlot', context: 'ConversationSlotContext') -> int | None
 ```
 
-**Purpose**: Runs the summary operation for one conversation slot in the correct agent scope.
+**Purpose**: Runs one conversation-slot summarization under the conversation’s agent identity. It lets slot providers produce compact counts or summaries for UI lists.
 
-**Data flow**: It receives a bound slot and context, binds the context’s agent id, calls the provider’s summarize method, and returns the optional count or marker it produces.
+**Data flow**: It receives a bound slot and context, enters the relevant agent scope, calls the provider’s summarize method, and returns an integer summary or `None`.
 
-**Call relations**: The web surface calls it while building slot summaries.
+**Call relations**: The web surface calls it while building conversation-slot displays.
 
 *Call graph*: called by 1 (conversation_slots); 1 external calls (agent).
 
 
-##### `SurfaceContext.deploy_extensions`  (lines 1123–1126)
+##### `SurfaceContext.deploy_extensions`  (lines 1721–1724)
 
 ```
 def deploy_extensions(self) -> tuple[DeployExtensionView, ...]
 ```
 
-**Purpose**: Returns the installed deploy extensions as shown in administration views.
+**Purpose**: Returns the installed deploy extensions as administration-view data. It exposes names, versions, and sandbox-internet requirements, not secrets.
 
-**Data flow**: It reads and returns the boot-time tuple stored on the context.
+**Data flow**: It returns the tuple of `DeployExtensionView` objects stored on the context.
 
-**Call relations**: Portal administration pages use this as static deploy-status information.
+**Call relations**: Administration routes read it to show what the running deploy loaded.
 
 
-##### `SurfaceContext.deploy_sandbox_internet`  (lines 1129–1132)
+##### `SurfaceContext.deploy_sandbox_internet`  (lines 1727–1730)
 
 ```
 def deploy_sandbox_internet(self) -> bool
 ```
 
-**Purpose**: Reports whether the deploy’s installed extensions allow sandbox internet access at all.
+**Purpose**: Reports whether this deploy’s extensions allow sandbox public internet at all. Agent settings can only narrow this deploy-level ceiling.
 
-**Data flow**: It returns the boolean stored on the context.
+**Data flow**: It returns the boolean configured on the context.
 
-**Call relations**: Portal settings compare this deploy-wide ceiling with each agent’s own setting.
+**Call relations**: Portal administration and agent detail views use it to explain internet-access options.
 
 
-##### `SurfaceContext.deploy_skills`  (lines 1135–1140)
+##### `SurfaceContext.deploy_skills`  (lines 1733–1738)
 
 ```
 def deploy_skills(self) -> tuple[tuple[str, str], ...]
 ```
 
-**Purpose**: Lists deploy-provided loadable skills. These are the shared skills every agent may use before member-authored skills are added.
+**Purpose**: Returns the deploy-provided skill index available to agents. It is the shared skill floor before member-authored skills are added.
 
-**Data flow**: It asks the skill registry for its index and returns that tuple.
+**Data flow**: It asks the skill registry for its index and returns the resulting skill name/description pairs.
 
-**Call relations**: Surfaces use it when showing deploy skill availability.
+**Call relations**: Agent spawning and portal skill views use this deploy-level skill inventory.
 
 
-##### `SurfaceContext.models`  (lines 1143–1147)
+##### `SurfaceContext.system_skill_bundle`  (lines 1741–1743)
+
+```
+def system_skill_bundle(self) -> SystemSkillBundle
+```
+
+**Purpose**: Returns the immutable bundle of system skills loaded at boot. A terminal can cache it before running a turn.
+
+**Data flow**: It returns the stored `SystemSkillBundle` unchanged.
+
+**Call relations**: Runtime code reads this through the context when preparing turn execution.
+
+
+##### `SurfaceContext.models`  (lines 1746–1750)
 
 ```
 def models(self) -> tuple[str, ...]
 ```
 
-**Purpose**: Returns the model identifiers this deploy offers.
+**Purpose**: Returns the model ids this deploy can serve. The portal uses this closed list when offering model choices.
 
-**Data flow**: It reads the model tuple stored on the context and returns it.
+**Data flow**: It returns the tuple of configured model names.
 
-**Call relations**: Portal settings use it to populate model choices.
+**Call relations**: Agent settings and surface-side model choices read this property.
 
 
-##### `SurfaceContext.sandbox_sizes`  (lines 1150–1153)
+##### `SurfaceContext.sandbox_sizes`  (lines 1753–1756)
 
 ```
 def sandbox_sizes(self) -> tuple[str, ...]
 ```
 
-**Purpose**: Returns the sandbox sizes this deploy can provision.
+**Purpose**: Returns the sandbox sizes supported by the deployment. An empty list means there is no user-facing size choice.
 
-**Data flow**: It reads the stored tuple of size names and returns it.
+**Data flow**: It returns the stored tuple of size names.
 
-**Call relations**: Portal settings use it to decide whether to show a sandbox-size choice.
+**Call relations**: Agent settings use it to decide whether to show sandbox-size controls.
 
 
-##### `SurfaceContext.credential`  (lines 1155–1158)
+##### `SurfaceContext.credential`  (lines 1758–1761)
 
 ```
 async def credential(self, slot: str) -> str
 ```
 
-**Purpose**: Reads a workspace credential value for trusted surface code. It refuses if no credential store was configured.
+**Purpose**: Reads a workspace credential slot for trusted surface code. The value is returned in-process and is never exposed to ordinary scoped extensions.
 
-**Data flow**: It receives a slot name, checks that a store exists, reads the slot for this workspace, and returns the secret value.
+**Data flow**: It receives a slot name, checks that a credential store exists, and returns the encrypted store’s value for this workspace and slot.
 
-**Call relations**: Slack and other surface code call it for signing secrets, provider credentials, and identity proof.
+**Call relations**: Slack surface helpers and delivery functions call it for tokens and signing secrets.
 
-*Call graph*: called by 11 (_channel_origin, _ctx_signing_secret, _identity, _post_ephemeral, _run_identity_proof, _to_inbound, attach, ingest, interactive, post (+1 more)).
+*Call graph*: called by 8 (_bot_token, _channel_origin, _ctx_signing_secret, _post_ephemeral, _to_inbound, attach, post, speak).
 
 
-##### `SurfaceContext.credential_prompt_pending`  (lines 1160–1174)
+##### `SurfaceContext.credential_prompt_pending`  (lines 1763–1777)
 
 ```
 async def credential_prompt_pending(self, sealed: str, slot: str) -> bool
 ```
 
-**Purpose**: Checks whether a sealed credential request still needs a value for one slot. It prevents already fulfilled or invalid prompts from being shown again.
+**Purpose**: Checks whether a sealed credential request still needs one slot filled. It prevents fulfilled, expired, or foreign prompts from being shown again.
 
-**Data flow**: It receives a sealed request and slot. It opens and validates the seal, checks workspace and slot membership, looks for the fulfilled marker blob, and returns true only if the prompt is still pending.
+**Data flow**: It receives a sealed request and slot. It opens and validates the seal, checks workspace and slot membership, looks for the fulfilled marker blob, and returns a boolean.
 
-**Call relations**: The web surface uses it when rendering pending credential prompts.
+**Call relations**: The web surface calls it while deciding which credential prompts to render.
 
 *Call graph*: calls 1 internal fn (_fulfilled_marker_key); called by 1 (_pending_prompts); 1 external calls (open_credential_request).
 
 
-##### `SurfaceContext.open_credential_authorization`  (lines 1176–1186)
+##### `SurfaceContext.open_credential_authorization`  (lines 1779–1789)
 
 ```
 def open_credential_authorization(self, sealed: str) -> CredentialRequestState
 ```
 
-**Purpose**: Opens a sealed credential handoff and returns its claims. This lets a surface callback recover which workspace, member, and slots the handoff was for.
+**Purpose**: Opens a sealed credential handoff and returns its claims. Surface OAuth callbacks use this when there is no active turn to identify the member and slot.
 
-**Data flow**: It receives the sealed string, verifies it with the credential store’s Fernet key, and returns the decoded CredentialRequestState or raises if invalid.
+**Data flow**: It receives a sealed string, verifies it with the credential store’s Fernet key and purpose, and returns the decoded request state or raises if invalid.
 
-**Call relations**: Slack OAuth callbacks use it after the browser returns with sealed state.
+**Call relations**: Slack OAuth callback code calls it before fulfilling a credential slot.
 
 *Call graph*: called by 1 (oauth_callback); 1 external calls (open_credential_request).
 
 
-##### `SurfaceContext.fulfill_credential_request`  (lines 1188–1213)
+##### `SurfaceContext.fulfill_credential_request`  (lines 1791–1816)
 
 ```
 async def fulfill_credential_request(self, sealed: str, slot: str, value: str, member_id: UUID | None) -> None
 ```
 
-**Purpose**: Stores the value for one credential slot after proving the sealed request belongs to this workspace, member, and slot. It then marks that prompt as fulfilled.
+**Purpose**: Stores a credential value only if the sealed request, slot, workspace, and member all match. This protects credential handoffs from tampering or cross-member use.
 
-**Data flow**: It receives a seal, slot, value, and member id. It validates all claims, writes the credential, writes a marker blob, and returns nothing; invalid claims raise CredentialRequestInvalid.
+**Data flow**: It receives seal, slot, value, and member id. It validates the seal, checks workspace and member, writes the credential, and writes the fulfilled marker blob.
 
-**Call relations**: Slack, web, and UFO extension surfaces call it when a member completes a credential handoff.
+**Call relations**: Slack, web, and internal UFO surfaces call it after a member completes a credential prompt or provider callback.
 
 *Call graph*: calls 1 internal fn (_fulfilled_marker_key); called by 3 (oauth_callback, _fulfill_secret, fulfill_credential); 4 external calls (__init__, now, dumps, open_credential_request).
 
 
-##### `SurfaceContext.bind_installation`  (lines 1215–1221)
+##### `SurfaceContext.bind_installation`  (lines 1818–1826)
 
 ```
 async def bind_installation(self, installation_id: str) -> None
 ```
 
-**Purpose**: Binds this surface’s external installation id to the current workspace.
+**Purpose**: Binds this surface’s external installation identity to the current workspace. It is commonly used after OAuth installation completes.
 
-**Data flow**: It receives an installation id and passes this workspace and surface name to the shared binding helper.
+**Data flow**: It receives an installation id and calls the shared binding helper with this workspace and surface, marking it as ingress-routing.
 
-**Call relations**: Slack calls it during OAuth installation.
+**Call relations**: Slack’s OAuth callback calls this so future Slack events can resolve their workspace.
 
 *Call graph*: calls 1 internal fn (_bind_surface_installation); called by 1 (oauth_callback).
 
 
-##### `SurfaceContext.public_base_url`  (lines 1224–1227)
+##### `SurfaceContext.address_claim`  (lines 1828–1853)
+
+```
+async def address_claim(self, address: str) -> AddressClaim | None
+```
+
+**Purpose**: Reads this workspace’s claim on an addressed surface identity, such as a phone number. It tells whether the address is still only reserved or already proved.
+
+**Data flow**: It receives an address, queries the surface-address table for this surface and workspace, normalizes expiry time, and returns an `AddressClaim` or `None`.
+
+**Call relations**: The iMessage surface checks this before admitting messages from an addressed sender.
+
+*Call graph*: called by 1 (_admit_message); 3 external calls (__init__, select, workspace_tx).
+
+
+##### `SurfaceContext.confirm_address`  (lines 1855–1868)
+
+```
+async def confirm_address(self, address: str, proved_by: str) -> None
+```
+
+**Purpose**: Marks a reserved addressed-surface identity as proved. The proving inbound message becomes the proof id so replayed events do not also create turns.
+
+**Data flow**: It receives an address and proof id, then updates the matching surface-address row to clear expiry and store the proof.
+
+**Call relations**: The iMessage surface calls it when a sender proves ownership of an address.
+
+*Call graph*: called by 1 (_prove); 2 external calls (update, workspace_tx).
+
+
+##### `SurfaceContext.release_address`  (lines 1870–1879)
+
+```
+async def release_address(self, address: str) -> None
+```
+
+**Purpose**: Removes this workspace’s claim on an addressed-surface identity. After that, the address can be claimed again.
+
+**Data flow**: It receives an address and deletes the matching surface-address row for this workspace and surface.
+
+**Call relations**: The iMessage proof flow can call it when a claim should be dropped.
+
+*Call graph*: called by 1 (_prove); 2 external calls (delete, workspace_tx).
+
+
+##### `SurfaceContext.public_base_url`  (lines 1882–1885)
 
 ```
 def public_base_url(self) -> str | None
 ```
 
-**Purpose**: Returns the deploy’s configured public base URL, if any.
+**Purpose**: Returns the deployment’s public base URL if one is configured. Surfaces use it to build callback and portal links.
 
-**Data flow**: It reads the stored public URL and returns it or None.
+**Data flow**: It returns the stored public base URL or `None`.
 
-**Call relations**: Surfaces use it to build callback or public links.
+**Call relations**: Surface route and message-rendering code reads it when it needs an externally visible URL.
 
 
-##### `SurfaceContext.home_url`  (lines 1229–1239)
+##### `SurfaceContext.cookie_secure`  (lines 1888–1892)
+
+```
+def cookie_secure(self) -> bool
+```
+
+**Purpose**: Decides whether session cookies should be marked Secure. Secure cookies are only appropriate when the public base uses HTTPS-like schemes.
+
+**Data flow**: It parses the configured public base URL, passes the scheme to the cookie helper, and returns a boolean.
+
+**Call relations**: Browser surfaces use this when setting session cookies.
+
+*Call graph*: 2 external calls (cookie_secure, urlsplit).
+
+
+##### `SurfaceContext.home_url`  (lines 1894–1904)
 
 ```
 def home_url(self, fragment: str='') -> str | None
 ```
 
-**Purpose**: Builds a link into the deploy’s browser home surface. It returns None when the deploy has no public base URL or no home surface.
+**Purpose**: Builds a link to the deployment’s browser home surface. Durable surfaces use it when they need to send a member to the portal for an action they cannot perform inline.
 
-**Data flow**: It receives an optional URL fragment, combines the public base, home surface mount path, and fragment, and returns the URL.
+**Data flow**: It receives an optional fragment. If public base URL and home surface are configured, it returns `/surface/<home>` plus the fragment; otherwise it returns `None`.
 
-**Call relations**: Durable surfaces use it when they need to send a member to the browser portal.
+**Call relations**: iMessage, Slack, and sites surfaces call it when rendering portal links.
 
-*Call graph*: called by 2 (_terminal_text, _reply_with_oversize_links).
+*Call graph*: called by 3 (_terminal_text, _into_the_portal, _reply_with_oversize_links).
 
 
-##### `SurfaceContext.shared_artifacts`  (lines 1241–1273)
+##### `SurfaceContext.shared_artifacts`  (lines 1906–1944)
 
 ```
 async def shared_artifacts(self, turn_id: UUID) -> tuple[SharedArtifact, ...]
 ```
 
-**Purpose**: Lists the files a turn shared, in delivery order. Live surfaces use this to render download links directly.
+**Purpose**: Reads the files shared by one turn. Live surfaces use this directly, while durable surfaces receive the same information through writeback.
 
-**Data flow**: It receives a turn id, queries shared_artifact rows for this workspace and turn, converts each row to SharedArtifact, and returns the tuple.
+**Data flow**: It receives a turn id, queries shared-artifact rows for this workspace and turn, and returns `SharedArtifact` objects in share order.
 
-**Call relations**: Web and UFO surfaces call it when showing shared files.
+**Call relations**: Web and UFO surfaces call it to render file lists and links.
 
 *Call graph*: called by 2 (shared_files, _events); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `SurfaceContext.artifact_link`  (lines 1275–1290)
+##### `SurfaceContext.artifact_link`  (lines 1946–1954)
 
 ```
 def artifact_link(self, artifact: SharedArtifact) -> str | None
 ```
 
-**Purpose**: Creates a temporary signed download link for a shared artifact. If public artifact delivery is not configured, it returns None.
+**Purpose**: Creates a temporary download link for a shared artifact in this workspace. It hides signing details from surface code.
 
-**Data flow**: It receives a SharedArtifact, checks token secret and public base URL, mints an expiring artifact path, and returns the full URL.
+**Data flow**: It receives a `SharedArtifact`, combines it with context signing settings and workspace id, and returns a URL or `None`.
 
-**Call relations**: Slack, iMessage, web, and UFO surfaces use it when they need a link instead of inline upload.
+**Call relations**: It delegates to `shared_artifact_link`; Slack, iMessage, web, and UFO surfaces use it when rendering files.
 
-*Call graph*: called by 7 (_terminal_text, _oversize_link_line, shared_files, _file_payload, _project_slot_context, _radar_run, workspace_artifacts); 2 external calls (now, mint_artifact_url).
+*Call graph*: calls 1 internal fn (shared_artifact_link); called by 5 (_terminal_text, _oversize_link_line, shared_files, _file_payload, _project_slot_context).
 
 
-##### `SurfaceContext.artifact_preview_link`  (lines 1292–1325)
+##### `SurfaceContext.artifact_preview_link`  (lines 1956–1966)
 
 ```
 def artifact_preview_link(self, artifact: SharedArtifact) -> str | None
 ```
 
-**Purpose**: Creates a temporary signed image-preview link when the artifact or its preview blob is a safe raster image. It avoids previewing unknown, mismatched, or too-large bytes.
+**Purpose**: Creates a safe preview-image URL for an artifact when possible. It returns nothing if preview delivery is not configured or the file is not eligible.
 
-**Data flow**: It receives an artifact, chooses preview bytes or original bytes, verifies media type and size, mints a preview-granted artifact URL, and returns it or None.
+**Data flow**: It receives a `SharedArtifact`, applies context signing settings and workspace id, and returns a signed preview URL or `None`.
 
-**Call relations**: The web surface uses it when rendering file cards and artifact listings.
+**Call relations**: It delegates to `shared_artifact_preview_link`; web file-card and slot-context code uses it.
 
-*Call graph*: called by 4 (_file_payload, _project_slot_context, _radar_run, workspace_artifacts); 4 external calls (__init__, now, mint_artifact_url, raster_image_media_type).
+*Call graph*: calls 1 internal fn (shared_artifact_preview_link); called by 2 (_file_payload, _project_slot_context).
 
 
-##### `SurfaceContext.ingress_url`  (lines 1327–1356)
+##### `SurfaceContext.ingress_url`  (lines 1968–2014)
 
 ```
-def ingress_url(self, conversation_id: UUID, port: int, entry_path: str) -> str | None
+def ingress_url(self, conversation_id: UUID, port: int, entry_path: str, *, framed_from: str | None=None, shipped_slug: str | None=None, shipped_digest: str | None=None) -> str | None
 ```
 
-**Purpose**: Builds a signed browser URL for opening one sandbox port. This lets a surface expose a conversation’s running site without holding ingress secrets itself.
+**Purpose**: Mints a signed browser URL into a conversation’s sandbox port. This lets surfaces expose sandbox-hosted sites without giving them deployment secrets.
 
-**Data flow**: It receives conversation id, port, and entry path. It mints a short-lived ingress token, builds the stable subdomain for that conversation and port, quotes the path, and returns the URL or None if ingress is unconfigured.
+**Data flow**: It receives conversation, port, entry path, and optional framing or shipped-app details. It passes them with workspace identity to the ingress URL signer and returns a URL or `None` if ingress is unavailable.
 
-**Call relations**: The sites extension calls it when serving embedded site frames.
+**Call relations**: The sites surface calls it when serving app frames and shipped app bundles.
 
-*Call graph*: called by 1 (frame); 6 external calls (__init__, now, site_label, mint_ingress_token, quote, urlsplit).
+*Call graph*: called by 2 (_shipped_frame, frame); 1 external calls (mint_ingress_view_url).
 
 
-##### `SurfaceContext._identity_member`  (lines 1358–1371)
+##### `SurfaceContext._identity_member`  (lines 2016–2029)
 
 ```
 async def _identity_member(self, surface: str, external_id: str) -> UUID | None
 ```
 
-**Purpose**: Looks up which workspace member is linked to a given external id on a given surface.
+**Purpose**: Looks up which member a surface-specific external id is linked to. It is the private shared lookup behind several identity methods.
 
-**Data flow**: It receives a surface name and external id, queries surface_identity, and returns the member id or None.
+**Data flow**: It receives a surface name and external id, queries the surface-identity table in this workspace, and returns a member id or `None`.
 
-**Call relations**: linked_member and adopt_identity use it as their shared lookup.
+**Call relations**: `linked_member` uses it for this surface, while `adopt_identity` uses it for a peer surface.
 
 *Call graph*: called by 2 (adopt_identity, linked_member); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.linked_member`  (lines 1373–1374)
+##### `SurfaceContext.linked_member`  (lines 2031–2032)
 
 ```
 async def linked_member(self, external_id: str) -> UUID | None
 ```
 
-**Purpose**: Finds the member linked to this surface’s external user id.
+**Purpose**: Finds the member already linked to this surface’s external user id. It lets a surface recognize returning users.
 
-**Data flow**: It receives an external id, calls the shared identity lookup for this surface, and returns the member id or None.
+**Data flow**: It receives an external id and returns the linked member id by calling `_identity_member` for the current surface.
 
-**Call relations**: Many surfaces call it before admitting or serving user-specific requests.
+**Call relations**: Sample, sites, Slack, UFO, and web surfaces call it during authentication or inbound-message resolution.
 
-*Call graph*: calls 1 internal fn (_identity_member); called by 9 (_linked_member, _surface_ingest, _surface_live_admit, _viewer, _resolve_member, interactive, channel, op_body, _authenticate).
+*Call graph*: calls 1 internal fn (_identity_member); called by 8 (_surface_ingest, _surface_live_admit, _viewer, _resolve_member, interactive, channel, op_body, _authenticate).
 
 
-##### `SurfaceContext.is_operator_workspace`  (lines 1376–1383)
+##### `SurfaceContext.is_operator_workspace`  (lines 2034–2041)
 
 ```
 async def is_operator_workspace(self) -> bool
 ```
 
-**Purpose**: Checks whether the current workspace is the fleet operator’s own workspace. This gates operator-only display details.
+**Purpose**: Checks whether the current workspace is the deployment operator’s own workspace. This gates internal-only rendering such as debug footers.
 
-**Data flow**: It reads the workspace email domain and compares it with the operator domain constant.
+**Data flow**: It reads the workspace email domain and compares it to the operator domain constant.
 
-**Call relations**: Surface rendering can use it to decide whether to show internal debugging or accounting details.
+**Call relations**: Surface rendering code can call it before showing operator-only details.
 
 *Call graph*: calls 1 internal fn (workspace_domain).
 
 
-##### `SurfaceContext.adopt_identity`  (lines 1385–1408)
+##### `SurfaceContext.adopt_identity`  (lines 2043–2066)
 
 ```
 async def adopt_identity(self, peer_surface: str, external_id: str) -> UUID | None
 ```
 
-**Purpose**: Links this surface’s external id to the same member already known by another surface. This lets one human keep one member identity across surfaces.
+**Purpose**: Links this surface’s external id to the member already known by another surface. This lets the same human keep one member identity across surfaces.
 
-**Data flow**: It receives a peer surface and external id, looks up the peer link, inserts a link for this surface if found, logs races, and returns the member id or None.
+**Data flow**: It receives a peer surface and external id, looks up the peer identity, inserts this surface identity if found, logs races, and returns the member id or `None`.
 
-**Call relations**: The sample live surface uses it when adopting identities from a peer surface.
+**Call relations**: Sample live-admit code calls it when one surface wants to reuse another surface’s established identity.
 
 *Call graph*: calls 1 internal fn (_identity_member); called by 1 (_surface_live_admit); 3 external calls (insert, workspace_tx, log).
 
 
-##### `SurfaceContext.link_member`  (lines 1410–1432)
+##### `SurfaceContext.link_member`  (lines 2068–2090)
 
 ```
 async def link_member(self, external_id: str, email: str) -> UUID | None
 ```
 
-**Purpose**: Links this surface’s external id to an existing workspace member by email. It returns None if no member with that email exists.
+**Purpose**: Links this surface’s external id to an existing workspace member by email. If no member has that email, it leaves the identity unlinked.
 
-**Data flow**: It receives external id and email, finds the oldest case-insensitive matching member, then calls link_member_id to create the link.
+**Data flow**: It receives external id and email, case-insensitively finds the oldest matching member, then calls `link_member_id` and returns the id or `None`.
 
-**Call relations**: join_member uses it first; several surfaces use it during authentication or member resolution.
+**Call relations**: Authentication and ingest paths call it; `join_member` uses it before deciding whether to create a new member.
 
 *Call graph*: calls 1 internal fn (link_member_id); called by 5 (join_member, _surface_ingest, _viewer, channel, _authenticate); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.link_member_id`  (lines 1434–1463)
+##### `SurfaceContext.link_member_id`  (lines 2092–2121)
 
 ```
 async def link_member_id(self, external_id: str, member_id: UUID) -> UUID | None
 ```
 
-**Purpose**: Links this surface’s external id to a specific existing member id. This is used when the surface has already proved the member’s identity.
+**Purpose**: Links this surface’s external id to a specific existing member id. It is used after the surface has proved that member requested the link.
 
-**Data flow**: It receives external id and member id, verifies the member belongs to this workspace, inserts the surface_identity row, logs races, and returns the member id or None.
+**Data flow**: It receives external id and member id, verifies the member belongs to the workspace, inserts a surface identity, logs duplicate-insert races, and returns the member id or `None`.
 
-**Call relations**: link_member delegates to it, and iMessage uses it after its own member proof.
+**Call relations**: `link_member` delegates to it after resolving email to member id.
 
-*Call graph*: called by 2 (link_member, _linked_member); 4 external calls (insert, select, workspace_tx, log).
+*Call graph*: called by 1 (link_member); 4 external calls (insert, select, workspace_tx, log).
 
 
-##### `SurfaceContext.join_member`  (lines 1465–1482)
+##### `SurfaceContext.join_member`  (lines 2123–2140)
 
 ```
 async def join_member(self, external_id: str, email: str) -> UUID | None
 ```
 
-**Purpose**: Links an external id by email, and if needed creates a new member when the email domain matches the workspace’s own domain. This supports first-contact joining from trusted channels.
+**Purpose**: Links a surface identity by email, creating a new member when the email domain matches the workspace’s own domain. This supports first-contact teammate joining through verified channels.
 
-**Data flow**: It receives external id and email, tries linking an existing member, compares the email domain with the workspace domain, creates a member if allowed, then links again.
+**Data flow**: It receives external id and verified email. It first tries `link_member`; if absent, it compares email domain to workspace domain, creates a member if allowed, and links again.
 
-**Call relations**: Slack uses it when resolving channel-verified users.
+**Call relations**: Slack member-resolution calls it when Slack has verified the user’s email.
 
 *Call graph*: calls 2 internal fn (link_member, workspace_domain); called by 1 (_resolve_member); 3 external calls (workspace_tx, create_member, email_domain).
 
 
-##### `SurfaceContext._conversation_lookup`  (lines 1484–1494)
+##### `SurfaceContext._conversation_lookup`  (lines 2142–2152)
 
 ```
 def _conversation_lookup(self, queue_key: str) -> sa.Select
 ```
 
-**Purpose**: Builds the database query for finding this surface’s conversation by queue key.
+**Purpose**: Builds the common query for finding a conversation by this surface’s queue key. Queue keys are surface-defined identifiers such as channel/thread ids.
 
-**Data flow**: It receives a queue key and returns a SQL select scoped to workspace, surface, and key.
+**Data flow**: It receives a queue key and returns a SQL select for the matching conversation row in this workspace and surface.
 
-**Call relations**: conversation_for, find_conversation, and terminal_op_body reuse this query shape.
+**Call relations**: `conversation_for`, `find_conversation`, and `terminal_op_body` reuse it so they resolve surface conversations consistently.
 
 *Call graph*: called by 3 (conversation_for, find_conversation, terminal_op_body); 1 external calls (select).
 
 
-##### `SurfaceContext.find_conversation`  (lines 1496–1502)
+##### `SurfaceContext.find_conversation`  (lines 2154–2160)
 
 ```
 async def find_conversation(self, queue_key: str) -> UUID | None
 ```
 
-**Purpose**: Finds an existing conversation for this surface and queue key without creating one.
+**Purpose**: Finds an existing conversation for this surface queue key without creating one. This is useful when a surface needs to know whether the agent is already participating.
 
-**Data flow**: It receives a queue key, runs the shared lookup, and returns the conversation id or None.
+**Data flow**: It receives a queue key, runs `_conversation_lookup`, and returns the conversation id or `None`.
 
-**Call relations**: Slack uses it to decide whether an ambient reply belongs to an existing conversation.
+**Call relations**: Slack participation and interactive handlers call it before deciding whether to admit or route an action.
 
 *Call graph*: calls 1 internal fn (_conversation_lookup); called by 2 (_participating_conversation, interactive); 1 external calls (workspace_tx).
 
 
-##### `SurfaceContext.conversation_agent`  (lines 1504–1517)
+##### `SurfaceContext.conversation_agent`  (lines 2162–2175)
 
 ```
 async def conversation_agent(self, conversation_id: UUID) -> UUID | None
 ```
 
-**Purpose**: Finds which agent a conversation is permanently bound to.
+**Purpose**: Returns the agent permanently bound to a conversation. It helps routes enforce the agent wall before reading content.
 
-**Data flow**: It receives a conversation id, queries this workspace’s conversation row, and returns the agent id or None.
+**Data flow**: It receives a conversation id, queries this workspace’s conversation table, and returns the agent id or `None`.
 
-**Call relations**: The web surface uses it when resolving a chat permalink.
+**Call relations**: The web surface calls it while resolving chat URLs and permissions.
 
 *Call graph*: called by 1 (_resolve_chat); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.retitle_conversation`  (lines 1519–1522)
+##### `SurfaceContext.retitle_conversation`  (lines 2177–2180)
 
 ```
 async def retitle_conversation(self, conversation_id: UUID, title: str) -> None
 ```
 
-**Purpose**: Renames a conversation in this workspace.
+**Purpose**: Renames a conversation in this workspace through the context. It is the surface-facing wrapper around the shared title update helper.
 
-**Data flow**: It receives a conversation id and title, then calls the module-level retitle helper with this workspace id.
+**Data flow**: It receives a conversation id and title, then calls the module-level `retitle_conversation` with this workspace id.
 
-**Call relations**: Slack and web surfaces call it when they learn a better conversation title.
+**Call relations**: Slack and web flows call it when a conversation gains a better displayed name.
 
-*Call graph*: calls 1 internal fn (retitle_conversation); called by 2 (_admit_inbound, _open_conversation).
+*Call graph*: calls 1 internal fn (retitle_conversation); called by 3 (_admit_inbound, submit_intent, _open_conversation).
 
 
-##### `SurfaceContext.conversation_for`  (lines 1524–1618)
+##### `SurfaceContext.conversation_for`  (lines 2182–2276)
 
 ```
 async def conversation_for(self, queue_key: str, audience: Audience, agent_id: UUID | None=None, conversation_id: UUID | None=None, label: str | None=None) -> UUID
 ```
 
-**Purpose**: Gets or creates the conversation for this surface’s queue key. It also narrows audience information and chooses the agent for new conversations.
+**Purpose**: Gets or creates the conversation represented by a surface queue key. It also narrows the conversation’s audience when the surface learns more precise membership.
 
-**Data flow**: It receives queue key, audience, optional agent id, optional conversation id, and optional label. It reuses an existing row if present, narrows audience and updates labels as needed, or inserts a new conversation bound to an agent.
+**Data flow**: It receives queue key, audience, optional agent, optional desired conversation id, and optional label. It finds an existing row, narrows audience or updates label if needed, or inserts a new conversation bound to an agent.
 
-**Call relations**: Almost every surface calls it before admitting a message or prepared intent.
+**Call relations**: All main surface ingest paths call it before admitting a turn, including Slack, iMessage, web, sample, and UFO surfaces.
 
-*Call graph*: calls 2 internal fn (_conversation_lookup, _surface_agent); called by 8 (_admit_message, _surface_ingest, _surface_live_admit, _admit_inbound, interactive, channel, submit_intent, _open_conversation); 9 external calls (insert, select, update, audience_member, narrow_audience, parse_audience, workspace_tx, log, uuid4).
+*Call graph*: calls 2 internal fn (_conversation_lookup, _surface_agent); called by 9 (_admit_message, _surface_ingest, _surface_live_admit, _admit_inbound, interactive, channel, submit_intent, _open_conversation, object_write); 9 external calls (insert, select, update, workspace_tx, log, audience_member, narrow_audience, parse_audience, uuid4).
 
 
-##### `SurfaceContext._surface_agent`  (lines 1620–1632)
+##### `SurfaceContext._surface_agent`  (lines 2278–2290)
 
 ```
 async def _surface_agent(self) -> UUID
 ```
 
-**Purpose**: Finds the agent this surface installation is bound to, falling back to the main agent.
+**Purpose**: Finds the agent a new conversation for this surface should use. It prefers the surface installation binding and falls back to the workspace’s main agent.
 
-**Data flow**: It queries surface_installation for this workspace and surface. If a binding exists it returns that agent id; otherwise it returns the main agent.
+**Data flow**: It queries the surface-installation row for this workspace and surface. If found it returns that agent id; otherwise it calls `_main_agent`.
 
-**Call relations**: conversation_for calls it when creating a conversation without an explicit agent.
+**Call relations**: `conversation_for` calls it when the caller did not explicitly choose an agent.
 
 *Call graph*: calls 1 internal fn (_main_agent); called by 1 (conversation_for); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.ambient_reply_wanted`  (lines 1634–1665)
+##### `SurfaceContext.ambient_reply_wanted`  (lines 2292–2323)
 
 ```
 async def ambient_reply_wanted(self, message: AmbientMessage, history: tuple[AmbientMessage, ...]) -> bool
 ```
 
-**Purpose**: Asks the ambient-reply classifier whether the agent should answer an unaddressed message. It fails open so a possible member request is not silently dropped.
+**Purpose**: Asks the ambient-reply classifier whether the agent should answer an unaddressed message. It fails open so uncertain classifier failures do not silently drop possible member requests.
 
-**Data flow**: It receives the new ambient message and recent history, calls the classifier with a timeout, logs the result, and returns false only for a definite no-reply decision.
+**Data flow**: It receives the current ambient message and recent history, runs the classifier with a short timeout, logs the decision or warning, and returns true unless the classifier clearly says no reply.
 
-**Call relations**: Slack and iMessage use it before admitting ambient channel traffic.
+**Call relations**: Slack and iMessage surfaces call it before admitting ambient channel traffic.
 
 *Call graph*: called by 2 (_admit_message, _ambient_reply_wanted); 3 external calls (wait_for, log, warn).
 
 
-##### `SurfaceContext.admit`  (lines 1667–1698)
+##### `SurfaceContext.admit`  (lines 2325–2358)
 
 ```
-async def admit(self, conversation_id: UUID, body: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None) -> Admitt
+async def admit(self, conversation_id: UUID, body: str, idempotency_key: str | None=None, context: TurnContext | None=None, *, speaker_member_id: UUID | None, intent: ToolIntent | None=None, comment:
 ```
 
-**Purpose**: Submits a member message or prepared intent to the core turn queue. The conversation’s bound agent, not the surface, decides which agent runs.
+**Purpose**: Admits a member message, comment, or prepared intent into the durable turn queue. It is the main surface write path into core.
 
-**Data flow**: It receives conversation id, body, optional idempotency key, context, speaker member id, and optional intent. It passes them to the injected MemberAdmitter and returns the Admitted result.
+**Data flow**: It receives conversation id, body, optional idempotency key, context, speaker id, optional intent, and optional comment. It forwards them to the injected `MemberAdmitter` and returns the resulting `Admitted` record.
 
-**Call relations**: All message-ingesting surfaces call it after resolving identity and conversation.
+**Call relations**: All message-ingest and portal-submit surfaces call it; the underlying admitter owns the database locking and turn-opening rules.
 
-*Call graph*: called by 9 (_admit_message, _surface_ingest, _surface_live_admit, _admit_inbound, interactive, _send, channel, submit_intent, chat).
+*Call graph*: called by 10 (_admit_message, _surface_ingest, _surface_live_admit, _admit_inbound, interactive, _send, channel, submit_intent, chat, object_write).
 
 
-##### `SurfaceContext.connect_url`  (lines 1700–1706)
+##### `SurfaceContext.connect_url`  (lines 2360–2366)
 
 ```
 async def connect_url(self, turn_id: UUID, member_id: UUID) -> str
 ```
 
-**Purpose**: Creates an authorization URL for a terminal connect request as the speaking member.
+**Purpose**: Creates a member-specific provider-connect authorization URL for a terminal connect request. It converts missing connect configuration into a request error.
 
-**Data flow**: It receives turn id and member id, obtains the installed connect flow, and asks ConnectHandoff to authorize the member for that turn.
+**Data flow**: It receives turn and member ids, obtains the installed connect flow, builds a handoff, and returns its authorization URL.
 
-**Call relations**: Slack, iMessage, and web surfaces call it when rendering connect affordances.
+**Call relations**: Slack, iMessage, and web surfaces call it when rendering connect controls.
 
-*Call graph*: called by 3 (_terminal_text, interactive, _events); 3 external calls (__init__, __init__, installed_connect_flow).
+*Call graph*: called by 3 (_terminal_text, interactive, connect_handoff); 3 external calls (__init__, __init__, installed_connect_flow).
 
 
-##### `SurfaceContext.admitted_body`  (lines 1708–1733)
+##### `SurfaceContext.held_accounts`  (lines 2368–2388)
+
+```
+async def held_accounts(self, owner_member_id: UUID) -> dict[str, str]
+```
+
+**Purpose**: Lists the latest connected account labels held by one member, grouped by provider. It helps UI controls show what the member has already connected.
+
+**Data flow**: It receives owner member id, queries that member’s connections ordered by update time, and returns provider-to-label mapping.
+
+**Call relations**: The web surface uses it while building connect controls.
+
+*Call graph*: called by 1 (_connect_controls); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext.connect_available`  (lines 2390–2397)
+
+```
+def connect_available(self) -> bool
+```
+
+**Purpose**: Reports whether the deployment has provider-connect machinery configured. It lets surfaces hide buttons that would lead nowhere.
+
+**Data flow**: It tries to load the installed connect flow and returns false if it is unavailable, true otherwise.
+
+**Call relations**: Web connect-control and event-rendering paths call it before showing provider actions.
+
+*Call graph*: called by 3 (_connect_controls, _events, _provider_label); 1 external calls (installed_connect_flow).
+
+
+##### `SurfaceContext.connect_label`  (lines 2399–2401)
+
+```
+def connect_label(self, provider: str) -> str
+```
+
+**Purpose**: Returns the human-facing label for a connect provider. This keeps labels consistent with the configured connect flow.
+
+**Data flow**: It receives a provider id, asks the installed connect flow for its label, and returns it.
+
+**Call relations**: The web surface calls it when displaying provider names.
+
+*Call graph*: called by 1 (_provider_label); 1 external calls (installed_connect_flow).
+
+
+##### `SurfaceContext.connector_catalog`  (lines 2403–2405)
+
+```
+async def connector_catalog(self, query: str, limit: int, after: str | None) -> CatalogPage
+```
+
+**Purpose**: Reads one page of connectable providers from the connector registry. It supports search and pagination in the portal.
+
+**Data flow**: It receives query text, limit, and cursor, passes them to the connector registry, and returns a catalog page.
+
+**Call relations**: The web connector-catalog route calls it directly.
+
+*Call graph*: called by 1 (connector_catalog).
+
+
+##### `SurfaceContext.admitted_body`  (lines 2407–2432)
 
 ```
 async def admitted_body(self, idempotency_key: str) -> str | None
 ```
 
-**Purpose**: Looks up what body was admitted under an idempotency key. This helps a surface decide whether a raced click or submit was the one that actually landed.
+**Purpose**: Finds the body that was admitted under an idempotency key. It lets a surface confirm which of several racing clicks or retries actually landed.
 
-**Data flow**: It receives an idempotency key, checks matching turn rows first and inbound-message rows second, and returns the stored body or None.
+**Data flow**: It receives an idempotency key, checks turn rows first and inbound-message rows second, and returns the stored body or `None`.
 
-**Call relations**: Slack and web surfaces call it when reconciling idempotent actions.
+**Call relations**: Slack and web handlers call it after interactive or chat submissions.
 
 *Call graph*: called by 3 (_unseen_tail, interactive, chat); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.turn_owner`  (lines 1735–1749)
+##### `SurfaceContext.turn_owner`  (lines 2434–2448)
 
 ```
 async def turn_owner(self, turn_id: UUID) -> UUID | None
 ```
 
-**Purpose**: Finds the member who owns the conversation containing a turn. Live surfaces use this to prevent one member from tailing another member’s turn.
+**Purpose**: Finds the member who owns the conversation containing a turn. Live surfaces use this to stop one member from tailing another member’s turn.
 
-**Data flow**: It receives a turn id, joins turn to conversation in this workspace, and returns the conversation member id or None.
+**Data flow**: It receives a turn id, joins turn to conversation in this workspace, and returns the conversation member id or `None`.
 
-**Call relations**: Web and sample surfaces call it before live turn access.
+**Call relations**: Sample and web live-turn code call it before opening a stream.
 
 *Call graph*: called by 2 (_surface_live_admit, _member_turn); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.stop_turn`  (lines 1751–1757)
+##### `SurfaceContext.stop_turn`  (lines 2450–2456)
 
 ```
 async def stop_turn(self, conversation_id: UUID, turn_id: UUID) -> Stopped
 ```
 
-**Purpose**: Stops a running turn in an already-authorized conversation.
+**Purpose**: Asks core to stop a running turn in an authorized conversation. It reports whether the call actually ended the turn and whether a follow-up turn began.
 
-**Data flow**: It receives conversation id and turn id, passes workspace, conversation, and turn to the injected stopper, and returns the Stopped result.
+**Data flow**: It receives conversation and turn ids, adds the context workspace id, delegates to the injected `TurnStopper`, and returns `Stopped`.
 
-**Call relations**: Web and UFO surfaces call it when a member presses stop.
+**Call relations**: UFO and web chat surfaces call it for user stop requests.
 
 *Call graph*: called by 2 (channel, chat).
 
 
-##### `SurfaceContext.retract_arrival`  (lines 1759–1777)
+##### `SurfaceContext.retract_arrival`  (lines 2458–2476)
 
 ```
 async def retract_arrival(self, conversation_id: UUID, arrival_id: UUID, member_id: UUID) -> bool
 ```
 
-**Purpose**: Deletes a pending message that the member sent but no turn has consumed yet.
+**Purpose**: Deletes a pending message that a member sent but no turn has consumed yet. It only retracts that member’s own unconsumed message.
 
-**Data flow**: It receives conversation id, arrival id, and member id. It deletes the inbound_message row only if it belongs to that member and is unconsumed, then returns whether a row was removed.
+**Data flow**: It receives conversation, arrival, and member ids. It deletes a matching unconsumed inbound-message row and returns true only if one row was removed.
 
 **Call relations**: The UFO surface calls it for unsend behavior.
 
 *Call graph*: called by 1 (_unsend); 2 external calls (delete, workspace_tx).
 
 
-##### `SurfaceContext.turn_is_terminal`  (lines 1779–1796)
+##### `SurfaceContext.turn_is_terminal`  (lines 2478–2495)
 
 ```
 async def turn_is_terminal(self, turn_id: UUID) -> bool
 ```
 
-**Purpose**: Checks whether a turn has reached a terminal database state. Missing turns count as terminal because there is nothing to keep reporting.
+**Purpose**: Checks whether a turn has ended by reading durable state rather than live hub state. This prevents progress notices from appearing after the final answer.
 
-**Data flow**: It receives a turn id, reads its status, and returns true if missing or done, failed, or cancelled.
+**Data flow**: It receives a turn id, reads its status, and returns true if missing or in a terminal status.
 
-**Call relations**: Side-channel reporters can use it to avoid posting progress after a final answer.
+**Call relations**: The UFO surface calls it before posting side-channel updates.
 
-*Call graph*: 2 external calls (select, workspace_tx).
+*Call graph*: called by 1 (channel); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.latest_turn`  (lines 1798–1815)
+##### `SurfaceContext.latest_turn`  (lines 2497–2514)
 
 ```
 async def latest_turn(self, conversation_id: UUID) -> UUID | None
 ```
 
-**Purpose**: Finds the newest turn in a conversation.
+**Purpose**: Returns the most recently admitted turn in a conversation. This helps reconnecting surfaces resume the right stream or render the latest handoffs.
 
-**Data flow**: It receives a conversation id, queries turns in descending sequence order, and returns the latest turn id or None.
+**Data flow**: It receives a conversation id, queries turns in descending sequence order, and returns the newest turn id or `None`.
 
-**Call relations**: Slack, web, and UFO surfaces use it when resuming or rendering a conversation.
+**Call relations**: Slack, UFO, and web surfaces call it during conversation resolution and reloads.
 
 *Call graph*: called by 4 (_participating_conversation, channel, _conversation_messages, _resolve_chat); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.absorbing_turn`  (lines 1817–1861)
+##### `SurfaceContext.absorbing_turn`  (lines 2516–2560)
 
 ```
 async def absorbing_turn(self, conversation_id: UUID) -> UUID | None
 ```
 
-**Purpose**: Checks whether a new message would fold into an already-running turn. It also verifies spend and balance gates so it does not promise a fold that admission would refuse.
+**Purpose**: Predicts whether a new message would fold into an existing live turn. It includes spend and balance gates so the prediction matches admission behavior.
 
-**Data flow**: It receives a conversation id, finds the oldest nonterminal turn, rejects parked turns, evaluates spend and balance, and returns the live turn id only if both gates allow.
+**Data flow**: It receives a conversation id, finds the oldest non-terminal turn, rejects parked turns, evaluates spend cap and balance, and returns the live turn id only if admission would be allowed.
 
-**Call relations**: Slack calls it before deciding whether ambient classification applies.
+**Call relations**: Slack calls it before deciding whether ambient reply classification applies.
 
 *Call graph*: called by 1 (_folds_into_live_turn); 4 external calls (__init__, __init__, select, workspace_tx).
 
 
-##### `SurfaceContext.tail`  (lines 1863–1869)
+##### `SurfaceContext.tail`  (lines 2562–2568)
 
 ```
 def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
 ```
 
-**Purpose**: Opens a live stream of frames for a turn.
+**Purpose**: Opens a live stream of frames for a turn. It is the surface-facing route to the hub without exposing the hub directly.
 
-**Data flow**: It receives a turn id and optional cursor, delegates to the injected TurnTailer, and returns an async context manager over frames.
+**Data flow**: It receives a turn id and optional cursor, delegates to the injected tailer, and returns an async context manager that yields live frames.
 
-**Call relations**: Web, debugger, sample, panels, and UFO surfaces call it to stream live updates.
+**Call relations**: Debugger, sample, UFO, and web surfaces call it for server-sent events and live updates.
 
-*Call graph*: called by 5 (_events, _surface_frames, channel, submit_intent, _events).
+*Call graph*: called by 6 (_events, _surface_frames, channel, submit_intent, _events, object_write).
 
 
-##### `SurfaceContext.spend_rollup`  (lines 1871–1874)
+##### `SurfaceContext.latest_activity`  (lines 2570–2574)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: Peeks at the newest retained live activity for a turn. It is cheaper than opening a full tail.
+
+**Data flow**: It receives a turn id, delegates to the injected tailer, and returns an activity frame or `None`.
+
+**Call relations**: The web agents-status route calls it after `agent_turn_statuses` identifies running turns.
+
+*Call graph*: called by 1 (agents_status).
+
+
+##### `SurfaceContext.spend_rollup`  (lines 2576–2579)
 
 ```
 async def spend_rollup(self, window_seconds: int | None) -> SpendReport
 ```
 
-**Purpose**: Reads workspace-wide usage and spending for a time window or all time.
+**Purpose**: Reads workspace-wide usage and cost over a selected time window. This supports billing and usage views.
 
-**Data flow**: It receives an optional window length, opens a workspace transaction, and returns SpendRollup’s report.
+**Data flow**: It receives an optional window length, opens a workspace transaction, asks `SpendRollup` to read totals, and returns a spend report.
 
-**Call relations**: Web usage pages and sample code call it for usage display.
+**Call relations**: Sample and web workspace-usage routes call it.
 
 *Call graph*: called by 2 (_surface_live_admit, workspace_usage); 2 external calls (__init__, workspace_tx).
 
 
-##### `SurfaceContext.write_workspace_file`  (lines 1876–1891)
+##### `SurfaceContext.write_workspace_file`  (lines 2581–2596)
 
 ```
 async def write_workspace_file(self, conversation_id: UUID, rel: str, chunks: AsyncIterator[bytes]) -> None
 ```
 
-**Purpose**: Writes an uploaded file into a conversation’s sandbox workspace before a turn runs.
+**Purpose**: Writes an uploaded or downloaded file into a conversation’s workspace before the turn runs. It enforces a maximum size while reading the stream.
 
-**Data flow**: It receives conversation id, relative path, and byte chunks. It accumulates chunks up to a maximum size, rejects oversized uploads, and writes the bytes through the sandbox carrier.
+**Data flow**: It receives conversation id, relative path, and byte chunks. It accumulates chunks up to the limit, raises if too large, and writes the final bytes through the sandbox carrier.
 
-**Call relations**: Slack, iMessage, web, and sample surfaces use it to deliver member attachments.
+**Call relations**: Slack, iMessage, sample, and web upload paths call it before admitting the message that references the file.
 
 *Call graph*: called by 4 (_downloaded_files, _surface_ingest, _download_files, _deliver_uploads).
 
 
-##### `SurfaceContext.render_preview`  (lines 1893–1921)
+##### `SurfaceContext.render_preview`  (lines 2598–2626)
 
 ```
 async def render_preview(self, kind: str, data: bytes) -> bytes | None
 ```
 
-**Purpose**: Asks an external preview service to turn uploaded document bytes into a small PNG preview. If previewing is unavailable or fails, composing can continue without a preview.
+**Purpose**: Asks an external preview service to render an uploaded document into a PNG thumbnail. If previewing is unavailable or fails, the surface can still show a plain file card.
 
-**Data flow**: It receives a kind and bytes, sends them with render options to the preview service, and returns PNG bytes only on a successful image/png response.
+**Data flow**: It receives a kind and file bytes. If preview service settings exist, it posts the file and render request, checks for a PNG response, and returns image bytes or `None`.
 
-**Call relations**: The web surface calls it for upload previews.
+**Call relations**: The web preview route calls it while a member is composing an upload.
 
 *Call graph*: called by 1 (preview); 2 external calls (AsyncClient, dumps).
 
 
-##### `SurfaceContext.list_agents`  (lines 1923–1955)
+##### `SurfaceContext.list_agents`  (lines 2628–2667)
 
 ```
 async def list_agents(self) -> tuple[AgentSummary, ...]
 ```
 
-**Purpose**: Lists all agents in the workspace, main agent first. Surfaces can then apply their own audience rules before showing choices.
+**Purpose**: Lists active agents in the workspace, main agent first. Surfaces use it for agent pickers and portal views.
 
-**Data flow**: It queries agent rows for this workspace, converts them to AgentSummary objects, and returns them.
+**Data flow**: It queries non-archived agent rows for this workspace, orders them, and returns `AgentSummary` objects.
 
-**Call relations**: Web and sites surfaces call it for agent selectors and related views.
+**Call relations**: Sites and web surfaces call it for frames, audience decisions, and app lists.
 
-*Call graph*: called by 4 (frame, web_audience, _created_apps, _subagent_nodes); 3 external calls (__init__, select, workspace_tx).
+*Call graph*: called by 5 (_shipped_frame, frame, web_audience, _created_apps, _subagent_nodes); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `SurfaceContext.member_extension_agent_ids`  (lines 1957–1972)
+##### `SurfaceContext.list_archived_agents`  (lines 2669–2698)
+
+```
+async def list_archived_agents(self) -> tuple[ArchivedAgent, ...]
+```
+
+**Purpose**: Lists archived agents so the portal can offer restore or history views. It uses archived display names when present.
+
+**Data flow**: It queries archived agent rows, orders most recently archived first, and returns `ArchivedAgent` objects.
+
+**Call relations**: The web agents index calls it.
+
+*Call graph*: called by 1 (agents_index); 3 external calls (__init__, select, workspace_tx).
+
+
+##### `SurfaceContext.member_extension_agent_ids`  (lines 2700–2715)
 
 ```
 async def member_extension_agent_ids(self, member_id: UUID) -> frozenset[UUID]
 ```
 
-**Purpose**: Finds agents that have private extension conversations for a member.
+**Purpose**: Finds agents that have private extension conversations for a member. This helps web audience logic decide what agents the member can see through extension activity.
 
-**Data flow**: It receives a member id, queries distinct agent ids from extension-surface private conversations, and returns them as a frozenset.
+**Data flow**: It receives a member id, queries distinct agent ids from private extension-surface conversations for that member, and returns a frozen set.
 
-**Call relations**: The web audience code uses it when deciding which agents a member can see.
+**Call relations**: The web audience helper calls it while computing visible agents.
 
-*Call graph*: called by 1 (web_audience); 3 external calls (select, conversation_audience, workspace_tx).
+*Call graph*: called by 1 (web_audience); 3 external calls (select, workspace_tx, conversation_audience).
 
 
-##### `SurfaceContext.agent_detail`  (lines 1974–2030)
+##### `SurfaceContext.agent_detail`  (lines 2717–2778)
 
 ```
-async def agent_detail(self, agent_id: UUID) -> AgentDetail | None
+async def agent_detail(self, agent_id: UUID, member_id: UUID) -> AgentDetail | None
 ```
 
-**Purpose**: Reads the full editable/detail view of one agent, including prompt digest, bound surfaces, and pending setup needs.
+**Purpose**: Reads one agent’s full settings for the portal. It includes prompt digest, bound surfaces, and setup work still missing for the requesting member.
 
-**Data flow**: It receives an agent id, queries the agent row and its installations, computes the prompt digest, looks up pending setup, and returns AgentDetail or None.
+**Data flow**: It receives agent and member ids, queries the agent row and installation surfaces, reads pending setup, and returns `AgentDetail` or `None`.
 
-**Call relations**: Web panels call it for agent settings and intent submission.
+**Call relations**: Web panel routes call it for agent settings and submit flows.
 
-*Call graph*: called by 2 (agent_settings, submit_intent); 5 external calls (__init__, select, pending_setup, workspace_tx, prompt_digest).
+*Call graph*: called by 2 (agent_settings, submit_intent); 5 external calls (__init__, select, workspace_tx, pending_setup, prompt_digest).
 
 
-##### `SurfaceContext.object_kind`  (lines 2032–2044)
+##### `SurfaceContext.object_kind`  (lines 2780–2792)
 
 ```
 def object_kind(self, kind: str) -> 'PortalKind | None'
 ```
 
-**Purpose**: Returns portal metadata for a registered object kind, such as listable fields and form schema.
+**Purpose**: Returns portal metadata for a registered object kind. This tells the UI which fields can be filtered or ordered and which schema to render.
 
-**Data flow**: It receives a kind name, looks up the bound object kind, and returns PortalKind or None.
+**Data flow**: It receives a kind name, looks it up in the bound object registry, and returns a `PortalKind` or `None`.
 
-**Call relations**: The web surface calls it before serving object pages.
+**Call relations**: Web object routes call it before listing, showing, or writing object records.
 
-*Call graph*: called by 1 (_object_gate); 1 external calls (__init__).
+*Call graph*: called by 2 (_object_gate, object_write); 1 external calls (__init__).
 
 
-##### `SurfaceContext.agent_skills`  (lines 2046–2064)
+##### `SurfaceContext.agent_skills`  (lines 2794–2833)
 
 ```
 async def agent_skills(self, agent_id: UUID) -> tuple[PortalSkill, ...]
 ```
 
-**Purpose**: Lists the skills a selected agent would load, combining deploy skills and member-authored skills.
+**Purpose**: Lists deploy-provided and member-authored skills available to an agent. Member skills that try to shadow deploy skills are skipped.
 
-**Data flow**: It receives an agent id, binds that agent scope, merges skill registries, labels each top-level skill as deploy or member origin, and returns PortalSkill records.
+**Data flow**: It receives an agent id, reads member skills inside that agent scope, filters shadowed names, and returns `PortalSkill` objects for deploy then member skills.
 
-**Call relations**: The web surface calls it for the skills page.
+**Call relations**: The web skills route calls it to render skill inventory.
 
-*Call graph*: called by 1 (skills); 2 external calls (__init__, agent).
+*Call graph*: called by 1 (skills); 3 external calls (__init__, agent, log).
 
 
-##### `SurfaceContext.memory_available`  (lines 2067–2071)
+##### `SurfaceContext.model`  (lines 2836–2840)
+
+```
+def model(self) -> 'SurfaceModel | None'
+```
+
+**Purpose**: Returns the optional model access object available to surface routes. Surfaces must handle `None` because a deploy may omit it.
+
+**Data flow**: It returns the stored `SurfaceModel` or `None`.
+
+**Call relations**: Surface handlers use this property before making surface-side model calls.
+
+
+##### `SurfaceContext.memory_available`  (lines 2843–2847)
 
 ```
 def memory_available(self) -> bool
 ```
 
-**Purpose**: Reports whether a memory-search provider is installed.
+**Purpose**: Reports whether a memory-search provider is installed. UI code uses this to hide memory features on deployments without memory.
 
 **Data flow**: It checks whether the context has a memory provider and returns a boolean.
 
-**Call relations**: Surfaces use it as a gate before offering memory search or browse.
+**Call relations**: Web memory routes gate calls to `search_memory`, `recent_memory`, and memory metadata with this property.
 
 
-##### `SurfaceContext.search_memory`  (lines 2073–2083)
+##### `SurfaceContext.search_memory`  (lines 2849–2859)
 
 ```
 async def search_memory(self, reader: 'SourceReader', queries: tuple[str, ...]) -> 'tuple[MemoryMatch, ...]'
 ```
 
-**Purpose**: Searches memory items visible to a reader. It deliberately errors if no memory provider is installed so callers must gate first.
+**Purpose**: Searches memory items visible to a source reader. It uses the same reader shape as turn tools so portal and agent reads match.
 
-**Data flow**: It receives a source reader and query strings, checks provider availability, delegates to the memory provider, and returns matches.
+**Data flow**: It receives a source reader and queries. It raises if no memory provider exists, otherwise delegates search and returns matches.
 
-**Call relations**: The web surface calls it for workspace memory search.
+**Call relations**: The web workspace-memory route calls it after checking `memory_available`.
 
 *Call graph*: called by 1 (workspace_memory).
 
 
-##### `SurfaceContext.recent_memory`  (lines 2085–2098)
+##### `SurfaceContext.recent_memory`  (lines 2861–2874)
 
 ```
 async def recent_memory(self, subjects: frozenset[str], limit: int, kinds: 'frozenset[str] | None'=None, cursor: 'ListingCursor | None'=None) -> 'ListingPage[MemoryMatch]'
 ```
 
-**Purpose**: Lists recent memory items for readable subjects, optionally filtered by kind and paged by cursor.
+**Purpose**: Lists recent memory items for readable subjects without a search query. It supports paged browsing and optional kind filtering.
 
-**Data flow**: It receives subjects, limit, optional kinds, and cursor, checks provider availability, delegates to list_recent, and returns a listing page.
+**Data flow**: It receives subjects, limit, optional kinds, and optional cursor. It raises if memory is unavailable, otherwise delegates to the provider and returns a listing page.
 
-**Call relations**: The web surface calls it for memory browsing.
+**Call relations**: Web memory and recall views call it after gating on memory availability.
 
-*Call graph*: called by 1 (workspace_memory).
+*Call graph*: called by 2 (_recalled, workspace_memory).
 
 
-##### `SurfaceContext.memory_kinds`  (lines 2101–2106)
+##### `SurfaceContext.memory_kinds`  (lines 2877–2882)
 
 ```
 def memory_kinds(self) -> tuple[str, ...]
 ```
 
-**Purpose**: Returns the filterable memory item classes supported by the installed provider.
+**Purpose**: Returns the memory item kinds that the installed provider can list. This supplies the portal’s filter choices.
 
-**Data flow**: It checks that memory exists, asks the provider for listable kinds, and returns them.
+**Data flow**: It raises if no memory provider exists, otherwise returns the provider’s listable kinds.
 
-**Call relations**: Portal memory views use it to build filters.
+**Call relations**: Web memory UI reads it alongside recent-memory pages.
 
 
-##### `SurfaceContext.agent_spend`  (lines 2108–2113)
+##### `SurfaceContext.memory_body_max_chars`  (lines 2885–2891)
+
+```
+def memory_body_max_chars(self) -> int
+```
+
+**Purpose**: Returns the maximum body length the memory provider stores. Forms use it to stop users before submission rather than after.
+
+**Data flow**: It raises if memory is unavailable, otherwise returns the provider’s body-length limit.
+
+**Call relations**: Portal memory forms read it when enforcing client-side limits.
+
+
+##### `SurfaceContext.agent_spend`  (lines 2893–2898)
 
 ```
 async def agent_spend(self, agent_id: UUID, window_seconds: int | None) -> AgentSpendReport
 ```
 
-**Purpose**: Reads usage and spending for one agent.
+**Purpose**: Reads usage and caps for one agent over a time window. It supports agent-level billing views.
 
-**Data flow**: It receives an agent id and optional time window, opens a transaction, and returns the agent spend report.
+**Data flow**: It receives agent id and optional window, opens a transaction, asks `SpendRollup` for the agent report, and returns it.
 
-**Call relations**: Administration or usage views can call it when showing agent-level costs.
+**Call relations**: Administration or agent usage surfaces can call it when showing per-agent costs.
 
 *Call graph*: 2 external calls (__init__, workspace_tx).
 
 
-##### `SurfaceContext.member_spend`  (lines 2115–2120)
+##### `SurfaceContext.member_spend`  (lines 2900–2905)
 
 ```
 async def member_spend(self, member_id: UUID, window_seconds: int | None) -> MemberSpendReport
 ```
 
-**Purpose**: Reads usage and spending for one member.
+**Purpose**: Reads usage and caps for one member over a time window. It supports member-level billing views.
 
-**Data flow**: It receives a member id and optional time window, opens a transaction, and returns the member spend report.
+**Data flow**: It receives member id and optional window, opens a transaction, asks `SpendRollup` for the member report, and returns it.
 
-**Call relations**: The web usage view calls it for member-specific usage.
+**Call relations**: The web workspace-usage route calls it for the signed-in member’s usage.
 
 *Call graph*: called by 1 (workspace_usage); 2 external calls (__init__, workspace_tx).
 
 
-##### `SurfaceContext.list_agent_connections`  (lines 2122–2174)
+##### `SurfaceContext.list_agent_connections`  (lines 2907–2959)
 
 ```
 async def list_agent_connections(self, agent_id: UUID, member_id: UUID, *, admin: bool) -> tuple[ConnectionView, ...]
 ```
 
-**Purpose**: Lists connector accounts granted to one agent that the viewer may see.
+**Purpose**: Lists connector accounts granted to one agent that the viewer may see. It respects private versus shared grants.
 
-**Data flow**: It receives agent id, member id, and admin flag. It queries grant and connection rows, applies visibility rules, and returns ConnectionView records.
+**Data flow**: It receives agent id, member id, and admin flag. It queries grants joined to connections and owners, filters visibility for non-admins, and returns `ConnectionView` objects.
 
-**Call relations**: The web connections page calls it.
+**Call relations**: The web connections route calls it for an agent’s connection panel.
 
-*Call graph*: called by 1 (connections); 5 external calls (__init__, or_, select, workspace_tx, account_object_name).
+*Call graph*: called by 1 (connections); 5 external calls (__init__, or_, select, account_object_name, workspace_tx).
 
 
-##### `SurfaceContext.list_connections`  (lines 2176–2245)
+##### `SurfaceContext.list_connections`  (lines 2961–3043)
 
 ```
 async def list_connections(self, member_id: UUID, *, admin: bool) -> tuple[ConnectionPoolView, ...]
 ```
 
-**Purpose**: Lists visible connector accounts across the workspace, grouped with the agents attached to each.
+**Purpose**: Lists workspace connection accounts and the live agents attached to each. It is the connection-library view.
 
-**Data flow**: It receives member id and admin flag, queries connections and optional grants, filters non-admin visibility, groups agent rows per account, and returns ConnectionPoolView records.
+**Data flow**: It receives member id and admin flag, queries connections with visible owners and non-archived attached agents, groups rows by account, and returns `ConnectionPoolView` objects.
 
-**Call relations**: The web connection pool view calls it.
+**Call relations**: The web provider and connection-pool routes call it.
 
-*Call graph*: called by 1 (connection_pool); 6 external calls (__init__, __init__, or_, select, workspace_tx, account_object_name).
+*Call graph*: called by 2 (_held_providers, connection_pool); 7 external calls (__init__, __init__, and_, or_, select, account_object_name, workspace_tx).
 
 
-##### `SurfaceContext.github_coverage`  (lines 2247–2295)
+##### `SurfaceContext.github_coverage`  (lines 3045–3093)
 
 ```
 async def github_coverage(self, member_id: UUID, *, admin: bool) -> GithubCoverageView
 ```
 
-**Purpose**: Reports which GitHub integration pieces are present and visible: API connection, git-push credential, and sources.
+**Purpose**: Reports whether GitHub is configured through API connections, git-push credentials, and sources. It helps onboarding show what remains to set up.
 
-**Data flow**: It receives member id and admin flag, builds visibility conditions, checks existence of GitHub connections and sources, checks credential slots, and returns GithubCoverageView.
+**Data flow**: It receives member id and admin flag, checks visible GitHub connections, visible GitHub sources, and filled GitHub credential slots, then returns booleans.
 
-**Call relations**: The web surface calls it for GitHub integration status.
+**Call relations**: Web first-run, held-provider, and GitHub-coverage routes call it.
 
-*Call graph*: called by 1 (github_coverage); 6 external calls (__init__, exists, or_, select, true, workspace_tx).
+*Call graph*: called by 3 (_held_providers, github_coverage, workspace_first_run); 6 external calls (__init__, exists, or_, select, true, workspace_tx).
 
 
-##### `SurfaceContext.list_artifacts`  (lines 2297–2402)
+##### `SurfaceContext.recent_object_changes`  (lines 3095–3134)
 
 ```
-async def list_artifacts(self, member_id: UUID, *, admin: bool, limit: int, cursor: 'ListingCursor | None'=None, q: str | None=None, media: str | None=None, scope: str | None=None) -> 'ListingPage[Lis
+async def recent_object_changes(self, limit: int) -> tuple[ObjectChange, ...]
 ```
 
-**Purpose**: Returns a paged list of shared files visible to a member or admin, with optional search, media, and scope filters.
+**Purpose**: Reads the newest object-change audit records in the workspace. It is meant for admin audit screens.
 
-**Data flow**: It receives viewer information, pagination, and filters. It builds a query over shared artifacts and conversations, applies visibility, gets sources, wraps rows as ListedArtifact, and returns a listing page.
+**Data flow**: It receives a limit, queries object-change rows newest first, normalizes timestamps, and returns `ObjectChange` records.
 
-**Call relations**: The web workspace artifacts page calls it; it uses _media_predicate and _conversation_sources.
+**Call relations**: The web object-changes route calls it after doing its own admin gate.
 
-*Call graph*: calls 2 internal fn (_conversation_sources, _media_predicate); called by 1 (workspace_artifacts); 6 external calls (or_, select, readable_audiences, workspace_tx, page_of, page_query).
+*Call graph*: called by 1 (object_changes); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `SurfaceContext.list_conversation_artifacts`  (lines 2404–2470)
+##### `SurfaceContext.list_conversation_artifacts`  (lines 3136–3205)
 
 ```
 async def list_conversation_artifacts(self, conversation_id: UUID, *, limit: int) -> tuple[ListedArtifact, ...]
 ```
 
-**Purpose**: Lists recent shared files for one conversation.
+**Purpose**: Lists the newest files shared in one conversation. Authorization is expected to happen before this read.
 
-**Data flow**: It receives a conversation id and limit, queries newest matching artifacts in this workspace, gets the conversation source, and returns ListedArtifact records.
+**Data flow**: It receives conversation id and limit, queries shared artifacts joined to turn and conversation metadata, resolves the conversation source, and returns `ListedArtifact` objects.
 
-**Call relations**: The web surface uses it for transcript aids and slot context.
+**Call relations**: Web transcript-aid and slot-context code calls it when building conversation file views.
 
-*Call graph*: calls 1 internal fn (_conversation_sources); called by 2 (_project_slot_context, _transcript_aids); 4 external calls (__init__, __init__, select, workspace_tx).
-
-
-##### `SurfaceContext.list_scheduled_runs`  (lines 2472–2556)
-
-```
-async def list_scheduled_runs(self, member_id: UUID, *, limit: int, cursor: 'ListingCursor | None'=None, agent_id: UUID | None=None) -> 'ListingPage[ScheduledRun]'
-```
-
-**Purpose**: Returns a paged feed of completed scheduled runs that the member may read. Successful runs only appear when they shared a file; failures appear because the failure is itself useful output.
-
-**Data flow**: It receives member id, limit, cursor, and optional agent id. It builds the scheduled-run query, pages it, loads files for those turns, reads sources, and returns ScheduledRun entries.
-
-**Call relations**: The web radar page calls it; it shares query construction with count_scheduled_runs_since.
-
-*Call graph*: calls 2 internal fn (_conversation_sources, _scheduled_runs); called by 1 (workspace_radar); 5 external calls (__init__, select, workspace_tx, page_of, page_query).
+*Call graph*: called by 2 (_project_slot_context, _transcript_aids); 5 external calls (__init__, __init__, __init__, select, workspace_tx).
 
 
-##### `SurfaceContext.count_scheduled_runs_since`  (lines 2558–2575)
+##### `SurfaceContext.agent_turn_statuses`  (lines 3207–3335)
 
 ```
-async def count_scheduled_runs_since(self, member_id: UUID, since: datetime, *, agent_id: UUID | None=None) -> int
+async def agent_turn_statuses(self, agent_ids: Sequence[UUID], member_id: UUID) -> tuple[AgentTurnStatus, ...]
 ```
 
-**Purpose**: Counts scheduled-run feed rows at or after a given time under the same visibility rules as the feed.
+**Purpose**: Summarizes live and recent turn status for several agents, limited to conversations the member can read. It powers polling status cards.
 
-**Data flow**: It receives member id, since datetime, and optional agent id. It builds the scheduled-run query, changes it to a count, applies the time bound, and returns the integer count.
+**Data flow**: It receives agent ids and member id. It finds each agent’s liveest non-terminal readable turn, newest readable activity time, and whether the latest terminal readable turn failed, then returns statuses in input order.
 
-**Call relations**: The web radar page uses it to size recent windows.
+**Call relations**: The web agents-status route calls it, then may use `latest_activity` for running turns.
 
-*Call graph*: calls 1 internal fn (_scheduled_runs); called by 1 (workspace_radar); 1 external calls (workspace_tx).
+*Call graph*: called by 1 (agents_status); 5 external calls (__init__, case, select, workspace_tx, readable_audiences).
 
 
-##### `SurfaceContext._scheduled_runs`  (lines 2577–2611)
+##### `SurfaceContext.agent_setup`  (lines 3337–3376)
 
 ```
-def _scheduled_runs(self, member_id: UUID, agent_id: UUID | None) -> sa.Select[Any]
+async def agent_setup(self, agent_id: UUID, member_id: UUID) -> SetupState
 ```
 
-**Purpose**: Builds the shared SQL query for scheduled-run feed rows.
+**Purpose**: Computes what an agent still needs before it is ready, such as accounts, credentials, or standing orders. It is member-aware for private grants.
 
-**Data flow**: It receives member id and optional agent id, creates conditions for scheduled terminal turns, readable audiences, failures or reported successes, and returns the select.
+**Data flow**: It receives agent and member ids, defines an `armed` helper for extension-owned orders, enters workspace scope, and asks setup-state logic for the result.
 
-**Call relations**: list_scheduled_runs and count_scheduled_runs_since both call it.
+**Call relations**: Web agent-setup and workspace-starters routes call it; its nested `armed` helper reads objects through this same context.
 
-*Call graph*: called by 2 (count_scheduled_runs_since, list_scheduled_runs); 3 external calls (or_, select, readable_audiences).
+*Call graph*: called by 2 (agent_setup, workspace_starters); 2 external calls (setup_state, ws).
 
 
-##### `SurfaceContext.list_member_objects`  (lines 2613–2639)
+##### `SurfaceContext.agent_setup.armed`  (lines 3359–3373)
+
+```
+async def armed(kind: str, name: str | None) -> ArmedOrder
+```
+
+**Purpose**: Checks whether a required standing order exists for an agent setup step. It can check either one named object or whether any objects of a kind exist.
+
+**Data flow**: It receives an object kind and optional name. It reads that exact object or a page of objects, extracts a schedule when present, and returns an `ArmedOrder`.
+
+**Call relations**: `SurfaceContext.agent_setup` passes this helper into setup-state logic.
+
+*Call graph*: calls 2 internal fn (list_member_objects, member_object); 2 external calls (__init__, __init__).
+
+
+##### `SurfaceContext.list_member_objects`  (lines 3378–3404)
 
 ```
 async def list_member_objects(self, kind: str, agent_id: UUID, member_id: UUID, *, admin: bool, query: 'ObjectListQuery') -> 'ObjectPage | None'
 ```
 
-**Purpose**: Lists one registered object kind for a signed-in member, using the object kind’s own visibility rules.
+**Purpose**: Lists object records of one kind as a signed-in member. It uses the object kind’s own member-list visibility rules.
 
-**Data flow**: It receives kind, agent id, member id, admin flag, and query. It finds the bound kind, verifies it is member-listable, binds the agent, stamps supported fields into the query, and delegates to the store.
+**Data flow**: It receives kind, agent, member, admin flag, and query. It checks registry support, stamps supported fields onto the query, enters agent scope, and returns an object page or `None`.
 
-**Call relations**: The web surface calls it for object indexes, homepage data, and radar task names.
+**Call relations**: Web object indexes and setup checks call it.
 
-*Call graph*: called by 3 (_radar_task_names, homepage, object_index); 2 external calls (replace, agent).
+*Call graph*: called by 4 (armed, _has_own_page, _homepage_state, object_index); 2 external calls (replace, agent).
 
 
-##### `SurfaceContext.member_object`  (lines 2641–2656)
+##### `SurfaceContext.member_object`  (lines 3406–3421)
 
 ```
 async def member_object(self, kind: str, name: str, agent_id: UUID, member_id: UUID, *, admin: bool) -> 'MemberObject | None'
 ```
 
-**Purpose**: Reads one object detail for a signed-in member, hiding missing and unauthorized rows the same way.
+**Purpose**: Reads one object record as a signed-in member. Hidden and absent rows both return `None`.
 
-**Data flow**: It receives kind, object name, agent id, member id, and admin flag. It checks the bound kind is member-readable, binds the agent, delegates to the store, and returns the object or None.
+**Data flow**: It receives kind, name, agent, member, and admin flag. It verifies the kind supports member detail reads, enters agent scope, and delegates to the store.
 
-**Call relations**: The web object detail route calls it.
+**Call relations**: Web object detail routes and setup checks call it.
 
-*Call graph*: called by 1 (object_detail); 1 external calls (agent).
+*Call graph*: called by 2 (armed, object_detail); 1 external calls (agent).
 
 
-##### `SurfaceContext.list_conversation_member_objects`  (lines 2658–2680)
+##### `SurfaceContext.list_conversation_member_objects`  (lines 3423–3445)
 
 ```
 async def list_conversation_member_objects(self, kind: str, agent_id: UUID, conversation_id: UUID, member_id: UUID, *, admin: bool, limit: int) -> tuple['ConversationObjectGrant', ...] | None
 ```
 
-**Purpose**: Lists object grants or rows tied to a conversation for a member-visible object kind.
+**Purpose**: Lists object grants related to one conversation for a member. It supports conversation-aware portal panels.
 
-**Data flow**: It receives kind, agent id, conversation id, member id, admin flag, and limit. It verifies the bound kind supports conversation-member listing, binds the agent, delegates to the store, and returns rows or None.
+**Data flow**: It receives kind, agent, conversation, member, admin flag, and limit. It checks whether the kind supports conversation-member listing, enters agent scope, and returns grants or `None`.
 
-**Call relations**: The web surface uses it while projecting conversation slot context.
+**Call relations**: The web slot-context projection calls it when adding conversation object rows.
 
 *Call graph*: called by 1 (_project_slot_context); 1 external calls (agent).
 
 
-##### `SurfaceContext.list_credential_slots`  (lines 2682–2713)
+##### `SurfaceContext.list_credential_slots`  (lines 3447–3478)
 
 ```
 async def list_credential_slots(self) -> tuple[CredentialSlotView, ...]
 ```
 
-**Purpose**: Lists member-fillable credential slots and whether each has a stored value, never the secret value itself.
+**Purpose**: Lists member-fillable credential slots and whether each is filled, never the secret values. It hides deploy-written machinery slots.
 
-**Data flow**: It reads filled slots from the database, maps declared slots to object names, filters to member-fillable slots, and returns CredentialSlotView records.
+**Data flow**: It queries filled credential slots, maps declared slots to object names, filters to member-fillable declarations, and returns `CredentialSlotView` records.
 
-**Call relations**: The web credentials page and credential-related panel submits call it.
+**Call relations**: Web credential pages and submit-intent panels call it.
 
 *Call graph*: called by 2 (submit_intent, workspace_credentials); 4 external calls (__init__, select, named_slots, workspace_tx).
 
 
-##### `SurfaceContext.workspace_domain`  (lines 2715–2721)
+##### `SurfaceContext.workspace_domain`  (lines 3480–3486)
 
 ```
 async def workspace_domain(self) -> str | None
 ```
 
-**Purpose**: Returns the workspace’s own email domain, if one can be derived.
+**Purpose**: Returns the workspace’s own email domain. This is used for trusted first-contact joining and operator-workspace checks.
 
-**Data flow**: It opens a workspace transaction, asks the seats helper for the domain, and returns it or None.
+**Data flow**: It opens a workspace transaction, asks the seats helper for the workspace domain, and returns a domain string or `None`.
 
-**Call relations**: join_member and is_operator_workspace call it.
+**Call relations**: `join_member` and `is_operator_workspace` call it.
 
 *Call graph*: called by 2 (is_operator_workspace, join_member); 2 external calls (workspace_tx, workspace_domain).
 
 
-##### `SurfaceContext.list_members`  (lines 2723–2731)
+##### `SurfaceContext.list_members`  (lines 3488–3496)
 
 ```
 async def list_members(self) -> tuple[SeatEntry, ...]
 ```
 
-**Purpose**: Lists the workspace roster in stable email order.
+**Purpose**: Returns the workspace roster sorted by email. It supports stable team-management displays.
 
-**Data flow**: It reads a Seats snapshot for the workspace, sorts members by email, and returns the tuple.
+**Data flow**: It reads a seats snapshot for this workspace and returns its member entries sorted by email.
 
-**Call relations**: The web team page calls it.
+**Call relations**: The web workspace-team route calls it.
 
 *Call graph*: called by 1 (workspace_team); 2 external calls (__init__, workspace_tx).
 
 
-##### `SurfaceContext.list_sources`  (lines 2733–2778)
+##### `SurfaceContext.list_sources`  (lines 3498–3545)
 
 ```
 async def list_sources(self, member_id: UUID, *, admin: bool) -> tuple[SourceView, ...]
 ```
 
-**Purpose**: Lists live source bindings visible to a member or admin.
+**Purpose**: Lists live source bindings visible to the member. Removed sources are excluded, and private sources are visible only to their owner unless the reader is admin.
 
-**Data flow**: It receives member id and admin flag, queries nonremoved sources, applies visibility, adds connector binding fields, and returns SourceView records.
+**Data flow**: It receives member id and admin flag, queries source rows with owner emails, filters visibility, projects connector binding fields, and returns `SourceView` objects.
 
-**Call relations**: The web workspace sources page calls it; it uses _binding_fields.
+**Call relations**: The web workspace-sources route calls it; it uses `_binding_fields` for connector-managed rows.
 
 *Call graph*: calls 1 internal fn (_binding_fields); called by 1 (workspace_sources); 4 external calls (__init__, or_, select, workspace_tx).
 
 
-##### `SurfaceContext.spend_caps`  (lines 2780–2828)
+##### `SurfaceContext.spend_caps`  (lines 3547–3596)
 
 ```
 async def spend_caps(self) -> tuple[SpendCapView, ...]
 ```
 
-**Purpose**: Lists workspace spend caps with human-readable subject names.
+**Purpose**: Lists spend caps configured for the workspace with readable subject names. It supports administration billing views.
 
-**Data flow**: It queries spend caps joined to agent or member names, converts rows into SpendCapView records, and returns them.
+**Data flow**: It queries spend-cap rows joined to agent and member names, orders them, and returns `SpendCapView` records.
 
-**Call relations**: The web administration index calls it.
+**Call relations**: The web admin index calls it.
 
 *Call graph*: called by 1 (admin_index); 4 external calls (__init__, and_, select, workspace_tx).
 
 
-##### `SurfaceContext.list_installations`  (lines 2830–2846)
+##### `SurfaceContext.list_installations`  (lines 3598–3614)
 
 ```
 async def list_installations(self) -> tuple[InstallationSummary, ...]
 ```
 
-**Purpose**: Lists surface installations for this workspace and the agent each is bound to.
+**Purpose**: Lists surface installations bound to this workspace and the agent each routes to. It supports surface and provider administration pages.
 
-**Data flow**: It queries surface_installation rows ordered by surface and returns InstallationSummary records.
+**Data flow**: It queries surface-installation rows for this workspace, orders by surface, and returns `InstallationSummary` records.
 
-**Call relations**: Web admin and workspace surfaces pages call it.
+**Call relations**: Several web administration and first-run routes call it.
 
-*Call graph*: called by 2 (admin_index, workspace_surfaces); 3 external calls (__init__, select, workspace_tx).
+*Call graph*: called by 4 (_held_providers, admin_index, workspace_first_run, workspace_surfaces); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `SurfaceContext.list_conversations`  (lines 2848–2897)
+##### `SurfaceContext.list_conversations`  (lines 3616–3665)
 
 ```
 async def list_conversations(self, limit: int=LIST_CONVERSATIONS_LIMIT) -> tuple[ConversationSummary, ...]
 ```
 
-**Purpose**: Lists recent workspace conversations across all surfaces for debugging-style views.
+**Purpose**: Lists recent conversations across all surfaces for this workspace. It is mainly a debug-oriented read.
 
-**Data flow**: It aggregates turn count and last activity, joins conversations and members, orders by activity, limits results, and returns ConversationSummary records.
+**Data flow**: It builds an activity summary from turns, joins conversations and members, orders by latest activity, and returns `ConversationSummary` objects.
 
-**Call relations**: The debugger surface calls it.
+**Call relations**: The debugger surface calls it for its conversation list.
 
 *Call graph*: called by 1 (conversations); 3 external calls (__init__, select, workspace_tx).
 
 
-##### `SurfaceContext.list_agent_conversations`  (lines 2899–3018)
+##### `SurfaceContext.list_agent_conversations`  (lines 3667–3690)
 
 ```
 async def list_agent_conversations(self, agent_id: UUID, member_id: UUID, *, admin: bool, limit: int, surface: str | None=None, conversation_id: UUID | None=None, participation: Literal['mine', 'other
 ```
 
-**Purpose**: Lists conversations for one agent as the portal sees them, with visibility, disclosure, title, source, and speaker information.
+**Purpose**: Lists conversations for one agent through the shared `ConversationDirectory`. It is the context-bound wrapper for portal conversation views.
 
-**Data flow**: It receives agent, viewer, filters, and limit. It builds an activity-ordered query, applies surface, id, participation, audience, and search filters, fetches readable content extras for allowed rows, and returns ListedConversation records.
+**Data flow**: It receives agent, member, admin flag, limit, and filters, creates a directory for this workspace, and returns its list result.
 
-**Call relations**: Many web chat and conversation routes call it; it uses _participated, _others, _matches, _conversation_sources, and _conversation_speakers.
+**Call relations**: Web chat-resolution and conversation routes call it.
 
-*Call graph*: calls 5 internal fn (_conversation_sources, _conversation_speakers, _matches, _others, _participated); called by 5 (_member_chat, _named, _resolve_chat, chats_index, conversations); 8 external calls (__init__, __init__, select, audience_member, conversation_audience, parse_audience, readable_audiences, workspace_tx).
-
-
-##### `SurfaceContext._spoken`  (lines 3020–3041)
-
-```
-def _spoken(self, member_id: UUID | None) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds a database condition meaning a conversation contains a member-spoken turn. It can check a specific member or any member.
-
-**Data flow**: It receives an optional member id and returns a correlated EXISTS condition over turns.
-
-**Call relations**: _participated and _others use it inside conversation listing filters.
-
-*Call graph*: called by 2 (_others, _participated); 2 external calls (literal, select).
+*Call graph*: called by 4 (_member_chat, _named, _resolve_chat, conversations); 1 external calls (__init__).
 
 
-##### `SurfaceContext._participated`  (lines 3043–3051)
-
-```
-def _participated(self, member_id: UUID) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds a condition for conversations a member participated in.
-
-**Data flow**: It receives a member id and returns true for conversations bound to that member or containing a turn spoken by them.
-
-**Call relations**: list_agent_conversations uses it for the participation='mine' filter.
-
-*Call graph*: calls 1 internal fn (_spoken); called by 1 (list_agent_conversations); 1 external calls (or_).
-
-
-##### `SurfaceContext._others`  (lines 3053–3065)
-
-```
-def _others(self, member_id: UUID) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds a condition for conversations where other members spoke and this member did not participate.
-
-**Data flow**: It receives a member id and returns a SQL condition excluding the member’s bound or spoken conversations while requiring some member speech.
-
-**Call relations**: list_agent_conversations uses it for the participation='others' filter.
-
-*Call graph*: calls 1 internal fn (_spoken); called by 1 (list_agent_conversations); 2 external calls (and_, not_).
-
-
-##### `SurfaceContext._matches`  (lines 3067–3096)
-
-```
-def _matches(self, search: str, member_id: UUID) -> sa.ColumnElement[bool]
-```
-
-**Purpose**: Builds a search condition for conversation listing. It protects private content by only matching titles and speaker names where the viewer may read the content.
-
-**Data flow**: It receives search text and member id, creates conditions over surface label, owner email, readable title, and readable speaker email, and returns their OR combination.
-
-**Call relations**: list_agent_conversations calls it when a search term is provided.
-
-*Call graph*: called by 1 (list_agent_conversations); 5 external calls (and_, literal, or_, select, readable_audiences).
-
-
-##### `SurfaceContext._conversation_sources`  (lines 3098–3133)
-
-```
-async def _conversation_sources(self, listed: Sequence[UUID]) -> dict[UUID, str | None]
-```
-
-**Purpose**: Finds the source link or identifier recorded on each listed conversation’s opening turn.
-
-**Data flow**: It receives conversation ids, finds the first turn in each, decodes its TurnContext, and returns a map from conversation id to source or None.
-
-**Call relations**: Conversation, artifact, and scheduled-run listings use it to provide links back to where work started.
-
-*Call graph*: called by 4 (list_agent_conversations, list_artifacts, list_conversation_artifacts, list_scheduled_runs); 4 external calls (model_validate, and_, select, workspace_tx).
-
-
-##### `SurfaceContext._conversation_speakers`  (lines 3135–3191)
-
-```
-async def _conversation_speakers(self, listed: Sequence[UUID]) -> dict[UUID, tuple[ConversationSpeaker, ...]]
-```
-
-**Purpose**: Finds the first few distinct speakers in each listed conversation.
-
-**Data flow**: It receives conversation ids, queries first turns per speaker, decodes sender display names from context, and returns a map of conversation id to ConversationSpeaker tuples.
-
-**Call relations**: list_agent_conversations uses it to enrich readable conversation rows.
-
-*Call graph*: called by 1 (list_agent_conversations); 4 external calls (__init__, model_validate, select, workspace_tx).
-
-
-##### `SurfaceContext.readable_conversation`  (lines 3193–3234)
+##### `SurfaceContext.readable_conversation`  (lines 3692–3733)
 
 ```
 async def readable_conversation(self, conversation_id: UUID, agent_id: UUID, member_id: UUID, *, admin: bool=False) -> bool
 ```
 
-**Purpose**: Decides whether a member may read a conversation’s content. It allows own and shared conversations, and allows admin reads of another member’s private conversation only after a recent disclosure record.
+**Purpose**: Decides whether a member may read a conversation’s content. Admins can read another member’s private conversation only after a recent disclosure record.
 
-**Data flow**: It receives conversation, agent, member, and admin flag. It reads the conversation audience, checks normal readable audiences, checks admin disclosure rules and window, and returns a boolean.
+**Data flow**: It receives conversation, agent, member, and admin flag. It checks workspace and agent, audience membership, admin eligibility, and recent transcript-access rows, returning true or false.
 
-**Call relations**: The web surface calls it before transcript and file content routes.
+**Call relations**: The web surface calls it before serving transcripts, files, subagent turns, or related content.
 
-*Call graph*: called by 1 (_readable_conversation); 6 external calls (now, select, audience_member, parse_audience, readable_audiences, workspace_tx).
+*Call graph*: called by 1 (_readable_conversation); 6 external calls (now, select, workspace_tx, audience_member, parse_audience, readable_audiences).
 
 
-##### `SurfaceContext.conversation_audience`  (lines 3236–3246)
+##### `SurfaceContext.conversation_audience`  (lines 3735–3745)
 
 ```
 async def conversation_audience(self, conversation_id: UUID, agent_id: UUID) -> Audience | None
 ```
 
-**Purpose**: Reads the audience attached to a conversation for this workspace and agent.
+**Purpose**: Reads the audience attached to a conversation. It returns the parsed audience object rather than raw stored text.
 
-**Data flow**: It receives conversation id and agent id, queries the audience string, parses it, and returns an Audience or None.
+**Data flow**: It receives conversation and agent ids, fetches the audience string for this workspace and agent, parses it, and returns it or `None`.
 
-**Call relations**: The web surface uses it while building slot context.
+**Call relations**: The web slot-context builder calls it before constructing conversation-scoped reads.
 
-*Call graph*: called by 1 (_slot_context); 3 external calls (select, parse_audience, workspace_tx).
+*Call graph*: called by 1 (_slot_context); 3 external calls (select, workspace_tx, parse_audience).
 
 
-##### `SurfaceContext.conversation_subagent_turns`  (lines 3248–3285)
+##### `SurfaceContext.conversation_subagent_turns`  (lines 3747–3784)
 
 ```
 async def conversation_subagent_turns(self, conversation_id: UUID, limit: int=LIST_TURNS_LIMIT) -> tuple[Turn, ...]
 ```
 
-**Purpose**: Lists all subagent turns spawned under a conversation’s turns, including nested descendants.
+**Purpose**: Reads all subagent turns spawned under a conversation’s turns, including nested descendants. This lets UIs display the work tree under the parent conversation.
 
-**Data flow**: It receives conversation id and limit, builds a recursive query over parent_turn_id, reads matching turn rows, converts them to Turn records, and returns them breadth-first.
+**Data flow**: It receives conversation id and limit, builds a recursive query over parent-turn links, fetches turn rows breadth first, converts them to `Turn` records, and returns them.
 
-**Call relations**: The web surface uses it for events, transcript aids, and slot targeting.
+**Call relations**: Web events, slot-target, and transcript-aid code call it after conversation authorization.
 
 *Call graph*: calls 2 internal fn (_turn_query, _turn_record); called by 3 (_events, _slot_target, _transcript_aids); 3 external calls (literal, select, workspace_tx).
 
 
-##### `SurfaceContext.list_turns`  (lines 3287–3303)
+##### `SurfaceContext.list_turns`  (lines 3786–3802)
 
 ```
 async def list_turns(self, conversation_id: UUID, limit: int=LIST_TURNS_LIMIT) -> tuple[Turn, ...]
 ```
 
-**Purpose**: Lists the durable turns in a conversation in admission order.
+**Purpose**: Reads the recent turns of a conversation in admission order. It returns the durable turn records, including terminal state and context.
 
-**Data flow**: It receives conversation id and limit, queries the latest limited set in reverse order, converts rows to Turn records, and returns them oldest first.
+**Data flow**: It receives conversation id and limit, fetches the newest matching turn rows, reverses them to oldest-first order, and converts each row to `Turn`.
 
-**Call relations**: Debugger and web transcript views call it.
+**Call relations**: Debugger and web transcript-aid routes call it.
 
 *Call graph*: calls 2 internal fn (_turn_query, _turn_record); called by 2 (conversation_turns, _transcript_aids); 1 external calls (workspace_tx).
 
 
-##### `SurfaceContext.agent_origin_refs`  (lines 3305–3340)
+##### `SurfaceContext.agent_origin_refs`  (lines 3804–3839)
 
 ```
 async def agent_origin_refs(self, conversation_id: UUID) -> frozenset[str]
 ```
 
-**Purpose**: Identifies transcript message references that came from scheduled runs or subagent result envelopes rather than member prose.
+**Purpose**: Identifies conversation message references that came from machine-origin prompts, such as scheduled fires or subagent results. Projection code can avoid rendering them as member speech.
 
-**Data flow**: It receives a conversation id, unions matching turn ids and inbound-message ids, converts them to strings, and returns a frozenset.
+**Data flow**: It receives a conversation id, unions matching turn ids and inbound-message ids based on admission source or spawn-result key, and returns them as strings.
 
-**Call relations**: Web conversation rendering uses it to avoid displaying machine envelopes as member messages.
+**Call relations**: Web conversation-message and history rendering code call it.
 
 *Call graph*: called by 2 (_conversation_messages, _history_messages); 4 external calls (or_, select, union_all, workspace_tx).
 
 
-##### `SurfaceContext.turn_detail`  (lines 3342–3392)
+##### `SurfaceContext.turn_detail`  (lines 3841–3891)
 
 ```
 async def turn_detail(self, turn_id: UUID) -> TurnDetail | None
 ```
 
-**Purpose**: Reads a detailed view of one turn, including accounting rows and immediate child subagent turns.
+**Purpose**: Reads one turn with its billing ledger and directly spawned child turns. It supports debugger and rich transcript views.
 
-**Data flow**: It receives a turn id, queries the turn, child turns, and ledger rows, converts them to TurnDetail, and returns None if the turn is absent.
+**Data flow**: It receives a turn id, fetches the turn row, child turn rows, and ledger rows, converts them into typed records, and returns `TurnDetail` or `None`.
 
-**Call relations**: Debugger and web views call it for turn pages, live event context, and message projection.
+**Call relations**: Debugger and web routes call it when resolving or displaying one turn.
 
 *Call graph*: calls 2 internal fn (_turn_query, _turn_record); called by 6 (stream, turn, _conversation_messages, _events, _member_turn, _resolve_chat); 4 external calls (__init__, __init__, select, workspace_tx).
 
 
-##### `SurfaceContext.queued_arrivals`  (lines 3394–3435)
+##### `SurfaceContext.turn_steps`  (lines 3893–3906)
+
+```
+async def turn_steps(self, turn_id: UUID) -> tuple[TurnStep, ...] | None
+```
+
+**Purpose**: Reads durable workflow steps for one turn if it belongs to this workspace. It helps debugger views explain how a turn ran.
+
+**Data flow**: It receives a turn id, reads its running-attempt id or uses the turn id, then delegates to the injected turn-step source. Missing foreign turns return `None`.
+
+**Call relations**: The debugger turn-steps route calls it.
+
+*Call graph*: called by 1 (turn_steps); 2 external calls (select, workspace_tx).
+
+
+##### `SurfaceContext.queued_arrivals`  (lines 3908–3949)
 
 ```
 async def queued_arrivals(self, conversation_id: UUID, draining_turn_id: UUID | None) -> tuple[QueuedArrival, ...]
 ```
 
-**Purpose**: Lists admitted messages in a conversation that are not yet written into the durable transcript.
+**Purpose**: Lists admitted messages that the written transcript does not yet contain. This lets a reloaded conversation still show messages waiting for or folded into a running turn.
 
-**Data flow**: It receives conversation id and optional draining turn id, verifies ownership, queries unconsumed or currently-draining inbound messages, and returns QueuedArrival records.
+**Data flow**: It receives conversation id and optional draining turn id, verifies ownership, queries unconsumed and optionally drained inbound rows, and returns `QueuedArrival` objects.
 
-**Call relations**: The web surface uses it to show messages during a live turn reload.
+**Call relations**: The web conversation-message projection calls it alongside turn rows.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 1 (_conversation_messages); 5 external calls (__init__, false, or_, select, workspace_tx).
 
 
-##### `SurfaceContext.arrival_speakers`  (lines 3437–3469)
+##### `SurfaceContext.arrival_speakers`  (lines 3951–3983)
 
 ```
 async def arrival_speakers(self, conversation_id: UUID) -> tuple[SpokenArrival, ...]
 ```
 
-**Purpose**: Reads attribution for member-admitted inbound-message rows, including drained ones.
+**Purpose**: Reads attribution for member-admitted inbound-message rows. It labels folded messages with sender, question, and speaker id.
 
-**Data flow**: It receives a conversation id, verifies ownership, queries member-admission rows, decodes context, and returns SpokenArrival records.
+**Data flow**: It receives a conversation id, verifies ownership, queries member-admitted inbound messages, decodes context, and returns `SpokenArrival` records.
 
-**Call relations**: Web message and history rendering use it to label folded messages.
+**Call relations**: Web conversation-message and history rendering call it to label queued or folded messages.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 2 (_conversation_messages, _history_messages); 4 external calls (__init__, __init__, select, workspace_tx).
 
 
-##### `SurfaceContext.keyed_admissions`  (lines 3471–3507)
+##### `SurfaceContext.keyed_admissions`  (lines 3985–4021)
 
 ```
 async def keyed_admissions(self, conversation_id: UUID) -> tuple[KeyedAdmission, ...]
 ```
 
-**Purpose**: Lists all messages in a conversation that were admitted with idempotency keys.
+**Purpose**: Lists all messages in a conversation that used idempotency keys. This lets projections recognize which transcript messages correspond to surface submissions.
 
-**Data flow**: It receives a conversation id, verifies ownership, unions keyed turn and inbound-message rows, and returns KeyedAdmission records.
+**Data flow**: It receives a conversation id, verifies ownership, unions keyed turn rows and keyed inbound-message rows, and returns `KeyedAdmission` records.
 
-**Call relations**: The web transcript aids view uses it to recognize its own submitted messages.
+**Call relations**: Web transcript-aid code calls it.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 1 (_transcript_aids); 4 external calls (__init__, select, union_all, workspace_tx).
 
 
-##### `SurfaceContext.read_transcript`  (lines 3509–3520)
+##### `SurfaceContext.read_transcript`  (lines 4023–4034)
 
 ```
 async def read_transcript(self, conversation_id: UUID) -> Conversation | None
 ```
 
-**Purpose**: Reads the durable transcript blob for a conversation if it belongs to this workspace.
+**Purpose**: Reads a conversation’s durable transcript from blob storage. It first checks workspace ownership to avoid cross-tenant blob reads.
 
-**Data flow**: It receives a conversation id, verifies ownership, reads the transcript blob, decodes it, and returns the Conversation or None if absent.
+**Data flow**: It receives a conversation id, verifies the conversation belongs to this workspace, reads the transcript blob, decodes it, and returns a `Conversation` or `None` if absent.
 
-**Call relations**: Debugger, web, and UFO surfaces call it for conversation history.
+**Call relations**: Debugger, UFO, and web surfaces call it when rendering conversation history or slot context.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 5 (conversation_transcript, channel, _conversation_messages, _slot_context, _subagent_nodes); 2 external calls (decode, transcript_key).
 
 
-##### `SurfaceContext.list_compactions`  (lines 3522–3533)
+##### `SurfaceContext.list_compactions`  (lines 4036–4047)
 
 ```
 async def list_compactions(self, conversation_id: UUID) -> tuple[int, ...]
 ```
 
-**Purpose**: Lists saved compaction record indices for a conversation.
+**Purpose**: Lists saved transcript-compaction record indices for a conversation. Compaction records explain how long histories were summarized.
 
 **Data flow**: It receives a conversation id, verifies ownership, lists matching blob keys, extracts numeric indices, sorts them, and returns them.
 
-**Call relations**: Debugger and web conversation views call it.
+**Call relations**: Debugger and web conversation-message routes call it.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 2 (conversation_compactions, _conversation_messages).
 
 
-##### `SurfaceContext.read_compaction`  (lines 3535–3541)
+##### `SurfaceContext.read_compaction`  (lines 4049–4055)
 
 ```
 async def read_compaction(self, conversation_id: UUID, index: int) -> CompactionRecord | None
 ```
 
-**Purpose**: Reads one stored compaction record for a conversation.
+**Purpose**: Reads one full compaction record for a conversation. It returns nothing if the conversation is not owned here or the record is absent.
 
-**Data flow**: It receives conversation id and index, verifies ownership, delegates to the transcript compaction reader, and returns the record or None.
+**Data flow**: It receives conversation id and compaction index, verifies ownership, delegates to the transcript helper, and returns a `CompactionRecord` or `None`.
 
-**Call relations**: Debugger and web history views call it.
+**Call relations**: Debugger and web history routes call it.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 2 (compaction_record, _history_messages); 1 external calls (read_compaction_record).
 
 
-##### `SurfaceContext.read_compaction_after`  (lines 3543–3551)
+##### `SurfaceContext.read_compaction_after`  (lines 4057–4065)
 
 ```
 async def read_compaction_after(self, conversation_id: UUID, index: int) -> tuple[Message, ...] | None
 ```
 
-**Purpose**: Reads only the post-compaction message window for one compaction record.
+**Purpose**: Reads only the post-compaction message window for one compaction record. This is a lighter read for comparing later history.
 
-**Data flow**: It receives conversation id and index, verifies ownership, delegates to read_compaction_after, and returns messages or None.
+**Data flow**: It receives conversation id and index, verifies ownership, delegates to the transcript helper, and returns messages or `None`.
 
-**Call relations**: The web surface uses it to verify earlier history windows.
+**Call relations**: The web verified-earlier helper calls it.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 1 (_verified_earlier); 1 external calls (read_compaction_after).
 
 
-##### `SurfaceContext.list_workspace_files`  (lines 3553–3559)
+##### `SurfaceContext.list_workspace_files`  (lines 4067–4073)
 
 ```
 async def list_workspace_files(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]
 ```
 
-**Purpose**: Lists member-visible files in a conversation’s sandbox workspace.
+**Purpose**: Lists member-visible files currently in a conversation’s sandbox workspace. It returns empty for foreign or missing conversations.
 
-**Data flow**: It receives a conversation id, verifies ownership, asks the sandbox manager for entries, and returns them or an empty tuple.
+**Data flow**: It receives a conversation id, verifies ownership, asks the sandbox carrier for workspace entries, and returns them.
 
 **Call relations**: Debugger and web attachment routes call it.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 2 (workspace_files, conversation_attachment).
 
 
-##### `SurfaceContext.conversation_changes`  (lines 3561–3567)
+##### `SurfaceContext.conversation_changes`  (lines 4075–4081)
 
 ```
 async def conversation_changes(self, conversation_id: UUID) -> WorkspaceChanges
 ```
 
-**Purpose**: Reads the last recorded workspace file changes for a conversation.
+**Purpose**: Reads the last recorded workspace-file changes for a conversation. It summarizes what git saw after turns committed.
 
-**Data flow**: It receives a conversation id, verifies ownership, returns recorded changes, or NOTHING_CHANGED for foreign conversations.
+**Data flow**: It receives a conversation id, verifies ownership, and returns recorded changes or a no-change value.
 
-**Call relations**: The web surface uses it in projected slot context.
+**Call relations**: The web slot-context projection calls it.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 1 (_project_slot_context); 1 external calls (recorded_workspace_changes).
 
 
-##### `SurfaceContext.read_workspace_file`  (lines 3569–3578)
+##### `SurfaceContext.read_workspace_file`  (lines 4083–4092)
 
 ```
 async def read_workspace_file(self, conversation_id: UUID, rel: str) -> AsyncIterator[bytes] | None
 ```
 
-**Purpose**: Streams one file from a conversation’s sandbox workspace.
+**Purpose**: Streams one file from a conversation’s sandbox workspace. It returns nothing if the conversation is not owned here or the file is absent.
 
-**Data flow**: It receives conversation id and relative path, verifies ownership, asks the sandbox manager for a byte stream, and returns the stream or None.
+**Data flow**: It receives conversation id and relative path, verifies ownership, and asks the sandbox carrier for an async byte stream.
 
-**Call relations**: Debugger and web attachment routes call it.
+**Call relations**: Debugger and web conversation-attachment routes call it.
 
 *Call graph*: calls 1 internal fn (_owned_conversation); called by 2 (workspace_file, conversation_attachment).
 
 
-##### `SurfaceContext.terminal_connect`  (lines 3580–3584)
+##### `SurfaceContext.terminal_connect`  (lines 4094–4100)
 
 ```
-def terminal_connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None
+def terminal_connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None, runtime_id: str) -> None
 ```
 
-**Purpose**: Registers that a member’s live terminal connection is available for a conversation.
+**Purpose**: Publishes that a surface-held terminal connection is available for a conversation. This lets a turn use the member’s terminal rather than a default sandbox.
 
-**Data flow**: It receives conversation id, current directory, and optional member id, and records the connection in the sandbox terminal rendezvous.
+**Data flow**: It receives conversation id, working directory, optional member id, and runtime id, then records the terminal connection with the sandbox terminal registry.
 
-**Call relations**: Live terminal transports call it around the lifetime of a held connection.
+**Call relations**: Terminal-capable surfaces call it when a held terminal connection opens.
 
 
-##### `SurfaceContext.terminal_disconnect`  (lines 3586–3587)
+##### `SurfaceContext.terminal_disconnect`  (lines 4102–4103)
 
 ```
 def terminal_disconnect(self, conversation_id: UUID) -> None
 ```
 
-**Purpose**: Removes the terminal connection for a conversation.
+**Purpose**: Removes the terminal connection for a conversation. It is the cleanup pair for `terminal_connect`.
 
-**Data flow**: It receives a conversation id and tells the sandbox terminal rendezvous to disconnect it.
+**Data flow**: It receives a conversation id and tells the sandbox terminal registry to disconnect it.
 
-**Call relations**: Live terminal transports call it when the held connection ends.
+**Call relations**: Terminal-capable surfaces call it when the held connection closes.
 
 
-##### `SurfaceContext.claim_terminal`  (lines 3589–3595)
+##### `SurfaceContext.claim_terminal`  (lines 4105–4111)
 
 ```
 async def claim_terminal(self, conversation_id: UUID, cwd: str) -> bool
 ```
 
-**Purpose**: Claims a connected terminal for a fresh conversation if the conversation has no sandbox binding yet.
+**Purpose**: Claims a connected terminal for a fresh conversation before a turn opens its sandbox. It avoids silently provisioning somewhere else during reconnect races.
 
-**Data flow**: It receives conversation id and current directory, asks the sandbox manager to claim the terminal, and returns whether this call made the binding.
+**Data flow**: It receives conversation id and working directory, asks the sandbox carrier to claim an empty binding, and returns whether this call made the claim.
 
-**Call relations**: The UFO surface calls it when sending work tied to a terminal.
+**Call relations**: The UFO terminal surface calls it when admitting or resuming terminal-backed work.
 
 *Call graph*: called by 2 (_send, channel).
 
 
-##### `SurfaceContext.next_terminal_op`  (lines 3597–3604)
+##### `SurfaceContext.next_terminal_op`  (lines 4113–4120)
 
 ```
 async def next_terminal_op(self, conversation_id: UUID, exclude_op_id: str | None=None) -> TerminalOp
 ```
 
-**Purpose**: Waits for or reads the next terminal operation requested by a turn.
+**Purpose**: Waits for the next operation a turn asks a member’s terminal to perform. It can exclude an operation just answered to avoid rendering it twice.
 
-**Data flow**: It receives conversation id and optional operation id to exclude, delegates to the terminal manager, and returns the next TerminalOp.
+**Data flow**: It receives conversation id and optional excluded op id, delegates to the terminal registry, and returns a `TerminalOp`.
 
-**Call relations**: Terminal streaming routes use it to send operations to the client.
+**Call relations**: Terminal streaming routes use it while racing terminal operations against normal turn frames.
 
 
-##### `SurfaceContext.terminal_resolve`  (lines 3606–3620)
+##### `SurfaceContext.terminal_resolve`  (lines 4122–4136)
 
 ```
 def terminal_resolve(self, conversation_id: UUID, op_id: str, reply: bytes, failed: str | None, member_id: UUID | None) -> bool
 ```
 
-**Purpose**: Completes an in-flight terminal operation with the client’s reply or failure.
+**Purpose**: Answers an in-flight terminal operation with client results. The terminal registry enforces the single-use op id and member binding.
 
-**Data flow**: It receives conversation id, operation id, reply bytes, failure text, and optional member id. It delegates to the terminal manager and returns whether the operation was resolved.
+**Data flow**: It receives conversation id, op id, reply bytes, optional failure text, and member id, then returns whether the operation was resolved.
 
-**Call relations**: The UFO surface calls it when a terminal client posts back.
+**Call relations**: The UFO terminal surface calls it when the member’s client posts an operation result.
 
 *Call graph*: called by 1 (channel).
 
 
-##### `SurfaceContext.terminal_op_body`  (lines 3622–3634)
+##### `SurfaceContext.terminal_op_body`  (lines 4138–4150)
 
 ```
 async def terminal_op_body(self, queue_key: str, op_id: str, member_id: UUID | None) -> bytes | None
 ```
 
-**Purpose**: Reads staged bytes for a terminal operation without creating a conversation.
+**Purpose**: Reads staged bytes for an in-flight terminal operation without creating a conversation. It is used when a client fetches a large operation body separately.
 
-**Data flow**: It receives queue key, operation id, and member id, finds the existing conversation by queue key, then asks the terminal manager for the staged body.
+**Data flow**: It receives queue key, op id, and member id, resolves the existing conversation, then asks the terminal registry for staged bytes. It returns bytes or `None`.
 
-**Call relations**: The UFO surface op_body route calls it.
+**Call relations**: The UFO `op_body` route calls it.
 
 *Call graph*: calls 1 internal fn (_conversation_lookup); called by 1 (op_body); 1 external calls (workspace_tx).
 
 
-##### `SurfaceContext.installation`  (lines 3636–3649)
+##### `SurfaceContext.installation`  (lines 4152–4165)
 
 ```
 async def installation(self, peer_surface: str) -> str | None
 ```
 
-**Purpose**: Reads this workspace’s installation identity for another surface.
+**Purpose**: Reads this workspace’s installation id for another surface. It helps debug and portal views link to the surface where a conversation lives.
 
-**Data flow**: It receives a peer surface name, queries surface_installation, and returns the installation id or None.
+**Data flow**: It receives a peer surface name, queries surface-installation rows, and returns the installation id or `None`.
 
-**Call relations**: The debugger surface uses it for workspace metadata and deep links.
+**Call relations**: The debugger workspace metadata route calls it.
 
 *Call graph*: called by 1 (workspace_meta); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext.transaction`  (lines 3652–3661)
+##### `SurfaceContext.transaction`  (lines 4168–4177)
 
 ```
 async def transaction(self) -> AsyncIterator[AsyncConnection]
 ```
 
-**Purpose**: Yields a raw workspace database transaction for a trusted surface extension’s own tables.
+**Purpose**: Yields a raw workspace database transaction for trusted surface code that needs extension-owned tables outside a turn. The caller must still scope its own SQL by workspace.
 
-**Data flow**: It opens workspace_tx, yields the connection, commits on normal exit, and rolls back on error through the transaction context.
+**Data flow**: It opens a workspace transaction, yields the async connection, commits on normal exit, and rolls back on error.
 
-**Call relations**: Sites and Slack surface code call it for extension-specific reads.
+**Call relations**: Sites and Slack surface helpers call it for surface-specific reads that cannot go through an `ExtensionContext`.
 
 *Call graph*: called by 2 (_viewer_is_admin, _folds_into_live_turn); 1 external calls (workspace_tx).
 
 
-##### `SurfaceContext._owned_conversation`  (lines 3663–3673)
+##### `SurfaceContext._owned_conversation`  (lines 4179–4189)
 
 ```
 async def _owned_conversation(self, conversation_id: UUID) -> bool
 ```
 
-**Purpose**: Checks whether a conversation id belongs to this workspace.
+**Purpose**: Checks whether a conversation id belongs to this workspace. It is the common guard before reading blobs, sandbox state, or queued messages.
 
-**Data flow**: It receives a conversation id, queries the conversation table scoped by workspace, and returns true if found.
+**Data flow**: It receives a conversation id, queries for a matching conversation row in this workspace, and returns true or false.
 
-**Call relations**: Transcript, compaction, queued-arrival, and workspace-file reads call it before touching unscoped storage.
+**Call relations**: Many transcript, compaction, file, arrival, and workspace-change reads call it before touching unscoped stores.
 
 *Call graph*: called by 10 (arrival_speakers, conversation_changes, keyed_admissions, list_compactions, list_workspace_files, queued_arrivals, read_compaction, read_compaction_after, read_transcript, read_workspace_file); 2 external calls (select, workspace_tx).
 
 
-##### `SurfaceContext._turn_query`  (lines 3675–3694)
+##### `SurfaceContext._turn_query`  (lines 4191–4211)
 
 ```
 def _turn_query(self) -> sa.Select
 ```
 
-**Purpose**: Builds the standard select list for reading turn rows.
+**Purpose**: Builds the standard SQL select for turn rows. It keeps all turn projections selecting the same fields.
 
-**Data flow**: It takes no input and returns a SQL select containing all fields needed to reconstruct a Turn record.
+**Data flow**: It takes no input and returns a SQL select with the durable turn columns needed to build a `Turn` record.
 
-**Call relations**: list_turns, turn_detail, and conversation_subagent_turns reuse it.
+**Call relations**: `conversation_subagent_turns`, `list_turns`, and `turn_detail` use it before converting rows with `_turn_record`.
 
 *Call graph*: called by 3 (conversation_subagent_turns, list_turns, turn_detail); 1 external calls (select).
 
 
-##### `SurfaceContext._turn_record`  (lines 3696–3715)
+##### `SurfaceContext._turn_record`  (lines 4213–4233)
 
 ```
 def _turn_record(self, row: sa.Row) -> Turn
 ```
 
-**Purpose**: Converts a database row into a typed Turn record.
+**Purpose**: Converts one database row into the typed `Turn` data model. It also validates nested context and terminal payloads.
 
-**Data flow**: It receives a row, validates optional context and terminal JSON, copies scalar fields, and returns a Turn.
+**Data flow**: It receives a SQL row, copies turn fields, parses JSON context and terminal data when present, and returns a `Turn` object.
 
-**Call relations**: Turn-reading methods call it after querying rows with _turn_query.
+**Call relations**: Turn-listing and detail methods call it after running `_turn_query`.
 
 *Call graph*: called by 3 (conversation_subagent_turns, list_turns, turn_detail); 3 external calls (__init__, model_validate, model_validate).
 
 
-##### `SurfaceInstallationAccess.installation`  (lines 3736–3749)
+##### `SurfaceInstallationAccess.reserve_address`  (lines 4265–4325)
+
+```
+async def reserve_address(self, surface: str, address: str, member_id: UUID, claim_expires_at: datetime) -> AddressClaimState
+```
+
+**Purpose**: Reserves an addressed-surface address for a workspace member until they prove it. It reports whether the address was reserved, already linked to them, or taken.
+
+**Data flow**: It receives surface, address, member id, and expiry. It checks the surface is declared as addressed, upserts or takes over expired reservations in owner scope, then returns an `AddressClaimState`.
+
+**Call relations**: Tool code uses this manifest-scoped access object when setting up addressed surfaces like iMessage.
+
+*Call graph*: 7 external calls (__init__, now, and_, or_, select, owner_tx, ws_current).
+
+
+##### `SurfaceInstallationAccess.installation`  (lines 4327–4340)
 
 ```
 async def installation(self, surface: str) -> str | None
 ```
 
-**Purpose**: Lets a tool read the current workspace’s installation id for a manifest-declared surface.
+**Purpose**: Reads this workspace’s installation identity for a declared surface. It refuses surfaces the tool did not declare.
 
-**Data flow**: It receives a surface name, rejects undeclared names, queries the installation row for the ambient workspace, and returns the id or None.
+**Data flow**: It receives a surface name, validates declaration, queries the workspace installation row, and returns the installation id or `None`.
 
-**Call relations**: Tool code uses this scoped access rather than the broader SurfaceContext.
+**Call relations**: Extension tools call it through their manifest-scoped installation access.
 
 *Call graph*: 4 external calls (__init__, select, workspace_tx, ws_current).
 
 
-##### `SurfaceInstallationAccess.bind`  (lines 3751–3756)
+##### `SurfaceInstallationAccess.bind`  (lines 4342–4354)
 
 ```
 async def bind(self, surface: str, installation_id: str) -> None
 ```
 
-**Purpose**: Lets a tool bind a declared surface installation to the ambient workspace.
+**Purpose**: Binds a declared surface installation to the current workspace. Addressed surfaces are marked differently because their shared installation does not route tenants.
 
-**Data flow**: It receives a surface name and installation id, rejects undeclared names, and calls the shared installation binder for the current workspace.
+**Data flow**: It receives surface and installation id, validates declaration, reads current workspace scope, and calls `_bind_surface_installation` with the correct ingress-routing flag.
 
-**Call relations**: Manifest-scoped tools use it to register installations safely.
+**Call relations**: Tool-driven installation flows call it instead of writing installation rows directly.
 
 *Call graph*: calls 1 internal fn (_bind_surface_installation); 2 external calls (__init__, ws_current).
 
 
-##### `SurfaceAuth.workspace`  (lines 3768–3778)
+##### `SurfaceAuth.workspace`  (lines 4366–4377)
 
 ```
 async def workspace(self, installation_id: str) -> UUID | None
 ```
 
-**Purpose**: Resolves which workspace owns a surface installation id before a request is bound to any workspace.
+**Purpose**: Resolves which workspace owns a shared surface installation id. It only returns installations that are allowed to route ingress.
 
-**Data flow**: It receives an installation id, queries owner-scoped installation rows for this surface, and returns the workspace id or None.
+**Data flow**: It receives an installation id, queries owner-scoped surface-installation rows for this surface and id, and returns a workspace id or `None`.
 
-**Call relations**: Slack workspace resolution calls it during shared ingress authentication.
+**Call relations**: Slack workspace-resolution code calls it before binding a request to a workspace.
 
 *Call graph*: called by 1 (resolve_workspace); 2 external calls (select, owner_tx).
 
 
-##### `SurfaceAuth.open_credential_authorization`  (lines 3780–3792)
+##### `SurfaceAuth.addressed_workspace`  (lines 4379–4392)
+
+```
+async def addressed_workspace(self, address: str) -> UUID | None
+```
+
+**Purpose**: Resolves which workspace owns an addressed-surface address. This is the tenant lookup for shared providers where the sender address, not an installation, routes traffic.
+
+**Data flow**: It receives an address, queries owner-scoped surface-address rows for this surface, and returns a workspace id or `None`.
+
+**Call relations**: Addressed listener contexts use it before admitting address-routed events.
+
+*Call graph*: 2 external calls (select, owner_tx).
+
+
+##### `SurfaceAuth.open_credential_authorization`  (lines 4394–4406)
 
 ```
 def open_credential_authorization(self, sealed: str) -> CredentialRequestState | None
 ```
 
-**Purpose**: Opens a sealed credential handoff before workspace binding, returning None instead of raising for invalid seals.
+**Purpose**: Opens a sealed credential handoff before any workspace has been resolved. It returns nothing for expired or tampered seals.
 
-**Data flow**: It receives a sealed string, verifies it if a credential store exists, and returns CredentialRequestState or None.
+**Data flow**: It receives a sealed string, verifies it with the credential store if present, and returns decoded state or `None`.
 
-**Call relations**: Slack’s resolver uses it to recover workspace information from OAuth state.
+**Call relations**: Slack request-resolution code calls it during pre-binding OAuth handshakes.
 
 *Call graph*: called by 1 (resolve_workspace); 1 external calls (open_credential_request).
 
 
-##### `SurfaceAuth.credential`  (lines 3794–3810)
+##### `SurfaceAuth.credential`  (lines 4408–4424)
 
 ```
 async def credential(self, workspace_id: UUID, slot: str) -> str
 ```
 
-**Purpose**: Reads a declared credential slot for a specific workspace during pre-binding authentication.
+**Purpose**: Reads a declared credential slot during pre-binding surface authentication. It first verifies that the workspace exists.
 
-**Data flow**: It receives workspace id and slot, checks the slot was declared, verifies the workspace exists, reads the credential, and returns it.
+**Data flow**: It receives workspace id and slot, checks the slot declaration and credential store, enters workspace scope, verifies the workspace row, and returns the credential value.
 
-**Call relations**: Slack uses it to read signing secrets while resolving incoming requests.
+**Call relations**: Slack authentication uses it to read signing secrets while resolving a request.
 
 *Call graph*: called by 1 (_auth_signing_secret); 4 external calls (__init__, select, workspace_tx, ws).
 
 
-##### `SurfaceListenerContext.workspace`  (lines 3846–3854)
+##### `SurfaceListenerContext.workspace`  (lines 4460–4468)
 
 ```
 async def workspace(self, installation_id: str) -> AsyncIterator[SurfaceContext | None]
 ```
 
-**Purpose**: Binds one listener event to the workspace that owns an installation id, while confirming this process still owns the listener lease.
+**Purpose**: Binds a persistent listener event to the workspace owning an installation id. It yields no context if the installation is unknown.
 
-**Data flow**: It receives an installation id, checks fleet ownership, resolves workspace id, yields None if unknown, or enters the workspace scope and yields a SurfaceContext.
+**Data flow**: It receives an installation id, verifies this process still owns the listener lease, resolves the workspace, enters workspace scope, and yields a `SurfaceContext` or `None`.
 
-**Call relations**: Persistent listener implementations use it around each provider event.
+**Call relations**: Persistent surface listeners use it around each provider event before touching workspace data.
 
-*Call graph*: called by 4 (_clear_cursor, _process_event, _read_cursor, _store_cursor); 1 external calls (ws).
+*Call graph*: 1 external calls (ws).
 
 
-##### `SurfaceListenerRunner.run`  (lines 3880–3918)
+##### `SurfaceListenerContext.addressed`  (lines 4471–4482)
+
+```
+async def addressed(self, address: str) -> AsyncIterator[SurfaceContext | None]
+```
+
+**Purpose**: Binds a persistent listener event to the workspace owning an address. It is the addressed-surface version of workspace binding.
+
+**Data flow**: It receives an address, checks listener ownership, resolves the addressed workspace, enters workspace scope, and yields a `SurfaceContext` or `None`.
+
+**Call relations**: The iMessage listener calls it while processing address-routed events.
+
+*Call graph*: called by 1 (_process_event); 1 external calls (ws).
+
+
+##### `SurfaceListenerContext.cursor`  (lines 4484–4499)
+
+```
+async def cursor(self, installation_id: str) -> int | None
+```
+
+**Purpose**: Reads the saved provider-stream position for this listener. It ignores cursors from a different installation id.
+
+**Data flow**: It receives installation id, queries the owner-scoped cursor row for this surface, and returns the sequence or `None`.
+
+**Call relations**: The iMessage listener calls it when starting or catching up.
+
+*Call graph*: called by 1 (listen); 2 external calls (select, owner_tx).
+
+
+##### `SurfaceListenerContext.store_cursor`  (lines 4501–4524)
+
+```
+async def store_cursor(self, installation_id: str, sequence: int) -> None
+```
+
+**Purpose**: Stores the provider-stream position for this listener. The cursor belongs to the fleet listener, not to any one workspace.
+
+**Data flow**: It receives installation id and sequence, upserts the cursor row for this surface, and records the latest sequence.
+
+**Call relations**: The iMessage listener updates it after catching up or processing events.
+
+*Call graph*: called by 2 (_catch_up, _process_event); 1 external calls (owner_tx).
+
+
+##### `SurfaceListenerContext.clear_cursor`  (lines 4526–4533)
+
+```
+async def clear_cursor(self) -> None
+```
+
+**Purpose**: Deletes the saved stream cursor so the next listener start begins from the provider’s head. It is a reset operation.
+
+**Data flow**: It takes no extra input and deletes the cursor row for this surface in owner scope.
+
+**Call relations**: The iMessage listener calls it when it needs to forget old stream position.
+
+*Call graph*: called by 1 (listen); 2 external calls (delete, owner_tx).
+
+
+##### `SurfaceListenerRunner.run`  (lines 4559–4597)
 
 ```
 async def run(self) -> None
 ```
 
-**Purpose**: Runs a persistent surface listener only while this process owns the fleet-wide lease. It restarts on ownership changes and parks non-database listener failures.
+**Purpose**: Runs one persistent surface listener only while this process owns the fleet-wide lease. It restarts on ownership changes and parks non-database listener failures.
 
-**Data flow**: It loops forever, waits for ownership, starts the listener and an ownership-loss watcher, reacts to whichever finishes first, logs failures, and cancels leftover tasks.
+**Data flow**: It waits until owned, starts the listener with a `SurfaceListenerContext`, races it against ownership loss, logs failures, sleeps or parks as appropriate, and cancels tasks during cleanup.
 
-**Call relations**: Core starts this runner for surfaces that declare a listener.
+**Call relations**: Core process startup runs this for surfaces that declare a listener.
 
 *Call graph*: calls 2 internal fn (_wait_until_not_owned, _wait_until_owned); 9 external calls (__init__, CancelledError, create_task, ensure_future, gather, sleep, wait, emit_metric, log).
 
 
-##### `SurfaceListenerRunner._wait_until_not_owned`  (lines 3920–3925)
+##### `SurfaceListenerRunner._wait_until_not_owned`  (lines 4599–4604)
 
 ```
 async def _wait_until_not_owned(self) -> None
 ```
 
-**Purpose**: Waits until this process no longer owns the listener lease.
+**Purpose**: Waits until this process loses the listener lease. It polls the ownership claim repeatedly.
 
-**Data flow**: It repeatedly checks ownership, returns when ownership is false, and sleeps between checks.
+**Data flow**: It calls `_owned_on_tick` in a loop, sleeps between checks, and returns once ownership is definitively false.
 
-**Call relations**: run starts it beside the listener to know when to stop that listener.
+**Call relations**: `run` uses it to stop or restart the listener when another process takes over.
 
 *Call graph*: calls 1 internal fn (_owned_on_tick); called by 1 (run); 1 external calls (sleep).
 
 
-##### `SurfaceListenerRunner._wait_until_owned`  (lines 3927–3931)
+##### `SurfaceListenerRunner._wait_until_owned`  (lines 4606–4610)
 
 ```
 async def _wait_until_owned(self) -> None
 ```
 
-**Purpose**: Waits until this process obtains or renews the listener lease.
+**Purpose**: Waits until this process gains the listener lease. It polls until ownership is true.
 
-**Data flow**: It repeatedly checks ownership and sleeps until the check returns true.
+**Data flow**: It repeatedly calls `_owned_on_tick`, sleeping between attempts, and returns when the claim succeeds.
 
-**Call relations**: run calls it before starting a listener.
+**Call relations**: `run` calls it before starting the listener task.
 
 *Call graph*: calls 1 internal fn (_owned_on_tick); called by 1 (run); 1 external calls (sleep).
 
 
-##### `SurfaceListenerRunner._owned_on_tick`  (lines 3933–3942)
+##### `SurfaceListenerRunner._owned_on_tick`  (lines 4612–4621)
 
 ```
 async def _owned_on_tick(self) -> bool | None
 ```
 
-**Purpose**: Performs one safe ownership check for the listener lease.
+**Purpose**: Performs one safe ownership check for the listener lease. Database errors are logged and treated as unknown rather than fatal.
 
-**Data flow**: It calls _owns, returns its result, and converts database errors into a logged None result.
+**Data flow**: It calls `_owns`; if a SQLAlchemy database error occurs, it logs and returns `None`.
 
-**Call relations**: Both ownership wait loops call it.
+**Call relations**: The wait loops call it on every ownership poll.
 
 *Call graph*: calls 1 internal fn (_owns); called by 2 (_wait_until_not_owned, _wait_until_owned); 1 external calls (log).
 
 
-##### `SurfaceListenerRunner._owns`  (lines 3944–3962)
+##### `SurfaceListenerRunner._owns`  (lines 4623–4641)
 
 ```
 async def _owns(self) -> bool
 ```
 
-**Purpose**: Claims or renews listener ownership while protecting the database transaction from cancellation damage.
+**Purpose**: Runs the lease-claim transaction in a cancellation-safe way. This prevents a cancelled task from leaving a database transaction half-open.
 
-**Data flow**: It starts _claim as a task, shields it until complete, remembers cancellation, re-raises cancellation after the claim finishes, and returns the claim result.
+**Data flow**: It starts `_claim` as a task, shields it until complete while remembering cancellation, then re-raises cancellation or returns the claim result.
 
-**Call relations**: _owned_on_tick calls it for each lease check.
+**Call relations**: `_owned_on_tick` calls it whenever ownership is polled.
 
 *Call graph*: calls 1 internal fn (_claim); called by 1 (_owned_on_tick); 2 external calls (ensure_future, shield).
 
 
-##### `SurfaceListenerRunner._claim`  (lines 3964–4004)
+##### `SurfaceListenerRunner._claim`  (lines 4643–4683)
 
 ```
 async def _claim(self) -> bool
 ```
 
-**Purpose**: Writes or renews the database lease for one surface listener.
+**Purpose**: Claims or refreshes the database lease for one surface listener. Only the current owner or an expired claim can update the lease.
 
-**Data flow**: It computes expiry time, upserts the listener-claim row if expired or already owned by this instance token, and returns whether the stored owner token matches this runner.
+**Data flow**: It computes a new expiry, upserts the listener-claim row with this instance id and token, and returns true if the returned token matches this runner.
 
-**Call relations**: _owns calls it; the lease controls whether run may keep the listener active.
+**Call relations**: `_owns` wraps it to protect the transaction from cancellation.
 
 *Call graph*: called by 1 (_owns); 7 external calls (now, timedelta, and_, insert, insert, or_, owner_tx).
 
 
-##### `SurfaceDeliveryError.__init__`  (lines 4011–4015)
+##### `SurfaceDeliveryError.__init__`  (lines 4690–4694)
 
 ```
 def __init__(self, message: str, *, retry_after_seconds: int | None=None) -> None
 ```
 
-**Purpose**: Creates a delivery error that may include a provider-requested retry delay.
+**Purpose**: Creates a delivery error that may carry a provider retry delay. Pollers use that delay instead of a fixed backoff when present.
 
-**Data flow**: It receives an error message and optional retry-after seconds, rejects negative delays, stores the delay, and initializes RuntimeError.
+**Data flow**: It receives an error message and optional nonnegative retry-after seconds, validates the delay, stores it, and initializes the runtime error.
 
-**Call relations**: Slack delivery code can raise it so pollers schedule retries according to provider advice.
+**Call relations**: Slack delivery code can raise it; writeback and mid-turn pollers inspect it during retry scheduling.
 
 *Call graph*: called by 1 (_chat_post).
 
 
-##### `_writeback_due`  (lines 4070–4094)
+##### `_writeback_due`  (lines 4755–4779)
 
 ```
 def _writeback_due(now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Builds the database condition for terminal writebacks that are ready to deliver. It also waits for pending mid-turn replies so the final answer arrives last.
+**Purpose**: Builds the database condition for terminal writebacks that are ready to claim. It also waits until pending mid-turn replies for the same turn are done.
 
-**Data flow**: It receives the current time and returns a SQL condition over turn and writeback status, claim expiry, and pending mid-turn replies.
+**Data flow**: It receives the current time and returns a SQL condition over turn, writeback, claim status, claim expiry, and mid-turn reply status.
 
-**Call relations**: writeback_workspaces.due and WritebackPoller._claim use it.
+**Call relations**: `writeback_workspaces.due` and `WritebackPoller._claim` use it to find eligible terminal deliveries.
 
 *Call graph*: called by 2 (_claim, due); 3 external calls (and_, exists, or_).
 
 
-##### `writeback_workspaces`  (lines 4097–4132)
+##### `writeback_workspaces`  (lines 4782–4817)
 
 ```
 def writeback_workspaces() -> WorkspaceCandidates
 ```
 
-**Purpose**: Creates a rotating candidate reader for workspaces with due terminal writebacks.
+**Purpose**: Creates a rotating workspace-candidate reader for terminal writebacks. It prevents one workspace from monopolizing the poller.
 
-**Data flow**: It initializes a cursor, wraps the due query with owner_candidates, and returns an async candidates function that pages workspace ids and wraps around.
+**Data flow**: It initializes a cursor and returns an async candidate function that pages workspace ids with due writebacks, wrapping the owner-scoped query helper.
 
-**Call relations**: WritebackPoller receives this as its workspace source.
+**Call relations**: A `WritebackPoller` receives the returned candidate function and calls it in `run` or `drain`.
 
 *Call graph*: 1 external calls (owner_candidates).
 
 
-##### `writeback_workspaces.due`  (lines 4104–4118)
+##### `writeback_workspaces.due`  (lines 4789–4803)
 
 ```
 def due() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Builds one page query for workspace ids that currently have deliverable terminal writebacks.
+**Purpose**: Builds one page query for workspace ids that currently have due terminal writebacks. It applies the rotating cursor when set.
 
-**Data flow**: It reads the current time, selects grouped workspace ids matching _writeback_due, applies the cursor if set, and limits the page.
+**Data flow**: It reads the current time, selects workspace ids from writebacks joined to turns, filters with `_writeback_due`, groups and orders them, and returns the SQL query.
 
-**Call relations**: owner_candidates calls it inside writeback_workspaces.
+**Call relations**: The owner-candidate wrapper inside `writeback_workspaces` executes it.
 
 *Call graph*: calls 1 internal fn (_writeback_due); 2 external calls (now, select).
 
 
-##### `writeback_workspaces.candidates`  (lines 4122–4130)
+##### `writeback_workspaces.candidates`  (lines 4807–4815)
 
 ```
 async def candidates() -> tuple[UUID, ...]
 ```
 
-**Purpose**: Returns the next rotating page of workspace ids with due writebacks.
+**Purpose**: Returns the next rotating page of workspace ids with due writebacks. It wraps around when the end is reached.
 
-**Data flow**: It calls the owner-scoped due reader, resets the cursor if it reached the end, updates the cursor to the last returned id, and returns the ids.
+**Data flow**: It calls the owner-scoped due reader, resets the cursor if a page is empty after the cursor, updates the cursor to the last id, and returns workspace ids.
 
-**Call relations**: WritebackPoller.run and drain call the candidates function.
+**Call relations**: `WritebackPoller.run` and `WritebackPoller.drain` call it through the poller’s `candidates` field.
 
 
-##### `_WritebackDeliveryFailed.__init__`  (lines 4140–4143)
+##### `_WritebackDeliveryFailed.__init__`  (lines 4825–4828)
 
 ```
 def __init__(self, phase: Literal['post', 'attach'], error: Exception) -> None
 ```
 
-**Purpose**: Wraps a delivery exception with the phase that failed: posting the reply or attaching files.
+**Purpose**: Wraps a failed writeback delivery with the phase that failed: posting the reply or attaching files. This lets retry logs say what broke.
 
-**Data flow**: It receives a phase and original exception, stores them, and initializes the runtime error text from the original error.
+**Data flow**: It receives a phase and original exception, stores both, and initializes the error message from the exception.
 
-**Call relations**: WritebackPoller._deliver_claimed raises it so _deliver can retry or fail the row with phase-specific logging.
+**Call relations**: `WritebackPoller._deliver_claimed` raises it when a surface `post` or `attach` call fails.
 
 *Call graph*: called by 1 (_deliver_claimed).
 
 
-##### `WritebackPoller.run`  (lines 4166–4199)
+##### `WritebackPoller.run`  (lines 4851–4884)
 
 ```
 async def run(self) -> None
 ```
 
-**Purpose**: Continuously drains terminal writebacks across workspaces in the background.
+**Purpose**: Continuously drains terminal writebacks across workspaces. It keeps a bounded number of workspace drain tasks in flight and logs failures.
 
-**Data flow**: It keeps a bounded set of workspace drain tasks, removes completed ones, asks for new candidate workspaces, starts drains under a concurrency semaphore, sleeps between polls, and cancels tasks on shutdown.
+**Data flow**: It creates a concurrency semaphore, polls candidate workspaces, starts drain tasks for new ones, cleans up finished tasks, sleeps between polls, and cancels outstanding tasks on shutdown.
 
-**Call relations**: Core runs it for durable surfaces; it calls _drain_workspace for each active workspace.
+**Call relations**: Core runs it as the background mailroom for durable surface final replies.
 
 *Call graph*: calls 1 internal fn (_drain_workspace); 5 external calls (Semaphore, create_task, gather, sleep, log).
 
 
-##### `WritebackPoller.drain`  (lines 4201–4210)
+##### `WritebackPoller.drain`  (lines 4886–4895)
 
 ```
 async def drain(self) -> None
 ```
 
-**Purpose**: Runs one bounded drain pass for currently due workspaces. This is useful for tests or one-shot maintenance.
+**Purpose**: Runs one bounded drain pass instead of an infinite loop. It is useful for tests or manual flushes.
 
-**Data flow**: It reads candidate workspace ids, drains them concurrently with a semaphore, gathers results, and raises an ExceptionGroup if any drains failed.
+**Data flow**: It reads candidate workspace ids, drains them concurrently under a semaphore, gathers results, and raises an exception group if any workspace failed.
 
-**Call relations**: It uses the same _drain_workspace path as the continuous run loop.
+**Call relations**: It calls `_drain_workspace`, the same worker used by `run`.
 
 *Call graph*: calls 1 internal fn (_drain_workspace); 2 external calls (Semaphore, gather).
 
 
-##### `WritebackPoller._drain_workspace`  (lines 4212–4230)
+##### `WritebackPoller._drain_workspace`  (lines 4897–4915)
 
 ```
 async def _drain_workspace(self, workspace_id: UUID, semaphore: asyncio.Semaphore) -> None
 ```
 
-**Purpose**: Claims and delivers due terminal writebacks for one workspace.
+**Purpose**: Claims and delivers due writebacks for one workspace. It also starts lease-renewal tasks while external delivery is in progress.
 
-**Data flow**: It enters the workspace scope, claims rows, starts claim-renewal tasks for each, delivers each row, then cancels and awaits renewals.
+**Data flow**: It receives workspace id and semaphore, enters workspace scope, claims rows, starts renewal tasks, delivers each row, and cancels renewals afterward.
 
-**Call relations**: run and drain call it; it coordinates _claim, _renew_claim, and _deliver.
+**Call relations**: `run` and `drain` call it for each candidate workspace.
 
 *Call graph*: calls 3 internal fn (_claim, _deliver, _renew_claim); called by 2 (drain, run); 4 external calls (create_task, gather, log, ws).
 
 
-##### `WritebackPoller._claim`  (lines 4232–4265)
+##### `WritebackPoller._claim`  (lines 4917–4950)
 
 ```
 async def _claim(self, workspace_id: UUID) -> Sequence[sa.Row]
 ```
 
-**Purpose**: Claims a batch of due writeback rows for this worker.
+**Purpose**: Claims a batch of due terminal writeback rows for this worker. Claiming stops other workers from delivering the same rows.
 
-**Data flow**: It builds a claimable subquery, updates matching writeback rows to claimed with worker id and expiry, and returns turn id, reply ref, and last error for each claimed row.
+**Data flow**: It receives workspace id, finds due rows with `_writeback_due`, updates them to claimed with worker id and expiry, and returns turn id, reply ref, and last error.
 
-**Call relations**: _drain_workspace calls it before attempting delivery.
+**Call relations**: `_drain_workspace` calls it before starting delivery.
 
 *Call graph*: calls 1 internal fn (_writeback_due); called by 1 (_drain_workspace); 5 external calls (now, timedelta, select, update, workspace_tx).
 
 
-##### `WritebackPoller._deliver`  (lines 4267–4299)
+##### `WritebackPoller._deliver`  (lines 4952–4984)
 
 ```
 async def _deliver(self, workspace_id: UUID, turn_id: UUID, reply_ref: str | None, renewal: asyncio.Task[None]) -> None
 ```
 
-**Purpose**: Delivers one claimed terminal writeback and records the outcome.
+**Purpose**: Delivers one claimed terminal writeback and logs the outcome. It turns delivery failures into retry or failure state changes.
 
-**Data flow**: It receives workspace id, turn id, optional reply ref, and renewal task. It times the work, calls _deliver_with_lease, handles lost claims or delivery failures, updates retry/failure state, and logs success or failure.
+**Data flow**: It receives workspace id, turn id, existing reply ref, and renewal task. It times delivery, calls `_deliver_with_lease`, catches claim loss or delivery failure, and logs success or retry/failure details.
 
-**Call relations**: _drain_workspace calls it for each claimed row.
+**Call relations**: `_drain_workspace` calls it for each claimed row.
 
 *Call graph*: calls 2 internal fn (_deliver_with_lease, _fail_or_retry); called by 1 (_drain_workspace); 2 external calls (now, log).
 
 
-##### `WritebackPoller._deliver_with_lease`  (lines 4301–4330)
+##### `WritebackPoller._deliver_with_lease`  (lines 4986–5015)
 
 ```
 async def _deliver_with_lease(self, workspace_id: UUID, turn_id: UUID, reply_ref: str | None, renewal: asyncio.Task[None]) -> None
 ```
 
-**Purpose**: Runs external delivery while the claim-renewal task is alive, then marks the row delivered only after renewal is stopped.
+**Purpose**: Runs external delivery while the claim-renewal task stays healthy, then marks the row delivered. It stops renewal before the final commit to avoid locking against itself.
 
-**Data flow**: It starts _deliver_claimed, waits for delivery or renewal failure, cancels leftovers, then calls _mark_delivered.
+**Data flow**: It starts `_deliver_claimed`, races it against renewal failure, cancels leftover tasks, waits for cleanup, and calls `_mark_delivered` after successful delivery.
 
-**Call relations**: _deliver calls it to separate provider calls from the final database commit.
+**Call relations**: `_deliver` calls it as the protected delivery core.
 
 *Call graph*: calls 2 internal fn (_deliver_claimed, _mark_delivered); called by 1 (_deliver); 3 external calls (create_task, gather, wait).
 
 
-##### `WritebackPoller._deliver_claimed`  (lines 4332–4354)
+##### `WritebackPoller._deliver_claimed`  (lines 5017–5039)
 
 ```
 async def _deliver_claimed(self, workspace_id: UUID, turn_id: UUID, reply_ref: str | None) -> None
 ```
 
-**Purpose**: Builds a Writeback and calls the owning surface’s post and attach functions.
+**Purpose**: Builds the writeback payload and calls the surface’s final reply delivery functions. It records the provider reply reference before uploading attachments.
 
-**Data flow**: It receives workspace id, turn id, and optional reply ref. It builds delivery data, finds the surface spec, skips missing delivery functions, posts if no reply ref exists, records the ref, then attaches files.
+**Data flow**: It receives workspace id, turn id, and optional reply ref. It builds `Writeback`, finds the surface spec, skips missing delivery hooks, posts if needed, records the ref, and calls attach.
 
-**Call relations**: _deliver_with_lease calls it; it uses _build and _record_ref.
+**Call relations**: `_deliver_with_lease` calls it; failures are wrapped as `_WritebackDeliveryFailed`.
 
 *Call graph*: calls 3 internal fn (_build, _record_ref, __init__); called by 1 (_deliver_with_lease); 1 external calls (log).
 
 
-##### `WritebackPoller._renew_claim`  (lines 4356–4359)
+##### `WritebackPoller._renew_claim`  (lines 5041–5044)
 
 ```
 async def _renew_claim(self, turn_id: UUID) -> None
 ```
 
-**Purpose**: Keeps a writeback claim alive while external delivery is in progress.
+**Purpose**: Keeps a claimed writeback lease alive during slow external delivery. It refreshes until cancelled.
 
-**Data flow**: It repeatedly sleeps for the refresh interval and calls _refresh_claim for the turn.
+**Data flow**: It receives a turn id, sleeps for the refresh interval in a loop, and calls `_refresh_claim` each time.
 
-**Call relations**: _drain_workspace starts one renewal task per claimed row.
+**Call relations**: `_drain_workspace` starts one renewal task per claimed row.
 
 *Call graph*: calls 1 internal fn (_refresh_claim); called by 1 (_drain_workspace); 1 external calls (sleep).
 
 
-##### `WritebackPoller._refresh_claim`  (lines 4361–4377)
+##### `WritebackPoller._refresh_claim`  (lines 5046–5062)
 
 ```
 async def _refresh_claim(self, turn_id: UUID) -> None
 ```
 
-**Purpose**: Extends this worker’s claim expiry for a writeback row.
+**Purpose**: Extends the claim expiry for a writeback row still owned by this worker. It raises if the worker no longer owns the claim.
 
-**Data flow**: It receives a turn id, updates the claimed row if still owned by this worker, and raises _WritebackClaimLost if no row was updated.
+**Data flow**: It receives a turn id, updates the matching claimed row with a later expiry, and raises `_WritebackClaimLost` if no row was updated.
 
-**Call relations**: _renew_claim calls it on each refresh tick.
+**Call relations**: `_renew_claim` calls it repeatedly.
 
 *Call graph*: called by 1 (_renew_claim); 5 external calls (__init__, now, timedelta, update, workspace_tx).
 
 
-##### `WritebackPoller._build`  (lines 4379–4431)
+##### `WritebackPoller._build`  (lines 5064–5116)
 
 ```
 async def _build(self, turn_id: UUID) -> tuple[Writeback, str]
 ```
 
-**Purpose**: Builds the Writeback object needed by a surface delivery function.
+**Purpose**: Builds the `Writeback` object for one terminal turn. It includes the terminal frame, conversation queue key, agent id, and shared artifacts.
 
-**Data flow**: It receives a turn id, reads the terminal frame, conversation, agent, queue key, surface name, and shared artifacts, validates terminal JSON, and returns the Writeback plus surface name.
+**Data flow**: It receives a turn id, queries turn and conversation data plus artifact rows, validates the terminal frame, and returns the writeback payload with the surface name.
 
-**Call relations**: _deliver_claimed calls it before invoking a surface.
+**Call relations**: `_deliver_claimed` calls it before dispatching to the surface spec.
 
 *Call graph*: called by 1 (_deliver_claimed); 5 external calls (__init__, __init__, model_validate, select, workspace_tx).
 
 
-##### `WritebackPoller._record_ref`  (lines 4433–4445)
+##### `WritebackPoller._record_ref`  (lines 5118–5130)
 
 ```
 async def _record_ref(self, turn_id: UUID, reply_ref: str) -> None
 ```
 
-**Purpose**: Stores the durable provider reply reference after a successful post. This prevents a retry from reposting if the process crashes later.
+**Purpose**: Stores the provider reply reference after the final reply has been posted. This prevents reposting if the worker crashes before attachments finish.
 
-**Data flow**: It receives turn id and reply ref, updates the claimed writeback row owned by this worker, and raises _WritebackClaimLost if ownership was lost.
+**Data flow**: It receives turn id and reply ref, updates the claimed writeback row owned by this worker, and raises claim-lost if no row changed.
 
-**Call relations**: _deliver_claimed calls it between post and attach.
+**Call relations**: `_deliver_claimed` calls it between `post` and `attach`.
 
 *Call graph*: called by 1 (_deliver_claimed); 3 external calls (__init__, update, workspace_tx).
 
 
-##### `WritebackPoller._mark_delivered`  (lines 4447–4464)
+##### `WritebackPoller._mark_delivered`  (lines 5132–5149)
 
 ```
 async def _mark_delivered(self, turn_id: UUID) -> None
 ```
 
-**Purpose**: Marks a claimed writeback as fully delivered.
+**Purpose**: Marks a claimed terminal writeback as delivered. It clears claim owner and expiry.
 
-**Data flow**: It receives a turn id, updates the row to delivered, clears claim fields, and raises _WritebackClaimLost if this worker no longer owns it.
+**Data flow**: It receives a turn id, updates the claimed row owned by this worker to delivered, and raises claim-lost if the update fails.
 
-**Call relations**: _deliver_with_lease calls it after external delivery completes.
+**Call relations**: `_deliver_with_lease` calls it after external delivery succeeds.
 
 *Call graph*: called by 1 (_deliver_with_lease); 3 external calls (__init__, update, workspace_tx).
 
 
-##### `WritebackPoller._fail_or_retry`  (lines 4466–4515)
+##### `WritebackPoller._fail_or_retry`  (lines 5151–5200)
 
 ```
 async def _fail_or_retry(self, turn_id: UUID, error: _WritebackDeliveryFailed) -> tuple[str, str, datetime | None]
 ```
 
-**Purpose**: Schedules a failed terminal writeback for retry or marks it permanently failed after the delivery window expires.
+**Purpose**: Schedules a failed terminal writeback for retry or marks it permanently failed after it gets too old. It honors provider retry-after hints within a bounded window.
 
-**Data flow**: It receives turn id and wrapped delivery error, chooses retry delay from SurfaceDeliveryError or fixed backoff, truncates error text, updates row status and next claim time, and returns outcome details.
+**Data flow**: It receives turn id and wrapped delivery error, computes retry timing and last-error text, updates the row if still claimed by this worker, and returns outcome, error text, and next attempt time.
 
-**Call relations**: _deliver calls it after _deliver_with_lease reports a delivery failure.
+**Call relations**: `_deliver` calls it when `_deliver_with_lease` reports a delivery failure.
 
 *Call graph*: called by 1 (_deliver); 5 external calls (now, timedelta, case, update, workspace_tx).
 
 
-##### `mid_turn_reply_workspaces`  (lines 4518–4549)
+##### `mid_turn_reply_workspaces`  (lines 5203–5234)
 
 ```
 def mid_turn_reply_workspaces() -> WorkspaceCandidates
 ```
 
-**Purpose**: Creates a rotating candidate reader for workspaces with due mid-turn replies.
+**Purpose**: Creates a rotating workspace-candidate reader for deliverable mid-turn replies. These are replies sent before a turn reaches its final answer.
 
-**Data flow**: It initializes a cursor, wraps its due query with owner_candidates, and returns an async candidates function that pages workspace ids.
+**Data flow**: It initializes a cursor and returns an async function that pages workspace ids with due mid-turn reply rows.
 
-**Call relations**: MidTurnReplyPoller receives this as its workspace source.
+**Call relations**: `MidTurnReplyPoller` receives and calls the returned candidate function.
 
 *Call graph*: 1 external calls (owner_candidates).
 
 
-##### `mid_turn_reply_workspaces.due`  (lines 4524–4535)
+##### `mid_turn_reply_workspaces.due`  (lines 5209–5220)
 
 ```
 def due() -> sa.Select[tuple[UUID]]
 ```
 
-**Purpose**: Builds one page query for workspace ids that have deliverable mid-turn replies.
+**Purpose**: Builds one query for workspace ids with due mid-turn replies. It applies the rotating cursor to page through workspaces.
 
-**Data flow**: It reads the current time, selects grouped workspace ids matching _mid_turn_reply_due, applies the cursor if set, and limits the page.
+**Data flow**: It reads the current time, selects grouped workspace ids from mid-turn replies matching `_mid_turn_reply_due`, orders and limits them, and returns the SQL query.
 
-**Call relations**: owner_candidates calls it inside mid_turn_reply_workspaces.
+**Call relations**: The owner-candidate wrapper inside `mid_turn_reply_workspaces` executes it.
 
 *Call graph*: calls 1 internal fn (_mid_turn_reply_due); 2 external calls (now, select).
 
 
-##### `mid_turn_reply_workspaces.candidates`  (lines 4539–4547)
+##### `mid_turn_reply_workspaces.candidates`  (lines 5224–5232)
 
 ```
 async def candidates() -> tuple[UUID, ...]
 ```
 
-**Purpose**: Returns the next rotating page of workspace ids with due mid-turn replies.
+**Purpose**: Returns the next rotating page of workspaces with mid-turn replies to deliver. It wraps around after the last workspace.
 
-**Data flow**: It calls the owner-scoped due reader, resets the cursor at the end, updates the cursor to the last id, and returns workspace ids.
+**Data flow**: It calls the due reader, resets the cursor if necessary, stores the last workspace id as the new cursor, and returns the ids.
 
-**Call relations**: MidTurnReplyPoller.drain calls it.
+**Call relations**: `MidTurnReplyPoller.drain` calls it through the poller’s `candidates` field.
 
 
-##### `_mid_turn_reply_due`  (lines 4552–4565)
+##### `_mid_turn_reply_due`  (lines 5237–5250)
 
 ```
 def _mid_turn_reply_due(now: datetime) -> sa.ColumnElement[bool]
 ```
 
-**Purpose**: Builds the database condition for mid-turn reply rows that are claimable now.
+**Purpose**: Builds the database condition for claimable mid-turn replies. It includes pending rows and expired claims.
 
-**Data flow**: It receives the current time and returns a SQL condition matching pending or expired claimed rows.
+**Data flow**: It receives the current time and returns a SQL condition over reply status and claim expiry.
 
-**Call relations**: mid_turn_reply_workspaces.due and MidTurnReplyPoller._claim use it.
+**Call relations**: `mid_turn_reply_workspaces.due` and `MidTurnReplyPoller._claim` use it.
 
 *Call graph*: called by 2 (_claim, due); 2 external calls (and_, or_).
 
 
-##### `MidTurnReplyPoller.run`  (lines 4591–4597)
+##### `MidTurnReplyPoller.run`  (lines 5276–5282)
 
 ```
 async def run(self) -> None
 ```
 
-**Purpose**: Continuously delivers mid-turn replies in the background.
+**Purpose**: Continuously drains deliverable mid-turn replies. It logs drain failures and tries again on the next poll.
 
-**Data flow**: It loops forever, calls drain, logs drain failures, then sleeps before the next poll.
+**Data flow**: It loops forever, calls `drain`, catches and logs errors, then sleeps for the poll interval.
 
-**Call relations**: Core runs it for durable surfaces that may speak before a turn ends.
+**Call relations**: Core runs it as the background sender for early replies and cross-surface comment notices.
 
 *Call graph*: calls 1 internal fn (drain); 2 external calls (sleep, log).
 
 
-##### `MidTurnReplyPoller.drain`  (lines 4599–4609)
+##### `MidTurnReplyPoller.drain`  (lines 5284–5294)
 
 ```
 async def drain(self) -> None
 ```
 
-**Purpose**: Claims and delivers due mid-turn replies for candidate workspaces.
+**Purpose**: Runs one pass of mid-turn reply delivery across candidate workspaces. It processes claimed replies in order.
 
-**Data flow**: It reads candidate workspace ids, enters each workspace scope, claims rows, logs retries, and delivers each row.
+**Data flow**: It gets workspace ids from the candidate reader, enters each workspace scope, claims rows, logs retries, and calls `_deliver` for each row.
 
-**Call relations**: run calls it every poll interval; it coordinates _claim and _deliver.
+**Call relations**: `run` calls it repeatedly.
 
 *Call graph*: calls 2 internal fn (_claim, _deliver); called by 1 (run); 2 external calls (log, ws).
 
 
-##### `MidTurnReplyPoller._claim`  (lines 4611–4652)
+##### `MidTurnReplyPoller._claim`  (lines 5296–5337)
 
 ```
 async def _claim(self, workspace_id: UUID) -> Sequence[sa.Row]
 ```
 
-**Purpose**: Claims a batch of due mid-turn reply rows for this worker in stable delivery order.
+**Purpose**: Claims a batch of due mid-turn reply rows for this worker. It orders them so surfaces receive replies in the model’s intended order.
 
-**Data flow**: It builds a claimable query ordered by creation and span order, updates rows to claimed with expiry, returns delivery fields, and sorts the claimed rows.
+**Data flow**: It receives workspace id, finds due rows using `_mid_turn_reply_due`, updates them to claimed with worker id and expiry, returns useful row fields, and sorts the claimed rows.
 
-**Call relations**: drain calls it before delivering replies.
+**Call relations**: `drain` calls it before delivering mid-turn replies.
 
 *Call graph*: calls 1 internal fn (_mid_turn_reply_due); called by 1 (drain); 5 external calls (now, timedelta, select, update, workspace_tx).
 
 
-##### `MidTurnReplyPoller._deliver`  (lines 4654–4677)
+##### `MidTurnReplyPoller._deliver`  (lines 5339–5362)
 
 ```
 async def _deliver(self, workspace_id: UUID, row: sa.Row) -> None
 ```
 
-**Purpose**: Delivers one claimed mid-turn reply and records success or retry/failure.
+**Purpose**: Delivers one claimed mid-turn reply and records the result. It schedules retry or failure on errors.
 
-**Data flow**: It receives workspace id and claimed row, calls _speak, sends failures to _fail_or_retry, marks success with _mark_delivered, and logs the result.
+**Data flow**: It receives workspace id and a claimed row, calls `_speak`, handles failures with `_fail_or_retry`, marks success with `_mark_delivered`, and logs timing.
 
-**Call relations**: drain calls it for each claimed row.
+**Call relations**: `drain` calls it for every claimed reply row.
 
 *Call graph*: calls 3 internal fn (_fail_or_retry, _mark_delivered, _speak); called by 1 (drain); 2 external calls (now, log).
 
 
-##### `MidTurnReplyPoller._speak`  (lines 4679–4720)
+##### `MidTurnReplyPoller._speak`  (lines 5364–5406)
 
 ```
 async def _speak(self, workspace_id: UUID, row: sa.Row) -> str | None
 ```
 
-**Purpose**: Calls the owning surface’s mid-turn speak function, or completes silently if there is no function to call.
+**Purpose**: Calls the surface’s mid-turn delivery hook for one reply, unless it was already posted or the surface has no hook. Existing reply references prevent duplicate posts after crashes.
 
-**Data flow**: It receives workspace id and reply row. If a reply ref already exists it returns it; otherwise it reads turn and conversation surface data, finds the spec, builds MidTurnReply, and calls spec.speak if present.
+**Data flow**: It receives workspace id and reply row. It returns an existing reply ref if present, otherwise loads turn and conversation data, finds the surface spec, builds `MidTurnReply`, and calls `speak` when available.
 
-**Call relations**: _deliver calls it before marking the row delivered.
+**Call relations**: `_deliver` calls it as the actual external send step.
 
 *Call graph*: called by 1 (_deliver); 4 external calls (__init__, select, workspace_tx, log).
 
 
-##### `MidTurnReplyPoller._mark_delivered`  (lines 4722–4740)
+##### `MidTurnReplyPoller._mark_delivered`  (lines 5408–5426)
 
 ```
 async def _mark_delivered(self, reply_id: UUID, reply_ref: str | None) -> None
 ```
 
-**Purpose**: Marks a mid-turn reply row delivered and stores its provider reference if any.
+**Purpose**: Marks a mid-turn reply row as delivered and stores its provider reply reference. If the claim was lost, it logs instead of raising.
 
-**Data flow**: It receives reply id and optional reply ref, updates the row only if still claimed by this worker, clears claim fields, and logs if the claim was lost.
+**Data flow**: It receives reply id and optional reply ref, updates the claimed row owned by this worker to delivered, clears claim fields, and logs claim loss if no row changed.
 
-**Call relations**: _deliver calls it after _speak succeeds or intentionally does nothing.
+**Call relations**: `_deliver` calls it after `_speak` succeeds or intentionally does nothing.
 
 *Call graph*: called by 1 (_deliver); 3 external calls (update, workspace_tx, log).
 
 
-##### `MidTurnReplyPoller._fail_or_retry`  (lines 4742–4789)
+##### `MidTurnReplyPoller._fail_or_retry`  (lines 5428–5475)
 
 ```
 async def _fail_or_retry(self, reply_id: UUID, error: Exception) -> tuple[str, str, datetime | None]
 ```
 
-**Purpose**: Schedules a failed mid-turn reply for retry or marks it failed after it ages out. A failed span no longer blocks the terminal writeback.
+**Purpose**: Schedules a failed mid-turn reply for retry or marks it failed after the delivery window expires. A failed mid-turn reply no longer blocks the terminal reply.
 
-**Data flow**: It receives reply id and error, chooses a retry delay, truncates error text, updates status and claim expiry based on age, and returns outcome details.
+**Data flow**: It receives reply id and error, computes retry delay from retry-after or fixed backoff, writes status, expiry, and last error if still claimed, and returns outcome and next attempt time.
 
-**Call relations**: _deliver calls it when _speak raises an error.
+**Call relations**: `_deliver` calls it when `_speak` raises an error.
 
 *Call graph*: called by 1 (_deliver); 5 external calls (now, timedelta, case, update, workspace_tx).
 
+
+### `core/src/ufo/surfaces/__init__.py`
+
+`other` · `import/package discovery`
+
+This is an empty package marker file. In Python projects, a file named `__init__.py` tells Python that the surrounding folder should be treated as an importable package. That means code elsewhere can refer to things inside `core/src/ufo/surfaces` using normal import paths, such as `ufo.surfaces.some_module`.
+
+There is no code here, so it does not create objects, run setup steps, or expose a public shortcut API. Its value is structural: it makes the folder part of the project’s module layout. Without it, depending on the Python version and packaging setup, imports involving `ufo.surfaces` might fail or behave differently.
+
+A simple analogy is a blank label on a filing cabinet drawer. The label does not contain the documents, but it tells the filing system that this drawer exists and can be addressed by name.
+
 ## 📊 State Registers Touched
 
-- `reg-database-store` — The shared database connection and tables where workspaces, users, agents, turns, files, jobs, costs, and extension data are saved.
-- `reg-workspace-principals` — The current workspace, members, agents, controlling users, and ownership identities used to decide who is acting.
-- `reg-surface-installations` — The saved bindings for web, Slack, iMessage, CLI, hosted sites, and other surfaces that connect outside channels to workspaces and agents.
-- `reg-conversation-records` — The durable conversation rows that remember where a conversation came from, which agent owns it, its audience, title, sandbox, and current metadata.
-- `reg-inbound-message-queue` — The saved holding area for incoming chat messages before they are admitted into a running or queued turn.
-- `reg-turn-run-state` — The shared state of each unit of agent work, including queued, claimed, running, parked, canceled, recovered, or finished.
-- `reg-runtime-fleet` — The records of running server or worker instances, their heartbeats, listener claims, and cleanup ownership.
-- `reg-transcript-history` — The saved conversation transcript and compaction snapshots that all surfaces, workers, prompts, and recovery logic read and update.
-- `reg-live-stream-state` — The live update stream that broadcasts turn progress, tool activity, subagent activity, cancellations, and final replies to connected clients.
-- `reg-midturn-replies` — The durable outbox for replies sent before a turn is fully complete, so they can be delivered once even after retries.
-- `reg-scheduled-jobs` — The durable background job and scheduled task state used for recurring work, wakeups, retries, monitors, billing, and offline evaluation.
-- `reg-observability-traces` — The shared trace, metric, log, and traceparent information that lets operators connect startup, turns, tools, subagents, and billing events.
-- `reg-pending-human-interactions` — The durable pending questions, credential-collection prompts, setup requests, and checklist-style waits that tools create and surfaces later resolve.
-- `reg-surface-delivery-state` — The outbound reply/writeback bookkeeping for external chat surfaces, including delivery targets, external message identifiers, and exactly-once final reply status.
-- `reg-active-cancellation-handles` — Process-local abort tokens and cancellation handles that bridge durable cancel requests to currently running turns, tools, sandboxes, and child turns.
-- `reg-turn-surface-context` — Durable per-turn inbound context such as speaker, on-behalf-of member, timezone, original surface metadata, and connection-authorization status carried from admission into prompting, execution, and delivery.
-- `reg-admission-ordering-locks` — Conversation-level admission and serialization locks/cursors that prevent concurrent messages, starts, stops, or queued turns from racing before durable turn execution begins.
+- `reg-extension-capability-registry` — The live catalog of everything enabled extensions add, such as tools, routes, jobs, credentials, hooks, and backends.
+- `reg-database-session-workspace-scope` — The shared database access layer that keeps reads and writes inside the right workspace and transaction.
+- `reg-workspace-directory` — The durable list of workspaces and their core ownership, admin, billing, and setup state.
+- `reg-member-auth-principals` — The shared answer to who the current person or service is and what member identity they are acting as.
+- `reg-agent-profiles` — The saved assistant definitions, including each agent's model, tools, visibility, setup needs, internet access, and identity.
+- `reg-surface-routing` — The mapping from outside places like web, Slack, terminal, and iMessage to the right workspace, conversation, member, and agent.
+- `reg-conversation-records` — The durable conversation list, including titles, audience, surface labels, sandbox links, and visibility rules.
+- `reg-inbound-admission-queue` — The saved queue of incoming messages or intents waiting to become safe conversation turns.
+- `reg-transcript-store` — The saved conversation history and compacted summaries that later turns, portals, and auditors read back.
+- `reg-live-update-stream` — The temporary live feed of progress messages that open clients and other server processes can follow.
+- `reg-billing-ledger` — The shared money and usage record for tokens, images, videos, sandbox use, egress, balances, caps, and exports.
+- `reg-credential-vault` — The encrypted store of API keys, connected accounts, grants, and approvals that lets tools use outside services without exposing secrets.
+- `reg-artifact-blob-store` — The shared file storage for generated artifacts, downloads, document previews, screenshots, and other saved output bytes.
+- `reg-observability-context` — The shared tracing, logging, metrics, health, and redaction context used to understand what happened safely.
+- `reg-extension-data-store` — Durable extension-scoped key/value or JSON state used by installed extensions beyond their manifest capabilities and lockfile selection.
+- `reg-reply-delivery-outbox` — Durable reply records for messages that must be delivered exactly once or retried safely, including mid-turn replies before final turn completion.
+- `reg-hosted-site-store` — Saved hosted-site records, published bindings, homepage mappings, build metadata, and site preview state used by public routes and site tools.
+- `reg-transcript-access-audit-log` — Durable audit trail of privacy-sensitive transcript reads, especially admin access to another member’s private conversation history.
+- `reg-delivery-format-registry` — Shared per-surface reply and delivery-format rules used when constructing prompts and shaping delivered responses.
+- `reg-workspace-membership-roster` — Durable workspace member records, roles/admin flags, invitations, inviter stamps, seating history, and member-local profile fields such as timezone or email lookup data.
+- `reg-auth-and-oauth-flow-state` — Short-lived login and OAuth handoff state such as nonces, return targets, code-verifier data, pending claims, and callback correlation before it becomes an authenticated principal or stored credential.
+- `reg-signed-token-keyring` — Shared signing secrets, key IDs, expiry rules, and validation parameters used to mint and verify login, public-route, artifact-download, and sandbox-access tokens.

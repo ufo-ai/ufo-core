@@ -1,911 +1,2307 @@
-# Live turn updates and terminal coordination  `stage-6.1`
+# Browser Web Portal Surface  `stage-6.1`
 
-This stage is shared behind-the-scenes support for live communication while a turn is running. A “turn” is one user request and the system’s answer process. Its job is to keep clients updated in real time, and to recover cleanly if a browser reconnects or if work is split across several server pods.
+This stage is the browser-facing front door of the system. It is part of the live main interface: the place where a member signs in, sees agents, chats, changes settings, and opens pages like memory, usage, connections, objects, admin views, and live streams.
 
-The in-memory hub is the fast local broadcaster. It sends live text, tool activity, cost changes, replies, and final status to any client watching the turn. It also keeps a short replay log, so a reconnecting client can resume from a saved cursor instead of starting over.
-
-The hub tail adds a safety net. It listens to the live hub, but also checks the database more slowly to confirm whether the turn really finished or was parked. This prevents a client from missing the final state.
-
-The Redis stream hub extends live updates across multiple server processes. Redis acts like a shared message lane for temporary frames. The Redis terminal layer does the same for terminal sessions, using streams for coordination and blob storage for larger chunks of data.
+The main web surface serves the browser app and protects it with a session cookie, which is a small browser-stored sign-in token. It also provides the routes the app uses to read data, send chat messages, and make changes. The audience code acts like a door attendant. It decides which members may see or chat with which agents, and gives admins tools to grant access or inspect private transcripts. Panels turns setup and settings form submissions into ordinary agent tool calls, so button clicks fit the same system as chat actions. Starters prepares the suggested prompts on the start screen, using remembered work and short-term caching to stay fast. Community reads public skills from skills.sh and presents errors clearly. The memory surface lets authorized operators inspect saved workspace memory. The chat package marker simply makes the chat extension importable.
 
 ## Files in this stage
 
-### Live turn streams
-In-memory live turn streaming and tailing logic deliver updates to clients while protecting late or reconnecting viewers from missed final state.
+### Portal shell and chat package
+The browser portal entrypoint serves the authenticated web app and chat/API surface, while the chat package marker makes the app chat extension importable.
 
-### `core/src/ufo/surfaces/hub_tail.py`
+### `extensions/web/ufo_ext_web/surface.py`
 
-`io_transport` · `request handling / live streaming`
+`io_transport` · `startup, request handling, live streaming, scheduled background jobs`
 
-A “turn” appears to be a unit of work or conversation that produces live frames over time. A client watching that turn needs updates as they happen, but live streams are fragile: the client may connect after the turn started, reconnect after missing something, or arrive after the turn already finished. This file solves that by using two paths at once, like watching both a live sports broadcast and the official scoreboard. The hub provides immediate live frames. The database provides the durable truth about whether the turn is already terminal, meaning finished, or parked, meaning paused because something such as a spend cap or seat permission blocks it.
+Think of this file as the front desk for UFO’s web product. A browser arrives with a signed session cookie, this file checks who the member is, works out which workspace and agents they are allowed to see, and then answers the page’s requests. It serves the built web app and its static files, including fallbacks for assets from older deployments so a rolling deploy does not break pages already open in someone’s browser.
 
-The main generator, `tail_frames`, starts a hub subscription and a background poll of the stored turn state. Both feed one queue. The caller receives frames from that queue until a final frame appears. If the database already says the turn is done or parked, the generator returns that immediately. If the hub delivers the ending first, the stream stops there. If the hub misses it, the polling path eventually finds it. The cleanup is important: when the caller stops reading, the background tasks are cancelled so no hidden work keeps running.
+Most of the file is route logic. Some routes read information: agent lists, live agent status, transcripts, memory, sources, credentials, usage, settings, skills, connections, and generic object lists. Other routes perform controlled actions: opening a session, sending a chat message, stopping a turn, fulfilling a credential prompt, following a connection handoff, applying prepared intents, or writing objects from an app frame.
 
-#### Function details
-
-##### `tail_frames`  (lines 28–59)
-
-```
-async def tail_frames(hub: Hub, turn_id: UUID, since: str='') -> AsyncGenerator[tuple[str, LiveFrame]]
-```
-
-**Purpose**: This is the main streaming function. It yields live frames for one turn and stops only when the turn has finished or become parked, using both the live hub and the stored database state so late or reconnecting clients still get a correct ending.
-
-**Data flow**: It receives a hub, a turn ID, and optionally the last cursor the caller saw. It checks whether the hub can resume from that cursor; if not, it starts from the beginning of what the hub still has. It then starts two background jobs: one copies hub messages into a queue, and one periodically checks the database for a final or parked state. Before waiting on the queue, it also checks the database once in case the turn already ended. It yields each frame to the caller and, when it sees a terminal or parked frame, it stops. When the generator closes, it cancels the background jobs.
-
-**Call relations**: This function is the worker behind `HubTailer.tail`. It calls the hub to see whether a reconnect cursor is still usable, starts `_pump` for live hub messages, starts `_poll_status` for the durable fallback, and asks `turn_status_frame` for the official stored state. It hands frames back upward to whatever surface is sending them to the client.
-
-*Call graph*: calls 4 internal fn (covers, _poll_status, _pump, turn_status_frame); called by 1 (tail); 3 external calls (Queue, ensure_future, gather).
-
-
-##### `_pump`  (lines 62–69)
-
-```
-async def _pump(hub: Hub, turn_id: UUID, since: str, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None
-```
-
-**Purpose**: This background helper copies live hub messages into the shared queue used by `tail_frames`. It is the fast path for updates that are still happening right now.
-
-**Data flow**: It receives the hub, the turn ID, the cursor to start from, and the queue. It subscribes to the hub for that turn and puts each received cursor-and-frame pair into the queue. If the subscription fails, it records a log message instead of crashing the whole tailing flow.
-
-**Call relations**: `tail_frames` starts this helper as a background task. `_pump` listens to `Hub.subscribe` and feeds results back to `tail_frames` through the queue. It does not decide when the stream is done; it simply passes along what the hub emits.
-
-*Call graph*: calls 1 internal fn (subscribe); called by 1 (tail_frames); 1 external calls (log).
-
-
-##### `_poll_status`  (lines 72–81)
-
-```
-async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None
-```
-
-**Purpose**: This background helper is the safety net. It checks the database every so often to find out whether the turn has reached a final or parked state, even if the live hub does not deliver that information.
-
-**Data flow**: It receives a turn ID and the shared queue. It waits for a fixed interval, asks `turn_status_frame` for the stored state, and repeats while the turn is still active. When it finds a terminal or parked frame, it puts that frame into the queue with an empty cursor and then stops. If something goes wrong, it writes a log entry.
-
-**Call relations**: `tail_frames` starts this helper alongside `_pump`. While `_pump` listens to the live hub, `_poll_status` asks `turn_status_frame` for the durable database answer. Whichever path supplies the ending first causes `tail_frames` to finish the stream.
-
-*Call graph*: calls 1 internal fn (turn_status_frame); called by 1 (tail_frames); 2 external calls (sleep, log).
-
-
-##### `turn_status_frame`  (lines 84–109)
-
-```
-async def turn_status_frame(turn_id: UUID) -> LiveFrame | None
-```
-
-**Purpose**: This function translates the stored database status of a turn into the stream frame that should end the client’s view. It returns a finished frame, a parked message, or nothing if the turn is still running or waiting.
-
-**Data flow**: It receives a turn ID. It opens a workspace database transaction and reads the turn’s status, saved terminal data, workspace, speaker, behalf-of member, and admission information. If no turn is found, it returns nothing. If terminal data is present, it validates that stored data and wraps it as a terminal live frame. If the turn is not parked, it returns nothing. If the turn is parked, it checks whether the relevant member is still admitted by the seat rules; if not, it returns a parked frame with the seat-revoked message. Otherwise it returns a parked frame explaining that the turn is over a spend cap and can resume later.
-
-**Call relations**: Both `tail_frames` and `_poll_status` call this function. `tail_frames` uses it for the immediate first check, so an already-finished turn can end without waiting. `_poll_status` uses it repeatedly as the durable backup while the live stream is running.
-
-*Call graph*: called by 2 (_poll_status, tail_frames); 7 external calls (__init__, __init__, __init__, model_validate, select, workspace_tx, gate_member).
-
-
-##### `HubTailer.tail`  (lines 121–124)
-
-```
-def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
-```
-
-**Purpose**: This method provides the public tailing interface bound to a specific hub. It gives callers a clean async context they can use to read one turn’s frames and automatically close the underlying generator afterward.
-
-**Data flow**: It receives a turn ID and optional cursor, then calls `tail_frames` with the stored hub. It wraps that generator in a closing context so that leaving the caller’s block shuts down the stream and its background work.
-
-**Call relations**: This is the small adapter that other surface code calls instead of importing the hub-tail details directly. It delegates the real streaming work to `tail_frames` and uses `aclosing` so cleanup happens when the caller is done.
-
-*Call graph*: calls 1 internal fn (tail_frames); 1 external calls (aclosing).
-
-
-### `core/src/ufo/hub.py`
-
-`io_transport` · `main loop and live request handling`
-
-A “hub” here is like a small radio tower for each running turn. Code that produces live events publishes frames into the hub, and surfaces such as a CLI or web page subscribe to hear them. The frames can be text chunks, cost meter updates, tool-call notices, skill-load notices, delivered replies, subagent progress, or an ending frame such as a terminal result or a parked message.
-
-The important promise is that publishing never waits for slow readers. Each subscriber has a bounded queue. If that queue fills, the oldest unread frame is dropped for that subscriber, rather than blocking the running turn. At the same time, the hub keeps a bounded ring buffer, which is a fixed-size recent-history list, for each active turn. Subscribers reconnect with a cursor, which is just the frame number they last saw, and the hub replays newer buffered frames before sending fresh ones.
-
-The in-process implementation uses a thread lock because publishers and subscribers may run on different asyncio event loops. It carefully registers subscribers and snapshots replay data under the same lock, so replayed frames and live frames do not overlap or leave gaps. Finished streams are removed when possible to avoid keeping memory forever, while parked turns preserve cursor numbering because they can resume later under the same turn id.
+The important safety pattern is repeated everywhere: authenticate first, resolve the member’s web audience, then check the specific agent, conversation, object, or turn before returning anything. Conversation rendering is also centralized here, so chat, transcripts, history pages, attachments, subagent runs, shared files, created apps, questions, and connection prompts are shown consistently. The file is large because it is the seam where the browser-facing portal translates core UFO concepts into simple JSON and server-sent events for the UI.
 
 #### Function details
 
-##### `Hub.publish`  (lines 151–151)
+##### `load_assets`  (lines 228–238)
 
 ```
-async def publish(self, turn_id: UUID, frame: LiveFrame) -> str
+def load_assets(directory: Path) -> dict[str, tuple[bytes, str]]
 ```
 
-**Purpose**: This is the interface promise for sending one live frame into a turn’s stream. Callers use it when something visible happens during a turn, such as text arriving, a tool starting, or the turn ending.
-
-**Data flow**: It receives a turn id and a live frame. An implementation records and broadcasts that frame, then returns a cursor string that identifies the frame’s position in that turn’s stream.
-
-**Call relations**: This protocol method is the shape that concrete hubs must follow. The queue code that commits a failed terminal state calls it so even failure can be reported through the same live stream.
-
-*Call graph*: called by 1 (_commit_failed_terminal).
+*Call graph*: 1 external calls (glob).
 
 
-##### `Hub.subscribe`  (lines 153–155)
+##### `rum_config`  (lines 251–264)
 
 ```
-def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, LiveFrame]]
+def rum_config(environ: Mapping[str, str]) -> dict[str, str] | None
 ```
 
-**Purpose**: This is the interface promise for reading a turn’s live stream. A surface uses it to catch up from an optional cursor and then keep receiving new frames.
-
-**Data flow**: It receives a turn id and, optionally, the last cursor the reader already saw. It produces an asynchronous stream of cursor-and-frame pairs: first any buffered frames after that cursor, then newly published frames.
-
-**Call relations**: The hub tailing code calls this when it needs to pump live frames toward a surface. Concrete implementations, such as InProcessHub.subscribe, provide the actual replay and live delivery behavior.
-
-*Call graph*: called by 1 (_pump).
+*Call graph*: called by 1 (portal_page).
 
 
-##### `Hub.covers`  (lines 157–157)
+##### `portal_shell`  (lines 267–276)
 
 ```
-async def covers(self, turn_id: UUID, cursor: str) -> bool
+def portal_shell(html: str, config: Mapping[str, str] | None) -> str
 ```
 
-**Purpose**: This is the interface promise for checking whether a cursor can still be resumed without a gap. A surface uses it to decide whether it can safely reconnect from its cursor or must fall back to a fuller redraw or durable poll.
-
-**Data flow**: It receives a turn id and cursor. An implementation checks its retained replay history and returns true if that cursor is still covered, or false if the needed history is gone or the cursor is empty.
-
-**Call relations**: The live tailing code calls this before relying on replay. It lets the rest of the system treat different hub backends the same way, whether in-process or shared across processes.
-
-*Call graph*: called by 1 (tail_frames).
+*Call graph*: called by 1 (portal_page); 1 external calls (dumps).
 
 
-##### `_offer`  (lines 160–163)
+##### `resolve_workspace`  (lines 289–328)
 
 ```
-def _offer(queue: asyncio.Queue[tuple[str, LiveFrame]], item: tuple[str, LiveFrame]) -> None
+async def resolve_workspace(request: Request, _auth: SurfaceAuth) -> UUID | Response | None
 ```
 
-**Purpose**: This helper puts a frame into a subscriber’s queue without ever blocking the publisher. If the queue is already full, it discards the oldest queued frame to make room.
-
-**Data flow**: It receives a subscriber queue and one cursor-and-frame item. It checks whether the queue is full; if so, it removes one old item, then immediately inserts the new item.
-
-**Call relations**: InProcessHub.publish schedules this helper on each subscriber’s event loop. That keeps cross-thread delivery safe while preserving the hub’s rule that a slow subscriber must not stall publishing.
+*Call graph*: calls 3 internal fn (_chat_target, _form, _framed_length); 2 external calls (workspace_claim, RedirectResponse).
 
 
-##### `InProcessHub._stream`  (lines 210–220)
+##### `_chat_target`  (lines 331–335)
 
 ```
-def _stream(self, turn_id: UUID) -> _TurnStream
+def _chat_target(request: Request) -> UUID | None
 ```
 
-**Purpose**: This internal helper finds the stored live-stream state for one turn, or creates it if it does not exist yet. It is the place where a turn gets its replay buffer, subscriber list, and cursor counter.
-
-**Data flow**: It receives a turn id and reads the hub’s internal dictionary of active turn streams. If a stream is already present, it returns it; otherwise it creates a new stream with a fixed-size replay buffer and a cursor sequence continuing from any saved mark.
-
-**Call relations**: InProcessHub.publish calls this when it needs somewhere to append a new frame. InProcessHub.subscribe calls it when a reader attaches, so there is a stream object to hold that subscriber and provide replay.
-
-*Call graph*: called by 2 (publish, subscribe); 2 external calls (__init__, deque).
+*Call graph*: called by 1 (resolve_workspace); 1 external calls (UUID).
 
 
-##### `InProcessHub.publish`  (lines 222–241)
+##### `_static_response`  (lines 338–348)
 
 ```
-async def publish(self, turn_id: UUID, frame: LiveFrame) -> str
+def _static_response(request: Request) -> Response | None
 ```
 
-**Purpose**: This sends one frame to all current subscribers of a turn and stores it in the turn’s replay buffer. It is designed so publishing is quick and does not wait for readers.
-
-**Data flow**: It receives a turn id and frame. Under a lock, it gets or creates the turn stream, assigns the next cursor, stores the frame in the replay ring, and copies the current subscribers. After releasing the lock, it schedules delivery to each subscriber queue and returns the cursor. If the frame ends the stream, it marks or removes stored state as appropriate.
-
-**Call relations**: This is the concrete implementation behind Hub.publish for the in-process backend. It uses InProcessHub._stream to access per-turn state and uses _offer indirectly on subscriber event loops so live delivery is safe even when publishers and subscribers run in different threads.
-
-*Call graph*: calls 1 internal fn (_stream).
+*Call graph*: calls 1 internal fn (_asset_response); called by 1 (static_asset).
 
 
-##### `InProcessHub.subscribe`  (lines 243–270)
+##### `_asset_response`  (lines 351–355)
 
 ```
-async def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, LiveFrame]]
+def _asset_response(request: Request, body: bytes, media_type: str, etag: str) -> Response
 ```
 
-**Purpose**: This lets a reader follow one turn’s live frames, starting with any buffered frames after its last cursor. It is the main path used by a CLI or web surface to show a running turn in real time.
-
-**Data flow**: It receives a turn id and optional cursor. It creates a bounded queue for live frames, registers that queue as a subscriber, and snapshots all replay-buffer frames newer than the cursor. It yields the replay frames first, then waits on the queue and yields newly published frames until the reader stops. When the reader disconnects, it removes the subscriber and may clean up the stream.
-
-**Call relations**: This is the concrete implementation behind Hub.subscribe. It is called by the surface tail pump, uses InProcessHub._stream to attach to the turn, and receives later frames because InProcessHub.publish fans them out to its registered queue.
-
-*Call graph*: calls 1 internal fn (_stream); 2 external calls (Queue, get_running_loop).
+*Call graph*: called by 2 (_static_response, _stored_asset); 1 external calls (Response).
 
 
-##### `InProcessHub.covers`  (lines 272–280)
+##### `load_apps`  (lines 381–414)
 
 ```
-async def covers(self, turn_id: UUID, cursor: str) -> bool
+def load_apps(directory: Path) -> AppsBundle | None
 ```
 
-**Purpose**: This checks whether the in-memory replay buffer still reaches far enough back for a given cursor. It helps a reconnecting surface know whether replay can be trusted to fill every gap.
-
-**Data flow**: It receives a turn id and cursor string. If the cursor is empty, the stream is gone, or the replay buffer is empty, it returns false. Otherwise it compares the oldest retained cursor with the requested cursor and returns whether the requested point is still within the retained range.
-
-**Call relations**: This is the concrete implementation behind Hub.covers. The tailing layer asks it before resuming from a cursor; its answer decides whether the client can continue from live replay or must recover state another way.
+*Call graph*: 4 external calls (__init__, sha256, is_dir, rglob).
 
 
-### Redis coordination backends
-Redis Streams backends extend live answer and terminal coordination across multiple server pods.
+##### `apps`  (lines 420–426)
 
-### `extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py`
+```
+def apps() -> AppsBundle
+```
 
-`io_transport` · `live request handling and reconnect streaming`
+*Call graph*: called by 3 (_homepage_state, agents_index, homepage).
 
-This file is a live message relay for a “turn,” meaning one running exchange or response. As an answer is being produced, small updates called frames are created: pieces of text, tool-call notices, cost updates, terminal markers, and similar events. Instead of storing these short-lived updates in the main database, this hub puts them into Redis Streams, which are ordered append-only message lists in Redis. Think of each turn as having its own scrolling receipt tape: publishers add new lines, and viewers read forward from the last line they saw.
 
-The important reason this exists is scale. If one server process creates a live frame and another process is serving the user interface, Redis gives both processes a shared place to meet. Without this, live streaming would mostly work only inside one process, and reconnecting clients would have a harder time replaying recent updates.
+##### `_publish_assets`  (lines 429–439)
 
-The file also protects against a subtle async problem. Redis clients are tied to the event loop that created them; an event loop is the runner that schedules async work. This hub keeps a separate Redis client per event loop, so background workflow code and web-serving code do not accidentally share unsafe connection state.
+```
+async def _publish_assets(blob: BlobStore, apps: AppsBundle) -> None
+```
 
-Streams are trimmed and expire after idle time. That means old live frames can disappear, but that is acceptable because the final answer is stored elsewhere. If a reconnect cursor is too old, the caller can redraw from the durable turn state instead.
+*Call graph*: calls 3 internal fn (exists, list, put); called by 1 (_assets_published).
+
+
+##### `_assets_published`  (lines 442–469)
+
+```
+def _assets_published(blob: BlobStore, apps: AppsBundle) -> 'asyncio.Task[None]'
+```
+
+*Call graph*: calls 1 internal fn (_publish_assets); called by 3 (agents_index, homepage, portal_page); 1 external calls (create_task).
+
+
+##### `_stored_asset`  (lines 472–494)
+
+```
+async def _stored_asset(blob: BlobStore, request: Request) -> Response
+```
+
+*Call graph*: calls 3 internal fn (exists, get, _asset_response); called by 1 (static_asset); 3 external calls (sha256, Path, Response).
+
+
+##### `portal_page`  (lines 497–514)
+
+```
+async def portal_page(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 3 internal fn (_assets_published, portal_shell, rum_config); 1 external calls (HTMLResponse).
+
+
+##### `_authenticate`  (lines 517–535)
+
+```
+async def _authenticate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str] | Response
+```
+
+*Call graph*: calls 2 internal fn (link_member, linked_member); called by 2 (_audience_for, fulfill_credential); 2 external calls (verify_token, Response).
+
+
+##### `static_asset`  (lines 538–544)
+
+```
+async def static_asset(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (_static_response, _stored_asset).
+
+
+##### `open_session`  (lines 547–578)
+
+```
+async def open_session(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (_form, _framed_length); 3 external calls (JSONResponse, RedirectResponse, set_session_cookie).
+
+
+##### `_agent_param`  (lines 581–585)
+
+```
+def _agent_param(request: Request) -> UUID | None
+```
+
+*Call graph*: called by 4 (_member_chat_page, _panel_gate, chat, transcript); 1 external calls (UUID).
+
+
+##### `_chat_row_key`  (lines 588–589)
+
+```
+def _chat_row_key(conversation_id: UUID) -> str
+```
+
+*Call graph*: called by 2 (_open_conversation, _own_web_chat).
+
+
+##### `_chat_title`  (lines 598–616)
+
+```
+def _chat_title(text: str, paths: tuple[str, ...]) -> str
+```
+
+*Call graph*: called by 2 (_open_conversation, summarize_chat_titles).
+
+
+##### `_title_excerpt`  (lines 628–646)
+
+```
+def _title_excerpt(messages: tuple[Message, ...]) -> str
+```
+
+*Call graph*: calls 1 internal fn (_rendered_text); called by 1 (summarize_chat_titles); 1 external calls (member_message_text).
+
+
+##### `summarize_chat_titles`  (lines 649–695)
+
+```
+async def summarize_chat_titles(ctx: ExtensionContext) -> None
+```
+
+*Call graph*: calls 4 internal fn (conversations_awaiting_title, summarized_conversation_title, _chat_title, _title_excerpt); 2 external calls (__init__, __init__).
+
+
+##### `seed_homepages`  (lines 698–769)
+
+```
+async def seed_homepages(ctx: ExtensionContext, bucket: str | None=None) -> None
+```
+
+*Call graph*: calls 5 internal fn (earliest_seated_admin, invoke, open_conversation, turn_outcomes, workspace_agents); 2 external calls (now, shipped_app_slug).
+
+
+##### `_open_conversation`  (lines 772–805)
+
+```
+async def _open_conversation(ctx: SurfaceContext, store: ScopedStore, agent_id: UUID, member_id: UUID, email: str, queue_key: str, text: str, paths: tuple[str, ...]) -> tuple[UUID, str]
+```
+
+*Call graph*: calls 8 internal fn (delete, put, conversation_for, retitle_conversation, _chat_row_key, _chat_title, _named, _own_web_chat); called by 1 (chat); 3 external calls (__init__, conversation_audience, uuid4).
+
+
+##### `_named`  (lines 808–815)
+
+```
+async def _named(ctx: SurfaceContext, agent_id: UUID, member_id: UUID, conversation_id: UUID) -> str
+```
+
+*Call graph*: calls 1 internal fn (list_agent_conversations); called by 1 (_open_conversation).
+
+
+##### `_own_web_chat`  (lines 818–830)
+
+```
+async def _own_web_chat(store: ScopedStore, agent_id: UUID, email: str, conversation_id: UUID) -> ChatRecord | None
+```
+
+*Call graph*: calls 2 internal fn (get, _chat_row_key); called by 2 (_member_chat, _open_conversation).
+
+
+##### `_member_chat`  (lines 833–878)
+
+```
+async def _member_chat(ctx: SurfaceContext, store: ScopedStore, agent_id: UUID, member_id: UUID, email: str, conversation_id: UUID, *, agent_visible: bool) -> ListedConversation | None
+```
+
+*Call graph*: calls 3 internal fn (list_agent_conversations, _commentable, _own_web_chat); called by 5 (_member_chat_page, _member_turn, _resolve_chat, chat, transcript); 1 external calls (conversation_audience).
+
+
+##### `_commentable`  (lines 881–885)
+
+```
+def _commentable(conversation: ListedConversation, member_id: UUID) -> bool
+```
+
+*Call graph*: called by 5 (_conversation_row, _member_chat, _member_turn, _resolve_chat, chat); 1 external calls (conversation_audience).
+
+
+##### `_turn_context`  (lines 888–899)
+
+```
+def _turn_context(email: str, request: Request, source: str) -> TurnContext
+```
+
+*Call graph*: called by 1 (chat); 2 external calls (__init__, log).
+
+
+##### `_chat_url`  (lines 902–905)
+
+```
+def _chat_url(public_base_url: str | None, conversation_id: UUID) -> str | None
+```
+
+*Call graph*: called by 2 (_chat_source, _comment_notice).
+
+
+##### `_chat_source`  (lines 908–917)
+
+```
+def _chat_source(public_base_url: str | None, conversation_id: UUID, email: str) -> str
+```
+
+*Call graph*: calls 1 internal fn (_chat_url); called by 1 (chat).
+
+
+##### `_comment_notice`  (lines 920–940)
+
+```
+def _comment_notice(public_base_url: str | None, conversation: ListedConversation, member_id: UUID, email: str, text: str, paths: tuple[str, ...]) -> str
+```
+
+*Call graph*: calls 1 internal fn (_chat_url); called by 1 (chat); 2 external calls (PurePosixPath, conversation_audience).
+
+
+##### `_audience_for`  (lines 943–950)
+
+```
+async def _audience_for(ctx: SurfaceContext, request: Request) -> tuple[UUID, str, WebAudience] | Response
+```
+
+*Call graph*: calls 1 internal fn (_authenticate); called by 24 (_member_chat_page, _member_turn, _object_gate, _panel_gate, admin_index, agents_index, agents_status, chat, chats_index, connection_pool (+14 more)); 2 external calls (web_audience, web_extension).
+
+
+##### `_visibility_flag`  (lines 971–975)
+
+```
+def _visibility_flag(agent: AgentSummary) -> str | None
+```
+
+*Call graph*: called by 2 (_flag_reads, agents_index); 1 external calls (shipped_app_slug).
+
+
+##### `_flag_reads`  (lines 978–998)
+
+```
+async def _flag_reads(agents: tuple[AgentSummary, ...]) -> dict[str, bool]
+```
+
+*Call graph*: calls 1 internal fn (_visibility_flag); called by 1 (agents_index); 2 external calls (gather, flag_enabled).
+
+
+##### `_setup_ready`  (lines 1001–1011)
+
+```
+def _setup_ready(state: SetupState) -> bool
+```
+
+*Call graph*: called by 2 (agents_index, workspace_starters).
+
+
+##### `agents_index`  (lines 1014–1112)
+
+```
+async def agents_index(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 8 internal fn (list_archived_agents, _assets_published, _audience_for, _flag_reads, _homepage_state, _setup_ready, _visibility_flag, apps); 6 external calls (Semaphore, gather, JSONResponse, shipped_app_slug, granted_emails, web_extension).
+
+
+##### `agents_index.setup_of`  (lines 1056–1058)
+
+```
+async def setup_of(agent: AgentSummary) -> SetupState
+```
+
+
+##### `agents_status`  (lines 1115–1156)
+
+```
+async def agents_status(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 4 internal fn (agent_turn_statuses, latest_activity, _audience_for, _iso); 1 external calls (JSONResponse).
+
+
+##### `_framed_length`  (lines 1159–1172)
+
+```
+def _framed_length(request: Request, limit: int) -> Response | None
+```
+
+*Call graph*: called by 5 (_parse_inbound, fulfill_credential, open_session, preview, resolve_workspace); 1 external calls (Response).
+
+
+##### `_form`  (lines 1175–1182)
+
+```
+async def _form(request: Request) -> FormData | Response
+```
+
+*Call graph*: called by 5 (_parse_inbound, fulfill_credential, open_session, preview, resolve_workspace); 2 external calls (form, Response).
+
+
+##### `_bounded_body`  (lines 1185–1193)
+
+```
+async def _bounded_body(request: Request, limit: int) -> bytes | Response
+```
+
+*Call graph*: called by 1 (_parse_inbound); 2 external calls (stream, Response).
+
+
+##### `_parse_inbound`  (lines 1196–1232)
+
+```
+async def _parse_inbound(request: Request) -> tuple[str, tuple[UploadFile, ...]] | Response
+```
+
+*Call graph*: calls 3 internal fn (_bounded_body, _form, _framed_length); called by 1 (chat); 1 external calls (Response).
+
+
+##### `_inbox_paths`  (lines 1235–1239)
+
+```
+def _inbox_paths(uploads: tuple[UploadFile, ...]) -> tuple[str, ...]
+```
+
+*Call graph*: called by 1 (chat); 1 external calls (inbox_name).
+
+
+##### `_deliver_uploads`  (lines 1242–1251)
+
+```
+async def _deliver_uploads(ctx: SurfaceContext, conversation_id: UUID, uploads: tuple[UploadFile, ...], paths: tuple[str, ...]) -> None
+```
+
+*Call graph*: calls 2 internal fn (write_workspace_file, _upload_chunks); called by 1 (chat).
+
+
+##### `_files_note`  (lines 1254–1257)
+
+```
+def _files_note(text: str, paths: tuple[str, ...]) -> str
+```
+
+*Call graph*: called by 1 (chat).
+
+
+##### `_member_attachments`  (lines 1265–1273)
+
+```
+def _member_attachments(said: str) -> tuple[str, tuple[str, ...]]
+```
+
+*Call graph*: called by 1 (_member_bubble).
+
+
+##### `_attachment_preview`  (lines 1276–1288)
+
+```
+def _attachment_preview(public_base_url: str | None, agent_id: UUID, conversation_id: UUID, path: str) -> str | None
+```
+
+*Call graph*: 2 external calls (raster_image_media_type, quote).
+
+
+##### `_attachment_payload`  (lines 1291–1304)
+
+```
+def _attachment_payload(path: str, preview_url: str | None) -> dict[str, object]
+```
+
+*Call graph*: called by 1 (_member_bubble); 2 external calls (PurePosixPath, raster_image_media_type).
+
+
+##### `_member_bubble`  (lines 1307–1315)
+
+```
+def _member_bubble(said: str, attach: Attach | None) -> dict[str, object]
+```
+
+*Call graph*: calls 2 internal fn (_attachment_payload, _member_attachments); called by 2 (_conversation_messages, _rendered_messages).
+
+
+##### `_upload_chunks`  (lines 1318–1320)
+
+```
+async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]
+```
+
+*Call graph*: called by 1 (_deliver_uploads); 1 external calls (read).
+
+
+##### `_answer_key`  (lines 1323–1328)
+
+```
+def _answer_key(conversation_id: UUID, turn_id: UUID, index: int) -> str
+```
+
+*Call graph*: called by 2 (_asks, chat).
+
+
+##### `_answer_headers`  (lines 1331–1343)
+
+```
+def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response
+```
+
+*Call graph*: called by 1 (chat); 2 external calls (Response, UUID).
+
+
+##### `_stop_header`  (lines 1346–1355)
+
+```
+def _stop_header(request: Request) -> UUID | None | Response
+```
+
+*Call graph*: called by 1 (chat); 2 external calls (Response, UUID).
+
+
+##### `chat`  (lines 1358–1474)
+
+```
+async def chat(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 19 internal fn (admit, admitted_body, stop_turn, _agent_param, _answer_headers, _answer_key, _audience_for, _chat_source, _comment_notice, _commentable (+9 more)); 5 external calls (JSONResponse, Response, web_extension, UUID, uuid4).
+
+
+##### `_rendered_text`  (lines 1477–1488)
+
+```
+def _rendered_text(message: Message) -> str
+```
+
+*Call graph*: called by 2 (_rendered_messages, _title_excerpt).
+
+
+##### `_append_activity`  (lines 1491–1492)
+
+```
+def _append_activity(events: list[dict[str, str]], text: str) -> None
+```
+
+*Call graph*: called by 2 (_rendered_messages, _subagent_activity).
+
+
+##### `_stored_activity`  (lines 1495–1507)
+
+```
+def _stored_activity(block: ToolUseBlock, result: ToolResultBlock) -> str | None
+```
+
+*Call graph*: called by 2 (_rendered_messages, _subagent_activity).
+
+
+##### `_subagent_activity`  (lines 1529–1553)
+
+```
+def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]
+```
+
+*Call graph*: calls 2 internal fn (_append_activity, _stored_activity); called by 1 (_subagent_nodes).
+
+
+##### `_finish_payload`  (lines 1556–1566)
+
+```
+def _finish_payload(answer: str) -> dict[str, JsonValue] | None
+```
+
+*Call graph*: called by 1 (_run_answer); 1 external calls (loads).
+
+
+##### `_payload_prose`  (lines 1569–1592)
+
+```
+def _payload_prose(value: JsonValue) -> str
+```
+
+*Call graph*: called by 1 (_run_answer); 2 external calls (items, strip).
+
+
+##### `_run_answer`  (lines 1595–1611)
+
+```
+def _run_answer(answer: str) -> str
+```
+
+*Call graph*: calls 2 internal fn (_finish_payload, _payload_prose); called by 2 (render, _subagent_nodes).
+
+
+##### `_subagent_nodes`  (lines 1614–1653)
+
+```
+async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> SubagentRuns
+```
+
+*Call graph*: calls 4 internal fn (list_agents, read_transcript, _run_answer, _subagent_activity); called by 2 (_events, _transcript_aids); 2 external calls (__init__, gather).
+
+
+##### `_rendered_messages`  (lines 1656–1819)
+
+```
+def _rendered_messages(messages: tuple[Message, ...], subagents: SubagentRuns | None=None, turn_ids: frozenset[str]=frozenset(), agent_origin: frozenset[str]=frozenset(), speakers: Mapping[str, str] |
+```
+
+*Call graph*: calls 4 internal fn (_append_activity, _member_bubble, _rendered_text, _stored_activity); called by 1 (render); 1 external calls (member_message_text).
+
+
+##### `_rendered_messages.note_answer`  (lines 1731–1736)
+
+```
+def note_answer() -> None
+```
+
+
+##### `_rendered_messages.flush_reply`  (lines 1738–1773)
+
+```
+def flush_reply(include_subagents: bool) -> None
+```
+
+
+##### `_asks`  (lines 1838–1870)
+
+```
+def _asks(conversation_id: UUID, turns: tuple[Turn, ...], admitted: tuple[KeyedAdmission, ...]) -> _Asks
+```
+
+*Call graph*: calls 1 internal fn (_answer_key); called by 1 (_transcript_aids); 2 external calls (__init__, member_message_text).
+
+
+##### `_TranscriptAids.render`  (lines 1893–1912)
+
+```
+def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]
+```
+
+*Call graph*: calls 2 internal fn (_rendered_messages, _run_answer).
+
+
+##### `_transcript_aids`  (lines 1915–1967)
+
+```
+async def _transcript_aids(ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID, agent_origin: frozenset[str], speakers: dict[str, str], asked: dict[str, str], opens: frozenset[UUI
+```
+
+*Call graph*: calls 9 internal fn (conversation_subagent_turns, keyed_admissions, list_conversation_artifacts, list_turns, _asks, _connect_controls, _created_apps, _file_payload, _subagent_nodes); called by 2 (_conversation_messages, _history_messages); 3 external calls (__init__, gather, partial).
+
+
+##### `_connect_controls`  (lines 1970–2010)
+
+```
+async def _connect_controls(ctx: SurfaceContext, conversation_id: UUID, turns: tuple[Turn, ...], viewer: UUID) -> dict[str, dict[str, object]]
+```
+
+*Call graph*: calls 4 internal fn (connect_available, held_accounts, _connect_control, _provider_label); called by 1 (_transcript_aids).
+
+
+##### `_conversation_messages`  (lines 2013–2135)
+
+```
+async def _conversation_messages(ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID, opens: frozenset[UUID]) -> tuple[list[dict[str, object]], Turn | None, int]
+```
+
+*Call graph*: calls 10 internal fn (agent_origin_refs, arrival_speakers, latest_turn, list_compactions, queued_arrivals, read_transcript, turn_detail, _member_bubble, _transcript_aids, _verified_earlier); called by 2 (conversation_transcript, transcript); 3 external calls (gather, partial, member_message_text).
+
+
+##### `_verified_earlier`  (lines 2138–2154)
+
+```
+async def _verified_earlier(ctx: SurfaceContext, conversation_id: UUID, indices: tuple[int, ...], messages: tuple[Message, ...]) -> int
+```
+
+*Call graph*: calls 1 internal fn (read_compaction_after); called by 2 (_conversation_messages, _history_messages).
+
+
+##### `_history_cursor`  (lines 2157–2159)
+
+```
+def _history_cursor(index: int, end: int | None=None) -> str
+```
+
+*Call graph*: called by 4 (fits, _history_messages, conversation_transcript, transcript); 1 external calls (urlsafe_b64encode).
+
+
+##### `_history_position`  (lines 2162–2177)
+
+```
+def _history_position(cursor: str) -> tuple[int, int | None]
+```
+
+*Call graph*: called by 1 (_history_messages); 1 external calls (b64decode).
+
+
+##### `_bounded_history_page`  (lines 2180–2202)
+
+```
+def _bounded_history_page(messages: list[dict[str, object]], index: int, end: int) -> tuple[list[dict[str, object]], int]
+```
+
+*Call graph*: called by 1 (_history_messages).
+
+
+##### `_bounded_history_page.fits`  (lines 2185–2190)
+
+```
+def fits(start: int) -> bool
+```
+
+*Call graph*: calls 1 internal fn (_history_cursor); 1 external calls (JSONResponse).
+
+
+##### `_history_messages`  (lines 2205–2256)
+
+```
+async def _history_messages(ctx: SurfaceContext, agent_id: UUID, conversation_id: UUID, viewer: UUID, cursor: str, opens: frozenset[UUID]) -> tuple[list[dict[str, object]], str | None] | None
+```
+
+*Call graph*: calls 8 internal fn (agent_origin_refs, arrival_speakers, read_compaction, _bounded_history_page, _history_cursor, _history_position, _transcript_aids, _verified_earlier); called by 1 (_conversation_history); 1 external calls (gather).
+
+
+##### `transcript`  (lines 2259–2303)
+
+```
+async def transcript(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 7 internal fn (_agent_param, _audience_for, _conversation_messages, _history_cursor, _member_chat, _open_handoffs, _opens); 4 external calls (JSONResponse, Response, web_extension, UUID).
+
+
+##### `_open_handoffs`  (lines 2306–2317)
+
+```
+async def _open_handoffs(ctx: SurfaceContext, terminal: TerminalFrame) -> dict[str, object]
+```
+
+*Call graph*: calls 1 internal fn (_pending_prompts); called by 1 (transcript).
+
+
+##### `_connect_control`  (lines 2320–2324)
+
+```
+def _connect_control(ctx: SurfaceContext, provider: str, turn_id: UUID) -> dict[str, object]
+```
+
+*Call graph*: calls 1 internal fn (_provider_label); called by 2 (_connect_controls, _events).
+
+
+##### `_provider_label`  (lines 2327–2338)
+
+```
+def _provider_label(ctx: SurfaceContext, provider: str) -> str
+```
+
+*Call graph*: calls 2 internal fn (connect_available, connect_label); called by 3 (_connect_control, _connect_controls, agent_setup).
+
+
+##### `_provider_summary`  (lines 2341–2348)
+
+```
+def _provider_summary(provider: str) -> str
+```
+
+*Call graph*: called by 1 (agent_setup).
+
+
+##### `chats_index`  (lines 2351–2363)
+
+```
+async def chats_index(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (_audience_for, _resolve_chat); 2 external calls (Response, web_extension).
+
+
+##### `_resolve_chat`  (lines 2366–2454)
+
+```
+async def _resolve_chat(ctx: SurfaceContext, store: ScopedStore, audience: WebAudience, member_id: UUID, email: str, requested: str) -> Response
+```
+
+*Call graph*: calls 9 internal fn (conversation_agent, latest_turn, list_agent_conversations, turn_detail, allows, _commentable, _conversation_row, _iso, _member_chat); called by 1 (chats_index); 2 external calls (JSONResponse, UUID).
+
+
+##### `_panel_gate`  (lines 2457–2470)
+
+```
+async def _panel_gate(ctx: SurfaceContext, request: Request) -> tuple[UUID, str, WebAudience, UUID] | Response
+```
+
+*Call graph*: calls 2 internal fn (_agent_param, _audience_for); called by 10 (_readable_conversation, agent_setup, community_skill, community_skills, connections, conversations, homepage, intents, settings, skills); 1 external calls (Response).
+
+
+##### `_iso`  (lines 2473–2474)
+
+```
+def _iso(moment: datetime | None) -> str | None
+```
+
+*Call graph*: called by 6 (_conversation_row, _memory_rows, _resolve_chat, _usage_payload, agents_status, object_detail); 1 external calls (isoformat).
+
+
+##### `_window_param`  (lines 2477–2493)
+
+```
+def _window_param(request: Request) -> int | None | Response
+```
+
+*Call graph*: called by 1 (workspace_usage); 1 external calls (Response).
+
+
+##### `_usage_payload`  (lines 2496–2536)
+
+```
+def _usage_payload(report: MemberSpendReport | SpendReport) -> dict[str, object]
+```
+
+*Call graph*: calls 1 internal fn (_iso); called by 1 (workspace_usage).
+
+
+##### `skills`  (lines 2539–2563)
+
+```
+async def skills(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (agent_skills, _panel_gate); 1 external calls (JSONResponse).
+
+
+##### `_community_refusal`  (lines 2569–2573)
+
+```
+def _community_refusal(fault: Exception) -> Response
+```
+
+*Call graph*: called by 2 (community_skill, community_skills); 1 external calls (Response).
+
+
+##### `community_skills`  (lines 2580–2596)
+
+```
+async def community_skills(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (_community_refusal, _panel_gate); 3 external calls (JSONResponse, Response, listing).
+
+
+##### `community_skill`  (lines 2599–2620)
+
+```
+async def community_skill(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (_community_refusal, _panel_gate); 3 external calls (JSONResponse, Response, fetch).
+
+
+##### `workspace_memory`  (lines 2623–2700)
+
+```
+async def workspace_memory(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 5 internal fn (recent_memory, search_memory, decode, _audience_for, _memory_rows); 6 external calls (__init__, gather, audience_subjects, conversation_audience, JSONResponse, Response).
+
+
+##### `_memory_rows`  (lines 2703–2713)
+
+```
+def _memory_rows(found: tuple[MemoryMatch, ...]) -> list[dict[str, object]]
+```
+
+*Call graph*: calls 1 internal fn (_iso); called by 1 (workspace_memory).
+
+
+##### `connections`  (lines 2716–2725)
+
+```
+async def connections(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (list_agent_connections, _panel_gate); 1 external calls (JSONResponse).
+
+
+##### `connection_pool`  (lines 2728–2738)
+
+```
+async def connection_pool(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (list_connections, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `github_coverage`  (lines 2741–2747)
+
+```
+async def github_coverage(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (github_coverage, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `conversations`  (lines 2750–2781)
+
+```
+async def conversations(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 4 internal fn (list_agent_conversations, _conversation_row, _panel_gate, _searched); 1 external calls (JSONResponse).
+
+
+##### `_searched`  (lines 2784–2788)
+
+```
+def _searched(request: Request) -> str | None
+```
+
+*Call graph*: called by 1 (conversations).
+
+
+##### `_conversation_row`  (lines 2791–2825)
+
+```
+def _conversation_row(entry: ListedConversation, member_id: UUID, agent: dict[str, str] | None=None) -> dict[str, object]
+```
+
+*Call graph*: calls 2 internal fn (_commentable, _iso); called by 2 (_resolve_chat, conversations).
+
+
+##### `_readable_conversation`  (lines 2828–2848)
+
+```
+async def _readable_conversation(ctx: SurfaceContext, request: Request, conversation_id: UUID | None=None) -> tuple[UUID, UUID, 'SlotViewer'] | Response
+```
+
+*Call graph*: calls 3 internal fn (readable_conversation, _opens, _panel_gate); called by 4 (_conversation_history, _slot_target, conversation_attachment, conversation_transcript); 3 external calls (__init__, Response, UUID).
+
+
+##### `conversation_transcript`  (lines 2851–2869)
+
+```
+async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 4 internal fn (_conversation_history, _conversation_messages, _history_cursor, _readable_conversation); 1 external calls (JSONResponse).
+
+
+##### `_member_chat_page`  (lines 2872–2900)
+
+```
+async def _member_chat_page(ctx: SurfaceContext, request: Request) -> tuple[UUID, UUID, 'SlotViewer'] | Response
+```
+
+*Call graph*: calls 4 internal fn (_agent_param, _audience_for, _member_chat, _opens); called by 2 (_conversation_history, conversation_attachment); 4 external calls (__init__, Response, web_extension, UUID).
+
+
+##### `_conversation_history`  (lines 2903–2924)
+
+```
+async def _conversation_history(ctx: SurfaceContext, request: Request, cursor: str) -> Response
+```
+
+*Call graph*: calls 3 internal fn (_history_messages, _member_chat_page, _readable_conversation); called by 1 (conversation_transcript); 2 external calls (JSONResponse, Response).
+
+
+##### `_inbox_attachment`  (lines 2927–2938)
+
+```
+def _inbox_attachment(path: str) -> bool
+```
+
+*Call graph*: called by 1 (conversation_attachment).
+
+
+##### `conversation_attachment`  (lines 2941–2981)
+
+```
+async def conversation_attachment(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 5 internal fn (list_workspace_files, read_workspace_file, _inbox_attachment, _member_chat_page, _readable_conversation); 5 external calls (__init__, Response, raster_image_media_type, validated_image_preview, log).
+
+
+##### `_slot_target`  (lines 3001–3025)
+
+```
+async def _slot_target(ctx: SurfaceContext, request: Request) -> SlotTarget | Response
+```
+
+*Call graph*: calls 2 internal fn (conversation_subagent_turns, _readable_conversation); called by 2 (conversation_slot, conversation_slots); 3 external calls (__init__, Response, UUID).
+
+
+##### `_slot_context`  (lines 3028–3044)
+
+```
+async def _slot_context(ctx: SurfaceContext, target: SlotTarget, ext: ExtensionContext) -> ConversationSlotContext | None
+```
+
+*Call graph*: calls 2 internal fn (conversation_audience, read_transcript); called by 2 (conversation_slot, conversation_slots); 2 external calls (__init__, replace).
+
+
+##### `_project_slot_context`  (lines 3047–3131)
+
+```
+async def _project_slot_context(ctx: SurfaceContext, slot_context: ConversationSlotContext, extension: str, content: type[BaseModel], root_conversation_id: UUID | None, viewer: SlotViewer) -> Conversa
+```
+
+*Call graph*: calls 5 internal fn (artifact_link, artifact_preview_link, conversation_changes, list_conversation_artifacts, list_conversation_member_objects); called by 2 (conversation_slot, conversation_slots); 7 external calls (__init__, __init__, __init__, __init__, replace, raster_image_media_type, urlsplit).
+
+
+##### `_authorized_slot_payload`  (lines 3134–3178)
+
+```
+def _authorized_slot_payload(payload: ConversationSlotPayload, context: ConversationSlotContext) -> ConversationSlotPayload
+```
+
+*Call graph*: called by 1 (conversation_slot); 1 external calls (model_copy).
+
+
+##### `conversation_slots`  (lines 3181–3225)
+
+```
+async def conversation_slots(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 4 internal fn (summarize_conversation_slot, _project_slot_context, _slot_context, _slot_target); 4 external calls (replace, JSONResponse, Response, log).
+
+
+##### `conversation_slot`  (lines 3228–3255)
+
+```
+async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 5 internal fn (read_conversation_slot, _authorized_slot_payload, _project_slot_context, _slot_context, _slot_target); 2 external calls (JSONResponse, Response).
+
+
+##### `_changes_projection`  (lines 3258–3261)
+
+```
+def _changes_projection(ctx: ConversationSlotContext) -> WorkspaceChanges
+```
+
+*Call graph*: called by 2 (_read_changes, _summarize_changes).
+
+
+##### `_read_changes`  (lines 3264–3265)
+
+```
+async def _read_changes(ctx: ConversationSlotContext) -> WorkspaceChanges
+```
+
+*Call graph*: calls 1 internal fn (_changes_projection).
+
+
+##### `_summarize_changes`  (lines 3268–3269)
+
+```
+async def _summarize_changes(ctx: ConversationSlotContext) -> int | None
+```
+
+*Call graph*: calls 1 internal fn (_changes_projection).
+
+
+##### `_artifacts_projection`  (lines 3282–3285)
+
+```
+def _artifacts_projection(ctx: ConversationSlotContext) -> ArtifactsSlotPayload
+```
+
+*Call graph*: called by 2 (_read_artifacts, _summarize_artifacts).
+
+
+##### `_read_artifacts`  (lines 3288–3289)
+
+```
+async def _read_artifacts(ctx: ConversationSlotContext) -> ArtifactsSlotPayload
+```
+
+*Call graph*: calls 1 internal fn (_artifacts_projection).
+
+
+##### `_summarize_artifacts`  (lines 3292–3294)
+
+```
+async def _summarize_artifacts(ctx: ConversationSlotContext) -> int | None
+```
+
+*Call graph*: calls 1 internal fn (_artifacts_projection).
+
+
+##### `workspace_credentials`  (lines 3307–3315)
+
+```
+async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (list_credential_slots, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `workspace_team`  (lines 3318–3336)
+
+```
+async def workspace_team(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (list_members, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `workspace_sources`  (lines 3339–3350)
+
+```
+async def workspace_sources(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (list_sources, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `workspace_surfaces`  (lines 3353–3364)
+
+```
+async def workspace_surfaces(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (list_installations, _audience_for); 1 external calls (JSONResponse).
+
+
+##### `workspace_first_run`  (lines 3392–3426)
+
+```
+async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 3 internal fn (github_coverage, list_installations, _audience_for); 2 external calls (__init__, JSONResponse).
+
+
+##### `connector_catalog`  (lines 3429–3457)
+
+```
+async def connector_catalog(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (connector_catalog, _audience_for); 3 external calls (__init__, JSONResponse, Response).
+
+
+##### `_held_providers`  (lines 3508–3519)
+
+```
+async def _held_providers(ctx: SurfaceContext, member_id: UUID, *, admin: bool) -> frozenset[str]
+```
+
+*Call graph*: calls 3 internal fn (github_coverage, list_connections, list_installations); called by 1 (workspace_starters).
+
+
+##### `fill_starters`  (lines 3522–3611)
+
+```
+def fill_starters(slate: Slate, held: frozenset[str], taken: frozenset[str], installed: tuple[StarterApp, ...]=()) -> tuple[tuple[StarterRow, ...], UnlockRow | None]
+```
+
+*Call graph*: called by 1 (workspace_starters); 4 external calls (__init__, __init__, __init__, get).
+
+
+##### `_solvent`  (lines 3614–3623)
+
+```
+async def _solvent() -> bool
+```
+
+*Call graph*: called by 1 (workspace_starters); 2 external calls (read_headroom, web_extension).
+
+
+##### `_recalled`  (lines 3626–3633)
+
+```
+async def _recalled(ctx: SurfaceContext, member_id: UUID) -> tuple[str, ...]
+```
+
+*Call graph*: calls 1 internal fn (recent_memory); called by 1 (workspace_starters); 2 external calls (audience_subjects, conversation_audience).
+
+
+##### `workspace_starters`  (lines 3636–3694)
+
+```
+async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 7 internal fn (agent_setup, _audience_for, _held_providers, _recalled, _setup_ready, _solvent, fill_starters); 5 external calls (__init__, __init__, gather, JSONResponse, web_extension).
+
+
+##### `workspace_usage`  (lines 3697–3772)
+
+```
+async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 5 internal fn (member_spend, spend_rollup, _audience_for, _usage_payload, _window_param); 1 external calls (JSONResponse).
+
+
+##### `connect_handoff`  (lines 3778–3802)
+
+```
+async def connect_handoff(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (connect_url, _member_turn); 2 external calls (callback_page, RedirectResponse).
+
+
+##### `_member_turn`  (lines 3805–3858)
+
+```
+async def _member_turn(ctx: SurfaceContext, request: Request, *, named_turn: UUID | None=None, allow_commentable: bool=False) -> tuple[UUID, UUID, str] | Response
+```
+
+*Call graph*: calls 5 internal fn (turn_detail, turn_owner, _audience_for, _commentable, _member_chat); called by 3 (chat, connect_handoff, stream); 3 external calls (Response, web_extension, UUID).
+
+
+##### `stream`  (lines 3861–3869)
+
+```
+async def stream(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (_events, _member_turn); 1 external calls (StreamingResponse).
+
+
+##### `_event`  (lines 3872–3873)
+
+```
+def _event(name: str, payload: dict[str, object]) -> bytes
+```
+
+*Call graph*: called by 1 (_events); 1 external calls (dumps).
+
+
+##### `_pending_prompts`  (lines 3876–3889)
+
+```
+async def _pending_prompts(ctx: SurfaceContext, request_: CredentialRequest) -> dict[str, object] | None
+```
+
+*Call graph*: calls 1 internal fn (credential_prompt_pending); called by 2 (_events, _open_handoffs).
+
+
+##### `_file_payload`  (lines 3892–3905)
+
+```
+def _file_payload(ctx: SurfaceContext, artifact: SharedArtifact) -> dict[str, object]
+```
+
+*Call graph*: calls 2 internal fn (artifact_link, artifact_preview_link); called by 2 (_events, _transcript_aids).
+
+
+##### `_opens`  (lines 3908–3909)
+
+```
+def _opens(audience: WebAudience) -> frozenset[UUID]
+```
+
+*Call graph*: called by 4 (_events, _member_chat_page, _readable_conversation, transcript).
+
+
+##### `_created_apps`  (lines 3912–3943)
+
+```
+async def _created_apps(ctx: SurfaceContext, created: Mapping[str, tuple[ObjectRef, ...]], opens: frozenset[UUID]) -> dict[str, list[dict[str, object]]]
+```
+
+*Call graph*: calls 1 internal fn (list_agents); called by 2 (_events, _transcript_aids).
+
+
+##### `_events`  (lines 3946–3994)
+
+```
+async def _events(ctx: SurfaceContext, turn_id: UUID, member_id: UUID, since: str, email: str) -> AsyncIterator[bytes]
+```
+
+*Call graph*: calls 13 internal fn (connect_available, conversation_subagent_turns, shared_artifacts, tail, turn_detail, _connect_control, _created_apps, _event, _file_payload, _opens (+3 more)); called by 1 (stream); 2 external calls (web_audience, web_extension).
+
+
+##### `fulfill_credential`  (lines 3997–4025)
+
+```
+async def fulfill_credential(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 4 internal fn (fulfill_credential_request, _authenticate, _form, _framed_length); 2 external calls (JSONResponse, Response).
+
+
+##### `admin_index`  (lines 4028–4080)
+
+```
+async def admin_index(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 3 internal fn (list_installations, spend_caps, _audience_for); 5 external calls (__init__, JSONResponse, Response, granted_emails, web_extension).
+
+
+##### `_object_gate`  (lines 4083–4097)
+
+```
+async def _object_gate(ctx: SurfaceContext, request: Request) -> tuple[UUID, WebAudience, PortalKind] | Response
+```
+
+*Call graph*: calls 2 internal fn (object_kind, _audience_for); called by 2 (object_detail, object_index); 1 external calls (Response).
+
+
+##### `_object_agent`  (lines 4100–4110)
+
+```
+def _object_agent(request: Request, audience: WebAudience) -> AgentSummary | Response
+```
+
+*Call graph*: called by 2 (object_detail, object_index); 2 external calls (Response, UUID).
+
+
+##### `_kind_payload`  (lines 4113–4120)
+
+```
+def _kind_payload(kind: PortalKind) -> dict[str, object]
+```
+
+*Call graph*: calls 2 internal fn (applying_kinds, deleting_kinds); called by 2 (object_detail, object_index).
+
+
+##### `_filter_value`  (lines 4123–4130)
+
+```
+def _filter_value(raw: str) -> JsonValue
+```
+
+*Call graph*: called by 1 (object_index); 1 external calls (loads).
+
+
+##### `_fanout_token`  (lines 4133–4138)
+
+```
+def _fanout_token(walking: dict[str, str]) -> str | None
+```
+
+*Call graph*: called by 1 (object_index); 1 external calls (dumps).
+
+
+##### `_fanout_walks`  (lines 4141–4158)
+
+```
+def _fanout_walks(token: str) -> dict[UUID, str] | None
+```
+
+*Call graph*: called by 1 (object_index); 2 external calls (loads, UUID).
+
+
+##### `_merged_rank`  (lines 4161–4174)
+
+```
+def _merged_rank(row: dict[str, object], order_by: str) -> tuple[int, float | str, str]
+```
+
+
+##### `object_index`  (lines 4177–4261)
+
+```
+async def object_index(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 7 internal fn (list_member_objects, _fanout_token, _fanout_walks, _filter_value, _kind_payload, _object_agent, _object_gate); 4 external calls (__init__, replace, JSONResponse, Response).
+
+
+##### `object_detail`  (lines 4264–4311)
+
+```
+async def object_detail(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 5 internal fn (member_object, _iso, _kind_payload, _object_agent, _object_gate); 2 external calls (JSONResponse, Response).
+
+
+##### `_sse`  (lines 4314–4346)
+
+```
+def _sse(cursor: str, frame: LiveFrame) -> bytes
+```
+
+*Call graph*: called by 1 (_events); 1 external calls (model_dump_json).
+
+
+##### `intents`  (lines 4349–4354)
+
+```
+async def intents(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (submit_intent).
+
+
+##### `_write_agent`  (lines 4361–4379)
+
+```
+def _write_agent(request: Request, audience: WebAudience, stated: object=None) -> AgentSummary | Response
+```
+
+*Call graph*: called by 1 (object_write); 2 external calls (Response, UUID).
+
+
+##### `_direct_result`  (lines 4382–4386)
+
+```
+def _direct_result(frame: TerminalFrame, name: str) -> Response
+```
+
+*Call graph*: called by 1 (object_write); 1 external calls (JSONResponse).
+
+
+##### `object_write`  (lines 4389–4463)
+
+```
+async def object_write(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 7 internal fn (admit, conversation_for, object_kind, tail, _audience_for, _direct_result, _write_agent); 7 external calls (__init__, timeout, dumps, conversation_audience, JSONResponse, json, Response).
+
+
+##### `object_changes`  (lines 4469–4497)
+
+```
+async def object_changes(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 2 internal fn (recent_object_changes, _audience_for); 2 external calls (JSONResponse, Response).
+
+
+##### `settings`  (lines 4500–4512)
+
+```
+async def settings(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 1 internal fn (_panel_gate); 1 external calls (agent_settings).
+
+
+##### `agent_setup`  (lines 4515–4543)
+
+```
+async def agent_setup(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 5 internal fn (agent_setup, _has_own_page, _panel_gate, _provider_label, _provider_summary); 1 external calls (JSONResponse).
+
+
+##### `_has_own_page`  (lines 4546–4571)
+
+```
+async def _has_own_page(ctx: SurfaceContext, agent_id: UUID, member_id: UUID) -> bool
+```
+
+*Call graph*: calls 1 internal fn (list_member_objects); called by 1 (agent_setup); 1 external calls (__init__).
+
+
+##### `homepage`  (lines 4574–4592)
+
+```
+async def homepage(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 4 internal fn (_assets_published, _homepage_state, _panel_gate, apps); 1 external calls (JSONResponse).
+
+
+##### `_homepage_state`  (lines 4595–4652)
+
+```
+async def _homepage_state(ctx: SurfaceContext, summary: AgentSummary, member_id: UUID, admin: bool) -> dict[str, JsonValue]
+```
+
+*Call graph*: calls 2 internal fn (list_member_objects, apps); called by 2 (agents_index, homepage); 4 external calls (__init__, shipped_app_slug, homepage_embed_url, shipped_homepage_url).
+
+
+##### `preview`  (lines 4670–4701)
+
+```
+async def preview(ctx: SurfaceContext, request: Request) -> Response
+```
+
+*Call graph*: calls 4 internal fn (render_preview, _audience_for, _form, _framed_length); 2 external calls (PurePosixPath, Response).
+
+
+### `extensions/app_chat/ufo_ext_app_chat/__init__.py`
+
+`other` · `import/package discovery`
+
+This is an empty package marker file. In Python, a folder can be treated as an importable package when it has an `__init__.py` file. That means other parts of the system can refer to this folder using normal Python import paths, such as importing modules from `ufo_ext_app_chat`.
+
+There is no setup logic, configuration, or feature code here. Its value is structural: it tells Python and project tooling that the surrounding directory belongs together as one package. Without this file, some Python environments or older tooling might not recognize the folder as a package, which could make imports fail or make the extension harder to discover.
+
+A simple analogy is a blank cover page in a binder. The page does not contain instructions, but it clearly marks where a section begins so the rest of the binder can be organized and referenced correctly.
+
+
+### Memory inspection surface
+The memory web surface gives authorized operators a read-only page and JSON API for inspecting workspace memory records.
+
+### `extensions/memory/ufo_ext_memory/surface.py`
+
+`io_transport` · `request handling`
+
+This file is the doorway for a “memory explorer” page. Its job is to show an operator what the Memory extension has stored for a selected workspace, much like opening a read-only filing cabinet. Without this file, the stored memories might still exist, but there would be no simple operator web surface for viewing them.
+
+The file defines two web actions. One serves a static HTML page from `static/memory.html`. That page is the browser app the operator sees. The other returns the actual memory records as JSON, which is a plain data format browsers and tools can read.
+
+The important safety detail is that the page relies on the platform’s operator session and workspace binding. In plain terms, the request must already be tied to a verified operator and a specific workspace. When the JSON endpoint reads memory rows, it creates an extension-specific context so it can access the Memory extension’s own storage table, but the read is still scoped to the currently bound workspace. This keeps one workspace’s memory from leaking into another.
+
+At the bottom, `ROUTES` connects web paths to these actions: load the page, bind an operator session, and fetch the memory list.
 
 #### Function details
 
-##### `frame_payload`  (lines 61–64)
+##### `app_page`  (lines 27–30)
 
 ```
-def frame_payload(frame: LiveFrame) -> dict[str, object]
+async def app_page(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Turns one live frame into a simple tagged dictionary that can be safely written to Redis as JSON. The tag says what kind of frame it is, so it can later be rebuilt as the same kind of object.
+**Purpose**: This function returns the Memory explorer web page to the operator’s browser. It is used when someone opens the surface’s main page.
 
-**Data flow**: It receives a live frame object. It looks up that frame’s type, adds a short kind name, and asks the frame to turn its fields into JSON-friendly values. It returns a dictionary with two parts: the kind and the frame data.
+**Data flow**: It receives the surface context and the incoming web request. It checks whether the static HTML file was successfully loaded when the module started. If the file is present, it wraps the HTML text in an HTTP response and sends it back; if the file is missing, it raises an error instead of serving a broken page.
 
-**Call relations**: When RedisStreamHub.publish is about to append a frame to Redis, it calls this function first. This function prepares the frame for json.dumps, which then turns it into the text form stored in the stream.
+**Call relations**: The route table calls this function for a GET request to the surface root path. Its only handoff is to `HTMLResponse`, which turns the already-loaded page text into a browser response.
 
-*Call graph*: called by 1 (publish); 1 external calls (model_dump).
-
-
-##### `frame_from_payload`  (lines 67–71)
-
-```
-def frame_from_payload(payload: dict[str, object]) -> LiveFrame
-```
-
-**Purpose**: Rebuilds a live frame object from the tagged dictionary that was read back from Redis. It checks the kind tag so unknown or invalid frame types fail clearly instead of being misread.
-
-**Data flow**: It receives a dictionary loaded from JSON. It reads the kind value, confirms it is a known frame kind, and uses the matching model class to validate and rebuild the frame data. It returns the reconstructed live frame.
-
-**Call relations**: RedisStreamHub.subscribe calls this after reading a stored JSON frame from Redis. It converts the wire format back into the live-frame object that subscribers expect to receive.
-
-*Call graph*: called by 1 (subscribe); 1 external calls (cast).
+*Call graph*: 1 external calls (HTMLResponse).
 
 
-##### `_stream_id`  (lines 74–76)
+##### `memories`  (lines 33–42)
 
 ```
-def _stream_id(entry_id: str) -> tuple[int, int]
+async def memories(ctx: SurfaceContext, request: Request) -> Response
 ```
 
-**Purpose**: Converts a Redis Stream entry id into two numbers that can be compared in time order. Redis ids look like a millisecond timestamp plus a sequence number, such as “123-0.”
+**Purpose**: This function returns every memory item for the currently bound workspace as JSON, newest first according to the store query it uses. It gives the browser page the data it needs to display the memory inventory.
 
-**Data flow**: It receives a Redis entry id string. It splits the string around the dash, converts the millisecond part and sequence part into integers, and returns them as a pair. If the sequence part is missing, it treats it as zero.
+**Data flow**: It receives the surface context, which includes the workspace id, and the incoming request. It builds an extension context for the Memory extension’s own scoped storage, with no declared credential access. Then it asks the memory store for the inventory for that workspace. The returned memory items are converted into JSON-friendly dictionaries and sent back in a JSON HTTP response.
 
-**Call relations**: RedisStreamHub.covers uses this helper when deciding whether a saved cursor is still within the part of the stream Redis has kept. Comparing numeric pairs avoids fragile string comparisons.
+**Call relations**: The route table calls this function for GET requests to `api/memories`. Inside, it creates `ScopedStore`, `CredentialAccess`, and `ExtensionContext` so it can read the Memory extension’s table, then hands the transaction and workspace id to `ufo_ext_memory.store.inventory`. Finally, it passes the serialized results to `JSONResponse` so the web client can consume them.
 
-*Call graph*: called by 1 (covers).
-
-
-##### `_stream_entries`  (lines 79–88)
-
-```
-def _stream_entries(batch: XReadResponse) -> list[StreamEntry]
-```
-
-**Purpose**: Extracts the actual stream entries from the shape returned by Redis xread. It also makes sure the response has the expected older Redis protocol shape, so the code does not silently read the wrong thing.
-
-**Data flow**: It receives the raw batch returned by xread. If the batch is empty, it returns an empty list. If the batch is not the expected list form, it raises an error. Otherwise it pulls out and returns the entries for the stream.
-
-**Call relations**: RedisStreamHub.subscribe calls this after each Redis xread. The subscribe loop then walks through the returned entries and turns each stored frame into a live frame for the caller.
-
-*Call graph*: called by 1 (subscribe).
+*Call graph*: 5 external calls (__init__, __init__, __init__, JSONResponse, inventory).
 
 
-##### `RedisStreamHub._client`  (lines 104–110)
+### Portal feature helpers
+These helpers decide web agent access, expose community skill browsing, process setup/settings submissions, and build personalized start-screen suggestions.
 
-```
-def _client(self) -> Redis
-```
+### `extensions/web/ufo_ext_web/audience.py`
 
-**Purpose**: Gives the caller a Redis client that belongs to the currently running async event loop. This prevents one loop from reusing a Redis connection object created for another loop.
+`domain_logic` · `request handling`
 
-**Data flow**: It reads the current event loop and checks the hub’s internal dictionary of clients. If a client already exists for that loop, it returns it. If not, it creates a new Redis client from the configured URL, stores it for that loop, and returns it.
+The web portal needs a clear answer to a simple question: “Is this person allowed to reach this agent here?” This file is that authority for the web surface. It treats a member’s email address as their web identity, and it stores explicit access grants as rows keyed by agent and email. Without this file, the portal would not have one consistent place to decide who can see private agents, who can chat, or how admins safely open private transcripts.
 
-**Call relations**: Publishing, subscribing, and coverage checks all go through this method before talking to Redis. It is the safety valve that lets background workflow code and web-serving code use the same hub object without sharing loop-bound Redis state.
+The main idea is layered access. Workspace admins can reach every agent. Non-admin members can reach agents visible to the whole workspace, agents explicitly granted to their email, and agents they own. There is also a special case for private extension conversations: a member may be allowed to chat with an agent through one of those conversations even if the agent is not generally listed for them.
 
-*Call graph*: called by 3 (covers, publish, subscribe); 2 external calls (get_running_loop, from_url).
-
-
-##### `RedisStreamHub._stream`  (lines 112–113)
-
-```
-def _stream(self, turn_id: UUID) -> str
-```
-
-**Purpose**: Builds the Redis Stream name for one turn. This gives every turn its own separate live-update channel.
-
-**Data flow**: It receives a turn id. It joins the fixed stream prefix with that id and returns the resulting Redis key name.
-
-**Call relations**: RedisStreamHub.publish, RedisStreamHub.subscribe, and RedisStreamHub.covers all call this before using Redis. It keeps stream naming consistent, so writers and readers meet on the same Redis key.
-
-*Call graph*: called by 3 (covers, publish, subscribe).
-
-
-##### `RedisStreamHub.publish`  (lines 115–122)
-
-```
-async def publish(self, turn_id: UUID, frame: LiveFrame) -> str
-```
-
-**Purpose**: Adds one live frame to the Redis Stream for a turn and returns the new stream cursor. Callers use this when they want viewers to see a new live update.
-
-**Data flow**: It receives a turn id and a live frame. It builds the stream name, converts the frame into a JSON string, and uses a Redis pipeline, meaning a small batch of Redis commands sent together, to append the frame and refresh the stream’s expiry time. It returns the Redis entry id created by the append, which acts as the cursor for that frame.
-
-**Call relations**: This is the writer side of the hub. It calls _stream to find the right Redis key, _client to get a safe Redis connection for the current event loop, and frame_payload to prepare the frame for storage. Subscribers later use the returned cursor, or a later one, to continue reading without repeating old frames.
-
-*Call graph*: calls 3 internal fn (_client, _stream, frame_payload); 1 external calls (dumps).
-
-
-##### `RedisStreamHub.subscribe`  (lines 124–148)
-
-```
-async def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, LiveFrame]]
-```
-
-**Purpose**: Continuously reads live frames for one turn, starting after a cursor if one is provided. It supports both replaying retained frames and waiting for new frames as they arrive.
-
-**Data flow**: It receives a turn id and an optional cursor. It chooses the Redis stream for that turn and starts reading from the cursor, or from the beginning if no cursor is given. It first tries a non-blocking read for already-available entries, then waits briefly for new entries if none are ready. For each entry, it updates the cursor, decodes the stored JSON, rebuilds the live frame, and yields the cursor plus frame to the caller. Timeout while waiting is treated as normal idleness, so the loop simply tries again.
-
-**Call relations**: This is the reader side of the hub. It uses _stream and _client to talk to the right Redis stream, _stream_entries to normalize Redis responses, and frame_from_payload to rebuild frames. It is designed for surfaces or clients that tail a live turn and need to keep going across short quiet periods.
-
-*Call graph*: calls 4 internal fn (_client, _stream, _stream_entries, frame_from_payload); 1 external calls (loads).
-
-
-##### `RedisStreamHub.covers`  (lines 150–156)
-
-```
-async def covers(self, turn_id: UUID, cursor: str) -> bool
-```
-
-**Purpose**: Checks whether a saved cursor is still covered by the retained Redis Stream. This tells a reconnecting reader whether it can resume cleanly or needs to redraw from durable state.
-
-**Data flow**: It receives a turn id and cursor. If the cursor is empty, it returns false. Otherwise it asks Redis for the first retained entry in that turn’s stream. If the stream is empty, it returns false. If there is a first entry, it compares that entry id with the cursor and returns true when the cursor is not older than what Redis still has.
-
-**Call relations**: Reconnect logic can call this before subscribing from an old cursor. The method uses _stream to locate the stream, _client to query Redis, and _stream_id to compare Redis ids in the same order Redis uses.
-
-*Call graph*: calls 3 internal fn (_client, _stream, _stream_id).
-
-
-### `extensions/redis_hub/ufo_ext_redis_hub/stream_terminal.py`
-
-`io_transport` · `request handling and cross-pod terminal coordination`
-
-A terminal session is like a phone call between a workflow and a user’s machine. In a single process, both sides can meet in memory. In a fleet of pods, the workflow may be on one pod while the held browser or CLI connection is on another, so memory is no longer enough. This file provides that meeting place using Redis, a shared fast key-value service, and a blob store, a shared place for larger byte data.
-
-RedisTerminals publishes where a conversation’s terminal is currently connected, keeps that binding alive with a heartbeat, queues terminal operations one at a time, and waits for replies. Redis Streams act like small ordered mailboxes: workflows add an operation, connection pods read the next operation, and replies are written back to a reply stream. Large request or reply bodies are stored separately in the blob store so Redis is not overloaded.
-
-The code is careful about failure. Keys have expiry times, so abandoned work eventually cleans itself up. A per-conversation lock stops two operations from running at the same time. A Redis-side Lua script claims an operation atomically, meaning two reconnecting pods should not both deliver the same command. If Redis or the terminal disappears, callers get TerminalGone instead of waiting forever.
+The file also exposes three tools used from an agent conversation. Admins can grant or revoke a member’s web access to the current agent by email. Before doing so, the code checks that the speaker is a real workspace member, is an admin, and named an email that belongs to an existing member. A separate tool records that an admin acknowledged opening someone else’s private transcript. That record is important because the portal later uses it as proof that the private transcript may be shown.
 
 #### Function details
 
-##### `_text`  (lines 54–57)
+##### `web_extension`  (lines 28–35)
 
 ```
-def _text(value: bytes | str) -> str
+def web_extension() -> ExtensionContext
 ```
 
-**Purpose**: Converts a Redis field value into normal Python text. Redis may return either bytes or strings depending on client settings, and the rest of the file wants one consistent shape.
+**Purpose**: Builds the web extension’s own context so code running from the web surface can read and write the web extension’s private store. This is like getting the right filing-cabinet key before looking up audience grants.
 
-**Data flow**: It receives one Redis value, checks whether it is already text, and otherwise decodes the bytes into text. The result is a string that JSON parsing, ID comparison, and field decoding can use safely.
+**Data flow**: It takes no inputs. It creates a scoped store for the web extension and an empty credential access object, then wraps them in an ExtensionContext. The result is a ready-to-use extension context pointed at the web audience data.
 
-**Call relations**: Small decoding steps throughout the file call this when they read Redis data. It is used before turning stream fields into TerminalOp objects, reading bindings, checking gates, and decoding replies.
+**Call relations**: Surface code can call this when it has a SurfaceContext but needs to consult the web extension’s own stored rows. Inside, it constructs the store, credential access, and extension context that later audience checks or tool calls can use.
 
-*Call graph*: called by 7 (_decode_op, _decode_reply, _gate_ok, _read_binding, _run_op, next_op, _pairs).
+*Call graph*: 3 external calls (__init__, __init__, __init__).
 
 
-##### `_pairs`  (lines 60–65)
+##### `_grant_key`  (lines 38–39)
 
 ```
-def _pairs(flat: object) -> _StreamFields
+def _grant_key(agent_id: UUID, email: str) -> str
 ```
 
-**Purpose**: Turns Redis’s flat stream field list into a more useful dictionary. This matters because the Lua script returns fields as alternating name and value items.
+**Purpose**: Creates the exact storage key for one access grant: one agent and one member email. It keeps email matching consistent by trimming spaces and lowercasing the address.
 
-**Data flow**: It receives a flat list like field, value, field, value. It converts each item to text and returns a map from each field name to its value; if the input is not a list, it fails loudly.
+**Data flow**: It receives an agent ID and an email address. It normalizes the email, combines it with the audience prefix and agent ID, and returns a single string key used in the store.
 
-**Call relations**: RedisTerminals.next_op uses this after the Lua claim script returns an operation. _pairs calls _text so the later operation decoder sees plain strings.
+**Call relations**: _grant uses this key before writing a grant, and _revoke uses the same key before deleting one. Because both use the same helper, granting and revoking point to the same stored row.
 
-*Call graph*: calls 1 internal fn (_text); called by 1 (next_op).
+*Call graph*: called by 2 (_grant, _revoke).
 
 
-##### `_bind_payload`  (lines 68–71)
+##### `granted_emails`  (lines 42–49)
 
 ```
-def _bind_payload(cwd: str, member_id: UUID | None) -> str
+async def granted_emails(store: ScopedStore) -> dict[UUID, tuple[str, ...]]
 ```
 
-**Purpose**: Builds the small JSON record that says where a terminal is and which member it belongs to. This is the shared form used for both live bindings and in-flight operation pins.
+**Purpose**: Reads all saved web access grants and turns them into an admin-friendly map from agent to granted emails. This is useful for showing who has been granted access to which agents.
 
-**Data flow**: It receives a current working directory and an optional member ID. It writes them into JSON text, using the member’s hexadecimal ID when present and null when not.
+**Data flow**: It receives a scoped store. It lists every stored row under the audience prefix, splits each key into an agent ID and email, groups emails by agent, sorts each email list, and returns a dictionary of agent IDs to email tuples.
 
-**Call relations**: The heartbeat uses it when advertising a connected terminal. _run_op also uses it to keep the binding visible while an operation is in progress.
+**Call relations**: This function reads the same stored grant rows that _grant writes and _revoke deletes. It depends on the store’s list operation to scan the audience area and converts the saved text agent IDs back into UUID objects.
 
-*Call graph*: called by 2 (_heartbeat, _run_op); 1 external calls (dumps).
+*Call graph*: calls 1 internal fn (list); 1 external calls (UUID).
 
 
-##### `_stream_entries`  (lines 145–154)
+##### `_granted_agent_ids`  (lines 52–59)
 
 ```
-def _stream_entries(batch: XReadResponse) -> list[StreamEntry]
+async def _granted_agent_ids(store: ScopedStore, email: str) -> frozenset[UUID]
 ```
 
-**Purpose**: Extracts the actual entries from a Redis stream read response. It protects the code from silently misreading an unexpected Redis response shape.
+**Purpose**: Finds all agents that have been explicitly granted to one email address. It answers the question, “Which private agents did admins open for this member?”
 
-**Data flow**: It receives the raw result from Redis XREAD. If there is no data, it returns an empty list; if the shape is wrong, it raises an error; otherwise it returns the stream entries.
+**Data flow**: It receives a store and an email. It normalizes the email, scans all audience grant rows, keeps only rows whose saved email matches, converts their agent IDs into UUID objects, and returns them as a frozen set.
 
-**Call relations**: _await_reply calls this after waiting on a reply stream. That keeps reply-reading code focused on the reply fields instead of Redis response formatting.
+**Call relations**: web_audience calls this while building a non-admin member’s view of the portal. It supplies the explicit grant part of the access decision, alongside workspace-visible agents and agents owned by the member.
 
-*Call graph*: called by 1 (_await_reply).
+*Call graph*: calls 1 internal fn (list); called by 1 (web_audience); 1 external calls (UUID).
 
 
-##### `RedisTerminals._client`  (lines 181–198)
+##### `WebAudience.allows`  (lines 73–74)
 
 ```
-def _client(self) -> Redis
+def allows(self, agent_id: UUID) -> bool
 ```
 
-**Purpose**: Returns the Redis client for the current asyncio event loop. An asyncio event loop is the scheduler running async tasks, and Redis clients bind their pending work to the loop that created them.
+**Purpose**: Checks whether this member’s normal web audience includes a particular agent. It is used when the portal needs a yes-or-no answer before showing or opening an agent.
 
-**Data flow**: It reads the current event loop, looks up an existing Redis client for that loop, and creates one if needed with bounded socket timeouts. It returns the client and stores it for reuse.
+**Data flow**: It receives an agent ID. It looks through the WebAudience object’s main agent list and returns true if any listed agent has that ID, otherwise false. It does not change anything.
 
-**Call relations**: Nearly every Redis operation in this class goes through _client. This is what lets workflow-side and serve-side loops use Redis safely without sharing one loop-bound client incorrectly.
+**Call relations**: The web surface’s chat-resolution code calls this when deciding whether a requested agent is inside the member’s allowed portal audience. It relies on web_audience having already built the correct list.
 
-*Call graph*: called by 9 (_await_reply, _clear_op, _deliver_reply, _heartbeat, _read_binding, _run_op, next_op, send, staged); 2 external calls (get_running_loop, from_url).
+*Call graph*: called by 1 (_resolve_chat).
 
 
-##### `RedisTerminals._bind_key`  (lines 200–201)
+##### `WebAudience.allows_chat`  (lines 76–77)
 
 ```
-def _bind_key(self, conversation_id: UUID) -> str
+def allows_chat(self, agent_id: UUID) -> bool
 ```
 
-**Purpose**: Builds the Redis key that stores the live terminal binding for a conversation. The key name is predictable so any pod can find the same binding.
+**Purpose**: Checks whether this member may chat with a particular agent, including special private conversation access. This can be broader than the normal visible agent list.
 
-**Data flow**: It receives a conversation ID and formats it into the live binding key string. Nothing else is changed.
+**Data flow**: It receives an agent ID. It looks through chat_agents, which combines the normal allowed agents with conversation-only agents, and returns true if the ID appears there.
 
-**Call relations**: _heartbeat writes this key while a connection is held. _read_binding reads it when another pod wants to know whether the terminal is connected.
+**Call relations**: It builds on the chat_agents property. Code that needs a chat-specific permission check can use this instead of allows, because private extension conversations may permit chat even when the agent is not generally visible.
 
-*Call graph*: called by 2 (_heartbeat, _read_binding).
 
+##### `WebAudience.chat_agents`  (lines 80–81)
 
-##### `RedisTerminals._inflight_key`  (lines 203–204)
+```
+def chat_agents(self) -> tuple[AgentSummary, ...]
+```
+
+**Purpose**: Returns every agent this member can chat with in the portal. It combines ordinary visible or granted agents with agents reachable only through member-private extension conversations.
+
+**Data flow**: It reads the WebAudience object’s agents tuple and conversation_agents tuple. It returns a new tuple containing both groups, without changing the object.
+
+**Call relations**: WebAudience.allows_chat uses this property to make a chat permission decision. The split between agents and conversation_agents is created by web_audience, and this property joins them for chat-time checks.
+
+
+##### `web_audience`  (lines 84–116)
+
+```
+async def web_audience(surface: SurfaceContext, extension: ExtensionContext, email: str) -> WebAudience
+```
+
+**Purpose**: Builds the complete web-portal view for one member email: whether they are an admin, which agents they can normally see, and which extra agents they can chat with through private conversations.
+
+**Data flow**: It receives a surface context, an extension context, and an email. It normalizes the email, reads the workspace seat snapshot inside a transaction, checks whether the email belongs to an admin and to which member, lists all agents, then filters those agents according to the access rules. It returns a WebAudience object.
+
+**Call relations**: This is the central audience-building function. It calls the seat system to learn workspace membership, asks the surface for the available agents and member-private extension agent IDs, and uses _granted_agent_ids to add explicit grants. Portal routes can then use the returned WebAudience to answer access questions.
+
+*Call graph*: calls 4 internal fn (transaction, list_agents, member_extension_agent_ids, _granted_agent_ids); 2 external calls (__init__, __init__).
+
+
+##### `_refusal`  (lines 123–124)
+
+```
+def _refusal(text: str) -> ToolResult
+```
+
+**Purpose**: Creates a standard error result for a tool when the requested access change or transcript action is not allowed. It keeps refusal replies consistent and clearly marked as errors.
+
+**Data flow**: It receives a plain text message. It wraps that message in TextContent, puts it in a ToolResult, marks the result as an error, and returns it.
+
+**Call relations**: _gate uses this for failed grant or revoke pre-checks, and _read_private_transcript uses it when transcript access cannot be recorded. It hands back the final tool response instead of letting the operation continue.
+
+*Call graph*: called by 2 (_gate, _read_private_transcript); 2 external calls (__init__, __init__).
+
+
+##### `_gate`  (lines 127–145)
+
+```
+async def _gate(ctx: ToolContext, extension: ExtensionContext, args: WebAccessInput) -> ToolResult | None
+```
+
+**Purpose**: Performs the shared safety checks before an admin can grant or revoke web access. It makes sure the speaker is a workspace member, is an admin, supplied an email, and named an existing workspace member.
+
+**Data flow**: It receives the current tool context, the extension context, and the email input. It checks speaker identity, checks admin status, validates that the email is not blank, reads the workspace member snapshot in a transaction, and confirms the email exists. It returns a refusal ToolResult if something is wrong, or None if the operation may continue.
+
+**Call relations**: _grant and _revoke both call this before touching the access store. When a check fails, _gate uses _refusal to produce the tool response; when checks pass, it hands control back so the caller can write or delete the grant.
+
+*Call graph*: calls 3 internal fn (transaction, speaker_is_admin, _refusal); called by 2 (_grant, _revoke); 1 external calls (__init__).
+
+
+##### `_grant`  (lines 148–170)
+
+```
+async def _grant(ctx: ToolContext, args: WebAccessInput) -> ToolResult
+```
+
+**Purpose**: Implements the grant_web_access tool. It lets an admin give a workspace member web-portal access to the current agent, unless the current agent is the main agent, which already answers everyone.
+
+**Data flow**: It receives the tool context and an input email. It confirms an extension context is present, runs _gate, skips storage if the current agent is the main agent, otherwise writes a grant row keyed by current agent and normalized email, including who granted it. It returns a ToolResult explaining what happened.
+
+**Call relations**: This function is registered as the handler for the grant_web_access tool. It depends on _gate for permission checks, _grant_key for the storage key, and the tool context for the current agent, speaker, and main-agent check.
+
+*Call graph*: calls 3 internal fn (agent_is_main, _gate, _grant_key); 2 external calls (__init__, __init__).
+
+
+##### `_revoke`  (lines 173–195)
+
+```
+async def _revoke(ctx: ToolContext, args: WebAccessInput) -> ToolResult
+```
+
+**Purpose**: Implements the revoke_web_access tool. It lets an admin remove a member’s explicit web access to the current agent, while making clear that main-agent access cannot really be removed.
+
+**Data flow**: It receives the tool context and an input email. It confirms an extension context is present, runs _gate, deletes the matching grant row from the store, then checks whether the current agent is the main agent. It returns a ToolResult saying either that the member still reaches the main agent or that access to this agent was removed.
+
+**Call relations**: This function is registered as the handler for the revoke_web_access tool. Like _grant, it uses _gate before changing data and _grant_key to target the exact grant row, so it deletes the same kind of row that granting creates.
+
+*Call graph*: calls 3 internal fn (agent_is_main, _gate, _grant_key); 2 external calls (__init__, __init__).
+
+
+##### `_read_private_transcript`  (lines 205–232)
+
+```
+async def _read_private_transcript(ctx: ToolContext, args: PrivateTranscriptInput) -> ToolResult
+```
+
+**Purpose**: Implements the read_private_transcript tool. It records an admin’s acknowledgement before the web portal shows another member’s private conversation transcript.
+
+**Data flow**: It receives the tool context and a conversation ID. It checks that the speaker is a member and an admin, then asks record_transcript_access to record access for this workspace, conversation, agent, and admin member. If there is nothing eligible to record, it returns an error; otherwise it returns a message confirming whose private conversation was opened and that the access was logged.
+
+**Call relations**: This function is registered as the handler for the read_private_transcript tool. It uses _refusal for denied or inapplicable cases and delegates the actual audit record creation to record_transcript_access, which the portal later relies on when deciding whether to show the transcript.
+
+*Call graph*: calls 2 internal fn (speaker_is_admin, _refusal); 3 external calls (__init__, __init__, record_transcript_access).
+
+
+### `extensions/web/ufo_ext_web/community.py`
+
+`domain_logic` · `request handling`
+
+The Community tab needs two things from the public skills directory: a short list of skills to show, and the full SKILL.md document when someone opens one for install review. This file is the bridge to that outside service. With no search text, it reads the skills.sh homepage payload and extracts the leaderboard. With search text, it calls the public search API. Either way, it returns simple skill records with a name, source repository, and install count.
+
+The file is careful because the outside directory is rate limited and may change shape. It stores listing results for a short time, like keeping a recently used menu on the counter instead of asking the restaurant again. It stores fetched skill documents for the life of the process, so reopening the same skill does not spend another request. It also limits how much data it will read, so a broken or unexpectedly huge response cannot consume too much memory.
+
+When fetching a single skill, it downloads the directory’s JSON package, looks for SKILL.md, and reads its YAML front matter. YAML front matter is the small metadata block at the top of a Markdown file. If the document is missing, malformed, or lacks a name or description, the file returns no document rather than inventing data.
+
+#### Function details
+
+##### `_refusal`  (lines 43–49)
+
+```
+def _refusal(code: int) -> CommunityUnavailable
+```
+
+**Purpose**: This helper turns an HTTP failure code from skills.sh into a user-readable error. It gives a special, clearer message when the directory says the rate limit has been reached.
+
+**Data flow**: It receives a numeric response code. If the code means “too many requests,” it creates an error explaining the 60-reads-an-hour limit; otherwise it creates an error saying which code the directory returned. The result is an exception object that callers raise.
+
+**Call relations**: The low-level network readers call this when skills.sh does not answer successfully. `_search` uses it for failed search API calls, and `_body` uses it for failed streamed downloads, so both paths report failures in the same friendly way.
+
+*Call graph*: called by 2 (_body, _search); 1 external calls (__init__).
 
+
+##### `CommunitySkills.listing`  (lines 79–89)
+
+```
+async def listing(self, query: str) -> list[CommunitySkill]
+```
+
+**Purpose**: This is the main entry point for showing the Community skill list. It returns either popular skills or search results, while avoiding repeated calls to skills.sh when a fresh cached answer already exists.
+
+**Data flow**: It receives the user’s search text. It first checks the listing cache for that exact text and returns the saved list if it is still fresh. If not, it opens an HTTP client, asks either the leaderboard reader or the search reader for results, trims the list to the display limit, stores it with the current time, and returns it.
+
+**Call relations**: The web route for the Community narrowing would call this when it needs rows for the Skills tab. Inside, it chooses `_popular` when the query is empty and `_search` when the user typed something, using `_client` to create the temporary network client.
+
+*Call graph*: calls 3 internal fn (_client, _popular, _search); 1 external calls (monotonic).
+
+
+##### `CommunitySkills.fetch`  (lines 91–116)
+
+```
+async def fetch(self, source: str, name: str) -> CommunityDocument | None
+```
+
+**Purpose**: This is the main entry point for reading one specific community skill’s document. It downloads and parses SKILL.md so the install screen can show the skill’s description and instructions.
+
+**Data flow**: It receives a repository source such as `owner/repo` and a skill name. It checks the document cache first. If missing, it builds the download URL, reads the response body, decodes the JSON, searches the returned files for `SKILL.md`, parses that file, stores the result in the cache, and returns either a `CommunityDocument` or `None` if no readable document was found.
+
+**Call relations**: The install review flow calls this after a user chooses a skill from the listing. It relies on `_client` for the HTTP client, `_body` for safe downloading, and `_parse` for understanding the Markdown document’s metadata.
+
+*Call graph*: calls 3 internal fn (_body, _client, _parse); 2 external calls (__init__, loads).
+
+
+##### `CommunitySkills._client`  (lines 118–119)
+
+```
+def _client(self, timeout: float) -> httpx.AsyncClient
+```
+
+**Purpose**: This creates the asynchronous HTTP client used to talk to skills.sh. It centralizes timeout, redirect, and test-transport settings so all network reads behave consistently.
+
+**Data flow**: It receives a timeout value. It combines that timeout with the optional injected transport and redirect-following setting, then returns a ready-to-use `httpx.AsyncClient`, which is an HTTP client designed for async code.
+
+**Call relations**: `listing` and `fetch` call this just before they contact the directory. Tests can provide a fake transport here, letting the code be tested without real internet access.
+
+*Call graph*: called by 2 (fetch, listing); 1 external calls (AsyncClient).
+
+
+##### `CommunitySkills._popular`  (lines 121–136)
+
+```
+async def _popular(self, client: httpx.AsyncClient) -> list[CommunitySkill]
+```
+
+**Purpose**: This reads the skills.sh leaderboard when the user has not searched for anything. It extracts skill entries from the site’s page payload and sorts them by install count.
+
+**Data flow**: It receives an HTTP client. It downloads the leaderboard page with a special header, scans the text for embedded JSON-looking skill entries, converts each valid entry into a `CommunitySkill`, removes duplicates by source and name, and returns the skills from most installed to least installed. If no valid entries are found, it raises a clear unavailable error.
+
+**Call relations**: `listing` calls this for the default Community view. It uses `_body` to safely download the page and `_entry` to validate each possible skill row before returning the ranked list.
+
+*Call graph*: calls 2 internal fn (_body, _entry); called by 1 (listing); 2 external calls (__init__, loads).
+
+
+##### `CommunitySkills._search`  (lines 138–147)
+
 ```
-def _inflight_key(self, conversation_id: UUID) -> str
+async def _search(self, client: httpx.AsyncClient, query: str) -> list[CommunitySkill]
 ```
 
-**Purpose**: Builds the Redis key that stores a temporary binding while an operation is running. This keeps the terminal discoverable even after the held stream hands off work and disconnects.
+**Purpose**: This calls the public skills.sh search API when the user types a search query. It turns the API’s response into the same simple skill rows used by the rest of the UI.
 
-**Data flow**: It receives a conversation ID and returns the matching in-flight key string. It does not contact Redis itself.
+**Data flow**: It receives an HTTP client and the search text. It sends a GET request with the query and result limit, checks for a successful response, reads the returned JSON, converts each listed skill through `_entry`, drops invalid rows, sorts the rest by install count, and returns the list.
 
-**Call relations**: _run_op writes this key before posting an operation, _read_binding falls back to it if no live binding exists, and _clear_op removes it during cleanup.
+**Call relations**: `listing` calls this whenever the query is not empty. If the API refuses the request, it hands the status code to `_refusal`; for usable responses, it depends on `_entry` to keep only well-formed skills.
 
-*Call graph*: called by 3 (_clear_op, _read_binding, _run_op).
+*Call graph*: calls 2 internal fn (_entry, _refusal); called by 1 (listing); 1 external calls (get).
 
 
-##### `RedisTerminals._op_stream`  (lines 206–207)
+##### `CommunitySkills._entry`  (lines 149–156)
 
 ```
-def _op_stream(self, conversation_id: UUID) -> str
+def _entry(self, entry: object) -> CommunitySkill | None
 ```
 
-**Purpose**: Builds the Redis Stream name where terminal operations for one conversation are queued. A stream is an ordered mailbox in Redis.
+**Purpose**: This validates and normalizes one raw skill entry from skills.sh. It protects the portal from odd or incomplete data by only accepting entries with a name and a safe-looking repository source.
 
-**Data flow**: It receives a conversation ID and returns the operation stream name for that conversation.
+**Data flow**: It receives one unknown object from a page payload or API response. If the object is not a dictionary, or if the name or repository source is missing or badly shaped, it returns `None`. Otherwise it creates and returns a `CommunitySkill` with name, source, and install count.
 
-**Call relations**: _run_op adds new operations to this stream, next_op reads and claims them, and _clear_op deletes completed entries when possible.
+**Call relations**: Both `_popular` and `_search` pass their raw directory entries through this function. That makes the two listing paths produce the same clean data shape before `listing` caches and returns the results.
 
-*Call graph*: called by 3 (_clear_op, _run_op, next_op).
+*Call graph*: called by 2 (_popular, _search); 1 external calls (__init__).
 
 
-##### `RedisTerminals._reply_stream`  (lines 209–210)
+##### `CommunitySkills._body`  (lines 158–178)
 
 ```
-def _reply_stream(self, op_id: str) -> str
+async def _body(self, client: httpx.AsyncClient, url: str, cap: int, headers: dict[str, str] | None=None) -> bytes
 ```
 
-**Purpose**: Builds the Redis Stream name where the reply for one operation is written. Each operation gets its own reply mailbox.
+**Purpose**: This safely downloads a response body from skills.sh. It reads the response in pieces and stops if the service returns an error or sends more data than this code is willing to accept.
 
-**Data flow**: It receives an operation ID and returns the reply stream name. It has no side effects.
+**Data flow**: It receives an HTTP client, a URL, a maximum byte limit, and optional headers. It opens a streaming GET request, checks the status code, adds each incoming byte chunk to a list, tracks the total size, and raises an error if the response is too large. On success, it returns all chunks joined into one byte string.
 
-**Call relations**: _await_reply waits on this stream, _deliver_reply writes to it, and _clear_op deletes it after the operation finishes.
+**Call relations**: `_popular` uses this to read the leaderboard page, and `fetch` uses it to download a skill package. When the status code is not successful, it delegates the message-building to `_refusal`; when the body is too large, it raises its own clear unavailable error.
 
-*Call graph*: called by 3 (_await_reply, _clear_op, _deliver_reply).
+*Call graph*: calls 1 internal fn (_refusal); called by 2 (_popular, fetch); 2 external calls (__init__, stream).
 
 
-##### `RedisTerminals._lock_key`  (lines 212–213)
+##### `CommunitySkills._parse`  (lines 180–199)
 
 ```
-def _lock_key(self, conversation_id: UUID) -> str
+def _parse(self, document: str) -> CommunityDocument | None
 ```
+
+**Purpose**: This reads a downloaded `SKILL.md` file and extracts the parts the install screen needs. It only accepts documents with valid front matter containing both a name and a description.
+
+**Data flow**: It receives the full Markdown document as text. It looks for a YAML metadata block at the top, parses that block safely, checks for required name and description fields, and separates the remaining Markdown as instructions. It returns a `CommunityDocument` when everything is usable, or `None` when the document does not meet those expectations.
+
+**Call relations**: `fetch` calls this after it finds `SKILL.md` in the downloaded files. The parsed result is then cached and returned to the install review flow, so the UI can show the skill’s description and instructions without another directory read.
 
-**Purpose**: Builds the Redis key for the per-conversation lock. The lock is like a bathroom key: only one terminal operation for the conversation can hold it at once.
+*Call graph*: called by 1 (fetch); 2 external calls (__init__, safe_load).
 
-**Data flow**: It receives a conversation ID and returns the lock key string. It does not acquire the lock itself.
 
-**Call relations**: send uses this key to create and acquire a Redis lock before posting an operation, so commands queue instead of running concurrently.
+### `extensions/web/ufo_ext_web/panels.py`
 
-*Call graph*: called by 1 (send).
+`orchestration` · `request handling`
 
+The web portal lets people do things like save an agent setting, connect Slack, request a credential prompt, rebuild reports, or add a team member. This file is the contract for those actions. It does not create separate special-purpose write APIs. Instead, every portal action is packaged as a prepared intent and sent through the same conversation system that chat uses. That matters because the conversation becomes the audit trail: who asked, what they asked, and what happened all live together.
 
-##### `RedisTerminals._deliv_key`  (lines 215–216)
+The file first defines many small request shapes using Pydantic models, which are data checkers that reject malformed input before work starts. For example, a credential can only be deleted here, not filled in, because secrets must go through a private credential prompt. A connection can be connected or disconnected, not edited like a normal object.
 
+The central path is `submit_intent`. It reads the web request, validates it, fills in missing safe defaults for partial agent updates, turns the intent into a `ToolIntent`, admits it into a durable “Portal actions” conversation, and waits for the final result. Helper functions translate that final result into JSON the browser can understand, including special cases for install links and billing portal links. The file also supplies first-run provider tiles and “unlock” suggestions, which explain what useful apps become possible after connecting certain tools.
+
+#### Function details
+
+##### `ApplyIntent.kinds`  (lines 78–82)
+
 ```
-def _deliv_key(self, op_id: str) -> str
+def kinds(cls) -> frozenset[str]
 ```
 
-**Purpose**: Builds the Redis key used as a delivery marker for an operation. The marker shows that a connection pod has already claimed the operation for delivery.
+**Purpose**: Returns the full set of object kinds that a panel form is allowed to submit changes for. This keeps the user interface and the server-side rules tied to the same list.
 
-**Data flow**: It receives an operation ID and returns the delivery-marker key string.
+**Data flow**: It reads the declared `kind` choices from the `ApplyIntent` model → extracts those fixed choices → returns them as a frozen set of strings.
 
-**Call relations**: The Lua script in next_op creates these marker keys directly using the same prefix. _clear_op later removes the marker during best-effort cleanup.
+**Call relations**: Other code can ask this model what object kinds are valid instead of keeping a separate copy. `ApplyIntent.applying_kinds` and `ApplyIntent.deleting_kinds` build on this same source of truth.
 
-*Call graph*: called by 1 (_clear_op).
+*Call graph*: 1 external calls (get_args).
 
 
-##### `RedisTerminals._opmeta_key`  (lines 218–219)
+##### `ApplyIntent.applying_kinds`  (lines 85–87)
 
 ```
-def _opmeta_key(self, op_id: str) -> str
+def applying_kinds(cls) -> frozenset[str]
 ```
 
-**Purpose**: Builds the Redis key that stores metadata for an operation, such as its conversation and member. This metadata is used as a safety check before serving staged input or accepting a reply.
+**Purpose**: Returns the object kinds that can be created or updated through an `apply` action. It excludes kinds that are only deleted or connected.
 
-**Data flow**: It receives an operation ID and returns the operation metadata key string.
+**Data flow**: It starts with all allowed kinds from `ApplyIntent.kinds` → removes credential-like delete-only kinds and connection-only kinds → returns the remaining set.
 
-**Call relations**: _run_op writes this metadata, staged and _deliver_reply read it to check permissions, and _clear_op deletes it after completion.
+**Call relations**: The web surface calls this when deciding which object pages should show create or edit controls. Because it derives from the same validation rules, the page should not offer an action the server later refuses.
 
-*Call graph*: called by 4 (_clear_op, _deliver_reply, _run_op, staged).
+*Call graph*: called by 1 (_kind_payload).
 
 
-##### `RedisTerminals._body_blob`  (lines 221–222)
+##### `ApplyIntent.deleting_kinds`  (lines 90–96)
 
 ```
-def _body_blob(self, op_id: str) -> str
+def deleting_kinds(cls) -> frozenset[str]
 ```
+
+**Purpose**: Returns the object kinds that can be deleted or disconnected from the panel lane. In this file, every named kind can be the target of a delete-style action.
+
+**Data flow**: It reads the allowed kinds from `ApplyIntent.kinds` → returns that same set as the delete-capable set.
 
-**Purpose**: Builds the blob-store key for an operation’s input body. Blob storage is used for byte payloads that should not be squeezed into Redis stream fields.
+**Call relations**: The web surface calls this when deciding where to show delete controls. It pairs with the validator on `ApplyIntent`, so the displayed options and accepted requests stay aligned.
 
-**Data flow**: It receives an operation ID and returns the blob key for that operation’s staged body.
+*Call graph*: called by 1 (_kind_payload).
 
-**Call relations**: _run_op writes the body there, staged reads it for the connection-side projection, and _clear_op deletes it afterward.
 
-*Call graph*: called by 3 (_clear_op, _run_op, staged).
+##### `ApplyIntent._verb_pairs_with_its_kind`  (lines 99–120)
 
+```
+def _verb_pairs_with_its_kind(self) -> 'ApplyIntent'
+```
+
+**Purpose**: Checks that an object action makes sense for the object kind. For example, credentials cannot be edited through a normal form, and connections can only be connected or disconnected.
+
+**Data flow**: It receives a parsed `ApplyIntent` → inspects its verb, kind, spec, and create-only flag → either returns the same intent as valid or raises a validation error explaining the invalid pairing.
 
-##### `RedisTerminals._reply_blob`  (lines 224–225)
+**Call relations**: Pydantic runs this automatically when a panel submission is validated. It protects `submit_intent` from turning an unsafe or impossible panel request into a real tool call.
 
+
+##### `Unlock._names_offered_tiles_and_a_drawn_mark`  (lines 400–409)
+
 ```
-def _reply_blob(self, op_id: str) -> str
+def _names_offered_tiles_and_a_drawn_mark(self) -> 'Unlock'
 ```
+
+**Purpose**: Checks that an unlock suggestion can actually be shown in the portal. It verifies that the icon is known and that every required provider has a first-run tile with a label and glyph.
+
+**Data flow**: It receives an `Unlock` row → checks its icon against the known icon set and each provider name against the offered provider catalog → returns the row or raises a validation error.
+
+**Call relations**: Pydantic runs this when unlock rows are created. This catches broken setup suggestions early, before the start screen could show a blank or confusing item.
 
-**Purpose**: Builds the blob-store key for a large operation reply. Small replies go in Redis directly, but large replies are stored as blobs.
 
-**Data flow**: It receives an operation ID and returns the blob key for that operation’s reply body.
+##### `Unlock.missing`  (lines 411–415)
 
-**Call relations**: _deliver_reply writes large replies there, _decode_reply reads them when the waiting sender sees a blob marker, and _clear_op deletes them.
+```
+def missing(self, held: frozenset[str]) -> tuple[str, ...]
+```
+
+**Purpose**: Figures out which provider accounts a member still needs before a suggested app or workflow can run. It treats each requirement group as “any one of these is enough.”
+
+**Data flow**: It receives the set of provider names the member already has → walks each requirement group → for unmet groups, chooses the first preferred provider name → returns the missing names in catalog order.
 
-*Call graph*: called by 3 (_clear_op, _decode_reply, _deliver_reply).
+**Call relations**: Start or setup views can use this to explain what a member can build now and what is one or two connections away. It depends on the requirement groups already validated by `Unlock._names_offered_tiles_and_a_drawn_mark`.
 
 
-##### `RedisTerminals.connect`  (lines 227–240)
+##### `_tools_recorded`  (lines 584–595)
 
 ```
-def connect(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None
+def _tools_recorded(labels: tuple[str, ...], budget: int) -> str
 ```
 
-**Purpose**: Records that this pod currently holds a terminal connection for a conversation. It starts or shares a heartbeat so other pods can discover the connection through Redis.
+**Purpose**: Builds a short memory sentence describing the tools a team already uses during first-run setup. It trims the list gracefully so it fits within the memory provider’s size limit.
 
-**Data flow**: It receives the conversation ID, current working directory, and optional member ID. Under a thread lock, it creates a local hold if needed, starts the heartbeat task, and increments the number of active held connections.
+**Data flow**: It receives provider labels and a character budget → tries to write “My team uses ...” with as many labels as fit → if needed, replaces the rest with a count → returns the final sentence.
 
-**Call relations**: The serve-side held stream calls this when a terminal connection is established. It starts _heartbeat, which does the actual Redis publishing until disconnect reduces the count to zero.
+**Call relations**: `_tool_intent` calls this when turning a `ToolingIntent` into a memory update. It prevents first-run selections from producing a memory body that is too long.
 
-*Call graph*: calls 1 internal fn (_heartbeat); 2 external calls (__init__, get_running_loop).
+*Call graph*: called by 1 (_tool_intent).
 
 
-##### `RedisTerminals.disconnect`  (lines 242–251)
+##### `ToolingIntent._picks_are_offered`  (lines 610–614)
 
 ```
-def disconnect(self, conversation_id: UUID) -> None
+def _picks_are_offered(self) -> 'ToolingIntent'
 ```
 
-**Purpose**: Marks one local terminal connection as gone. When the last local connection for that conversation leaves, it stops the heartbeat.
+**Purpose**: Checks that every provider selected during first-run setup is one the portal actually offered. This prevents unknown provider names from becoming misleading memory text.
 
-**Data flow**: It receives a conversation ID, finds the local hold, decrements its connection count, and cancels the heartbeat task if there are no remaining connections. It intentionally does not delete the Redis binding.
+**Data flow**: It receives a parsed `ToolingIntent` → compares the submitted provider names with the first-run provider catalog → returns the intent or raises a validation error for the first unknown name.
 
-**Call relations**: This pairs with connect. By cancelling the heartbeat instead of deleting the key, it lets Redis expiry bridge short reconnect gaps without one pod erasing another pod’s fresh binding.
+**Call relations**: Pydantic runs this during panel intent validation. If it passes, `_tool_intent` can safely turn provider names into human-readable labels.
 
 
-##### `RedisTerminals._heartbeat`  (lines 253–265)
+##### `_tool_intent`  (lines 682–836)
 
 ```
-async def _heartbeat(self, conversation_id: UUID, cwd: str, member_id: UUID | None) -> None
+def _tool_intent(submitted: ApplyIntent | AddMemberIntent | AudienceIntent | ConnectGitHubIntent | ConnectImessageIntent | ConnectSlackIntent | CorrectionIntent | CredentialIntent | DigestRebuildInten
 ```
 
-**Purpose**: Keeps the live terminal binding fresh in Redis while this pod holds the connection. It is the periodic “I’m still here” signal.
+**Purpose**: Converts a validated panel submission into the exact tool call that the agent system should run. It is the translation layer between browser-friendly form data and the internal tool-call format.
 
-**Data flow**: It builds the binding JSON and key, then repeatedly writes that key with a time-to-live and sleeps before refreshing again. Redis errors are ignored so a temporary Redis problem does not crash the task.
+**Data flow**: It receives a specific intent object, an optional credential slot description, and the memory body limit → matches the intent type → builds a `ToolIntent` with the correct tool name and input payload → returns that tool call. For object apply actions, it writes the object envelope as YAML so the existing object-apply tool can read it.
 
-**Call relations**: connect starts this background task. Other pods later read the key through _read_binding, and disconnect cancels the task when the local hold ends.
+**Call relations**: `submit_intent` calls this after validation and deployment checks. It may call `_tools_recorded` for first-run tooling memory, and it hands the resulting `ToolIntent` back to `submit_intent`, which admits it into the conversation lane.
 
-*Call graph*: calls 3 internal fn (_bind_key, _client, _bind_payload); called by 1 (connect); 2 external calls (sleep, suppress).
+*Call graph*: calls 1 internal fn (_tools_recorded); called by 1 (submit_intent); 2 external calls (__init__, safe_dump).
 
 
-##### `RedisTerminals.workspace`  (lines 267–276)
+##### `_outcome`  (lines 839–855)
 
 ```
-def workspace(self, conversation_id: UUID) -> TerminalWorkspace | None
+def _outcome(frame: TerminalFrame, turn_id: UUID) -> Response
 ```
 
-**Purpose**: Returns this pod’s local view of the terminal workspace, if this pod is the one holding it. It avoids Redis because the information is already in memory locally.
+**Purpose**: Turns a finished tool run into the standard JSON response used by most panel actions. It reports success, failure, a user-facing message, and the turn identifier.
 
-**Data flow**: It receives a conversation ID, looks in the local hold table under a lock, and returns a TerminalWorkspace with the directory and member ID if found. If this pod has no hold, it returns None.
+**Data flow**: It receives a terminal frame and the turn ID → checks whether the tool finished successfully → includes credential request data if present, otherwise returns “Saved.” on success → on failure, cleans up the error text and returns an unsuccessful response.
 
-**Call relations**: This is useful for local callers that only need the workspace on the connection-holding pod. Cross-pod send flow uses arrived instead, because arrived reads the Redis-published binding.
+**Call relations**: `submit_intent` uses this as the normal result formatter. The specialized outcome helpers also call it when their tool did not finish successfully, so failures are reported consistently.
 
-*Call graph*: 1 external calls (__init__).
+*Call graph*: called by 5 (_connect_outcome, _imessage_outcome, _portal_outcome, _rebuild_outcome, submit_intent); 1 external calls (JSONResponse).
 
 
-##### `RedisTerminals.arrived`  (lines 278–291)
+##### `_connect_outcome`  (lines 858–882)
 
 ```
-async def arrived(self, conversation_id: UUID, grace_s: float) -> TerminalWorkspace | None
+def _connect_outcome(submitted: ConnectSlackIntent | ConnectGitHubIntent, frame: TerminalFrame, turn_id: UUID) -> Response
 ```
 
-**Purpose**: Waits briefly for a terminal binding to appear for a conversation. This covers normal reconnect gaps where the member’s client is between held streams.
+**Purpose**: Extracts an install link from the final answer of the Slack or GitHub connection tools. These tools return links in slightly different shapes, so this function normalizes them for the browser.
 
-**Data flow**: It receives a conversation ID and a grace period. It repeatedly calls _read_binding until it finds a workspace, the grace time runs out, or it sleeps and polls again.
+**Data flow**: It receives the original connect intent, the terminal frame, and the turn ID → if the run failed, delegates to `_outcome` → for Slack, reads a JSON object from the tool text and uses its authorization URL or hint → for GitHub, searches the text for an install URL → returns JSON with the link, message, and turn ID.
 
-**Call relations**: send calls arrived before creating an operation. If arrived finds no binding, send reports that no terminal is connected instead of posting work into nowhere.
+**Call relations**: `submit_intent` calls this when the submitted intent was `ConnectSlackIntent` or `ConnectGitHubIntent`. It falls back to `_outcome` for non-success cases and otherwise prepares the URL the setup screen should open.
 
-*Call graph*: calls 1 internal fn (_read_binding); called by 1 (send); 2 external calls (get_running_loop, sleep).
+*Call graph*: calls 1 internal fn (_outcome); called by 1 (submit_intent); 2 external calls (loads, JSONResponse).
 
 
-##### `RedisTerminals._read_binding`  (lines 293–307)
+##### `_imessage_outcome`  (lines 885–906)
 
 ```
-async def _read_binding(self, conversation_id: UUID) -> TerminalWorkspace | None
+def _imessage_outcome(frame: TerminalFrame, turn_id: UUID) -> Response
 ```
 
-**Purpose**: Reads the terminal binding from Redis and turns it into a TerminalWorkspace. It checks both the live connection key and the temporary in-flight key.
+**Purpose**: Reads the iMessage connection state from the tool’s final answer and turns it into a browser response. It tells the user what to do next and may include an opt-in link.
 
-**Data flow**: It asks Redis for the live binding key; if missing, it asks for the in-flight binding key. If neither exists it returns None; otherwise it parses the JSON and returns the directory and optional member ID.
+**Data flow**: It receives the terminal frame and turn ID → if the run failed, delegates to `_outcome` → extracts a JSON object from the frame text → validates the connection state, instruction, and optional link → returns whether the action is considered applied, the instruction message, the link, and the turn ID.
 
-**Call relations**: arrived uses this while waiting for a terminal to appear. It relies on _bind_key and _inflight_key for the Redis names, and on _text to normalize the stored JSON.
+**Call relations**: `submit_intent` calls this after an iMessage connect intent reaches its terminal frame. It uses `_outcome` only for failed runs, while successful runs need this special JSON parsing.
 
-*Call graph*: calls 4 internal fn (_bind_key, _client, _inflight_key, _text); called by 1 (arrived); 3 external calls (__init__, loads, UUID).
+*Call graph*: calls 1 internal fn (_outcome); called by 1 (submit_intent); 2 external calls (loads, JSONResponse).
 
 
-##### `RedisTerminals.send`  (lines 309–365)
+##### `_portal_outcome`  (lines 909–923)
 
 ```
-async def send(self, conversation_id: UUID, kind: str, timeout_s: int, name: str='', arg: str='', params: str='', body: bytes | None=None) -> bytes
+def _portal_outcome(frame: TerminalFrame, turn_id: UUID) -> Response
 ```
 
-**Purpose**: Sends one terminal operation to the connected terminal and waits for its answer. It is the main workflow-side entry for asking the user’s terminal to do something.
+**Purpose**: Extracts the billing provider portal URL from the billing tool’s final answer. This lets an admin save a payment card through an external billing page.
 
-**Data flow**: It receives the conversation, operation details, timeout, and optional body bytes. It waits for a binding, creates a TerminalOp, acquires the per-conversation Redis lock, runs the operation, and returns reply bytes; if anything important is missing or unreachable, it raises TerminalGone.
+**Data flow**: It receives the terminal frame and turn ID → if the run failed, delegates to `_outcome` → reads a JSON object from the tool text → requires a string portal URL → returns a successful JSON response containing that URL.
 
-**Call relations**: send begins by calling arrived, then uses _lock_key and _client to serialize operations. Once it owns the lock, it hands the real work to _run_op and releases the lock afterward.
+**Call relations**: `submit_intent` calls this for `PaymentMethodIntent`. It relies on the billing tool to decide whether the user is allowed to open billing, and uses `_outcome` for refusals.
 
-*Call graph*: calls 4 internal fn (_client, _lock_key, _run_op, arrived); 5 external calls (__init__, __init__, wait_for, suppress, uuid4).
+*Call graph*: calls 1 internal fn (_outcome); called by 1 (submit_intent); 2 external calls (loads, JSONResponse).
 
 
-##### `RedisTerminals._run_op`  (lines 367–413)
+##### `_rebuild_outcome`  (lines 926–933)
 
 ```
-async def _run_op(self, conversation_id: UUID, op: TerminalOp, body: bytes | None, bound: TerminalWorkspace, deadline_s: float) -> bytes
+def _rebuild_outcome(frame: TerminalFrame, turn_id: UUID) -> Response
 ```
 
-**Purpose**: Performs the actual post-lock operation work: publish metadata, stage input bytes, add the operation to Redis, wait for the reply, and clean up. It assumes send has already made sure only one operation is active for the conversation.
+**Purpose**: Returns the rebuild tool’s own message to the browser. Rebuild actions usually queue work rather than immediately changing visible text, so the tool’s explanation is important.
 
-**Data flow**: It receives a conversation, TerminalOp, optional body, known binding, and deadline. It writes metadata and an in-flight binding, optionally stores body bytes in the blob store, adds the operation to the Redis stream, waits for the reply, and finally clears operation state.
+**Data flow**: It receives the terminal frame and turn ID → if the run failed, delegates to `_outcome` → otherwise returns success with the frame text as the message.
 
-**Call relations**: send calls this after acquiring the lock. It calls _await_reply to wait for the terminal’s response and always calls _clear_op afterward to remove Redis keys and blobs as best it can.
+**Call relations**: `submit_intent` calls this for report digest and page fact rebuild intents. It keeps the specific “what was queued” wording from the tool instead of replacing it with a generic saved message.
 
-*Call graph*: calls 10 internal fn (_await_reply, _body_blob, _clear_op, _client, _inflight_key, _op_fields, _op_stream, _opmeta_key, _bind_payload, _text); called by 1 (send); 2 external calls (wait_for, dumps).
+*Call graph*: calls 1 internal fn (_outcome); called by 1 (submit_intent); 1 external calls (JSONResponse).
 
 
-##### `RedisTerminals._op_fields`  (lines 415–423)
+##### `submit_intent`  (lines 964–1096)
 
 ```
-def _op_fields(self, op: TerminalOp) -> dict[FieldT, EncodableT]
+async def submit_intent(ctx: SurfaceContext, request: Request, agent_id: UUID, member_id: UUID, email: str) -> Response
 ```
 
-**Purpose**: Converts a TerminalOp object into the field map stored in the Redis operation stream. This gives the connection pod all the command details it needs.
+**Purpose**: Accepts one panel form submission, turns it into a safe tool call, runs it through the portal’s durable intent conversation, and waits for the final answer. This is the main write path for portal actions.
 
-**Data flow**: It receives a TerminalOp and returns a dictionary containing its ID, kind, timeout, name, argument, and parameters as Redis-friendly values.
+**Data flow**: It receives the surface context, HTTP request, selected agent ID, member ID, and member email → reads and size-checks the request body → validates it as one of the known panel intents → performs extra checks such as valid agent model, existing credential slot, and memory availability → converts it with `_tool_intent` → opens or reuses the member’s portal intent conversation → admits the tool call as a turn → tails the turn until it finishes, parks, or times out → returns JSON describing the result.
 
-**Call relations**: _run_op calls this immediately before adding an operation to the conversation’s Redis stream. next_op later reads those same fields and reconstructs a TerminalOp.
+**Call relations**: This function is the hub of the file. It calls context methods to read agent details, find credential slots, create the conversation, retitle it, admit the turn, and watch the turn stream. When a terminal frame arrives, it chooses `_connect_outcome`, `_imessage_outcome`, `_portal_outcome`, `_rebuild_outcome`, or `_outcome` depending on what was submitted.
 
-*Call graph*: called by 1 (_run_op).
+*Call graph*: calls 12 internal fn (admit, agent_detail, conversation_for, list_credential_slots, retitle_conversation, tail, _connect_outcome, _imessage_outcome, _outcome, _portal_outcome (+2 more)); 5 external calls (timeout, loads, conversation_audience, JSONResponse, body).
 
 
-##### `RedisTerminals._decode_op`  (lines 425–433)
+##### `_update_schema`  (lines 1099–1111)
 
 ```
-def _decode_op(self, fields: _StreamFields) -> TerminalOp
+def _update_schema(sandbox_sizes: tuple[str, ...]) -> dict[str, JsonValue]
 ```
 
-**Purpose**: Rebuilds a TerminalOp from fields read out of Redis. This is the reverse of _op_fields.
+**Purpose**: Builds the schema that tells the settings page which agent settings can be edited with generated form controls. It removes fields the page draws in custom ways, like prompt and icon.
 
-**Data flow**: It receives a field dictionary from a stream entry, converts values to text, parses the timeout as a number, and returns a TerminalOp object.
+**Data flow**: It receives the deploy’s available sandbox sizes → starts from the full `AgentSpec` JSON schema → removes custom-rendered fields and, when sandbox sizes are not offered, removes sandbox size too → returns the reduced schema.
 
-**Call relations**: next_op calls this after it has claimed an operation. The returned TerminalOp is what the held terminal stream will render or execute for the client.
+**Call relations**: `agent_settings` calls this while preparing the settings projection. The returned schema lets the front end stay close to the real agent specification instead of maintaining a separate form description.
 
-*Call graph*: calls 1 internal fn (_text); called by 1 (next_op); 2 external calls (__init__, get).
+*Call graph*: called by 1 (agent_settings); 1 external calls (model_json_schema).
 
 
-##### `RedisTerminals._await_reply`  (lines 435–458)
+##### `agent_settings`  (lines 1114–1160)
 
 ```
-async def _await_reply(self, op_id: str, deadline_s: float, timeout_s: int) -> bytes
+async def agent_settings(ctx: SurfaceContext, agent_id: UUID, member_id: UUID, *, admin: bool, archivable: bool) -> Response
 ```
+
+**Purpose**: Returns the data needed to draw an agent’s settings page. It includes the agent’s current configuration, deploy capabilities, available models, editable schema, and admin-only web audience information.
+
+**Data flow**: It receives the surface context, agent ID, member ID, and flags saying whether the viewer is an admin and whether the agent can be archived → looks up the agent detail → if missing, returns a 404 response → for admins, reads granted web audience emails → builds a JSON response with agent metadata, deployment limits, model choices, current spec values, the update schema, and optional audience list.
+
+**Call relations**: This is the read-side partner to `submit_intent`. It calls the surface context for agent detail, uses `_update_schema` to describe editable fields, and calls the web audience helpers when admin-only grant data is needed.
+
+*Call graph*: calls 2 internal fn (agent_detail, _update_schema); 5 external calls (__init__, JSONResponse, Response, granted_emails, web_extension).
+
 
-**Purpose**: Waits for the reply to one operation, but only until the operation’s deadline. This prevents a workflow from getting stuck forever if the terminal disappears.
+### `extensions/web/ufo_ext_web/starters.py`
 
-**Data flow**: It receives an operation ID, total deadline, and user-facing timeout. It repeatedly reads the operation’s reply stream with short bounded waits, decodes the first reply entry, and returns reply bytes or raises TerminalGone on timeout or Redis failure.
+`domain_logic` · `request handling for the start screen`
 
-**Call relations**: _run_op calls this after posting an operation. It uses _reply_stream to find the mailbox, _stream_entries to interpret Redis’s response, and _decode_reply to turn the reply fields into bytes or an error.
+The start screen needs helpful first prompts, not generic examples. This file creates a small “slate” of ranked starter rows for one member: each row has a short title, a one-line explanation, and the sentence the member would say if they clicked it. It also allows one optional “check-in” row, but only when the member’s own unfinished work clearly deserves it.
 
-*Call graph*: calls 4 internal fn (_client, _decode_reply, _reply_stream, _stream_entries); called by 1 (_run_op); 2 external calls (__init__, get_running_loop).
+The file is careful about cost and reliability. A slate is made only when somebody actually opens the screen. Once made, it is cached for 30 minutes. If the cached slate is still fresh, it is returned immediately. If it is stale, the old slate can still be shown while a new one is made, so the user is not left with an empty screen.
 
+To avoid duplicate work, the file uses a short “claim” record in shared storage. This is like putting a sticky note on a task saying “I’m doing this,” so two browser tabs do not ask the model for the same slate at the same time. If model generation fails, it records a cooldown period so the next read does not immediately hit the same failure again. Model replies are validated and cleaned: invalid rows, unknown catalog entries, and duplicates are dropped without ruining the rest of the slate.
 
-##### `RedisTerminals._decode_reply`  (lines 460–473)
+#### Function details
 
+##### `Slate.fresh`  (lines 112–113)
+
+```
+def fresh(self, now: datetime) -> bool
+```
+
+**Purpose**: Checks whether a stored slate is still safe to reuse. It considers both age and whether the ranking instructions have changed since the slate was made.
+
+**Data flow**: It receives the current time and reads the slate’s stored generation time and prompt digest. If the slate is younger than the allowed cache lifetime and was made with the current instructions, it returns true; otherwise it returns false.
+
+**Call relations**: When the start screen asks `StarterCache.read` for suggestions, the cached slate is checked with `Slate.fresh`. A fresh slate ends the flow early, avoiding a new model call.
+
+
+##### `starters_key`  (lines 124–125)
+
 ```
-async def _decode_reply(self, op_id: str, fields: _StreamFields) -> bytes
+def starters_key(member_id: UUID) -> str
 ```
 
-**Purpose**: Turns reply stream fields into the final bytes returned to the sender, or raises the right terminal error. It understands failed replies, inline replies, and large blob-backed replies.
+**Purpose**: Builds the storage key where one member’s cached starter slate is saved. This keeps each member’s suggestions separate.
 
-**Data flow**: It receives an operation ID and reply fields. If there is a failure field, it raises TerminalOpFailed; if there is a blob marker, it reads the reply bytes from the blob store; otherwise it base64-decodes the inline bytes.
+**Data flow**: It takes a member ID, turns it into the project’s standard member subject string, and prefixes it with the starters cache label. The result is a single text key used for reading and writing storage.
 
-**Call relations**: _await_reply calls this once a reply entry appears. _deliver_reply writes replies in the exact formats this function reads.
+**Call relations**: `StarterCache._held` uses this key to look up an existing slate, and `StarterCache.read` uses it to save a newly generated slate after ranking finishes.
 
-*Call graph*: calls 2 internal fn (_reply_blob, _text); called by 1 (_await_reply); 5 external calls (__init__, __init__, get, wait_for, b64decode).
+*Call graph*: called by 2 (_held, read); 1 external calls (member_subject).
 
 
-##### `RedisTerminals.next_op`  (lines 475–506)
+##### `claim_key`  (lines 128–129)
 
 ```
-async def next_op(self, conversation_id: UUID, exclude_op_id: str | None=None) -> TerminalOp
+def claim_key(member_id: UUID) -> str
 ```
 
-**Purpose**: Waits for and claims the next terminal operation for a conversation. It is used by the connection side that needs to know what command to show or run next.
+**Purpose**: Builds the storage key for the temporary claim that says a member’s slate is currently being generated. This prevents duplicate model work for the same member.
 
-**Data flow**: It receives a conversation ID and optionally an operation ID to skip. It runs a Redis Lua script that cleans expired entries, skips already delivered operations, marks one operation as claimed, and returns it; if none is ready, it waits for more stream data and tries again.
+**Data flow**: It takes a member ID, converts it into the standard member subject string, and prefixes it with the starters claim label. The output is the storage key for the short-lived generation claim.
 
-**Call relations**: This is the receiving counterpart to send and _run_op. It uses _op_stream to find the queue, _pairs and _decode_op to rebuild the TerminalOp, and converts Redis failures into TerminalGone so the held stream can end cleanly.
+**Call relations**: `StarterCache._claim` uses this key while deciding whether this reader may generate a new slate. `StarterCache.read` deletes the claim after the generation attempt finishes.
 
-*Call graph*: calls 5 internal fn (_client, _decode_op, _op_stream, _pairs, _text); 1 external calls (__init__).
+*Call graph*: called by 2 (_claim, read); 1 external calls (member_subject).
 
 
-##### `RedisTerminals.staged`  (lines 508–523)
+##### `cooldown_key`  (lines 132–133)
 
 ```
-async def staged(self, conversation_id: UUID, op_id: str, member_id: UUID | None=None) -> bytes | None
+def cooldown_key(member_id: UUID) -> str
 ```
 
-**Purpose**: Fetches the staged input body for an in-flight operation, if the requester is allowed to see it. This lets any pod serve the bytes because the body is in the shared blob store.
+**Purpose**: Builds the storage key for remembering that starter generation recently failed for a member. This helps the system avoid retrying too aggressively.
 
-**Data flow**: It receives the conversation ID, operation ID, and optional member ID. It reads operation metadata from Redis, checks that the conversation and member match, and then reads the body blob; if anything is missing, mismatched, or too slow, it returns None.
+**Data flow**: It takes a member ID, converts it to the standard member subject string, and prefixes it with the cooldown label. The result points to the member’s recent failure stamp in storage.
 
-**Call relations**: The connection-side read path uses this after next_op exposes an operation with a staged body. It relies on _gate_ok for the safety check and _body_blob for the blob-store key.
+**Call relations**: `StarterCache._may_generate` checks this key before allowing another model call. If generation fails, `StarterCache.read` writes a failure time under this key.
 
-*Call graph*: calls 4 internal fn (_body_blob, _client, _gate_ok, _opmeta_key); 1 external calls (wait_for).
+*Call graph*: called by 2 (_may_generate, read); 1 external calls (member_subject).
 
 
-##### `RedisTerminals.resolve`  (lines 525–540)
+##### `_stamped`  (lines 136–145)
 
 ```
-def resolve(self, conversation_id: UUID, op_id: str, reply: bytes, failed: str | None=None, member_id: UUID | None=None) -> bool
+def _stamped(held: object, key: str) -> datetime | None
 ```
 
-**Purpose**: Accepts a terminal reply and schedules its delivery without making the HTTP or stream handler wait on Redis. It returns immediately while a background task writes the reply.
+**Purpose**: Reads a timestamp from a small stored record, but treats bad or old-shaped data as missing instead of crashing. This makes cache housekeeping safe even if stored data is incomplete or from an older version.
 
-**Data flow**: It receives the conversation ID, operation ID, reply bytes, optional failure text, and optional member ID. It creates a background delivery task and returns True right away.
+**Data flow**: It receives some stored value and the name of the timestamp field to look for. If the value is a dictionary containing a readable ISO-format date string, it returns a datetime; if not, it returns none.
 
-**Call relations**: This is the reply-side counterpart to _await_reply. It hands the real write to _deliver_reply through _spawn so the waiting send call can pick up the reply from Redis when it arrives.
+**Call relations**: `StarterCache._may_generate` uses it to read the last failure time from the cooldown record. `StarterCache._claim` uses it to read when an existing generation claim was created.
 
-*Call graph*: calls 2 internal fn (_deliver_reply, _spawn); 1 external calls (get_running_loop).
+*Call graph*: called by 2 (_claim, _may_generate); 1 external calls (fromisoformat).
 
 
-##### `RedisTerminals._deliver_reply`  (lines 542–571)
+##### `StarterCache.read`  (lines 168–185)
 
 ```
-async def _deliver_reply(self, conversation_id: UUID, op_id: str, reply: bytes, failed: str | None, member_id: UUID | None) -> None
+async def read(self) -> Slate | None
 ```
 
-**Purpose**: Writes an operation reply into the shared reply stream after checking that it belongs to the right conversation and member. It stores large replies in the blob store and small replies directly in Redis.
+**Purpose**: Runs the full start-screen slate flow for one member. It returns a fresh cached slate when possible, returns a stale slate when that is better than nothing, and generates a new slate only when it is safe and worthwhile.
 
-**Data flow**: It receives operation identity, reply bytes, optional failure text, and optional member ID. It reads metadata, rejects mismatches with a warning, chooses failure/blob/base64 fields, writes the reply stream entry, and sets an expiry on the stream.
+**Data flow**: It starts with the current time, reads any stored slate, and checks whether it is fresh. If not fresh, it asks whether generation is allowed. If generation is not allowed, it returns the stored slate if there is one. If generation is allowed, it asks the model to rank starters, stores the new slate, clears the generation claim, and returns the new slate. If ranking fails, it records a cooldown, logs a warning, clears the claim, and returns the old slate.
 
-**Call relations**: resolve schedules this in the background. _await_reply is waiting on the stream it writes, and _decode_reply later reads either the inline base64 data or the blob marker created here.
+**Call relations**: This is the main method callers use when the start screen needs rows. It calls `_held` to fetch cached data, `_may_generate` to decide whether to spend a model call, `_rank` to produce a new slate, and the key helper functions to update storage around success or failure.
 
-*Call graph*: calls 5 internal fn (_client, _gate_ok, _opmeta_key, _reply_blob, _reply_stream); called by 1 (resolve); 3 external calls (wait_for, b64encode, warn).
+*Call graph*: calls 6 internal fn (_held, _may_generate, _rank, claim_key, cooldown_key, starters_key); 2 external calls (now, warn).
 
 
-##### `RedisTerminals._gate_ok`  (lines 573–584)
+##### `StarterCache._held`  (lines 187–194)
 
 ```
-def _gate_ok(self, meta_raw: bytes | str, conversation_id: UUID, member_id: UUID | None) -> bool
+async def _held(self) -> Slate | None
 ```
 
-**Purpose**: Checks whether a staged-body read or reply post is allowed for a given operation. It fails closed, meaning missing or mismatched information denies access.
+**Purpose**: Loads the currently stored slate for this member, if it exists and still matches the expected shape. Bad stored data is ignored rather than shown or allowed to crash the screen.
 
-**Data flow**: It receives raw operation metadata, a conversation ID, and an optional member ID. It parses the metadata, verifies the conversation matches, and if a member was named, verifies that member matches too.
+**Data flow**: It builds the member’s starter storage key, reads that value from the shared store, and checks that it is a dictionary. It then validates the dictionary as a `Slate`. If validation succeeds, it returns the slate; otherwise it returns none.
 
-**Call relations**: staged uses this before serving copy-in bytes, and _deliver_reply uses it before accepting a reply. This keeps one conversation or member from accidentally touching another operation.
+**Call relations**: `StarterCache.read` calls this first so it can reuse a cached slate or fall back to it if regeneration fails.
 
-*Call graph*: calls 1 internal fn (_text); called by 2 (_deliver_reply, staged); 2 external calls (loads, UUID).
+*Call graph*: calls 1 internal fn (starters_key); called by 1 (read).
 
 
-##### `RedisTerminals.in_flight`  (lines 586–589)
+##### `StarterCache._may_generate`  (lines 196–206)
 
 ```
-def in_flight(self, conversation_id: UUID) -> TerminalOp | None
+async def _may_generate(self, now: datetime) -> bool
 ```
+
+**Purpose**: Decides whether this read is allowed to create a new slate. It blocks generation when there is no model, no remembered work to rank, no available balance to spend, a recent failure cooldown, or another reader already generating.
 
-**Purpose**: Reports no local in-flight operation for this Redis-backed transport. In a cross-pod setup, the operation being awaited may live on another pod, so a local answer would be misleading.
+**Data flow**: It receives the current time and checks the cache object’s model, recalled memory, and solvency flag. It then reads the cooldown timestamp from storage and compares it with the cooldown window. If all checks pass, it asks `_claim` to reserve the right to generate. It returns true only if this reader should proceed.
 
-**Data flow**: It receives a conversation ID but does not inspect Redis or local state. It always returns None.
+**Call relations**: `StarterCache.read` calls this after finding no fresh slate. If `_may_generate` says yes, `read` moves on to `_rank`; otherwise it simply returns whatever slate was already stored.
 
-**Call relations**: This satisfies the broader terminal transport interface. Unlike an in-process transport, this file intentionally does not claim a partial local view of distributed work.
+*Call graph*: calls 3 internal fn (_claim, _stamped, cooldown_key); called by 1 (read).
 
 
-##### `RedisTerminals._clear_op`  (lines 591–612)
+##### `StarterCache._claim`  (lines 208–225)
 
 ```
-async def _clear_op(self, conversation_id: UUID, op_id: str, entry_id: str | None) -> None
+async def _claim(self, now: datetime) -> bool
 ```
 
-**Purpose**: Cleans up Redis keys, stream entries, and blob objects related to an operation after it finishes or times out. The system is safe even if cleanup misses something, because keys also expire.
+**Purpose**: Tries to reserve generation work for this reader, so two tabs or repeated polling do not pay for the same slate at once. It can also take over an abandoned claim after a short lease expires.
 
-**Data flow**: It receives the conversation ID, operation ID, and optional stream entry ID. It tries to delete the operation stream entry, metadata, delivery marker, in-flight binding, reply stream, staged body blob, and reply blob, suppressing cleanup errors.
+**Data flow**: It creates a claim record stamped with the current time. First it tries to insert that record only if no claim exists. If a claim already exists, it reads its timestamp. A recent claim means someone else is working, so it returns false. An old or unreadable claim can be replaced using the exact stored value as the comparison token, and the result of that replacement attempt is returned.
 
-**Call relations**: _run_op calls this in a final cleanup step no matter how the operation ends. The delivery-safety rules come from next_op’s claim marker and expiry windows; _clear_op is the tidy-up crew.
+**Call relations**: `StarterCache._may_generate` calls `_claim` as the last gate before model generation. `_claim` uses `claim_key` to find the shared claim record and `_stamped` to understand whether an existing claim is still alive.
 
-*Call graph*: calls 8 internal fn (_body_blob, _client, _deliv_key, _inflight_key, _op_stream, _opmeta_key, _reply_blob, _reply_stream); called by 1 (_run_op); 2 external calls (wait_for, suppress).
+*Call graph*: calls 2 internal fn (_stamped, claim_key); called by 1 (_may_generate); 1 external calls (isoformat).
 
 
-##### `RedisTerminals._spawn`  (lines 614–621)
+##### `StarterCache._rank`  (lines 227–254)
 
 ```
-def _spawn(self, coro: Coroutine[object, object, None], loop: asyncio.AbstractEventLoop) -> None
+async def _rank(self, now: datetime) -> Slate
 ```
 
-**Purpose**: Starts a background task and keeps a reference to it so it is not lost while running. It also arranges for failures to be logged.
+**Purpose**: Asks the language model to rank the best starter rows for this member. It packages the member’s memory, existing applications, and the product’s catalog into a structured request.
 
-**Data flow**: It receives a coroutine and an event loop. It wraps the coroutine with _logged, creates a task on the loop, stores it in the task set, and removes it from the set when done.
+**Data flow**: It reads the cache object’s recalled memory, current application names, available unlock catalog, and selected model. It sends those to the model with strict instructions and a tool schema, meaning the model must respond through a named structured output. The model reply is then passed to `settle_slate`, which turns it into a validated `Slate`.
 
-**Call relations**: resolve uses this to schedule _deliver_reply. _spawn connects quick request handling with reliable enough background delivery and logging.
+**Call relations**: `StarterCache.read` calls `_rank` only after cache, cooldown, balance, and claim checks pass. `_rank` hands the raw model message to `settle_slate` so the rest of the system receives a clean slate instead of trusting model output directly.
 
-*Call graph*: calls 1 internal fn (_logged); called by 1 (resolve); 1 external calls (create_task).
+*Call graph*: calls 1 internal fn (settle_slate); called by 1 (read); 4 external calls (__init__, __init__, __init__, dumps).
 
 
-##### `RedisTerminals._logged`  (lines 623–627)
+##### `settle_slate`  (lines 257–290)
 
 ```
-async def _logged(self, coro: Coroutine[object, object, None]) -> None
+def settle_slate(reply: Message, generated_at: datetime) -> Slate
 ```
 
-**Purpose**: Runs a background coroutine and logs any exception it raises. This prevents fire-and-return delivery failures from disappearing silently.
+**Purpose**: Turns the model’s structured `record_slate` reply into a safe `Slate`. It keeps good ranked rows, drops bad or duplicate ones, and rejects a reply that did not actually record the required tool call.
 
-**Data flow**: It receives a coroutine, awaits it, and if any exception occurs, sends a warning with the error text. It does not return useful data.
+**Data flow**: It receives a model message and the generation time. It searches the message content for the expected tool-use block. From that block, it validates each ranked entry, keeps only entries that name a known catalog unlock, removes repeats, and trims to the maximum allowed count. It separately validates the optional check-in, ignoring it if invalid. It returns a new `Slate` stamped with the current prompt digest.
 
-**Call relations**: _spawn wraps background delivery work with this. When _deliver_reply fails after resolve has already returned, _logged is the place that records the problem.
+**Call relations**: `StarterCache._rank` calls this after the model answers. If no required tool call is found, `settle_slate` raises an error, which lets `StarterCache.read` treat the generation as a failure and fall back to the stored slate if possible.
 
-*Call graph*: called by 1 (_spawn); 1 external calls (warn).
+*Call graph*: called by 1 (_rank); 1 external calls (__init__).

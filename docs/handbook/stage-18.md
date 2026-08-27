@@ -1,700 +1,701 @@
-# Core schema, durable records, and persistence contracts  `stage-18` (cross-cutting infrastructure)
+# Live Updates, Cancellation, Replies, and Surface Delivery  `stage-18`
 
-This stage is shared behind-the-scenes support. It defines the durable “paperwork” the rest of the system relies on: what records look like, where they are stored, and how they are safely read or changed. It is used during startup, normal work, background jobs, and rendering, because all those parts must agree on the same data shapes.
+This stage is the system’s live “delivery desk” during and just after a conversation turn. While the assistant is working, core/src/ufo/hub.py sends small progress messages, called frames, to any open user interface and keeps a short memory so reconnecting clients can catch up. core/src/ufo/surfaces/hub_tail.py is the watcher for one turn: it combines that live feed with a database check so it knows whether the work is still running, paused, or finished.
 
-The database doorway is core/src/ufo/db.py. It creates connections to the database, starts and finishes transactions, keeps each workspace’s data separate, runs migrations that update the database layout, and closes connections cleanly. The main database blueprint is core/src/ufo/schema/tables.py, which describes the tables, columns, relationships, defaults, and safety rules for both local SQLite and deployed Postgres databases.
+If the system is spread across several server processes, extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py uses Redis Streams, a fast shared message log, to pass those live frames between them without saving every temporary update in the main database.
 
-The shared vocabulary lives in core/src/ufo/schema/records.py. It defines the records for agents, conversation turns, terminal results, questions, credential requests, and queue state, so workers and user-facing parts understand the same messages. Conversation history is covered by core/src/ufo/transcript.py, which defines the saved transcript format, and core/src/ufo/loop/transcript.py, which safely reads and writes transcript snapshots without letting older copies overwrite newer ones.
+Stopping work is handled carefully. core/src/ufo/surfaces/stop.py checks the requested turn, asks cancellation to happen, alerts listeners, and may point the user to a follow-up turn. core/src/ufo/turns/cancellation.py performs the shared safe stop.
+
+For what users see, core/src/ufo/loop/replies.py extracts private reply blocks from model output and hides control tags. core/src/ufo/turns/activity.py turns raw tool activity into safe, friendly status labels.
 
 ## Files in this stage
 
-### Database access and transcript persistence
-Safe persistence entry points manage database connections, migrations, workspace isolation, and durable transcript snapshots.
+### Live Surface Controls
+Client-facing surface endpoints let viewers follow a turn's live output and let members request a safe stop.
 
-### `core/src/ufo/db.py`
+### `core/src/ufo/surfaces/hub_tail.py`
 
-`io_transport` · `startup, request handling, background jobs, migrations, teardown`
+`orchestration` · `request handling / live stream`
 
-This module is the tenancy boundary for the database. In plain terms, it makes sure each database transaction is tied to the right workspace, so one running server can safely serve many customers or work areas without mixing their rows. For PostgreSQL, it uses row-level security, meaning the database itself filters rows based on a setting called app.workspace_id. workspace_tx sets that value only for the current transaction, like writing a temporary room number on a visitor badge that disappears when the visit ends. If no workspace was set, the database fails closed instead of accidentally showing shared data.
+A “turn” here is a unit of work whose progress is streamed to a caller, like watching words appear while an assistant is responding. The hard problem is that live messages can be missed: a client may connect after the turn started, reconnect after a network drop, or listen from a different event loop than the one that finished the turn. This file solves that by racing two sources into one stream. One source is the hub, which is the fast in-memory broadcaster for live frames. The other source is a repeated database poll, which is slower but durable and can see the final stored state even if the live message was missed.
 
-The file also owns database connection pools. A pool is a small reusable supply of database connections, so the app does not have to open a fresh connection for every query. Because async database connections belong to the event loop that created them, this file keeps separate engines per event loop and database URL.
+The main generator, `tail_frames`, yields frames until it sees either a final result (`Terminal`) or a pause (`Parked`). The pause matters because a parked turn is not finished, but the live stream should still stop and tell the caller why it paused. The file also checks the current reason for a pause, such as a revoked seat, low balance, or spending cap, instead of relying on an old stored message that may no longer be true.
 
-There are two transaction paths. workspace_tx is the normal scoped path for application work. owner_tx is the special cross-workspace path used by background sweeps to list work across all workspaces, after which callers must re-enter the proper workspace before reading details. The module also verifies database reachability at startup, runs Alembic migrations, tunes SQLite behavior, records connection-wait metrics, and disposes engines safely during teardown.
+Think of it like following a delivery truck: the hub is the live GPS signal, while the database poll is calling the dispatch office. GPS is faster, but dispatch has the official answer if the signal was missed.
 
 #### Function details
 
-##### `_build_engine`  (lines 98–108)
+##### `tail_frames`  (lines 34–66)
 
 ```
-def _build_engine(url: str, pool: _Pool) -> AsyncEngine
+async def tail_frames(hub: Hub, turn_id: UUID, since: str='', billing_url: str | None=None) -> AsyncGenerator[tuple[str, LiveFrame]]
 ```
 
-**Purpose**: Creates an asynchronous SQLAlchemy database engine, which is the object used to open pooled database connections. It also attaches SQLite-specific setup hooks when the database is SQLite.
+**Purpose**: Streams the live frames for one turn until the turn finishes or pauses. It protects callers from missed live messages by also checking the stored turn state.
 
-**Data flow**: It receives a database URL and a pool description. It asks _pool_kwargs for the right pool and driver options, creates the engine, and, for SQLite, registers small callbacks that prepare each connection and start writes safely. It returns the ready-to-use engine.
+**Data flow**: It receives a hub, a turn id, an optional last-seen cursor, and an optional billing URL. It first decides where the hub stream should resume, starts a background hub reader, checks the database once for an already-finished or already-parked turn, then starts a background poller if needed. It yields each frame to the caller and stops once a final or parked frame appears; when the caller is done, it cancels the background work.
 
-**Call relations**: _engine_for calls this when a loop first needs an engine for a URL. verify_db_reachable also calls it to make a temporary engine just to test whether the database can be reached.
+**Call relations**: This is the main worker behind `HubTailer.tail`. It asks `Hub.covers` whether the old cursor can still be resumed, starts `_pump` to listen to `Hub.subscribe`, uses `_read_status_frame` for the durable database check, and starts `_poll_status` so a missed ending is still discovered.
 
-*Call graph*: calls 1 internal fn (_pool_kwargs); called by 2 (_engine_for, verify_db_reachable); 1 external calls (create_async_engine).
-
-
-##### `_pool_kwargs`  (lines 111–131)
-
-```
-def _pool_kwargs(url: str, pool: _Pool) -> dict[str, Any]
-```
-
-**Purpose**: Builds the settings used when creating a connection pool. It chooses different settings for SQLite and networked databases because they behave differently.
-
-**Data flow**: It receives a database URL and a pool description. It parses the URL to learn which database backend and driver are being used. For SQLite, it returns local-file-friendly pool settings; for other databases, it returns bounded pool settings plus driver-specific connection options from _driver_kwargs.
-
-**Call relations**: _build_engine asks this function for the exact arguments to pass into SQLAlchemy’s engine creation. When the backend is not SQLite, this function hands off to _driver_kwargs so each database driver gets options in the format it understands.
-
-*Call graph*: calls 1 internal fn (_driver_kwargs); called by 1 (_build_engine); 1 external calls (make_url).
+*Call graph*: calls 4 internal fn (covers, _poll_status, _pump, _read_status_frame); called by 1 (tail); 3 external calls (Queue, ensure_future, gather).
 
 
-##### `_driver_kwargs`  (lines 134–161)
+##### `_pump`  (lines 69–78)
 
 ```
-def _driver_kwargs(driver: str, pool: _Pool) -> dict[str, Any]
+async def _pump(hub: Hub, turn_id: UUID, since: str, frames: asyncio.Queue[tuple[str, LiveFrame]]) -> None
 ```
 
-**Purpose**: Chooses connection options for the specific PostgreSQL driver being used. This matters because asyncpg and psycopg use different option names for the same ideas, such as connection timeout and application name.
+**Purpose**: Copies live frames from the hub into the shared queue used by `tail_frames`. It ignores arrival-notice frames that are not meaningful output for the caller.
 
-**Data flow**: It receives the driver name and the pool description. If the driver is asyncpg, it returns asyncpg-style options, including a timeout, an application name for database monitoring, and disabled prepared-statement caching. Otherwise it returns psycopg-style options with matching intent.
+**Data flow**: It receives the hub, the turn id, the resume cursor, and a queue. It subscribes to the hub, reads each incoming cursor and frame, skips `ArrivalQueued` notices, and puts the remaining frames into the queue. If the hub subscription fails, it logs the failure instead of crashing the whole tail.
 
-**Call relations**: _pool_kwargs calls this only for non-SQLite URLs. Its result becomes part of the engine setup used later by _build_engine.
+**Call relations**: `tail_frames` starts this as a background task. `_pump` depends on `Hub.subscribe` for the in-memory live feed and hands usable frames back to `tail_frames` through the queue.
 
-*Call graph*: called by 1 (_pool_kwargs).
-
-
-##### `_engine_for`  (lines 164–180)
-
-```
-def _engine_for(url: str, pool: _Pool) -> AsyncEngine
-```
-
-**Purpose**: Finds or creates the database engine for the current event loop and URL. This prevents sharing async database connections across event loops, which would be unsafe.
-
-**Data flow**: It reads the currently running event loop and combines it with the database URL as a key. It removes registry entries for loops that have already closed, reuses an existing engine if one is present, or builds a new one with _build_engine. It returns the engine for this loop and URL.
-
-**Call relations**: workspace_tx and owner_tx call this whenever they need to start a transaction. If there is no engine yet for the current loop, this function creates one before those transaction helpers continue.
-
-*Call graph*: calls 1 internal fn (_build_engine); called by 2 (owner_tx, workspace_tx); 1 external calls (get_running_loop).
+*Call graph*: calls 1 internal fn (subscribe); called by 1 (tail_frames); 1 external calls (log).
 
 
-##### `init_db`  (lines 183–187)
+##### `_poll_status`  (lines 81–93)
 
 ```
-def init_db(url: str) -> None
+async def _poll_status(turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]], billing_url: str | None) -> None
 ```
 
-**Purpose**: Registers the main application database URL. This is a startup step that must happen before normal workspace transactions can run.
+**Purpose**: Repeatedly checks the durable turn state until it finds that the turn has finished or paused. This is the safety net for endings that the live hub feed did not deliver.
 
-**Data flow**: It receives a database URL and stores it in the module’s private app URL slot. If the app database was already initialized, it raises an error instead of silently replacing it.
+**Data flow**: It receives a turn id, the shared queue, and an optional billing URL. Every polling interval, it calls `_read_status_frame`; if no ending is found, it sleeps and tries again. If a terminal or parked frame is found, it puts that frame into the queue with an empty cursor and stops. If one poll fails, it logs the error and tries again later.
 
-**Call relations**: This function is usually called by higher-level startup code before workspace_tx or owner_tx are used. It does not call other helpers itself; it simply records the URL that later transaction functions rely on.
+**Call relations**: `tail_frames` starts this after the initial database check shows the turn is still active. It relies on `_read_status_frame` for the actual database-backed status read and sends its result back into the same queue used by `_pump`.
 
-
-##### `init_owner_db`  (lines 190–204)
-
-```
-def init_owner_db(url: str) -> None
-```
-
-**Purpose**: Registers the optional owner-role database URL used for cross-workspace reads. It also normalizes plain PostgreSQL URLs into the async driver form SQLAlchemy needs here.
-
-**Data flow**: It receives an owner database URL. If an owner URL is already set, it raises an error. Otherwise it rewrites a leading postgresql:// prefix to postgresql+asyncpg:// and stores the result for later owner_tx calls.
-
-**Call relations**: Startup code calls this when the process has a special owner database credential. owner_tx later checks whether this URL exists; if it does, owner_tx uses the owner pool, and if it does not, owner_tx falls back to the app database.
+*Call graph*: calls 1 internal fn (_read_status_frame); called by 1 (tail_frames); 2 external calls (sleep, log).
 
 
-##### `verify_db_reachable`  (lines 207–227)
+##### `_read_status_frame`  (lines 96–114)
 
 ```
-async def verify_db_reachable() -> None
+async def _read_status_frame(turn_id: UUID, billing_url: str | None) -> LiveFrame | None
 ```
 
-**Purpose**: Checks at startup that the configured database or databases can actually be reached. This catches a broken database connection before the service starts accepting work.
+**Purpose**: Reads the stored status of a turn while carefully preserving cancellation behavior. It is designed so a cancellation request does not leave the inner database read half-forgotten in an unclear state.
 
-**Data flow**: It reads the stored app and owner URLs. If no database has been initialized, it raises an error. For each configured URL, it builds a temporary engine, opens and closes one connection, and then disposes that temporary engine so no pooled connection remains.
+**Data flow**: It receives a turn id and optional billing URL. It starts `turn_status_frame` as its own async task, waits for that task while shielding it from immediate cancellation, then returns the resulting live frame or `None`. If cancellation happened while waiting, it raises the cancellation after the read has resolved in a controlled way.
 
-**Call relations**: This function calls _build_engine directly instead of publishing the engine through _engine_for. It is meant for startup health checks, separate from the engines later used by workspace_tx and owner_tx.
+**Call relations**: `tail_frames` uses this for the first immediate durable check, and `_poll_status` uses it for repeated checks. It hands off the real decision-making to `turn_status_frame`, adding careful async task behavior around that call.
 
-*Call graph*: calls 1 internal fn (_build_engine).
-
-
-##### `dispose_db`  (lines 230–253)
-
-```
-async def dispose_db() -> None
-```
-
-**Purpose**: Shuts down all known database engines and clears the stored database URLs. It is used during teardown, such as at the end of a command-line run or a test.
-
-**Data flow**: It first clears the app and owner URLs so future initialization is not blocked. It then finds engines owned by the current event loop and disposes them directly. For engines owned by other still-running loops, it removes them from the registry and asks their own loop to dispose them through _hand_off.
-
-**Call relations**: Teardown code calls this when the whole database layer should be reset. It uses _hand_off for engines that cannot be safely closed from the current loop.
-
-*Call graph*: calls 1 internal fn (_hand_off); 1 external calls (get_running_loop).
+*Call graph*: calls 1 internal fn (turn_status_frame); called by 2 (_poll_status, tail_frames); 2 external calls (ensure_future, shield).
 
 
-##### `_hand_off`  (lines 256–263)
+##### `turn_status_frame`  (lines 117–174)
 
 ```
-def _hand_off(loop: asyncio.AbstractEventLoop, engine: AsyncEngine) -> None
+async def turn_status_frame(turn_id: UUID, billing_url: str | None=None) -> LiveFrame | None
 ```
 
-**Purpose**: Asks another event loop to dispose an engine that belongs to that loop. This is needed because async database connections must be closed on the loop that owns them.
+**Purpose**: Looks in the database and decides whether a turn should produce a stream-ending frame. It returns a final frame for completed turns, a pause frame for parked turns, or nothing for turns still waiting or running.
 
-**Data flow**: It receives an event loop and an engine. It tries to schedule _dispose_on_this_loop on that loop in a thread-safe way. If the loop has already closed, it quietly gives up because there is no safe place left to run the disposal.
+**Data flow**: It receives a turn id and optional billing URL. It opens a workspace database transaction, reads the turn row, and checks the stored terminal result first. If the turn is parked, it works out the current pause reason by checking seat access, billing balance, and spending caps. It returns a `Terminal`, a `Parked` message with the best current reason, or `None` if there is no stream-ending state yet.
 
-**Call relations**: dispose_db calls this for engines owned by other loops. The handoff schedules the actual cleanup work to happen later on the proper loop.
+**Call relations**: Only `_read_status_frame` calls this function. It reaches into the database with SQLAlchemy queries, converts stored terminal data through `TerminalFrame.model_validate`, asks `Seats` about membership access, reads billing headroom, and uses `SpendEvaluator` when spending caps may apply.
 
-*Call graph*: called by 1 (dispose_db); 1 external calls (call_soon_threadsafe).
-
-
-##### `_dispose_on_this_loop`  (lines 266–273)
-
-```
-def _dispose_on_this_loop(engine: AsyncEngine) -> None
-```
-
-**Purpose**: Runs on the engine’s owning event loop and starts the actual engine disposal task. It keeps track of the task so it is not garbage-collected before finishing.
-
-**Data flow**: It receives an engine. It creates an asynchronous task for engine.dispose(), stores that task in the module-level _disposing set, and arranges for the task to remove itself from the set when done.
-
-**Call relations**: _hand_off schedules this function onto the target event loop. It is the final step that actually closes the engine’s pooled database connections on the correct loop.
-
-*Call graph*: 2 external calls (ensure_future, dispose).
+*Call graph*: called by 1 (_read_status_frame); 11 external calls (__init__, __init__, __init__, __init__, model_validate, select, applicable_caps_absent, balance_refusal_message, read_headroom, workspace_tx (+1 more)).
 
 
-##### `dispose_loop_engines`  (lines 276–286)
+##### `HubTailer.tail`  (lines 187–190)
 
 ```
-async def dispose_loop_engines() -> None
+def tail(self, turn_id: UUID, since: str='') -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]
 ```
 
-**Purpose**: Disposes only the engines that belong to the currently running event loop, while leaving the configured database URLs in place. This is useful for temporary loops that are about to close.
+**Purpose**: Provides a clean context-managed way to stream one turn from the process hub. Callers use it without needing to know how the hub feed and database polling are combined.
 
-**Data flow**: It reads the current event loop, scans both the app and owner engine registries, removes entries for this loop, and awaits disposal of each matching engine. Other loops’ engines are left alone.
+**Data flow**: It receives a turn id and optional last-seen cursor. It calls `tail_frames` with this tailer’s hub and billing URL, then wraps the async generator in `aclosing` so leaving the caller’s block closes the generator and cancels its background tasks.
 
-**Call relations**: Higher-level serve or setup code can call this before closing a short-lived event loop. Unlike dispose_db, it does not clear initialization, so persistent parts of the process can keep using the database.
+**Call relations**: This is the public method on `HubTailer` that callers use. It delegates the real streaming work to `tail_frames` and adds the lifetime wrapper that makes cleanup happen when the caller stops reading.
 
-*Call graph*: 1 external calls (get_running_loop).
-
-
-##### `_stopping`  (lines 289–296)
-
-```
-def _stopping() -> bool
-```
-
-**Purpose**: Detects whether the current async task has been asked to stop through cancellation. This helps distinguish a real database error from shutdown being disguised as a database failure.
-
-**Data flow**: It looks up the current asyncio task. If there is a task and its cancellation count is nonzero, it returns true; otherwise it returns false.
-
-**Call relations**: _opened uses this after connection or transaction errors. If the task is stopping, _opened turns certain database-looking failures back into cancellation so shutdown can proceed cleanly.
-
-*Call graph*: called by 1 (_opened); 1 external calls (current_task).
+*Call graph*: calls 1 internal fn (tail_frames); 1 external calls (aclosing).
 
 
-##### `_opened`  (lines 300–353)
+##### `HubTailer.latest_activity`  (lines 192–193)
 
 ```
-async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnection]
+async def latest_activity(self, turn_id: UUID) -> Activity | None
 ```
 
-**Purpose**: Opens a database transaction and wraps it with timing, availability metrics, cancellation handling, and careful cleanup. It is the shared transaction core used by both normal workspace access and owner access.
+**Purpose**: Asks the hub for the latest known activity for a turn. This gives callers a quick snapshot of recent live state without opening the full frame stream.
 
-**Data flow**: It receives an engine and a path label such as workspace or owner. It measures how long it takes to begin a transaction, emits metrics if acquisition fails, yields the open connection to the caller, and then commits or rolls back by closing the transaction context. If cancellation happens during cleanup, it still lets cleanup finish before re-raising the cancellation.
+**Data flow**: It receives a turn id, passes it to the hub, waits for the hub’s answer, and returns either an activity object or `None` if the hub has no activity to report.
 
-**Call relations**: workspace_tx and owner_tx both call this to get a transaction. Inside, it calls _stopping to decide whether an apparent database error is really part of task shutdown, and it emits observability metrics for connection wait and failure cases.
-
-*Call graph*: calls 1 internal fn (_stopping); called by 2 (owner_tx, workspace_tx); 7 external calls (ensure_future, shield, AsyncExitStack, begin, monotonic, emit_histogram, emit_metric).
+**Call relations**: This method is a small forwarding point on `HubTailer`. It keeps callers talking to the tailer abstraction instead of importing or depending directly on the hub.
 
 
-##### `workspace_tx`  (lines 357–367)
+### `core/src/ufo/surfaces/stop.py`
 
-```
-async def workspace_tx() -> AsyncIterator[AsyncConnection]
-```
+`orchestration` · `request handling`
 
-**Purpose**: Opens the normal database transaction for work that must be limited to the current workspace. This is the main safe entry point for application queries.
+A “turn” is one running unit of conversation work. This file covers the case where a member presses stop while that work is still running. The important job is to make that stop feel immediate and correct, without damaging a turn that already finished by itself.
 
-**Data flow**: It checks that init_db has registered an app database URL. It gets the engine for the current loop through _engine_for, opens a transaction through _opened, reads current_workspace, and, on PostgreSQL, sets the app.workspace_id value for this transaction only. It yields the connection to the caller with that workspace filter in place.
+`MemberStop` acts like a careful traffic controller. First it looks in the database to confirm that the turn being stopped belongs to the conversation the member is allowed to affect. Without this check, someone could accidentally or maliciously stop the wrong conversation’s work.
 
-**Call relations**: Application code calls this when it needs to read or write workspace-scoped data. It depends on _engine_for for the right pooled engine and _opened for transaction lifetime; before yielding, it uses SQL text to pin the workspace setting in the database.
+Next it calls the shared cancellation routine. That routine is the durable source of truth for ending the turn, so this file does not invent a separate stop path. If the turn was already finished, the stop request becomes a harmless no-op and reports that nothing was newly ended.
 
-*Call graph*: calls 2 internal fn (_engine_for, _opened); 1 external calls (text).
-
-
-##### `owner_tx`  (lines 371–384)
-
-```
-async def owner_tx() -> AsyncIterator[AsyncConnection]
-```
-
-**Purpose**: Opens the special transaction path that does not pin a workspace. It is meant for narrow cross-workspace enumeration, such as background sweeps finding IDs to process.
-
-**Data flow**: It chooses the owner database URL and owner pool if one was initialized; otherwise it falls back to the app database URL and app pool. It raises an error if no URL is available. Then it gets the correct engine with _engine_for, opens a transaction with _opened, and yields the connection without setting app.workspace_id.
-
-**Call relations**: Background or control-plane code uses this to enumerate work across workspaces. It shares the same engine lookup and transaction wrapper as workspace_tx, but deliberately skips the workspace-setting step so callers must re-scope each returned item themselves.
-
-*Call graph*: calls 2 internal fn (_engine_for, _opened).
-
-
-##### `apply_migrations`  (lines 387–414)
-
-```
-def apply_migrations(url: str, pack: str | None=None) -> None
-```
-
-**Purpose**: Runs database schema migrations, which are versioned changes that create or update tables and indexes. It combines the core migrations with any active extension migrations so the database reaches all required heads.
-
-**Data flow**: It receives a database URL and optionally an extension pack name. It builds an Alembic configuration, asks the extension loader for extra migration locations, validates that migration revision IDs are not duplicated, and runs Alembic upgrade to all heads. If the database is SQLite, it then calls _seal_sqlite_journal to leave the file in the expected journal mode.
-
-**Call relations**: Startup, command-line, or test setup code calls this before the application uses the database schema. It calls into the extension loader for migration paths, Alembic for the actual schema work, and _seal_sqlite_journal for SQLite cleanup after migrations.
-
-*Call graph*: calls 1 internal fn (_seal_sqlite_journal); 6 external calls (__init__, upgrade, from_config, migration_locations, catch_warnings, simplefilter).
-
-
-##### `_seal_sqlite_journal`  (lines 417–433)
-
-```
-def _seal_sqlite_journal(url: str) -> None
-```
-
-**Purpose**: Finishes preparing a migrated SQLite file so later application connections do not have to change its journal mode under load. This avoids SQLite lock errors on first use.
-
-**Data flow**: It receives a SQLite URL, parses out the database file path, and raises an error if there is no file. It opens the file with sqlite3, sets journal_mode to WAL, and closes the connection.
-
-**Call relations**: apply_migrations calls this after Alembic migrations when the URL points to SQLite. It complements the SQLite connection hook by doing the one-time file conversion before normal engines start using the file.
-
-*Call graph*: called by 1 (apply_migrations); 2 external calls (make_url, connect).
-
-
-##### `_sqlite_on_connect`  (lines 436–442)
-
-```
-def _sqlite_on_connect(dbapi_connection: Any, _connection_record: Any) -> None
-```
-
-**Purpose**: Prepares each new SQLite connection with settings the application expects. These settings enable write-ahead logging, enforce foreign keys, and make SQLite wait briefly instead of immediately failing when the file is busy.
-
-**Data flow**: It receives a low-level SQLite connection from SQLAlchemy. It switches SQLAlchemy out of SQLite’s default transaction mode, runs PRAGMA commands to set journal mode, foreign-key enforcement, and busy timeout, then closes the cursor used for setup.
-
-**Call relations**: _build_engine registers this as a SQLite connect listener. After that, SQLAlchemy runs it automatically whenever a new SQLite connection is opened for an engine.
-
-
-##### `_sqlite_begin_immediate`  (lines 445–447)
-
-```
-def _sqlite_begin_immediate(connection: sa.Connection) -> None
-```
-
-**Purpose**: Starts SQLite transactions with an immediate write lock. This turns possible write-lock deadlocks into orderly waiting, like forming a queue before entering a one-person room.
-
-**Data flow**: It receives a SQLAlchemy connection and sends the raw SQL command begin immediate. The result is that SQLite claims the writer slot at the start of the transaction rather than discovering later that it cannot upgrade the lock.
-
-**Call relations**: _build_engine registers this as a SQLite begin listener. SQLAlchemy invokes it when beginning a SQLite transaction, so callers of workspace_tx or owner_tx get safer SQLite write behavior automatically.
-
-*Call graph*: 1 external calls (exec_driver_sql).
-
-
-### `core/src/ufo/loop/transcript.py`
-
-`io_transport` · `main loop and repair flow transcript persistence`
-
-A conversation transcript is the durable record of what has happened so far. This file wraps the lower-level blob store, which is a storage area for named chunks of data, and gives the rest of the loop a simple way to read or publish the transcript for one conversation.
-
-The important rule here is ordering. Each conversation has a sequence number, called `seq`, that rises as the conversation moves forward. Before writing a transcript, this file reads the currently stored one. If the stored transcript is already at the same or a later sequence number, the new write is ignored. This is like a notice board where only newer updates may replace older ones; someone arriving late with an old copy is not allowed to pin it over the latest version.
-
-That rule matters because different parts of the system may try to finish or repair a turn. The first valid write for a sequence is treated as authoritative, and stale writes cannot roll the conversation backward. The file also hides the storage details: it turns a conversation ID into the correct storage key, decodes stored bytes into a `Conversation`, and encodes a `Conversation` back into bytes when saving.
+If cancellation succeeds, the file asks admission logic whether there is already a pending member message that should be redispatched as a new turn. If so, it publishes an “absorbed” notice for that new turn, so the user interface does not wait forever for confirmation about the pending message. Finally it publishes the cancelled terminal event for the stopped turn, waking any live listeners immediately instead of making them wait until their next check.
 
 #### Function details
 
-##### `Transcript.read`  (lines 17–22)
+##### `MemberStop.stop`  (lines 38–61)
 
 ```
-async def read(self) -> Conversation | None
+async def stop(self, workspace_id: UUID, conversation_id: UUID, turn_id: UUID) -> Stopped
 ```
 
-**Purpose**: Reads the saved transcript for this conversation, if one exists. It gives callers either a decoded `Conversation` object or `None` when nothing has been stored yet.
+**Purpose**: Stops one running turn for a member, but only if that turn belongs to the given conversation in the given workspace. It cancels the turn through the shared cancellation path, starts or identifies a follow-up turn if needed, and tells listeners what happened.
 
-**Data flow**: It starts with the `Transcript` object's conversation ID and blob store. It builds the storage key for that conversation, asks the blob store for the saved bytes, and turns those bytes back into a conversation. If the blob store says the item is missing, it returns `None` instead of treating that as an error.
+**Data flow**: It receives a workspace ID, conversation ID, and turn ID. It first reads the database to find which conversation owns that turn inside the workspace. If the owner does not match the requested conversation, it raises an error. If the owner matches, it asks the cancellation system to end the turn. If the turn was already ended, it returns a `Stopped` result saying `ended` is false. If cancellation produced a final cancellation frame, it asks admission to redispatch any pending follow-up work. When a new turn is founded, it publishes an absorbed-message notice for that new turn. It then publishes the cancelled terminal notice for the stopped turn and returns a `Stopped` result saying the turn ended, including the new founded turn ID if there is one.
 
-**Call relations**: This is the lookup step used before saving. `Transcript.write` calls it first so it can compare the stored sequence number with the one it is about to publish. The function relies on the shared transcript helpers to choose the right key and decode the stored body.
+**Call relations**: This method is the main workflow for a member stop request. It uses `workspace_tx` and `sqlalchemy.select` to verify ownership in the database, then hands the actual durable cancellation to `ufo.turns.cancellation.cancel_one_turn`. After that, it coordinates with admission redispatch and publishes hub messages using `Absorbed` and `Terminal`, so other parts of the system and live clients see the follow-up turn and the cancelled ending in the right order. It returns a `Stopped` object for the surface layer to report the result back to the member.
 
-*Call graph*: called by 1 (write); 2 external calls (decode, transcript_key).
-
-
-##### `Transcript.write`  (lines 24–28)
-
-```
-async def write(self, conversation: Conversation) -> None
-```
-
-**Purpose**: Saves a conversation transcript only if it is newer than the one already stored. This protects the durable transcript from being overwritten by an older or duplicate update.
-
-**Data flow**: It receives a `Conversation` to publish. First it reads the currently stored transcript. If there is already a transcript with a sequence number greater than or equal to the incoming one, it stops without changing storage. Otherwise, it encodes the incoming conversation into bytes and writes those bytes to the blob store under this conversation's transcript key.
-
-**Call relations**: This is the publishing step used when a turn is completed or when a repair flow republishes a committed final state. It depends on `Transcript.read` to decide whether the write is still valid, then hands the conversation to the shared encoder and blob store only when the update is allowed to become the durable transcript.
-
-*Call graph*: calls 1 internal fn (read); 2 external calls (encode, transcript_key).
+*Call graph*: 6 external calls (__init__, __init__, __init__, select, workspace_tx, cancel_one_turn).
 
 
-### Shared durable schemas
-Common record, table, and transcript formats define the durable vocabulary used across surfaces, workers, tools, and renderers.
+### Live Hub Transport
+The live hub and Redis extension publish, replay, and distribute turn progress frames across viewers and server processes.
 
-### `core/src/ufo/schema/records.py`
+### `extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py`
 
-`data_model` · `cross-cutting: used when admitting turns, running workers, recording results, retries, and surface rendering`
+`io_transport` · `request handling and live streaming`
 
-This file is the contract at the boundary between the user-facing parts of the product and the background workers that run agent turns. A “turn” is one unit of agent work, like one message being processed from start to finish. Without these shared record shapes, different parts of the system could disagree about what a queued turn looks like, when it is finished, how to bill it, or how to ask the user for more information.
+A running assistant turn can produce many short-lived updates: text chunks, tool activity, cost ticks, parking and resume notices, and final signals. This file sends those updates through Redis Streams, which are append-only message logs stored in Redis. Think of each turn as having its own scrolling ticker tape. Writers add frames to the tape, and readers can start from a saved position and keep reading forward.
 
-Most of the file is made of Pydantic models. Pydantic is a validation library: it checks that incoming data has the expected shape before the rest of the system trusts it. The file defines allowed status words, default settings, agent icons, prepared tool intents, usage counters, structured questions, credential and account-connection requests, final turn results, agent settings, and the Turn record itself.
+This matters because live updates need to work across multiple server processes. Without this Redis-backed hub, a viewer connected to one server might miss frames produced by another. The permanent answer still lives elsewhere; these frames are for live display and replay, so losing an old trimmed frame only means the display may need to redraw, not that the system lost the actual result.
 
-A few helper functions create stable UUIDs, which are unique identifiers. They are deterministic: the same workspace, conversation, and sequence number always produce the same turn id. This matters when background work is retried, because the retry should refer to the same real-world turn instead of accidentally creating a duplicate.
-
-The validators are guardrails. They clean unsafe user-provided context text, reject unknown time zones, normalize timestamps, treat missing created-object lists as empty, and make sure a turn only has a terminal result when its status is truly finished.
+The file also translates between in-memory frame objects and a small JSON wire format. Redis stores only simple strings, so each frame is tagged with a kind, such as text delta or terminal, plus its data. The hub keeps one Redis client per asyncio event loop, because async Redis clients are tied to the loop that created them. That prevents subtle cross-thread event-loop errors when workflow code and web-serving code run on different loops.
 
 #### Function details
 
-##### `auto_agent_icon`  (lines 180–199)
+##### `frame_payload`  (lines 76–82)
 
 ```
-def auto_agent_icon(name: str, taken: Collection[str]) -> TablerIcon
+def frame_payload(frame: HubFrame) -> dict[str, object]
 ```
 
-**Purpose**: Chooses a starting icon for a newly created agent. It tries to pick an icon that matches words in the agent name, avoids icons already used in the workspace when possible, and otherwise picks a repeatable fallback from the agent name.
+**Purpose**: Turns a live frame object into a plain dictionary that can be safely written as JSON. It adds a kind label so a later reader knows what type of frame to rebuild.
 
-**Data flow**: It receives an agent name and a collection of icons already taken. It lowercases and splits the name into simple word tokens, looks for a matching keyword such as “support” or “finance,” and also hashes the name to get a stable number. It returns one valid icon name: first an unused keyword match if available, otherwise an unused icon chosen by the hash, and if all icons are used, a repeatable reused icon.
+**Data flow**: It receives a HubFrame, such as a text update or activity notice. It inspects the frame type, converts the frame fields into JSON-friendly data, and returns a dictionary with a kind and data. Activity frames get a special Redis-facing shape so they remain compatible with the stream format.
 
-**Call relations**: This helper is used wherever a new agent needs a default visual identity. It calls the standard SHA-256 hash function so the choice is stable: the same name tends to land on the same icon, like assigning a locker number from a name rather than from the current time.
+**Call relations**: When RedisStreamHub.publish is about to write a frame to Redis, it asks this function to package the frame first. The packaged result is then converted to a JSON string and stored in the Redis Stream.
 
-*Call graph*: 1 external calls (sha256).
-
-
-##### `turn_id_for`  (lines 246–248)
-
-```
-def turn_id_for(workspace_id: UUID, conversation_id: UUID, seq: int) -> UUID
-```
-
-**Purpose**: Builds the permanent identifier for a turn from its workspace, conversation, and sequence number. This makes the turn id predictable, which helps retries and workflow replay point back to the same turn.
-
-**Data flow**: It receives a workspace id, a conversation id, and a turn sequence number. It combines them into one string and feeds that into a namespace-based UUID generator. It returns a UUID that will be the same every time those same inputs are used.
-
-**Call relations**: This function is part of turn admission and workflow setup. Instead of asking for a random id, callers use it so the database row and the background workflow can share one identity and avoid duplicate work after a retry.
-
-*Call graph*: 1 external calls (uuid5).
+*Call graph*: called by 1 (publish); 2 external calls (__init__, model_dump).
 
 
-##### `ledger_id_for`  (lines 251–256)
+##### `frame_from_payload`  (lines 85–95)
 
 ```
-def ledger_id_for(workspace_id: UUID, turn_id: UUID, dimension: str, attempt: str='') -> UUID
+def frame_from_payload(payload: dict[str, object]) -> HubFrame
 ```
 
-**Purpose**: Creates a stable billing-ledger id for one kind of usage within one turn attempt. This lets the system record token or cost usage once per attempt, even if the same workflow is replayed.
+**Purpose**: Rebuilds a live frame object from the plain dictionary stored in Redis. This is what turns the wire format back into something the rest of the application understands.
 
-**Data flow**: It receives a workspace id, a turn id, a billing dimension such as a category of usage, and optionally an attempt id. It joins those pieces into a string and turns that string into a deterministic UUID. The result identifies one billing write for that exact turn, dimension, and attempt.
+**Data flow**: It receives a decoded JSON payload with a kind label and data. It checks the kind, validates the data against the matching frame model, and returns the reconstructed HubFrame. Older or alternate activity formats for tools and skills are translated into normal Activity messages.
 
-**Call relations**: Workers use this when recording billing data. It hands off to the UUID generator so repeated execution of the same attempt collapses onto the same ledger row, while a later resumed attempt gets a different row and can be counted separately.
+**Call relations**: RedisStreamHub.subscribe uses this after reading frames from Redis so subscribers receive real frame objects. RedisStreamHub.latest_activity also uses it when it finds an activity-like entry while scanning recent stream entries.
 
-*Call graph*: 1 external calls (uuid5).
-
-
-##### `mid_turn_reply_id_for`  (lines 259–270)
-
-```
-def mid_turn_reply_id_for(turn_id: UUID, round_index: int, span_index: int, attempt: str='') -> UUID
-```
-
-**Purpose**: Creates a stable id for a reply sent before a turn fully ends. This prevents the same mid-turn message from being delivered twice when a workflow is replayed.
-
-**Data flow**: It receives the turn id, the round number, the reply span position within that round, and optionally the attempt id. It combines those values into a deterministic UUID. The returned id names exactly one mid-turn reply in one attempt.
-
-**Call relations**: This fits into the flow where an agent can speak partial results before its final answer. Delivery records use this id so replayed work recognizes the same reply, while a resumed run can create new replies even if its round numbering starts over.
-
-*Call graph*: 1 external calls (uuid5).
+*Call graph*: called by 2 (latest_activity, subscribe); 2 external calls (__init__, cast).
 
 
-##### `TurnContext._tag_safe_line`  (lines 430–434)
+##### `_stream_id`  (lines 98–100)
 
 ```
-def _tag_safe_line(cls, value: str | None) -> str | None
+def _stream_id(entry_id: str) -> tuple[int, int]
 ```
 
-**Purpose**: Cleans surface-provided text before it is embedded into the turn context. It stops sender names, question text, or source text from pretending to be markup by removing angle brackets and flattening the value to one line.
+**Purpose**: Converts a Redis Stream entry id into numbers that can be compared reliably. Redis ids look like timestamp-plus-sequence strings, and this helper makes their ordering explicit.
 
-**Data flow**: It receives a string or nothing. If there is no value, it leaves it as missing. If there is text, it removes “<” and “>”, collapses whitespace into single spaces, and returns the cleaned line, or returns missing if nothing useful remains.
+**Data flow**: It receives an entry id string such as a millisecond time followed by a sequence number. It splits the string, converts both parts to integers, and returns them as a pair. That pair can then be compared with another pair to tell which entry came first.
 
-**Call relations**: Pydantic calls this automatically when building a TurnContext for the sender, question, and source fields. It acts as a small safety filter before the engine later renders that context into a structured prompt.
+**Call relations**: RedisStreamHub.covers uses this helper when deciding whether a subscriber's saved cursor still points to data that Redis has retained. It supports the resume-or-redraw decision.
 
-
-##### `TurnContext._known_zone`  (lines 438–445)
-
-```
-def _known_zone(cls, value: str | None) -> str | None
-```
-
-**Purpose**: Checks that a provided time zone name is real. This catches mistakes at the edge of the system instead of letting a turn fail later while it is running.
-
-**Data flow**: It receives a time zone string or nothing. If the value is missing, it stays missing. If a name is present, the function asks the system time zone database to load it; if the name is unknown, it raises a clear validation error. A valid name is returned unchanged.
-
-**Call relations**: Pydantic runs this while creating TurnContext. It calls the standard ZoneInfo lookup, so surfaces must provide a valid IANA time zone name such as “America/New_York” before the turn record is accepted.
-
-*Call graph*: 1 external calls (ZoneInfo).
+*Call graph*: called by 1 (covers).
 
 
-##### `Turn.spawned`  (lines 475–478)
+##### `_stream_entries`  (lines 103–112)
 
 ```
-def spawned(self) -> bool
+def _stream_entries(batch: XReadResponse) -> list[StreamEntry]
 ```
 
-**Purpose**: Tells whether this turn was created as a child of another turn. A spawned turn may be a subagent task or another agent task launched by a parent turn.
+**Purpose**: Extracts the actual stream entries from Redis's XREAD response and checks that the response has the expected shape. This prevents the code from silently misreading Redis data if the protocol response format changes.
 
-**Data flow**: It reads the turn’s parent_turn_id field. If that field has a value, it returns true; if it is empty, it returns false. It does not change the turn.
+**Data flow**: It receives the raw batch returned by Redis. If the batch is empty, it returns an empty list. If the batch is not the expected list-style response, it raises an error. Otherwise, it pulls out and returns the entries for the stream.
 
-**Call relations**: Other code can use this property when it needs to treat child turns differently from ordinary user-admitted turns. It is a simple label derived from the parent link that the spawn path writes.
+**Call relations**: RedisStreamHub.subscribe calls this after each Redis read. The subscribe loop then walks through the returned entries, decodes each stored frame, and yields it to the subscriber.
 
-
-##### `Turn._nothing_created`  (lines 482–485)
-
-```
-def _nothing_created(cls, value: object) -> object
-```
-
-**Purpose**: Turns a missing created-object list into an empty tuple. This lets callers work with “no created objects” as an empty collection instead of having to special-case a database null.
-
-**Data flow**: It receives the raw value for created_refs before normal validation. If the value is null, it returns an empty tuple. Otherwise it passes the value through for normal parsing.
-
-**Call relations**: Pydantic calls this when loading or constructing a Turn. It smooths over the database representation, where a turn that has created nothing may store SQL NULL, so later code can simply iterate over an empty list-like value.
+*Call graph*: called by 1 (subscribe).
 
 
-##### `Turn._aware_utc`  (lines 489–494)
+##### `RedisStreamHub._client`  (lines 128–134)
 
 ```
-def _aware_utc(cls, value: datetime | None) -> datetime | None
+def _client(self) -> Redis
 ```
 
-**Purpose**: Makes sure turn timestamps know they are in UTC. UTC is the common world clock used by the system, and marking it explicitly prevents local-time mix-ups.
+**Purpose**: Returns the Redis client for the currently running asyncio event loop. An asyncio event loop is the scheduler that runs async tasks; Redis clients are tied to the loop that created them, so sharing one across loops can break.
 
-**Data flow**: It receives a datetime value or nothing for created_at or updated_at. If there is no timestamp, it stays missing. If the timestamp already has time zone information, it is returned as-is. If it is missing that marker, the function adds UTC as the time zone without changing the clock reading.
+**Data flow**: It looks up the current event loop. If this hub already has a Redis client for that loop, it returns it. If not, it creates a new client from the configured Redis URL, stores it for that loop, and returns it.
 
-**Call relations**: Pydantic applies this to Turn timestamps. It exists because some database drivers can return UTC timestamps without the UTC marker; this validator repairs that before other code compares or displays times.
+**Call relations**: All Redis operations in this hub go through this method. Publishing, subscribing, coverage checks, and activity lookups each call it right before talking to Redis, so workflow-side and web-serving-side code get separate safe clients when needed.
 
-*Call graph*: 1 external calls (replace).
+*Call graph*: called by 4 (covers, latest_activity, publish, subscribe); 2 external calls (get_running_loop, from_url).
 
 
-##### `Turn._terminal_matches_status`  (lines 497–502)
+##### `RedisStreamHub._stream`  (lines 136–137)
 
 ```
-def _terminal_matches_status(self) -> 'Turn'
+def _stream(self, turn_id: UUID) -> str
 ```
 
-**Purpose**: Checks that the turn’s status and final result agree with each other. A turn may only carry a terminal frame when it is actually finished, failed, or cancelled, and the frame’s status must match the turn’s status.
+**Purpose**: Builds the Redis Stream name for a particular turn. It gives every turn its own stream so frames from different conversations or runs do not mix.
 
-**Data flow**: It receives the fully built Turn model. It compares the turn status with whether a terminal result is present. If the combination is inconsistent, or if the terminal frame says a different final status, it raises a validation error. Otherwise it returns the turn unchanged.
+**Data flow**: It receives a turn UUID. It combines a fixed stream prefix with that UUID and returns the Redis key string used for that turn's live-frame stream.
 
-**Call relations**: Pydantic runs this after the Turn fields have been parsed. It protects the larger worker and surface flow from impossible records, such as a queued turn that already has a final answer or a failed turn whose terminal frame says it was done.
+**Call relations**: Every public hub operation calls this before reading or writing. RedisStreamHub.publish writes to the named stream, RedisStreamHub.subscribe reads from it, RedisStreamHub.covers checks its retained entries, and RedisStreamHub.latest_activity scans it.
+
+*Call graph*: called by 4 (covers, latest_activity, publish, subscribe).
 
 
-### `core/src/ufo/schema/tables.py`
+##### `RedisStreamHub.publish`  (lines 139–146)
 
-`data_model` · `startup, migrations, and any database access that needs the shared schema`
+```
+async def publish(self, turn_id: UUID, frame: HubFrame) -> str
+```
 
-Think of this file as the building blueprint for the app’s database. The rest of the system stores workspaces, members, agents, conversations, messages, billing records, credentials, connected accounts, synced sources, pages, and delivery jobs in a database. Without this file, the code would not have a shared map of what can be stored, how records relate to each other, or which bad states the database should reject.
+**Purpose**: Adds one live frame to the Redis Stream for a turn and returns the new stream position. Publishers use this whenever the running turn has a new update for viewers.
 
-It uses SQLAlchemy, a Python library that describes database tables as Python objects. The central object is `metadata`, which is like a folder holding all table definitions. Each `sa.Table(...)` entry adds one table to that folder. Columns describe individual pieces of data, such as an agent name or a conversation title. Foreign keys describe links between tables, such as a conversation belonging to a workspace. Unique constraints stop duplicate records, such as two members with the same email in one workspace. Check constraints are guardrails: they reject impossible or unsupported values, such as a turn status outside the allowed set.
+**Data flow**: It receives a turn id and a frame. It chooses the turn's stream name, converts the frame into a JSON string, appends it to Redis, trims the stream to a maximum length, refreshes the stream's expiry time, and returns the Redis entry id as a cursor. The cursor is a bookmark readers can use later.
 
-A notable design choice is that this file is “dialect-neutral”: it avoids tying the schema to only one database engine. It also adds targeted indexes, which are like book indexes for the database, so common lookups such as pending writebacks, active conversations, or billing entries can be found quickly.
+**Call relations**: This is the write side of the hub. It relies on _stream to find the right Redis key, frame_payload to serialize the frame, and _client to get the correct Redis connection for the current event loop.
+
+*Call graph*: calls 3 internal fn (_client, _stream, frame_payload); 1 external calls (dumps).
+
+
+##### `RedisStreamHub.subscribe`  (lines 148–172)
+
+```
+async def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, HubFrame]]
+```
+
+**Purpose**: Streams live frames for one turn, starting after a saved cursor or from the beginning if no cursor is given. It lets a viewer catch up on retained updates and then wait for new ones.
+
+**Data flow**: It receives a turn id and an optional cursor. It repeatedly reads entries from that turn's Redis Stream, first without blocking to catch up quickly and then with a short blocking wait when no entries are ready. Each Redis entry's JSON frame is decoded back into a HubFrame, and the function yields the new cursor plus the frame. Timeouts are treated as normal idle moments, so the loop simply tries again.
+
+**Call relations**: This is the read side used by live surfaces. It uses _stream for the Redis key, _client for Redis access, _stream_entries to unpack Redis's response, and frame_from_payload to rebuild each frame before handing it to the caller.
+
+*Call graph*: calls 4 internal fn (_client, _stream, _stream_entries, frame_from_payload); 1 external calls (loads).
+
+
+##### `RedisStreamHub.covers`  (lines 174–180)
+
+```
+async def covers(self, turn_id: UUID, cursor: str) -> bool
+```
+
+**Purpose**: Checks whether a saved cursor can still be replayed without a gap. This helps a reconnecting viewer know whether it can resume from its bookmark or should redraw from a more durable source.
+
+**Data flow**: It receives a turn id and cursor. If there is no cursor, or the stream has no retained entries, it returns false. Otherwise, it compares the first retained Redis entry id with the cursor and returns true when the cursor is not older than what Redis still keeps.
+
+**Call relations**: Reconnect logic can call this before subscribing. The method uses _stream to find the stream, _client to read its oldest entry, and _stream_id to compare Redis entry ids in chronological order.
+
+*Call graph*: calls 3 internal fn (_client, _stream, _stream_id).
+
+
+##### `RedisStreamHub.latest_activity`  (lines 182–214)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: Finds the most recent activity-style update for a turn, such as a tool call or skill load, by looking only at a bounded number of recent stream entries. This gives status polling a cheap way to answer “what is it doing now?”
+
+**Data flow**: It receives a turn id. It scans that turn's Redis Stream from newest to older entries, but stops after a fixed limit so it does not repeatedly inspect thousands of text-only frames. For each entry, it reads the JSON payload and checks the kind before decoding. If it finds a tool or skill activity, it returns it as an Activity; if not, it returns None.
+
+**Call relations**: Status views or polling code can call this when they need a recent human-readable activity. It uses _stream and _client to read Redis, and frame_from_payload only for the matching activity entry it wants to return.
+
+*Call graph*: calls 3 internal fn (_client, _stream, frame_from_payload); 2 external calls (loads, cast).
+
+
+### `core/src/ufo/hub.py`
+
+`io_transport` · `cross-cutting during live turn streaming`
+
+A running agent turn produces many small updates: text chunks, tool-status messages, cost ticks, delivered replies, subagent progress, and finally a terminal result or a parked notice. This file defines the shapes of those live updates and an in-memory “hub” that fans them out to anyone watching the turn. Think of it like a train-station announcement board: publishers post announcements, and every connected display receives them.
+
+The important problem is reconnection. A browser or command-line client may disconnect briefly, especially when handing control to a local tool. Instead of forcing it to redraw everything from permanent storage, the hub keeps a bounded ring buffer, meaning a fixed-size recent-history list that drops the oldest entries when full. Each frame gets a simple increasing cursor number. A subscriber can reconnect with its last cursor and receive only the frames after it.
+
+The hub is deliberately non-blocking. If a subscriber is too slow and its queue fills up, the oldest queued frame for that subscriber is dropped rather than slowing the running turn. Publishing must stay fast. Shared state is protected by a lock because publishers and subscribers may run on different event loops, meaning separate asynchronous execution contexts. When a turn ends, the hub drops retained memory once it is safe to do so.
 
 #### Function details
 
-##### `_conversation_audience`  (lines 12–13)
+##### `Hub.publish`  (lines 146–146)
 
 ```
-def _conversation_audience(context: DefaultExecutionContext) -> str
+async def publish(self, turn_id: UUID, frame: HubFrame) -> str
 ```
 
-**Purpose**: This function chooses the default audience for a new conversation when the caller has not supplied one directly. In plain terms, it decides whether a conversation should be shared or tied to a specific member, based on the `member_id` being inserted.
+**Purpose**: This is the interface promise for adding one live frame to a turn’s stream. A caller uses it when something new has happened and watchers should be told.
 
-**Data flow**: It receives SQLAlchemy’s current database execution context, which contains the values being inserted into the new row. It reads the pending `member_id`, passes that value to `conversation_audience`, turns the result into plain text, and returns that text as the conversation’s stored `audience` value.
+**Data flow**: It receives a turn id and a frame of live information. An implementation records and broadcasts that frame, then returns the cursor that marks where the frame landed in the stream.
 
-**Call relations**: This function is plugged into the `conversation` table as the Python-side default for the `audience` column. When code creates a conversation without explicitly setting `audience`, SQLAlchemy calls this helper during the insert. The helper asks `ufo.audience.conversation_audience` to apply the project’s audience rules, so the table default stays consistent with the rest of the application.
+**Call relations**: The queue code calls this interface when it needs to publish a failed terminal result. Concrete hub implementations, such as InProcessHub.publish, provide the actual storage and fan-out behavior behind this promise.
 
-*Call graph*: 2 external calls (get_current_parameters, conversation_audience).
+*Call graph*: called by 1 (_commit_failed_terminal).
 
 
-### `core/src/ufo/transcript.py`
+##### `Hub.subscribe`  (lines 148–148)
 
-`data_model` · `cross-cutting transcript persistence and compaction reads`
+```
+def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, HubFrame]]
+```
 
-This file is the contract for durable conversation history. A conversation is not just a chat log; it can also include the system instruction used for a completed turn and extra context injected into the model prompt. Other parts of the project write these records, while debug tools and evaluation tools read them, so the format has to live in one neutral place. Without this file, those parts could quietly disagree about where records are stored or what shape they have.
+**Purpose**: This is the interface promise for watching a turn’s live stream. A caller uses it to receive missed frames after a cursor and then keep receiving new frames as they are published.
 
-The file defines typed records using Pydantic, a validation library that checks incoming data has the expected fields and types. `Conversation` is the saved transcript. `CompactionSummary`, `CompactionVerification`, and related small models describe a compressed version of older conversation history. Compaction is like replacing the first chapters of a notebook with a careful summary while keeping the latest pages unchanged.
+**Data flow**: It receives a turn id and optionally the last cursor the caller already saw. It produces an asynchronous stream of cursor-and-frame pairs, first replaying eligible old frames and then yielding live ones.
 
-For storage, the records are turned into compact JSON and then compressed with LZ4, a fast compression format. The key-building functions decide the exact paths used in the blob store, which is a byte-storage service. The read functions fetch compaction pieces back, decompress them, validate them, and return typed Python objects. If bytes are corrupt or no longer match the expected schema, the code raises `TranscriptDecodeError` so readers get a clear failure instead of using bad history.
+**Call relations**: The surface tailing code calls this when it needs to pump hub frames to a user-facing stream. InProcessHub.subscribe is the in-memory implementation of the behavior.
+
+*Call graph*: called by 1 (_pump).
+
+
+##### `Hub.covers`  (lines 150–150)
+
+```
+async def covers(self, turn_id: UUID, cursor: str) -> bool
+```
+
+**Purpose**: This is the interface promise for asking whether a cursor is still covered by the hub’s replay memory. A reconnecting surface uses this to decide whether it can resume smoothly or must fall back to rebuilding from durable state.
+
+**Data flow**: It receives a turn id and a cursor string. It checks whether the retained replay history goes back far enough to include that cursor, and returns true or false.
+
+**Call relations**: The hub-tail surface code calls this before deciding how to continue a stream after reconnect. InProcessHub.covers supplies the in-memory answer.
+
+*Call graph*: called by 1 (tail_frames).
+
+
+##### `Hub.latest_activity`  (lines 152–152)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: This is the interface promise for asking what a running turn appears to be doing right now, without opening a full subscription. It is meant for quick status reads.
+
+**Data flow**: It receives a turn id. An implementation looks through recent retained frames for the newest activity summary and returns it, or returns nothing if none is available.
+
+**Call relations**: No direct caller is listed in the provided graph, but this method belongs to the hub interface so status-related code can ask for a lightweight one-frame view of current activity.
+
+
+##### `_offer`  (lines 155–158)
+
+```
+def _offer(queue: asyncio.Queue[tuple[str, HubFrame]], item: tuple[str, HubFrame]) -> None
+```
+
+**Purpose**: This helper puts a frame into one subscriber’s queue without ever making the publisher wait. If that subscriber is already too far behind, it drops the oldest queued frame to make room.
+
+**Data flow**: It receives an asynchronous queue and a cursor-and-frame item. If the queue is full, it removes one old item, then adds the new item immediately; it returns nothing and only changes the queue contents.
+
+**Call relations**: InProcessHub.publish schedules this helper on each subscriber’s event loop. This keeps cross-thread delivery safe while preserving the rule that publishing should not block on slow readers.
+
+
+##### `InProcessHub._stream`  (lines 205–215)
+
+```
+def _stream(self, turn_id: UUID) -> _TurnStream
+```
+
+**Purpose**: This internal helper finds or creates the live stream state for one turn. It is where the hub makes sure each turn has a replay buffer, a subscriber list, and a cursor counter.
+
+**Data flow**: It receives a turn id and reads the hub’s dictionaries while the lock is expected to be held. If a stream already exists, it returns it; otherwise it creates a new _TurnStream with a fixed-size deque replay buffer and starts its cursor sequence from the saved mark for that turn, if any.
+
+**Call relations**: InProcessHub.publish uses this when it needs somewhere to append a new frame. InProcessHub.subscribe uses it when a watcher attaches, so the watcher can be registered and given a replay snapshot.
+
+*Call graph*: called by 2 (publish, subscribe); 2 external calls (__init__, deque).
+
+
+##### `InProcessHub.publish`  (lines 217–236)
+
+```
+async def publish(self, turn_id: UUID, frame: HubFrame) -> str
+```
+
+**Purpose**: This adds a new live frame for a turn, stores it for possible replay, and sends it to all current subscribers. It is designed so a slow or disconnected subscriber cannot slow down the running turn.
+
+**Data flow**: It receives a turn id and a frame. Under a lock, it gets the turn stream, assigns the next cursor, saves the frame in the replay ring, snapshots the current subscribers, and marks the stream ended if the frame is terminal or parked. After releasing the lock, it schedules delivery to each subscriber queue and returns the new cursor.
+
+**Call relations**: This is the concrete implementation behind Hub.publish. It calls InProcessHub._stream to get the per-turn state, and it hands each outgoing item to _offer through the subscriber’s event loop so delivery is safe even when publisher and subscriber run on different loops.
+
+*Call graph*: calls 1 internal fn (_stream).
+
+
+##### `InProcessHub.subscribe`  (lines 238–265)
+
+```
+async def subscribe(self, turn_id: UUID, cursor: str='') -> AsyncIterator[tuple[str, HubFrame]]
+```
+
+**Purpose**: This lets a client follow one turn’s stream. It first replays retained frames newer than the caller’s cursor, then waits for new frames as they are published.
+
+**Data flow**: It receives a turn id and optional cursor. It creates a bounded queue for live frames, records the current event loop, registers that queue as a subscriber, and takes a snapshot of replayable frames after the cursor. It yields the replay snapshot, then yields items from the live queue until the subscriber stops; on exit it removes the subscriber and may delete the stream if it is no longer needed.
+
+**Call relations**: This is the concrete implementation behind Hub.subscribe. Surface streaming code calls the interface to receive frames. The method uses InProcessHub._stream to attach to the right turn, and InProcessHub.publish later feeds its queue with live updates.
+
+*Call graph*: calls 1 internal fn (_stream); 2 external calls (Queue, get_running_loop).
+
+
+##### `InProcessHub.covers`  (lines 267–275)
+
+```
+async def covers(self, turn_id: UUID, cursor: str) -> bool
+```
+
+**Purpose**: This answers whether the hub still has enough replay history for a client’s cursor. It prevents a reconnecting surface from assuming it can resume smoothly when the needed old frames have already been dropped.
+
+**Data flow**: It receives a turn id and cursor. If the cursor is empty, or the stream or buffer is missing, it returns false. Otherwise it compares the oldest retained cursor with the requested cursor and returns whether the retained history reaches back far enough.
+
+**Call relations**: This is the concrete implementation behind Hub.covers. The surface tailing flow asks this before deciding whether to resume from the hub replay or rely on a more complete redraw from durable storage.
+
+
+##### `InProcessHub.latest_activity`  (lines 277–294)
+
+```
+async def latest_activity(self, turn_id: UUID) -> Activity | None
+```
+
+**Purpose**: This gives a quick answer to “what is this turn doing right now?” by looking for the newest retained Activity frame. It avoids opening a live stream just to show a status line.
+
+**Data flow**: It receives a turn id. Under the lock, it finds that turn’s retained buffer and scans backward through only a limited number of recent frames. If it finds an Activity frame, it returns it; if the turn has no stream or no recent activity frame, it returns nothing.
+
+**Call relations**: This is the concrete implementation behind Hub.latest_activity. It uses a bounded reverse scan so repeated status checks do not waste time searching a large replay buffer when no useful activity is likely to be there.
+
+*Call graph*: 1 external calls (islice).
+
+
+### Visible Reply Shaping
+Reply extraction and activity labeling prepare safe, user-facing updates while hiding internal markup and sensitive tool details.
+
+### `core/src/ufo/loop/replies.py`
+
+`domain_logic` · `main loop and live response streaming`
+
+The system allows a model to mark part of its text as a reply to a specific message, using tags like `<reply-to message="..."> ... </reply-to>`. This file is the filter and reader for those tags. Without it, the raw tags could leak to people, reply text could be shown twice, or half-written tags could appear during live streaming.
+
+There are two related jobs here. After a full round of model output is complete, `marked_replies` scans the whole text, finds every fully closed reply span, records the words inside it, and notes which message ID it was aimed at if the ID is valid. It also returns the round text with the reply markup removed, so the conversation record keeps the words but not the instructions.
+
+During live streaming, text arrives in small chunks, and a tag can be split across chunk boundaries. `ReplyRedaction.feed` works like a careful curtain: it immediately lets through normal prose, but holds back anything that might be part of a reply tag or reply span until it knows what it is. Completed reply spans are withheld from the live stream because they will be delivered separately later. Broken or unfinished markup is dropped rather than shown.
 
 #### Function details
 
-##### `transcript_key`  (lines 37–38)
+##### `marked_replies`  (lines 42–51)
 
 ```
-def transcript_key(conversation_id: UUID) -> str
+def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]
 ```
 
-**Purpose**: Builds the storage path for the main saved transcript of one conversation. It gives writers and readers the same address for the conversation’s compressed message file.
+**Purpose**: This function reads a completed model response and pulls out the reply sections that were deliberately marked for a member. It also produces a cleaned version of the text with the reply tags removed, so the saved conversation does not contain markup.
 
-**Data flow**: It takes a conversation UUID, which is a unique identifier, and inserts it into a fixed path pattern. The result is a string like a filing-cabinet label pointing to that conversation’s transcript blob.
+**Data flow**: It takes the full text of a completed round. It searches for closed `<reply-to ...>` sections, strips any reply markup from the words inside, ignores empty replies, and turns each valid spoken section into a `MarkedReply` with a message reference when possible. It returns two things: the collected replies in order, and the original text with all reply markup removed.
 
-**Call relations**: This is the shared naming rule for transcript storage. No specific caller is shown in the provided call facts, but it exists so separate write and read code can meet at the same blob-store key.
+**Call relations**: This is used after the model has finished speaking, when the system can safely inspect the whole output. For each marked span it asks `_named_message` to turn the written message name into a real UUID when possible, then creates `MarkedReply` records that later code can deliver as member-visible replies.
 
-
-##### `encode`  (lines 41–43)
-
-```
-def encode(conversation: Conversation) -> bytes
-```
-
-**Purpose**: Turns a validated `Conversation` object into compressed bytes ready to store. Someone uses it when they want the durable transcript to be small and consistently formatted.
-
-**Data flow**: It receives a `Conversation`, asks it for its plain data form, converts that data to compact JSON text, encodes the text as bytes, and compresses those bytes with LZ4. The output is the byte blob that can be written to storage.
-
-**Call relations**: This is the writing-side partner to `decode`. It calls the conversation model’s dump method to get serializable data, then uses JSON encoding before compression so all readers see the same stored format.
-
-*Call graph*: 2 external calls (model_dump, dumps).
+*Call graph*: calls 1 internal fn (_named_message); 1 external calls (__init__).
 
 
-##### `decode`  (lines 46–50)
+##### `_named_message`  (lines 54–58)
 
 ```
-def decode(body: bytes) -> Conversation
+def _named_message(named: str) -> UUID | None
 ```
 
-**Purpose**: Turns stored transcript bytes back into a validated `Conversation`. It protects readers from corrupt or outdated transcript data by raising a clear transcript-specific error.
+**Purpose**: This small helper checks whether the message name written in a reply tag is a valid UUID, which is a standard unique identifier. If it is not valid, the reply is still kept, but without a trusted message reference.
 
-**Data flow**: It receives compressed bytes from storage, decompresses them, and asks `Conversation` to validate the JSON inside. If that succeeds, a `Conversation` object comes out; if decompression or validation fails, it raises `TranscriptDecodeError` instead of returning unsafe data.
+**Data flow**: It receives the raw text from the `message="..."` part of a reply tag. It trims extra spaces and tries to parse it as a UUID. If parsing works, it returns the UUID; if parsing fails, it returns `None`.
 
-**Call relations**: This is the reading-side partner to `encode`. It wraps lower-level decompression or validation failures in `TranscriptDecodeError`, giving callers one meaningful error type for transcript decode problems.
+**Call relations**: `marked_replies` calls this while building each `MarkedReply`. Its job is to keep bad or misspelled message IDs from crashing the reply extraction process.
 
-*Call graph*: 1 external calls (__init__).
-
-
-##### `compaction_key`  (lines 136–137)
-
-```
-def compaction_key(conversation_id: UUID, index: int, half: CompactionHalf) -> str
-```
-
-**Purpose**: Builds the storage path for one piece of one compaction record. A compaction has separate stored parts: the window before compression, the window after compression, and the summary.
-
-**Data flow**: It takes a conversation UUID, a compaction index number, and which part is wanted: `before`, `after`, or `summary`. It combines them into the exact blob-store key where that piece should live.
-
-**Call relations**: `read_compaction_after` and `read_compaction_record` call this before fetching bytes. It is the single naming rule that keeps all compaction readers pointed at the same storage layout.
-
-*Call graph*: called by 2 (read_compaction_after, read_compaction_record).
+*Call graph*: called by 1 (marked_replies); 1 external calls (UUID).
 
 
-##### `decode_compaction`  (lines 140–149)
+##### `ReplyRedaction.feed`  (lines 77–99)
 
 ```
-def decode_compaction(index: int, before: bytes, after: bytes, summary: bytes) -> CompactionRecord
+def feed(self, chunk: str) -> str
 ```
 
-**Purpose**: Rebuilds a complete `CompactionRecord` from its three stored byte blobs. It is used when a reader needs the full before-and-after story of a compaction, not just one piece.
+**Purpose**: This method filters live model output one chunk at a time, so reply markup and reply-only text are not shown in the ordinary stream. It lets safe prose through immediately and holds back anything that might be a tag until more characters arrive.
 
-**Data flow**: It receives the compaction index plus compressed bytes for the `before`, `after`, and `summary` parts. It decompresses and validates each part, pulls the message lists out of the two window records, and returns one `CompactionRecord` containing the index, both message windows, and the structured summary. If any part is unreadable or has the wrong shape, it raises `TranscriptDecodeError`.
+**Data flow**: It receives the next chunk of streamed text and appends it to text already being held. If it is inside a reply span, it discards text until it finds the closing reply tag, keeping only a possible unfinished closer at the end. If it is outside a reply span, it publishes normal text before an opener, withholds the reply span, or publishes only the part that is definitely not the start of a tag. It returns the newly safe text to show now, and updates its internal `held` and `inside` state for the next chunk.
 
-**Call relations**: `read_compaction_record` calls this after it has fetched all three blobs from storage. This function does the decoding and validation work, then hands back the typed record that higher-level readers can use.
+**Call relations**: This method is called repeatedly while a round is still being streamed. It relies on `_growing_suffix` when waiting for a possible closing tag and on `_settled_chars` when deciding how much ordinary-looking text is safe to release. Later, once the full round exists, `marked_replies` can extract the withheld reply spans for their proper delivery.
 
-*Call graph*: called by 1 (read_compaction_record); 2 external calls (__init__, __init__).
-
-
-##### `read_compaction_after`  (lines 152–165)
-
-```
-async def read_compaction_after(blob: BlobStore, conversation_id: UUID, index: int) -> tuple[Message, ...] | None
-```
-
-**Purpose**: Fetches only the `after` window for one compaction. This is useful when a reader only needs the replacement window, avoiding the heavier work of loading the full pre-compaction history.
-
-**Data flow**: It receives a blob store, a conversation UUID, and a compaction index. It builds the `after` key, asks the blob store for those bytes, and returns `None` if the blob is missing. If bytes are found, it decompresses and validates them, then returns the tuple of messages from the saved `after` window. Bad bytes become `TranscriptDecodeError`.
-
-**Call relations**: It calls `compaction_key` to get the correct storage path and `BlobStore.get` to fetch the bytes. Unlike `read_compaction_record`, it stops after the small `after` piece because some callers only need to compare or inspect the installed replacement window.
-
-*Call graph*: calls 2 internal fn (get, compaction_key); 1 external calls (__init__).
+*Call graph*: calls 2 internal fn (_growing_suffix, _settled_chars); 1 external calls (find).
 
 
-##### `read_compaction_record`  (lines 168–179)
+##### `_growing_suffix`  (lines 102–107)
 
 ```
-async def read_compaction_record(blob: BlobStore, conversation_id: UUID, index: int) -> CompactionRecord | None
+def _growing_suffix(text: str, token: str) -> str
 ```
 
-**Purpose**: Fetches and decodes one complete compaction record for a conversation. It returns `None` when that numbered compaction does not exist.
+**Purpose**: This helper keeps only the end of some text that could still become a specific token when the next streamed chunk arrives. It prevents the filter from accidentally discarding the beginning of a closing tag split across chunks.
 
-**Data flow**: It receives a blob store, a conversation UUID, and an index. It builds keys for the `before`, `after`, and `summary` blobs and fetches each one. If any blob is missing, it returns `None`; otherwise it passes all three byte blobs to `decode_compaction` and returns the resulting `CompactionRecord`.
+**Data flow**: It receives some current text and a target token, such as the reply closing tag. It checks each possible tail end of the text and finds the longest suffix that matches the start of the token. It returns that suffix, or an empty string if no tail could grow into the token.
 
-**Call relations**: `read_compaction_records` calls this repeatedly, one index at a time. Inside, this function uses `compaction_key` for the storage addresses, `BlobStore.get` for the actual reads, and `decode_compaction` to turn raw bytes into a safe typed object.
+**Call relations**: `ReplyRedaction.feed` uses this while it is inside a hidden reply span and has not yet seen the full closing tag. The helper lets `feed` throw away hidden reply content while still remembering enough characters to recognize the closer if it continues in the next chunk.
 
-*Call graph*: calls 3 internal fn (get, compaction_key, decode_compaction); called by 1 (read_compaction_records).
+*Call graph*: called by 1 (feed).
 
 
-##### `read_compaction_records`  (lines 182–192)
+##### `_settled_chars`  (lines 110–119)
 
 ```
-async def read_compaction_records(blob: BlobStore, conversation_id: UUID) -> tuple[CompactionRecord, ...]
+def _settled_chars(text: str) -> int
 ```
 
-**Purpose**: Reads every saved compaction for a conversation, oldest first. It gives debug or evaluation code the full sequence of compaction events without needing to know how they are numbered.
+**Purpose**: This helper decides how much currently held text is definitely ordinary prose and can be published now. It is careful around a trailing `<`, because that character might be the start of a reply tag split across chunks.
 
-**Data flow**: It starts at compaction index 1 with an empty list. For each index, it asks `read_compaction_record` for that record. Found records are appended; the first missing index means there are no more records, so it returns all collected records as an immutable tuple.
+**Data flow**: It receives held text from the live stream. If there is no `<`, all of it is safe. If the last `<` and the characters after it could still become an opening or closing reply tag, it reports that only the text before that point is safe. Otherwise, it reports that all the text can be published.
 
-**Call relations**: This function is the simple walking loop over compaction history. It depends on `read_compaction_record` to know whether each numbered record exists and to decode it, then stops naturally when that helper returns `None`.
+**Call relations**: `ReplyRedaction.feed` calls this when it is outside a reply span and has not found a complete opener. The result tells `feed` what to release to the live stream now and what to keep for the next chunk in case a tag is still forming.
 
-*Call graph*: calls 1 internal fn (read_compaction_record).
+*Call graph*: called by 1 (feed).
+
+
+### `core/src/ufo/turns/activity.py`
+
+`domain_logic` · `during a user turn when tool activity is being summarized`
+
+When the system uses a tool, the raw call can be technical or sensitive: it may include tool names, arguments, paths, URLs, or IDs. This file creates a safe, plain-language activity label for that tool call, so a user can see progress without seeing the machinery underneath. It is like replacing a kitchen’s detailed prep notes with a simple sign that says “Chopping vegetables.”
+
+The main piece is ActivitySummarizer. It receives a tool call and, optionally, the user’s goal. It builds a small JSON payload containing a shortened version of the goal and a shortened rendering of the tool arguments. Then it asks a language model to produce only a 3-to-8-word label, using a strict prompt that says not to reveal tool names, commands, paths, URLs, IDs, secrets, or JSON.
+
+The file also protects the rest of the system from delays and failures. The model request has a small token limit, and the call is wrapped in an 8-second timeout. If anything goes wrong, the file records a metric and a log entry, then returns nothing instead of breaking the turn. Finally, the model’s answer is cleaned up so it becomes one neat label with extra whitespace, bullets, quotes, and ending punctuation removed.
+
+#### Function details
+
+##### `ActivityModel.model`  (lines 31–31)
+
+```
+def model(self) -> str
+```
+
+**Purpose**: This is the agreed-upon way for an activity model object to reveal which model name it uses. ActivitySummarizer reads it when building the request sent to the language model.
+
+**Data flow**: Before: an object that follows the ActivityModel shape has some model identifier inside it. The property exposes that identifier as text. After: the summarizer can place that model name into the ModelRequest.
+
+**Call relations**: ActivitySummarizer.summarize relies on this property when it prepares the model request. The protocol does not implement the storage itself; it states what any compatible model object must provide.
+
+
+##### `ActivityModel.complete`  (lines 33–33)
+
+```
+async def complete(self, request: ModelRequest) -> str
+```
+
+**Purpose**: This is the agreed-upon method for asking a language model to complete a request and return text. In this file, it is used to turn a prepared prompt and payload into a short activity label.
+
+**Data flow**: Before: the caller has a ModelRequest containing the prompt, user payload, token limit, and other options. The model object receives that request and produces a text completion. After: the caller gets the model’s raw text answer.
+
+**Call relations**: ActivitySummarizer.summarize awaits this method after building the request. The protocol only defines the promise that such a method exists; the actual model implementation lives elsewhere.
+
+
+##### `ActivitySummarizer.summarize`  (lines 42–69)
+
+```
+async def summarize(self, call: ToolUseBlock, goal: str='') -> str | None
+```
+
+**Purpose**: This function creates a member-friendly label for one tool call. It uses the user goal and the tool call details as private context, asks a model for a safe short summary, and returns the cleaned-up label.
+
+**Data flow**: Before: it receives a ToolUseBlock, which includes the tool name and its input arguments, plus an optional goal string. It trims the goal, turns the arguments into bounded JSON text, builds a compact payload, and places that payload into a ModelRequest with a safety-focused instruction prompt. It then waits for the model response, but only up to the configured timeout. After: if the model answers successfully, the raw answer is normalized by activity_line and returned as a short label; if the request fails or times out, it records a metric and log entry and returns None.
+
+**Call relations**: This is the main flow in the file. It calls _bounded_arguments so large or sensitive argument blobs are not sent unchecked, constructs Message and ModelRequest objects for the model call, uses asyncio.timeout so the system does not wait forever, and then passes the model’s answer to activity_line for cleanup. On errors, it hands information to emit_metric and log so operators can see that activity labeling failed without interrupting the larger user turn.
+
+*Call graph*: calls 2 internal fn (_bounded_arguments, activity_line); 6 external calls (__init__, __init__, timeout, dumps, emit_metric, log).
+
+
+##### `_bounded_arguments`  (lines 72–76)
+
+```
+def _bounded_arguments(arguments: dict[str, object]) -> str
+```
+
+**Purpose**: This helper turns a tool’s argument dictionary into compact JSON text and cuts it off if it is too long. It keeps the activity-summary request small and avoids sending an unlimited amount of tool input to the model.
+
+**Data flow**: Before: it receives a dictionary of tool arguments. It serializes that dictionary into compact JSON text. If the result fits within the configured character limit, it returns it unchanged; if it is too long, it returns only the beginning plus an ellipsis. After: the caller has a short text version of the arguments suitable for the summarization prompt.
+
+**Call relations**: ActivitySummarizer.summarize calls this while building the payload for the model. This helper does not decide what the summary should say; it only prepares the argument text safely and predictably before the model request is made.
+
+*Call graph*: called by 1 (summarize); 1 external calls (dumps).
+
+
+##### `activity_line`  (lines 79–82)
+
+```
+def activity_line(text: str) -> str | None
+```
+
+**Purpose**: This function cleans a model’s raw answer into one tidy label. It removes common formatting noise so the member sees a simple phrase instead of bullets, quotes, code ticks, or stray punctuation.
+
+**Data flow**: Before: it receives the text returned by the model. It collapses repeated whitespace, trims leading bullet-like characters, removes wrapping quote or code characters, and strips ending punctuation such as periods or exclamation marks. After: it returns the cleaned label, or None if nothing meaningful remains.
+
+**Call relations**: ActivitySummarizer.summarize calls this after the model completes. The model is asked to follow strict formatting rules, but this function is the final cleanup step in case the model includes extra formatting anyway.
+
+*Call graph*: called by 1 (summarize); 1 external calls (sub).
+
+
+### Cancellation Primitive
+Shared cancellation logic stops active workflow execution before marking the turn cancelled in storage.
+
+### `core/src/ufo/turns/cancellation.py`
+
+`domain_logic` · `cancel handling and reconciliation`
+
+A “turn” is a unit of work that may be running as a durable DBOS workflow, meaning DBOS keeps enough state to recover or continue it reliably. This file exists because cancelling a turn is easy to get wrong: if the database says “cancelled” before the workflow is actually cancelled, the system could believe work has stopped while it is still running. That would be like marking a kitchen order as void before telling the cook to stop making it.
+
+The file’s single function, `cancel_one_turn`, is the common cancellation primitive used by different parts of the system. It cancels exactly one turn. It does not cancel child or descendant turns; another part of the system, the cancel reconciler, is responsible for walking that tree.
+
+The flow is careful. First it reads the turn row from the database. If the turn does not exist, or if it has already finished in some final state, it does nothing. If the turn is still active, it asks DBOS to cancel the workflow for that turn. Only after that cancellation request is durably recorded does it update the turn row to the terminal status `cancelled`. It also preserves the list of objects the turn had already created, so callers can still learn what was produced before cancellation. Finally, it emits a metric so cancelled turns are counted consistently.
+
+#### Function details
+
+##### `cancel_one_turn`  (lines 23–83)
+
+```
+async def cancel_one_turn(client: DBOSClient, turn_id: UUID) -> TerminalFrame | None
+```
+
+**Purpose**: Cancels one turn safely and records that cancellation in the database only after the workflow has been told to stop. It returns the final cancellation frame if this call actually changed the turn to cancelled, or `None` if the turn was missing or had already finished.
+
+**Data flow**: It takes a DBOS client and a turn ID. It first opens a database transaction and reads the turn’s current status, profile, and parent information. If the row is missing or already terminal, it returns `None`. Otherwise it asks DBOS to cancel the workflow named by that turn ID. Then it reopens a database transaction, reads the objects the turn already created, builds a `TerminalFrame` with status `cancelled`, and tries to update the row only if it is still non-terminal. If that update succeeds, it emits a cancellation metric and returns the frame; if another process finished the turn first, it returns `None`.
+
+**Call relations**: This function is the shared cancellation step that higher-level cancel paths rely on. Inside its flow it uses `workspace_tx` to read and write the durable turn row, `DBOSClient.cancel_workflow_async` to stop the durable workflow, `ObjectRef.model_validate` and `TerminalFrame` to describe the cancelled result, and `emit_metric` with `turn_profile` to report that the turn ended by cancellation.
+
+*Call graph*: 8 external calls (__init__, model_validate, cancel_workflow_async, select, update, workspace_tx, emit_metric, turn_profile).
 
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The merged deployment settings that tell the process how to run, which services to use, and which safety options are enabled.
-- `reg-database-store` — The shared database connection and tables where workspaces, users, agents, turns, files, jobs, costs, and extension data are saved.
-- `reg-workspace-principals` — The current workspace, members, agents, controlling users, and ownership identities used to decide who is acting.
-- `reg-visibility-boundaries` — The saved rules for who may see each conversation, agent, transcript, source, memory, artifact, or workspace object.
-- `reg-credential-vault` — The encrypted store of API keys, OAuth tokens, and other secrets that can be injected only into approved places.
-- `reg-connection-grants` — The saved account connections and per-agent permissions that say which outside accounts an agent may use.
-- `reg-agent-settings` — The durable settings for each agent, including model choice, reasoning mode, internet access, sandbox size, tools, setup needs, icon, and visibility.
-- `reg-surface-installations` — The saved bindings for web, Slack, iMessage, CLI, hosted sites, and other surfaces that connect outside channels to workspaces and agents.
-- `reg-conversation-records` — The durable conversation rows that remember where a conversation came from, which agent owns it, its audience, title, sandbox, and current metadata.
-- `reg-inbound-message-queue` — The saved holding area for incoming chat messages before they are admitted into a running or queued turn.
-- `reg-turn-run-state` — The shared state of each unit of agent work, including queued, claimed, running, parked, canceled, recovered, or finished.
-- `reg-runtime-fleet` — The records of running server or worker instances, their heartbeats, listener claims, and cleanup ownership.
-- `reg-transcript-history` — The saved conversation transcript and compaction snapshots that all surfaces, workers, prompts, and recovery logic read and update.
-- `reg-midturn-replies` — The durable outbox for replies sent before a turn is fully complete, so they can be delivered once even after retries.
-- `reg-model-usage-accounting` — The recorded token, image, video, embedding, sandbox, egress, and cost usage used for billing and audit trails.
-- `reg-spend-controls` — The workspace spending caps, prepaid balances, top-up settings, BYOK flags, and billing export state.
-- `reg-sandbox-runtime` — The remembered sandbox handles, workspace directories, terminals, command sessions, ports, and cleanup state used for safe code execution.
-- `reg-egress-policy` — The network access rules and proxy authorization state that decide what sandboxed code may contact outside the system.
-- `reg-file-blob-store` — The shared byte storage for uploads, generated files, previews, media, and other raw data, separated by workspace or deployment scope.
-- `reg-artifact-registry` — The saved list of files deliberately shared with users, including ownership, access checks, preview metadata, and download links.
-- `reg-source-sync-catalog` — The saved catalog of external sources, pages, sync cursors, deletion marks, retry backoff, and indexing needs.
-- `reg-search-index` — The shared keyword and embedding indexes that let conversations, tools, and background jobs find relevant stored documents.
-- `reg-memory-store` — The durable store of remembered facts and memory-search results that can be written, deduplicated, recalled, and shown later.
-- `reg-scheduled-jobs` — The durable background job and scheduled task state used for recurring work, wakeups, retries, monitors, billing, and offline evaluation.
-- `reg-subagent-delegation` — The shared state for spawned helper agents, including their catalog entries, parent-child turn links, required results, names, and cancellation state.
-- `reg-extension-object-slots` — The extension-owned object and conversation-panel data, such as artifacts, sources, tasks, sites, automations, and custom workspace objects.
-- `reg-workspace-change-log` — The saved record of file changes made during a conversation, used to explain later what the agent changed in the workspace.
-- `reg-observability-traces` — The shared trace, metric, log, and traceparent information that lets operators connect startup, turns, tools, subagents, and billing events.
-- `reg-schema-migration-state` — The applied core and extension migration revisions, rollback position, and schema-version bookkeeping that determine which durable records are valid.
-- `reg-prompt-change-proposals` — The durable proposal and governance state for suggested agent prompt or behavior changes, including approval and offline-improvement outcomes before agent settings are rewritten.
-- `reg-pending-human-interactions` — The durable pending questions, credential-collection prompts, setup requests, and checklist-style waits that tools create and surfaces later resolve.
-- `reg-surface-delivery-state` — The outbound reply/writeback bookkeeping for external chat surfaces, including delivery targets, external message identifiers, and exactly-once final reply status.
-- `reg-extension-workflow-state` — Extension-owned durable workflow records that are not just UI slots, such as code-review inboxes, evaluation runs, objectives, pauses, briefs, notes, monitors, triggers, and web-chat state.
-- `reg-seat-entitlements` — Workspace seat limits, included-seat counts, and seated-member marks that gate access and billing entitlement decisions.
-- `reg-turn-created-references` — Saved references or citations created by a turn so final replies, source panels, transcripts, and later turns can resolve cited material consistently.
-- `reg-turn-surface-context` — Durable per-turn inbound context such as speaker, on-behalf-of member, timezone, original surface metadata, and connection-authorization status carried from admission into prompting, execution, and delivery.
-- `reg-admission-ordering-locks` — Conversation-level admission and serialization locks/cursors that prevent concurrent messages, starts, stops, or queued turns from racing before durable turn execution begins.
+- `reg-database-session-workspace-scope` — The shared database access layer that keeps reads and writes inside the right workspace and transaction.
+- `reg-surface-routing` — The mapping from outside places like web, Slack, terminal, and iMessage to the right workspace, conversation, member, and agent.
+- `reg-conversation-records` — The durable conversation list, including titles, audience, surface labels, sandbox links, and visibility rules.
+- `reg-inbound-admission-queue` — The saved queue of incoming messages or intents waiting to become safe conversation turns.
+- `reg-turn-state` — The shared status record for each unit of agent work, including claiming, running, completion, failure, parent-child links, and billing markers.
+- `reg-transcript-store` — The saved conversation history and compacted summaries that later turns, portals, and auditors read back.
+- `reg-live-update-stream` — The temporary live feed of progress messages that open clients and other server processes can follow.
+- `reg-cancellation-flags` — The shared stop signals and cleanup markers used to cancel turns, child work, sandboxes, and stuck jobs safely.
+- `reg-runtime-instance-fleet` — The record of which server processes are alive and which shared listeners or jobs they currently own.
+- `reg-schedule-monitor-store` — The saved recurring prompts, pauses, and outside-world watches that can wake conversations later.
+- `reg-artifact-blob-store` — The shared file storage for generated artifacts, downloads, document previews, screenshots, and other saved output bytes.
+- `reg-subagent-objectives` — The shared plan and delegation state for child agents, objectives, steps, evidence, attempts, and result delivery.
+- `reg-observability-context` — The shared tracing, logging, metrics, health, and redaction context used to understand what happened safely.
+- `reg-reply-delivery-outbox` — Durable reply records for messages that must be delivered exactly once or retried safely, including mid-turn replies before final turn completion.
+- `reg-delivery-format-registry` — Shared per-surface reply and delivery-format rules used when constructing prompts and shaping delivered responses.
+- `reg-sandbox-task-session-state` — Persistent/pollable state for long-running sandbox commands and REPL sessions that survive tool timeouts across tool calls.
+- `reg-runtime-connection-pools` — Live pooled connections and reusable clients for shared services such as the database, Redis/live hub, blob storage, model providers, connector APIs, and sandbox/browser providers.

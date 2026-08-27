@@ -1,799 +1,1111 @@
-# Tool dispatch, sandboxed execution, artifacts, and files  `stage-10`
+# Model Invocation, Streaming, and Spend Admission  `stage-10`
 
-This stage is the system’s supervised “workshop” during the main conversation loop. When the model asks to do something, the tool registry acts like a catalog: it defines which tools exist, how they are shown to the model, and how the right one is found. The tool context is the rulebook handed to that tool. It says who the tool is acting for, which files and accounts it may use, how it can call subagents, and how it must report back.
+This stage is part of the main work loop, when UFO needs to ask a language model for the next answer or action. It is the system’s “translator and cashier.” It checks that a model can be used, prepares the request in the format each provider expects, streams the reply back in UFO’s own common event format, and records usage so cost can be calculated.
 
-The sandbox backends provide the safe workbench. They create a private workspace, run commands in local, terminal, Docker, or cloud containers, expose previews and ports, and block unsafe file paths that try to escape the workspace. The built-in tools are the everyday instruments: run shell commands, read and edit files, ask the user questions, collect credentials, manage checklists, and keep REPL sessions alive. Task journals remember long-running commands.
+The models package marker simply makes this model code importable. The Anthropic bridge talks to Anthropic’s API and hides Anthropic-only details such as special content blocks, retry behavior, and usage reporting. The OpenAI bridge does the same for OpenAI-style services, including chat messages, tools, images, reasoning data, and streamed replies. The pricing code turns token counts into billable cost and records which price table was used.
 
-Artifacts are shared files the agent has deliberately produced for the user, with access checks. Activity messages turn raw tool calls into clear, short updates people can understand.
-
-## Sub-stages
-
-- [Sandbox backends and file safety](stage-10.1.md) `stage-10.1` — 11 files
-- [Built-in interactive and stateful tools](stage-10.2.md) `stage-10.2` — 4 files
+OpenRouter is added as an extension provider, including image and video generation with proper saving and billing. The self-improvement model adapter gives that extension a small, safe way to call models. Its proposer asks for better agent prompts after failures, and its replay code tests a new prompt against an old conversation without rerunning tools.
 
 ## Files in this stage
 
-### Tool runtime surface
-These files describe how tool actions are presented, how shared artifacts are managed, and how tools are contextualized and registered for safe execution.
+### Core model transports
+Built-in model package entry points and provider bridges translate Anthropic and OpenAI-style requests and streams into UFO's common model interface.
 
-### `core/src/ufo/turns/activity.py`
+### `core/src/ufo/models/__init__.py`
 
-`domain_logic` · `during tool-call reporting`
+`data_model` · `import time`
 
-When a tool enters dispatch, this file asks the background model for one short, goal-facing summary of that call. The request contains only the tool name and bounded arguments. The result is normalized to one line under 50 characters for every activity surface, including Slack.
+This is an empty package marker file. In Python, a folder can act as an importable package when it contains an `__init__.py` file. That means other parts of the project can refer to this folder using import paths such as `ufo.models`, instead of treating it as just a plain directory on disk.
 
-Generation runs beside tool dispatch and has a bounded lifetime. A slow or failed summary produces no live label and never delays the tool or the main model loop.
+Because the file is empty, it does not create any classes, functions, settings, or side effects. Its job is structural: it gives the project a stable place for model-related code to live. You can think of it like a label on a filing cabinet drawer. The label does not contain the documents, but it tells the rest of the system that this drawer exists and can be opened by name.
 
-#### Function details
-
-##### `ActivitySummarizer.summarize`
-
-```
-async def summarize(self, call: ToolUseBlock) -> str | None
-```
-
-**Purpose**: Generates the current member-facing step without delaying dispatch.
-
-**Data flow**: It receives one `ToolUseBlock`, bounds and serializes its arguments, sends that call alone to the background model, and returns a normalized line. Failure or timeout returns `None`.
-
-**Call relations**: `TurnEngine` starts it in a detached task when a call enters dispatch, then publishes an `Activity` frame if the label finishes before the turn ends.
+Without this file, depending on the Python version and packaging setup, imports that expect `ufo.models` to be a regular package might fail or behave differently. Keeping it here makes the package layout explicit and easier for both tools and developers to understand.
 
 
-### `core/src/ufo/artifacts.py`
+### `core/src/ufo/models/anthropic.py`
 
-`domain_logic` · `request handling`
+`io_transport` · `request handling`
 
-An artifact is a file produced during a conversation and shared with the outside world through `share_file`. This file is the read-and-delete side of that feature. It treats all shares with the same conversation and filename as versions of one object, so if a turn shares `report.txt` twice in the same conversation, users see one artifact whose latest version is current. The same filename from a different conversation is a different artifact.
+This file is the Anthropic adapter for the model layer. The rest of the project wants to ask a model for an answer and receive a steady stream of simple events: text, tool calls, hidden reasoning records, and final token usage. Anthropic’s API speaks its own format, so this file acts like a translator at the border.
 
-The file gives each artifact a stable, readable name made from a short conversation id prefix plus a cleaned-up filename, like `3f2a9c1b-report-txt`. If two names would still collide, it adds a short fingerprint. This is like labeling boxes by both the room they came from and what is inside.
+Before sending a request, it converts the project’s message blocks into Anthropic content blocks. Text stays text, images become Anthropic base64 image objects, tool calls and tool results are reshaped, and reasoning from other providers is dropped because Anthropic cannot safely reuse it.
 
-The `ArtifactObjects` class is the main object-store surface. It can list visible artifacts, return details for one artifact, report its status, and delete it. Status is especially important: it may copy the latest stored bytes back into the workspace under `artifacts/<name>/<filename>`, so a later turn can reuse a file made earlier. It can also create a temporary download link. Creating or updating artifacts is refused, because artifacts must come from sharing a real workspace file, not from direct object edits.
+The main class, `AnthropicClient`, opens a streaming request to Anthropic. As chunks arrive, it yields project events such as `TextDelta` for visible text and `ToolCallStart` or `ToolCallDelta` when the model asks to use a tool. It holds Anthropic “thinking” blocks until the stream is finished, because those blocks must be echoed back later in their exact order if tool results continue the same reasoning round.
+
+The file also owns retry behavior. Temporary network failures, timeouts, overloads, and retryable status errors are tried again before any visible output has been yielded. Once the user-visible answer has started, errors are no longer retried because mixing two attempts would be unsafe. It always finishes a successful stream with usage information so callers know token costs.
 
 #### Function details
 
-##### `artifact_object_names`  (lines 67–87)
+##### `anthropic_sdk_client`  (lines 50–54)
 
 ```
-def artifact_object_names(shares: Iterable[tuple[UUID, str]]) -> dict[tuple[UUID, str], str]
+def anthropic_sdk_client(api_key: str) -> anthropic.AsyncAnthropic
 ```
 
-**Purpose**: Builds the public object name for each artifact identity, where an identity is a conversation plus a filename. It keeps artifacts from different conversations separate, even when the filenames match.
+**Purpose**: Creates the low-level Anthropic software client used to call the provider. It deliberately turns off the SDK’s built-in retries so this file’s own retry rules are the single source of truth.
 
-**Data flow**: It receives pairs of conversation id and filename. It turns each filename into a safe short slug, prefixes it with part of the conversation id, checks whether any generated names collide, and adds a short digest only for collisions. It returns a dictionary from each original identity to its final object name.
+**Data flow**: It receives an API key → builds an asynchronous Anthropic client with that key, a fixed timeout, and no automatic SDK retries → returns the ready-to-use client object.
 
-**Call relations**: ArtifactObjects._groups calls this after reading artifact rows from the database. This naming step lets later listing and lookup code talk about artifacts by one stable name instead of raw database fields.
+**Call relations**: This is the setup helper for code that needs an Anthropic connection. It hands back the raw provider client that `AnthropicClient` stores and later uses when `complete` sends a streaming request.
 
-*Call graph*: calls 2 internal fn (_identity_digest, _slug); called by 1 (_groups); 1 external calls (Counter).
-
-
-##### `_slug`  (lines 90–92)
-
-```
-def _slug(filename: str) -> str
-```
-
-**Purpose**: Turns a filename into a short, safe name fragment suitable for an object name. It removes awkward punctuation and normalizes the text so names are easier to read and compare.
-
-**Data flow**: It takes a filename string, lowercases it, replaces runs of non-letter-or-number characters with dashes, trims extra dashes, and limits the length. If nothing usable remains, it returns the fallback word `artifact`.
-
-**Call relations**: artifact_object_names uses this when creating the readable part of an artifact object name. It is the small cleaning step before collision checking happens.
-
-*Call graph*: called by 1 (artifact_object_names).
+*Call graph*: 1 external calls (AsyncAnthropic).
 
 
-##### `_identity_digest`  (lines 95–97)
+##### `_anthropic_image`  (lines 57–61)
 
 ```
-def _identity_digest(identity: tuple[UUID, str]) -> str
+def _anthropic_image(source: ImageSource) -> dict[str, object]
 ```
 
-**Purpose**: Creates a shortable fingerprint for an artifact identity. This is used only when two different artifacts would otherwise receive the same visible name.
+**Purpose**: Converts the project’s image description into the image shape Anthropic expects. This keeps image formatting in one small place instead of repeating it wherever images may appear.
 
-**Data flow**: It takes a conversation id and filename, combines them into one string, and hashes that string with SHA-256, a standard one-way fingerprinting method. It returns the full hexadecimal hash, and callers take the needed prefix.
+**Data flow**: It receives an `ImageSource`, which contains the image media type and base64 data → wraps those fields in Anthropic’s required dictionary structure → returns that dictionary for inclusion in a request.
 
-**Call relations**: artifact_object_names calls this when duplicate generated names are found. The digest lets the system keep names unique without making every normal name long and noisy.
+**Call relations**: It is used whenever higher-level conversion code finds an image. `_anthropic_tool_result_part` calls it for images inside tool results, and `anthropic_content` calls it for images in normal message content.
 
-*Call graph*: called by 1 (artifact_object_names); 1 external calls (sha256).
-
-
-##### `ArtifactObjects.list`  (lines 115–117)
-
-```
-async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage
-```
-
-**Purpose**: Lists artifact objects visible to the current tool turn. It is what the object system uses when an agent asks what shared files are available.
-
-**Data flow**: It reads the current context's allowed subjects, fetches matching artifact groups, turns each group into a display row, and passes those rows through paging and filtering. It returns an ObjectPage containing the visible artifact summaries.
-
-**Call relations**: This is the turn-time listing entry for artifacts. It relies on _groups to collect versioned artifacts and on _row to make each one readable before handing the result to the shared object_page helper.
-
-*Call graph*: calls 2 internal fn (_groups, _row); 1 external calls (object_page).
+*Call graph*: called by 2 (_anthropic_tool_result_part, anthropic_content).
 
 
-##### `ArtifactObjects.member_page`  (lines 119–133)
+##### `_anthropic_tool_result_part`  (lines 64–69)
 
 ```
-async def member_page(self, ext: ExtensionContext | None, *, member_id: UUID, admin: bool, query: ObjectListQuery) -> ObjectPage
+def _anthropic_tool_result_part(part: ToolResultContent) -> dict[str, object]
 ```
 
-**Purpose**: Lists artifact objects for a signed-in member viewing them outside an active tool turn, such as in a portal. It uses the member's own audience scope rather than the tool context's read scope.
+**Purpose**: Turns one piece of a tool result into Anthropic’s request format. A tool result can contain plain text or an image, and this function converts either case.
 
-**Data flow**: It receives member information and a list query. It derives the audiences that member may read, fetches artifact groups for those audiences, converts them into rows, and returns a paged ObjectPage.
+**Data flow**: It receives one tool-result content block → if it is text, it returns an Anthropic text dictionary; if it is an image, it delegates the image wrapping to `_anthropic_image` → the converted part is ready to be placed inside an Anthropic tool result.
 
-**Call relations**: This mirrors ArtifactObjects.list for portal-style reads. It calls the audience helpers to decide what the member can see, then uses the same _groups and _row path as normal artifact listing.
+**Call relations**: It works as a helper inside `anthropic_content`. When a message includes a structured tool result made of multiple parts, `anthropic_content` calls this function for each part before sending the request.
 
-*Call graph*: calls 2 internal fn (_groups, _row); 3 external calls (audience_subjects, conversation_audience, object_page).
-
-
-##### `ArtifactObjects.get`  (lines 135–137)
-
-```
-async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ArtifactSpec] | None
-```
-
-**Purpose**: Returns the saved description of one artifact visible to the current tool turn. It does not copy file bytes into the workspace; that happens through status.
-
-**Data flow**: It takes the current context and an artifact object name. It searches visible artifact groups for that name, returns None if not found, or converts the matching versions into an ObjectDetail with the latest filename, media type, caption, timestamps, and conversation link.
-
-**Call relations**: The object system calls this when a turn asks for one artifact's details. It delegates name lookup to _find and formatting to _detail.
-
-*Call graph*: calls 2 internal fn (_find, _detail).
+*Call graph*: calls 1 internal fn (_anthropic_image); called by 1 (anthropic_content).
 
 
-##### `ArtifactObjects.member_detail`  (lines 139–153)
+##### `anthropic_content`  (lines 72–106)
 
 ```
-async def member_detail(self, ext: ExtensionContext | None, name: str, *, member_id: UUID, admin: bool) -> MemberObject[ArtifactSpec] | None
+def anthropic_content(content: str | tuple[ContentBlock, ...]) -> str | list[dict[str, object]]
 ```
 
-**Purpose**: Returns both the list-row view and detail view for one artifact as seen by a signed-in member outside a turn. It deliberately does not copy bytes to a workspace or create a download link.
+**Purpose**: Translates the project’s standard message content into the exact content format accepted by Anthropic. This is the main request-body translator for text, images, tool use, tool results, and Anthropic reasoning blocks.
 
-**Data flow**: It takes an artifact name and member information, derives the member's readable audiences, and searches for that artifact. If missing, it returns None. If found, it packages a row summary and detailed spec into a MemberObject.
+**Data flow**: It receives either a plain string or a tuple of project content blocks → plain strings pass through unchanged; structured blocks are inspected one by one and converted into Anthropic dictionaries → it returns either the original string or a list of Anthropic-ready content blocks. It drops reasoning blocks that belong to another provider’s wire format, because Anthropic cannot reuse them.
 
-**Call relations**: This is the portal-style counterpart to get. It uses the same _find, _row, and _detail helpers as the tool-facing methods, but starts from the member's audience rather than a ToolContext.
+**Call relations**: `AnthropicClient.complete` calls this while building the message list for Anthropic. During that conversion, this function calls `_anthropic_image` for normal image blocks and `_anthropic_tool_result_part` for image or text pieces inside tool results.
 
-*Call graph*: calls 3 internal fn (_find, _detail, _row); 3 external calls (__init__, audience_subjects, conversation_audience).
-
-
-##### `ArtifactObjects.status`  (lines 155–199)
-
-```
-async def status(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> dict[str, JsonValue] | None
-```
-
-**Purpose**: Reports practical runtime information for an artifact and, when safe, copies the latest file bytes back into the workspace so a later turn can reuse them. It can also mint a temporary download URL.
-
-**Data flow**: It receives a context, artifact name, and optional expected generation. It finds the visible artifact, fetches its bytes from blob storage if the file is small enough, checks in the database that the conversation is still visible and unchanged, writes the bytes into the sandbox workspace if available, optionally creates a time-limited download link, and returns size, share time, turn id, version count, URL, and workspace path.
-
-**Call relations**: This is called during object status/get flows when the system needs the artifact to become usable again in the workspace. It uses _find for lookup, _unchanged_visible for a safety check, the blob store for bytes, the sandbox for writing files, and mint_artifact_url for member downloads.
-
-*Call graph*: calls 2 internal fn (_find, _unchanged_visible); 5 external calls (__init__, now, mint_artifact_url, workspace_tx, ws_current).
+*Call graph*: calls 2 internal fn (_anthropic_image, _anthropic_tool_result_part); called by 1 (complete).
 
 
-##### `ArtifactObjects.apply`  (lines 201–210)
+##### `AnthropicClient.complete`  (lines 114–442)
 
 ```
-async def apply(self, ctx: ToolContext, name: str, spec: ArtifactSpec, old: ArtifactSpec | None, *, expected_generation: UUID | None) -> None
+async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
 ```
 
-**Purpose**: Refuses create or update attempts for artifacts. Artifacts can only be made by writing a file in the workspace and sharing it with `share_file`.
+**Purpose**: Sends one model request to Anthropic and streams back the project’s common model events. It is responsible for translating the request, interpreting Anthropic’s stream, retrying safe failures, preserving reasoning blocks, and ending with token usage.
 
-**Data flow**: It receives the proposed artifact spec and related context, but does not store or change anything. It immediately raises VerbNotSupported with guidance explaining that artifacts are shared, not directly edited.
+**Data flow**: It receives a `ModelRequest` containing the model name, system prompt, conversation messages, tool definitions, token limit, caching settings, and reasoning preference → builds Anthropic request arguments, including converted messages and optional tool or reasoning settings → opens a streaming API call → converts each incoming Anthropic stream event into project events such as stream-start, text deltas, tool-call starts, tool-call JSON deltas, hidden reasoning blocks, and final usage. It may raise clear project errors if the model response is truncated, refused, missing usage, or if the provider failure cannot safely be retried.
 
-**Call relations**: The object system would call this for create or update verbs. This artifact store stops that path and points users back to the proper producer, `share_file`.
+**Call relations**: This is the central flow of the file. It calls `anthropic_content` before sending messages so Anthropic receives the right shape. While the stream runs, it creates and yields the project’s event objects for the rest of the engine to consume. If Anthropic reports temporary trouble before any visible output, it waits and tries again; if output has already begun, it lets the error surface so the caller does not accidentally combine two different model attempts.
+
+*Call graph*: calls 1 internal fn (anthropic_content); 13 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, __init__, sleep (+3 more)).
+
+
+### `core/src/ufo/models/openai.py`
+
+`io_transport` · `request handling during streamed model calls`
+
+This file solves a practical translation problem. The rest of the project speaks in its own common model language: messages can contain text, images, tool calls, tool results, and sometimes saved reasoning. OpenAI-style providers expect that information in very specific request formats, and they stream back many small events. This file converts both directions.
+
+The main class, OpenAIClient, chooses which OpenAI API shape to use based on the model’s specification, not by guessing from the model name. That matters because some models only accept certain combinations, such as tools plus reasoning, on the newer Responses API. Think of it like using the right shipping label for each carrier: the package may contain the same conversation, but the label format must match the service.
+
+The helper functions build request payloads for chat or responses, encode images as data URLs, split tool results into text and image parts when OpenAI requires it, and calculate token usage for billing or tracking. The streaming methods then call the provider, yield UFO’s standard ModelEvent objects as text or tool-call pieces arrive, and finish with usage information. They also retry temporary failures before any visible output has been delivered, respect provider retry-after hints, turn rejected API keys into clearer project errors, and raise explicit errors for truncation or refusal.
+
+#### Function details
+
+##### `_cache_write_tokens`  (lines 93–101)
+
+```
+def _cache_write_tokens(details: PromptTokensDetails | InputTokensDetails | None) -> int
+```
+
+**Purpose**: This helper reads a provider-specific token count for prompt tokens newly written into the cache. It protects the rest of the code from missing or badly typed provider metadata.
+
+**Data flow**: It receives token-detail metadata from OpenAI-style usage records. If the extra field is absent, it returns 0; if the field exists and is a real integer, it returns that number; if the value is not an integer, it raises an error so bad billing data is not silently accepted.
+
+**Call relations**: The chat streaming path uses it while converting Chat Completions usage into UFO’s Usage record. _responses_usage also calls it so both OpenAI API surfaces count cache-write tokens in the same cautious way.
+
+*Call graph*: called by 2 (_complete_chat, _responses_usage).
+
+
+##### `_responses_usage`  (lines 104–118)
+
+```
+def _responses_usage(raw: ResponseUsage, cache_write_30m_priced: bool) -> Usage
+```
+
+**Purpose**: This converts OpenAI Responses API usage data into UFO’s standard Usage object. It separates normal input tokens, cached input tokens, output tokens, and optionally cache-write tokens.
+
+**Data flow**: It receives a raw Responses API usage object and a flag saying whether 30-minute cache writes should be priced. It reads cached tokens and cache-write tokens, checks that those numbers do not exceed the total input tokens, then returns a Usage record with the totals split into UFO’s categories.
+
+**Call relations**: OpenAIClient._complete_responses calls this whenever the Responses stream reports usage. It relies on _cache_write_tokens for provider-specific cache-write metadata and then hands the normalized Usage event back to the model engine.
+
+*Call graph*: calls 1 internal fn (_cache_write_tokens); called by 1 (_complete_responses); 1 external calls (__init__).
+
+
+##### `openai_sdk_client`  (lines 121–127)
+
+```
+def openai_sdk_client(api_key: str, base_url: str | None=None) -> openai.AsyncOpenAI
+```
+
+**Purpose**: This creates the underlying asynchronous OpenAI SDK client used to talk to OpenAI or an OpenAI-compatible provider. It disables the SDK’s own retries because this file has its own retry rules for streaming calls.
+
+**Data flow**: It receives an API key and, optionally, a custom base URL for another provider that speaks the OpenAI protocol. It returns an openai.AsyncOpenAI client configured with a timeout and no built-in SDK retries.
+
+**Call relations**: This is a construction helper used when setting up an OpenAIClient. The returned SDK client is later used by OpenAIClient._complete_chat and OpenAIClient._complete_responses to make actual provider requests.
+
+*Call graph*: 1 external calls (AsyncOpenAI).
+
+
+##### `_status_retry_wait`  (lines 130–136)
+
+```
+def _status_retry_wait(error: openai.APIStatusError, delay: float) -> float
+```
+
+**Purpose**: This decides how long to wait after an HTTP status error before retrying. It respects the provider’s retry-after header when present, but never waits less than the current backoff delay.
+
+**Data flow**: It receives an API status error and the current retry delay. It tries to read the response’s retry-after header as a number of seconds, falls back to the existing delay if it is missing or invalid, and returns the larger wait time.
+
+**Call relations**: Both streaming paths call this after retryable status errors such as rate limits or server errors. It feeds the sleep time used before the next provider attempt.
+
+*Call graph*: called by 2 (_complete_chat, _complete_responses).
+
+
+##### `_openai_image`  (lines 139–143)
+
+```
+def _openai_image(source: ImageSource) -> dict[str, object]
+```
+
+**Purpose**: This turns UFO’s image data into the image-url format expected by OpenAI chat messages. The image is embedded directly as a base64 data URL.
+
+**Data flow**: It receives an ImageSource containing a media type and base64 image data. It returns a small dictionary saying this is an image URL and placing the image data inside a data URL string.
+
+**Call relations**: openai_messages uses it for ordinary image blocks in chat messages. _openai_tool_result uses it when a tool result contains images that must be lifted into a user message.
+
+*Call graph*: called by 2 (_openai_tool_result, openai_messages).
+
+
+##### `_openai_tool_result`  (lines 146–162)
+
+```
+def _openai_tool_result(result: str | tuple[ToolResultContent, ...]) -> tuple[str, list[dict[str, object]]]
+```
+
+**Purpose**: This prepares a tool result for OpenAI’s Chat Completions format, where tool messages can carry text but not images. It separates text from images so the caller can send the images in a follow-up user message.
+
+**Data flow**: It receives either a plain string tool result or a tuple of text and image blocks. For a string, it returns that text and no images. For blocks, it joins all text pieces with newlines and converts each image through _openai_image, returning both the text and the image parts.
+
+**Call relations**: openai_messages calls this while translating UFO ToolResultBlock objects into chat messages. The text becomes the OpenAI tool message, while any images are handed back so openai_messages can place them where Chat Completions accepts images.
+
+*Call graph*: calls 1 internal fn (_openai_image); called by 1 (openai_messages).
+
+
+##### `openai_messages`  (lines 165–224)
+
+```
+def openai_messages(system: str, messages: tuple[Message, ...]) -> list[dict[str, object]]
+```
+
+**Purpose**: This converts UFO’s conversation history into the message list required by OpenAI’s Chat Completions API. It keeps text, images, tool calls, and tool results, while dropping reasoning records because this API shape has no place to replay them.
+
+**Data flow**: It receives the system prompt and a tuple of UFO Message objects. It trims images where needed, walks through each message, converts text and images into OpenAI content, serializes tool-call arguments as JSON, turns tool results into OpenAI tool messages, and returns a list of dictionaries ready for the chat completion request.
+
+**Call relations**: OpenAIClient._chat_kwargs calls this when building the request payload for the Chat Completions path. It uses _openai_image and _openai_tool_result to keep image and tool-result conversion consistent.
+
+*Call graph*: calls 2 internal fn (_openai_image, _openai_tool_result); called by 1 (_chat_kwargs); 2 external calls (dumps, trim_images).
+
+
+##### `responses_input`  (lines 227–328)
+
+```
+def responses_input(messages: tuple[Message, ...]) -> list[ResponseInputItemParam]
+```
+
+**Purpose**: This converts UFO’s conversation history into the richer input-item format used by OpenAI’s Responses API. Unlike Chat Completions, this format can carry saved reasoning items, which helps the model resume a tool-using reasoning chain later.
+
+**Data flow**: It receives UFO messages. It walks through text, images, reasoning items, tool calls, and tool outputs; drops reasoning formats from other providers that OpenAI cannot use; encodes tool arguments as JSON; prefixes errored tool text with a clear marker; and returns a list of Responses API input items.
+
+**Call relations**: responses_request calls this when assembling a Responses API request. It is the main adapter that lets OpenAIClient._complete_responses send UFO’s full conversation state, including reasoning records, back to the provider.
+
+*Call graph*: called by 1 (responses_request); 13 external calls (dumps, ResponseReasoningItemParam, EasyInputMessageParam, ResponseFunctionToolCallParam, ResponseInputImageContentParam, ResponseInputImageParam, FunctionCallOutput, ResponseInputTextContentParam, ResponseInputTextParam, ResponseOutputTextParam (+3 more)).
+
+
+##### `responses_request`  (lines 331–363)
+
+```
+def responses_request(request: ModelRequest, effort: OpenAIEffort) -> dict[str, Any]
+```
+
+**Purpose**: This builds the full request dictionary for OpenAI’s Responses API. It combines the model name, instructions, converted input, token limit, streaming setting, reasoning effort, and tool definitions.
+
+**Data flow**: It receives a ModelRequest and the already-decided reasoning effort. It converts messages with responses_input, adds streaming and usage-related options, asks the provider to include encrypted reasoning content, adds tools and tool-choice rules when present, and returns keyword arguments for the SDK call.
+
+**Call relations**: OpenAIClient._complete_responses calls this just before starting a Responses stream. It hands the SDK a legal provider-specific request while keeping the rest of the project insulated from that wire format.
+
+*Call graph*: calls 1 internal fn (responses_input); called by 1 (_complete_responses); 1 external calls (FunctionToolParam).
+
+
+##### `OpenAIClient.complete`  (lines 375–378)
+
+```
+def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
+```
+
+**Purpose**: This is the public entry point for asking this client to complete a model request. It chooses the correct OpenAI API surface for the model.
+
+**Data flow**: It receives a ModelRequest. It checks the model specification’s api_surface field and returns the asynchronous stream from either the Responses path or the Chat Completions path.
+
+**Call relations**: Callers use this instead of calling the private streaming methods directly. It dispatches to OpenAIClient._complete_responses for models configured for the Responses API, otherwise to OpenAIClient._complete_chat.
+
+*Call graph*: calls 2 internal fn (_complete_chat, _complete_responses).
+
+
+##### `OpenAIClient._reasoning_effort`  (lines 380–399)
+
+```
+def _reasoning_effort(self, request: ModelRequest) -> OpenAIEffort
+```
+
+**Purpose**: This decides what reasoning-effort setting, if any, should be sent to the provider. It also prevents unsafe cases where the caller asked to turn reasoning off but the model/provider combination cannot express that with tools.
+
+**Data flow**: It reads the request’s desired reasoning mode, tool presence, and the model specification’s reasoning rules. It returns an OpenAI-compatible effort value, returns None when no parameter should be sent, translates UFO’s 'off' into OpenAI’s 'none', or raises an error when the request cannot be represented safely.
+
+**Call relations**: OpenAIClient._chat_kwargs uses this before building a Chat Completions request. OpenAIClient._complete_responses uses it before building a Responses request, so both API paths apply the same reasoning rules.
+
+*Call graph*: called by 2 (_chat_kwargs, _complete_responses).
+
+
+##### `OpenAIClient._chat_kwargs`  (lines 401–430)
+
+```
+def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]
+```
+
+**Purpose**: This builds the keyword arguments for a Chat Completions streaming request. It packages the conversation, token limit, reasoning effort, and tool definitions in the exact shape the chat API expects.
+
+**Data flow**: It receives a ModelRequest. It converts messages with openai_messages, asks _reasoning_effort whether to include a reasoning setting, translates UFO tool definitions into OpenAI function tools, applies tool-choice rules, and returns a dictionary for the SDK call.
+
+**Call relations**: OpenAIClient._complete_chat calls this immediately before contacting the provider. It is the chat-side counterpart to responses_request.
+
+*Call graph*: calls 2 internal fn (_reasoning_effort, openai_messages); called by 1 (_complete_chat).
+
+
+##### `OpenAIClient._complete_chat`  (lines 432–601)
+
+```
+async def _complete_chat(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
+```
+
+**Purpose**: This streams a response from OpenAI’s Chat Completions API and converts provider chunks into UFO ModelEvent objects. It also handles retries, usage accounting, truncation, empty responses, and key rejection errors.
+
+**Data flow**: It receives a ModelRequest, builds provider arguments with _chat_kwargs, starts a streaming SDK request, and reads chunks as they arrive. Text chunks become TextDelta events, new tool calls become ToolCallStart events, tool-call argument pieces become ToolCallDelta events, and usage chunks become a final Usage event. Temporary failures before visible output are retried with backoff; failures after output are raised to avoid mixing partial attempts.
+
+**Call relations**: OpenAIClient.complete calls this for models using the Chat Completions surface. Inside the stream it uses _cache_write_tokens to normalize usage and _status_retry_wait to honor retry timing from the provider.
+
+*Call graph*: calls 3 internal fn (_chat_kwargs, _cache_write_tokens, _status_retry_wait); called by 1 (complete); 9 external calls (__init__, __init__, __init__, __init__, __init__, __init__, sleep, emit_metric, log).
+
+
+##### `OpenAIClient._complete_responses`  (lines 603–801)
+
+```
+async def _complete_responses(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
+```
+
+**Purpose**: This streams a response from OpenAI’s Responses API and converts its richer event stream into UFO ModelEvent objects. It supports text, tool calls, refusals, truncation, usage, and saved reasoning items.
+
+**Data flow**: It receives a ModelRequest, resolves reasoning effort, builds the request with responses_request, then reads provider events. Text deltas become TextDelta events, function-call events become ToolCallStart and ToolCallDelta events, completed reasoning items are saved and yielded near the end, and usage is normalized with _responses_usage. Retryable provider failures are retried only before visible output; terminal provider events become clear UFO errors such as ModelRefusal or ModelResponseTruncated.
+
+**Call relations**: OpenAIClient.complete calls this for models whose specification selects the Responses API. It uses responses_request for outbound formatting, _responses_usage for accounting, and _status_retry_wait for status-error retry timing.
+
+*Call graph*: calls 4 internal fn (_reasoning_effort, _responses_usage, _status_retry_wait, responses_request); called by 1 (complete); 10 external calls (__init__, __init__, __init__, __init__, __init__, __init__, __init__, sleep, emit_metric, log).
+
+
+### Usage pricing
+Cost accounting converts provider usage into billable records tied to a stable pricing table fingerprint.
+
+### `core/src/ufo/models/pricing.py`
+
+`domain_logic` · `billing and usage recording`
+
+This file is the project’s price list and calculator for language model usage. Models charge different rates for different kinds of tokens, such as input tokens, output tokens, and cached tokens. This file gives those rates a clear shape with `ModelPrice`, then uses them to calculate costs in micro-USD, meaning millionths of a US dollar.
+
+The main idea is simple: usage records say how many tokens were used, and a price table says how much each kind of token costs per million tokens. The calculator multiplies each token count by its matching rate, adds everything together, then divides by one million to get the final micro-dollar cost. This is like a grocery receipt: each item category has a quantity and a unit price, and the total is the sum of all category totals.
+
+The file also creates a digest, which is a cryptographic fingerprint of the price table. That matters because prices can change over time. By stamping billed usage with this digest, the system can later prove which exact price table was used. If a historical usage record refers to a model that is no longer in the table, the code logs a warning and returns zero instead of crashing.
+
+#### Function details
+
+##### `price_digest`  (lines 26–43)
+
+```
+def price_digest(prices: Mapping[str, ModelPrice]) -> str
+```
+
+**Purpose**: Creates a stable version stamp for a model price table. This lets billing records point back to the exact set of rates that were used, even if the table changes later.
+
+**Data flow**: It receives a mapping from model names to `ModelPrice` values. It sorts the models, turns their rates into a compact JSON string, hashes that string with SHA-256, and returns the hash prefixed with `sha256:`. The original price table is not changed.
+
+**Call relations**: When `pricing_from` builds a `Pricing` object, it calls this function to attach a trustworthy fingerprint to the copied price table. Internally, this function relies on JSON formatting and SHA-256 hashing to make the fingerprint deterministic.
+
+*Call graph*: called by 1 (pricing_from); 2 external calls (sha256, dumps).
+
+
+##### `usage_priced_micro_usd`  (lines 46–60)
+
+```
+def usage_priced_micro_usd(model: str, usage: Usage, prices: Mapping[str, ModelPrice]) -> int
+```
+
+**Purpose**: Calculates the cost of one usage record for one model. It returns the cost in micro-USD, which is a very small money unit useful for precise billing.
+
+**Data flow**: It receives a model name, a `Usage` record containing token counts, and the price table. It looks up the model’s prices, multiplies each token count by the matching rate, adds the pieces together, and divides by one million because the rates are per million tokens. If the model is missing from the table, it writes a warning log and returns zero.
+
+**Call relations**: This is the real pricing calculator used by `Pricing.micro_usd`. It is kept as a separate function so the `Pricing` class can be a small wrapper around a price table while the arithmetic stays in one clear place.
+
+*Call graph*: called by 1 (micro_usd); 1 external calls (log).
+
+
+##### `Pricing.micro_usd`  (lines 70–71)
+
+```
+def micro_usd(self, model: str, usage: Usage) -> int
+```
+
+**Purpose**: Provides the normal method callers use to price a usage record with this `Pricing` object’s table. It hides the detail of passing the price table around.
+
+**Data flow**: It receives a model name and a `Usage` record. It forwards those, along with the `Pricing` object’s stored price table, to `usage_priced_micro_usd`, then returns the calculated micro-USD cost.
+
+**Call relations**: Billing code calls this method when recording sandbox, turn, or workspace usage. In that larger flow, the accounting layer has token usage to record, and this method supplies the money amount using the current pricing table.
+
+*Call graph*: calls 1 internal fn (usage_priced_micro_usd); called by 3 (record_sandbox_tokens, record_turn_usage, record_workspace_usage).
+
+
+##### `pricing_from`  (lines 74–77)
+
+```
+def pricing_from(prices: Mapping[str, ModelPrice]) -> Pricing
+```
+
+**Purpose**: Builds a complete immutable-looking `Pricing` value from a plain model price table. It pairs the table with its digest so later billing records can identify the exact rates used.
+
+**Data flow**: It receives a mapping of model names to `ModelPrice` entries. It copies that mapping into a regular dictionary, computes a digest for the copied table, and returns a new `Pricing` object containing both the copied prices and the digest.
+
+**Call relations**: This is the construction point for pricing data in this file. It calls `price_digest` before creating `Pricing`, so every `Pricing` object is born with both usable rates and a version stamp.
+
+*Call graph*: calls 1 internal fn (price_digest); 1 external calls (__init__).
+
+
+### Extension model adapters
+Extension adapters expose additional model access paths, including OpenRouter-backed media-capable models and a constrained self-improvement model facade.
+
+### `extensions/openrouter/ufo_ext_openrouter.py`
+
+`io_transport` · `request handling`
+
+OpenRouter is a service that routes one request to many possible AI providers. This file is the adapter that makes that service fit UFO's own model and tool system. For chat models, it translates UFO's internal request format into OpenRouter's OpenAI-style chat format, streams text and tool calls back as UFO events, records token usage, and retries when OpenRouter or an upstream provider has a temporary failure. It also knows small OpenRouter-specific quirks, such as adding provider prefixes to model names and wrapping some JSON tool results for Google models when OpenRouter would otherwise reject them.
+
+The file also defines two side-effecting tools: `generate_image` and `generate_video`. These are not registered as chat models, because they produce files and are priced per image or per video second, not per token. Each tool checks that the requested model, size, count, and duration are actually supported before making the API call. Successful images or videos are written into the workspace, and the cost is attached to the current turn unless the workspace supplied its own OpenRouter key. In short, this file is both the bridge to OpenRouter's chat models and the safe wrapper around OpenRouter's media-generation APIs.
+
+#### Function details
+
+##### `openrouter_slug`  (lines 260–270)
+
+```
+def openrouter_slug(model: str) -> str
+```
+
+**Purpose**: Turns a model name into the provider/model name style OpenRouter expects. This lets callers use familiar bare names like an OpenAI or Claude model while still sending a valid OpenRouter request.
+
+**Data flow**: It receives a model string. If the string already contains a slash, it leaves it alone; if it looks like an OpenAI or Anthropic model, it adds the matching provider prefix; otherwise it passes the name through unchanged. The output is the model slug used in OpenRouter API calls.
+
+**Call relations**: When a chat request is being prepared, `OpenRouterModelClient._create_kwargs` uses this to choose the wire model name. `_openrouter_messages` also uses it to detect Google-routed models, because those need special message cleanup.
+
+*Call graph*: called by 2 (_create_kwargs, _openrouter_messages).
+
+
+##### `_chunk_provider`  (lines 273–278)
+
+```
+def _chunk_provider(chunk: ChatCompletionChunk) -> str | None
+```
+
+**Purpose**: Extracts the actual upstream provider name from a streamed OpenRouter response chunk when OpenRouter includes it. This matters because a provider that returns an empty answer can be avoided on a retry.
+
+**Data flow**: It receives one streaming chat chunk from the OpenAI-style SDK. It looks in the chunk's extra metadata for a `provider` value and returns it as text, or returns nothing if the value is missing.
+
+**Call relations**: `OpenRouterModelClient.complete` calls this while reading the stream. If the answer later turns out to be empty, that provider name can be added to the ignore list for the next attempt.
+
+*Call graph*: called by 1 (complete).
+
+
+##### `_usage_of`  (lines 281–302)
+
+```
+def _usage_of(usage: CompletionUsage, cache_write_30m_rate: int) -> Usage
+```
+
+**Purpose**: Converts OpenRouter/OpenAI token usage into UFO's own usage record. It carefully separates normal input tokens, generated output tokens, cached reads, and cache writes so billing can be accurate.
+
+**Data flow**: It receives the SDK's usage object and the model's cache-write price setting. It reads prompt tokens, completion tokens, cached tokens, and any reported cache-write tokens, checks that the counts make sense, and returns a `Usage` object. If OpenRouter reports impossible token counts, it raises an error instead of silently billing bad data.
+
+**Call relations**: `OpenRouterModelClient.complete` calls this when usage arrives inside the model stream. The resulting `Usage` event is yielded back to the main model loop so the turn can be accounted for.
+
+*Call graph*: called by 1 (complete); 1 external calls (__init__).
+
+
+##### `_contains_json_reference`  (lines 317–329)
+
+```
+def _contains_json_reference(value: object) -> bool
+```
+
+**Purpose**: Checks whether a nested JSON-like value contains schema reference keys such as `$ref`. This is used to avoid a known OpenRouter problem with Google tool-result messages.
+
+**Data flow**: It receives any Python value, such as a dictionary, list, string, or number. It walks through dictionaries and lists looking for `$ref` or `$dynamicRef`. It returns true as soon as it finds one, otherwise false.
+
+**Call relations**: `_openrouter_messages` calls this after parsing a tool result as JSON. If a reference is found, the message is wrapped as plain text before being sent to OpenRouter.
+
+*Call graph*: called by 1 (_openrouter_messages).
+
+
+##### `_openrouter_messages`  (lines 332–369)
+
+```
+def _openrouter_messages(model: str, system: str, messages: tuple[Message, ...], accepts_image_input: bool) -> list[dict[str, object]]
+```
+
+**Purpose**: Builds the message list that OpenRouter should receive for a chat request. It also applies OpenRouter-specific cleanup so models that cannot see images or Google-routed models with fragile JSON handling still get usable input.
+
+**Data flow**: It receives the model name, system prompt, prior conversation messages, and whether the model accepts image input. It may remove images, converts UFO messages into OpenAI-style messages, and for Google models wraps certain JSON tool results as text if they contain schema references. The output is a list of dictionaries ready for the OpenRouter chat API.
+
+**Call relations**: `OpenRouterModelClient._create_kwargs` calls this while assembling the API request. It relies on `openrouter_slug` to recognize Google slugs and on `_contains_json_reference` to decide which tool-result messages need protective wrapping.
+
+*Call graph*: calls 2 internal fn (_contains_json_reference, openrouter_slug); called by 1 (_create_kwargs); 4 external calls (dumps, loads, omit_images, openai_messages).
+
+
+##### `OpenRouterModelClient.complete`  (lines 390–498)
+
+```
+async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]
+```
+
+**Purpose**: Runs one streaming chat completion through OpenRouter and yields UFO model events as they arrive. It is the main chat bridge: text, tool calls, usage, retries, and truncation errors all pass through here.
+
+**Data flow**: It receives a `ModelRequest` containing the prompt, messages, tools, token limit, and reasoning choice. It builds API arguments, opens a streaming OpenRouter request, translates stream chunks into start, text, tool-call, and usage events, and yields those events to the caller. It may retry temporary provider errors before any output appears, reroute around a provider that returns an empty response, or raise an error if the model hit the token limit.
+
+**Call relations**: The model runtime calls this when an agent uses an OpenRouter-backed chat model. Inside, it asks `_create_kwargs` to prepare the request, `_chunk_provider` to identify the routed provider, `_usage_of` to translate usage, and `_generation_usage` as a fallback when usage was not included in the stream.
+
+*Call graph*: calls 4 internal fn (_create_kwargs, _generation_usage, _chunk_provider, _usage_of); 8 external calls (__init__, __init__, __init__, __init__, __init__, sleep, emit_metric, log).
+
+
+##### `OpenRouterModelClient._generation_usage`  (lines 500–525)
+
+```
+async def _generation_usage(self, generation_id: str, finish_reason: str) -> Usage | None
+```
+
+**Purpose**: Fetches token usage from OpenRouter's generation lookup endpoint when the streaming response did not include usage. This is a backup path for keeping billing accurate.
+
+**Data flow**: It receives a generation id and the finish reason seen in the stream. It makes a separate OpenRouter API request, validates the returned generation data, checks cached token counts, emits a metric, and returns a UFO `Usage` object. If the generation was cancelled or does not match the stream's finish reason, it returns nothing.
+
+**Call relations**: `OpenRouterModelClient.complete` calls this only after a stream ends without usage but has enough information to look up the generation. The usage it returns is then yielded like normal stream usage.
+
+*Call graph*: called by 1 (complete); 3 external calls (__init__, AsyncClient, emit_metric).
+
+
+##### `OpenRouterModelClient._create_kwargs`  (lines 527–563)
+
+```
+def _create_kwargs(self, request: ModelRequest, ignore_providers: frozenset[str]) -> dict[str, Any]
+```
+
+**Purpose**: Assembles the keyword arguments for OpenRouter's chat-completions API. It is where UFO's request settings become the exact payload the OpenAI-style SDK sends.
+
+**Data flow**: It receives a `ModelRequest` and a set of providers to avoid. It chooses the OpenRouter model slug, renders messages, adds token and streaming options, includes reasoning settings when needed, includes provider-ignore settings for reroutes, and converts UFO tool definitions into OpenAI function-tool definitions. The output is a dictionary passed directly to the SDK.
+
+**Call relations**: `OpenRouterModelClient.complete` calls this at the start of each attempt. It delegates model-name conversion to `openrouter_slug` and message conversion to `_openrouter_messages`.
+
+*Call graph*: calls 2 internal fn (_openrouter_messages, openrouter_slug); called by 1 (complete).
+
+
+##### `_model_client`  (lines 566–571)
+
+```
+def _model_client(spec: ModelSpec, key: str) -> OpenRouterModelClient
+```
+
+**Purpose**: Creates an `OpenRouterModelClient` for one registered model spec and API key. It is the factory the model registry uses when a request needs this provider.
+
+**Data flow**: It receives a model specification and an API key. It creates an OpenAI-compatible async client pointed at OpenRouter's base URL and wraps it with the spec and key in an `OpenRouterModelClient`. The result is ready to stream chat completions.
+
+**Call relations**: Each `ModelSpec` built by `_openrouter` stores this factory. Later, when the system selects an OpenRouter model, the registry uses the factory to produce the live client.
+
+*Call graph*: 2 external calls (__init__, openai_sdk_client).
+
+
+##### `_openrouter`  (lines 574–594)
+
+```
+def _openrouter(id: str, price: ModelPrice, cutoff: str, context_window: int=OPENROUTER_CONTEXT_WINDOW, reasoning: ReasoningSupport=_REASONS, accepts_image_input: bool=True) -> ModelSpec
+```
+
+**Purpose**: Builds one registered chat-model specification for OpenRouter. It keeps the repeated provider settings in one place so each listed model can be declared clearly.
+
+**Data flow**: It receives the model id, price, knowledge cutoff, context window, reasoning support, and image-input support. It fills in shared OpenRouter details such as provider name, key slot, environment variable, API surface, and client factory. The output is a `ModelSpec` used by the registry.
+
+**Call relations**: The file calls this while constructing `OPENROUTER_MODEL_SPECS`. Those specs are later returned by `manifest` so the host can discover the available OpenRouter chat models.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `ArtifactObjects.delete`  (lines 212–238)
+##### `GenerateImageInput._within_model_limits`  (lines 698–722)
 
 ```
-async def delete(self, ctx: ToolContext, name: str, *, expected_generation: UUID | None) -> None
+def _within_model_limits(self) -> 'GenerateImageInput'
 ```
 
-**Purpose**: Deletes an artifact and every stored version of it. This removes both the database records and the blob-store bytes, so old download links stop working.
+**Purpose**: Validates an image-generation request against what the chosen image model can actually do. It prevents known-bad combinations from being sent to OpenRouter, where they would fail later with a less helpful error.
 
-**Data flow**: It takes a context and artifact name, finds all visible versions of that artifact, and fails if none exist. Inside a database transaction, it locks and checks the latest visible conversation state, deletes all matching shared_artifact rows, and verifies the expected number were removed. After the database rows are gone, it deletes each version's blob data and any preview blob data from storage.
+**Data flow**: It reads the already-parsed prompt options: model, image count, aspect ratio, and resolution. It checks them against that model's limits, fills in a default resolution when that model uses resolution tiers, and returns the adjusted input object. If the request asks for too many images or an unsupported size, it raises a clear validation error.
 
-**Call relations**: The object system calls this for artifact deletion. It relies on _find to collect the versions and _unchanged_visible to guard against deleting an artifact that changed or became invisible during the operation.
+**Call relations**: Pydantic, the input-validation library, calls this automatically after a `GenerateImageInput` is created for the `generate_image` tool. Validated arguments then flow into `OpenRouterImages.generate`.
 
-*Call graph*: calls 2 internal fn (_find, _unchanged_visible); 3 external calls (delete, workspace_tx, ws_current).
 
+##### `_reported_cost_micro_usd`  (lines 730–742)
 
-##### `ArtifactObjects._unchanged_visible`  (lines 240–247)
-
-```
-def _unchanged_visible(self, ctx: ToolContext, latest: sa.Row) -> sa.Select
-```
-
-**Purpose**: Builds a database check that confirms the latest artifact version still belongs to the current workspace, selected agent, and readable audience. This protects status and delete from acting on stale or no-longer-visible data.
-
-**Data flow**: It receives the current tool context and the latest artifact row. It produces a SQL select statement that looks for the owning conversation under the current workspace, current agent, same audience, and allowed read subjects. The function returns the query; callers execute it.
-
-**Call relations**: ArtifactObjects.status uses this before copying bytes, and ArtifactObjects.delete uses it before removing rows. It is the safety gate between an earlier name lookup and a later side effect.
-
-*Call graph*: called by 2 (delete, status); 3 external calls (select, object_agent_id, ws_current).
-
-
-##### `ArtifactObjects._find`  (lines 249–253)
-
-```
-async def _find(self, subjects: frozenset[str], name: str) -> tuple[sa.Row, ...] | None
-```
-
-**Purpose**: Looks up one artifact by its generated object name within a set of readable subjects. It returns all versions of that artifact, newest first, or says it was not found.
-
-**Data flow**: It receives a set of audience subjects and a name. It asks _groups for all visible artifact groups, scans for the matching generated name, and returns that group's shares if present. If no group has that name, it returns None.
-
-**Call relations**: get, member_detail, status, and delete all call this when they need to move from a user-facing artifact name to the underlying share rows. It is the common lookup step for single-artifact operations.
-
-*Call graph*: calls 1 internal fn (_groups); called by 4 (delete, get, member_detail, status).
-
-
-##### `ArtifactObjects._groups`  (lines 255–297)
-
-```
-async def _groups(self, subjects: frozenset[str]) -> Sequence[tuple[str, tuple[sa.Row, ...]]]
-```
-
-**Purpose**: Collects raw shared artifact rows from the database and groups them into versioned artifact objects. This is where database records become the object model used by listing, lookup, status, and delete.
-
-**Data flow**: It receives the readable audience subjects. It queries the current workspace for shared_artifact rows joined to their turns and conversations, limited to the selected agent and allowed audiences. It groups rows by conversation id and filename, assigns each group a generated object name, sorts each group's versions newest first, then returns all groups sorted by name.
-
-**Call relations**: list and member_page call this to build pages, and _find calls it to locate one named artifact. It calls artifact_object_names so each grouped identity receives the same naming rules.
-
-*Call graph*: calls 1 internal fn (artifact_object_names); called by 3 (_find, list, member_page); 4 external calls (select, workspace_tx, object_agent_id, ws_current).
-
-
-##### `_row`  (lines 300–311)
-
-```
-def _row(name: str, shares: tuple[sa.Row, ...]) -> ObjectRow
-```
-
-**Purpose**: Turns a versioned artifact group into a compact row for lists. The row shows the latest version's key facts and a short summary.
-
-**Data flow**: It receives an artifact name and its shares, with the newest share first. It reads the latest filename, caption, conversation id, and share time, creates a short summary from all versions, and returns an ObjectRow.
-
-**Call relations**: ArtifactObjects.list and ArtifactObjects.member_page use this for list pages, and member_detail uses it when returning a portal detail that also includes the row view. It depends on _summary for the human-readable sentence.
-
-*Call graph*: calls 1 internal fn (_summary); called by 3 (list, member_detail, member_page); 1 external calls (__init__).
-
-
-##### `_detail`  (lines 314–330)
-
-```
-def _detail(shares: tuple[sa.Row, ...]) -> ObjectDetail[ArtifactSpec]
-```
-
-**Purpose**: Builds the detailed object view for an artifact. It describes the latest version and links the artifact back to the conversation where it was created.
-
-**Data flow**: It receives all shares for one artifact, newest first. It creates an ArtifactSpec from the latest share's filename, media type, and caption; sets created time from the oldest version and updated time from the newest; and adds a `created_in` link to the conversation.
-
-**Call relations**: ArtifactObjects.get and ArtifactObjects.member_detail call this after finding an artifact. It is the formatting step that turns share rows into the object detail shape expected by the rest of the object system.
-
-*Call graph*: called by 2 (get, member_detail); 4 external calls (__init__, __init__, __init__, __init__).
-
-
-##### `_summary`  (lines 333–339)
-
-```
-def _summary(shares: tuple[sa.Row, ...]) -> str
-```
-
-**Purpose**: Creates a short human-readable summary for an artifact list row. It includes what the file is, how large it is, when it was shared, and whether it has multiple versions.
-
-**Data flow**: It receives all shares for one artifact, newest first. It reads the latest filename, media type, size, and date, adds a version count when there is more than one share, and trims the result to the maximum summary length.
-
-**Call relations**: _row calls this while building list rows. It keeps the list display concise so callers do not have to assemble their own artifact descriptions.
-
-*Call graph*: called by 1 (_row).
-
-
-### `core/src/ufo/tools/context.py`
-
-`domain_logic` · `active during each tool call and throughout a turn`
-
-A tool in this system is not allowed to freely reach into the whole application. Instead, it receives a ToolContext, which is like a guest badge: it says where the tool may go, what it may read, and whose authority it is using. This file defines that badge and the small result types that tools return.
-
-The context includes access to the sandbox for files and shell commands, a blob store for artifacts, the current turn and agent, the current audience, connected account grants, credential-request helpers, subagent controls, browser and search providers, loaded skills, and cleanup hooks. These pieces keep tool work tied to the right workspace, user, agent, and conversation.
-
-The file also defines how tools safely delegate work to subagents, how background subagents can be checked or cancelled, and how per-turn resources are closed at the end. Permission-related helpers answer questions such as “who is this tool acting as?”, “what audience should this write belong to?”, “is the speaker an admin?”, and “which external account can this turn use?”
-
-Without this file, tools would either need direct access to too much of the system, which risks leaks and privilege mistakes, or every tool would have to reimplement the same permission and cleanup rules.
-
-#### Function details
-
-##### `UnknownSubagentProfile.__init__`  (lines 91–96)
-
-```
-def __init__(self, requested: str, registered: tuple[str, ...]) -> None
-```
-
-**Purpose**: Builds a clear error when code asks for a subagent profile name that is not registered. The error includes both the bad name and the valid choices, so the caller or model has enough information to try again.
-
-**Data flow**: It receives the requested profile name and the tuple of registered names. It formats those into a human-readable error message and stores both pieces of information on the exception object. The result is an exception ready to be raised and inspected.
-
-**Call relations**: The subagent registry calls this when a lookup fails. Instead of letting a plain missing-key error escape, the registry hands back a specific explanation of which profile was unknown and what profiles exist.
-
-*Call graph*: called by 1 (get).
-
-
-##### `UnknownSpawnTarget.__init__`  (lines 103–110)
-
-```
-def __init__(self, requested: str, profiles: tuple[str, ...], agents: tuple[str, ...]) -> None
-```
-
-**Purpose**: Builds a clear error when a spawn request names something that is neither a known subagent profile nor a workspace agent. It tells the caller what names are actually spawnable.
-
-**Data flow**: It receives the requested target name, the available profile names, and the available agent names. It combines them into an error message and stores them as fields. The output is an exception that carries enough context to diagnose the failed spawn.
-
-**Call relations**: The subagent spawning resolver calls this when it cannot match a target. This helps a tool surface a retryable error instead of failing with an unclear lookup problem.
-
-*Call graph*: called by 1 (_resolve).
-
-
-##### `AmbiguousSpawnTarget.__init__`  (lines 117–122)
-
-```
-def __init__(self, requested: str) -> None
-```
-
-**Purpose**: Builds an error for the case where one bare spawn name could mean either a profile or an agent. It tells the caller to use an explicit prefix so the system does not guess wrong.
-
-**Data flow**: It receives the ambiguous name. It creates an error message that suggests the two qualified forms, such as profile:name or agent:name, and stores the requested name. The result is an exception that explains how to fix the ambiguity.
-
-**Call relations**: The subagent spawning resolver calls this when a target name exists in both namespaces. This keeps delegation safe by forcing the caller to say which kind of child it wants.
-
-*Call graph*: called by 1 (_resolve).
-
-
-##### `Spawn.__call__`  (lines 188–197)
-
-```
-async def __call__(self, target: str, payload: dict[str, Any], background: bool=False, dedup_key: str | None=None, delivers_result: bool=False, name: str='', detach_on_arrival: bool=False) -> SpawnRes
-```
-
-**Purpose**: Describes the callable interface used to delegate a task to a child turn, either a subagent profile or another workspace agent. A tool uses this when it wants another specialized worker to do part of the job.
-
-**Data flow**: It takes a target name, an input payload, and options such as whether to run in the background, how to deduplicate retries, and whether the child should deliver its own result. An implementation validates the payload, starts or reconnects to the child turn, waits if appropriate, and returns a SpawnResult describing the child and any finished output.
-
-**Call relations**: This is a protocol, meaning it states the shape of the function that the runtime provides on ToolContext. Tool code calls ctx.spawn, while the actual subagent workflow supplies the implementation behind this interface.
-
-
-##### `SubagentControl.result`  (lines 207–207)
-
-```
-async def result(self, turn_id: UUID) -> SpawnResult
-```
-
-**Purpose**: Describes how a tool can retrieve the final result of an already-spawned background subagent. It is used when the child was started earlier and the caller now wants its completed output.
-
-**Data flow**: It takes a child turn id. An implementation looks up that child, checks its terminal state and validated output, and returns a SpawnResult. It does not create a new child; it reads the state of an existing one.
-
-**Call relations**: This is part of the SubagentControl protocol placed on ToolContext. Tools use it through ctx.subagents, and the subagent lifecycle system provides the real behavior.
-
-
-##### `SubagentControl.wait`  (lines 209–209)
-
-```
-async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]
-```
-
-**Purpose**: Describes how a tool can wait for one or more background subagents and get their current terminal statuses. This is useful when several child tasks were started and the parent wants to pause until they finish or report progress.
-
-**Data flow**: It receives a tuple of child turn ids. An implementation waits according to the runtime’s rules, gathers each child’s status and final text if available, and returns a tuple of SubagentStatus objects.
-
-**Call relations**: This protocol method is offered through ToolContext by the subagent workflow. Tool handlers call it when coordinating background child turns.
-
-
-##### `SubagentControl.cancel`  (lines 211–211)
-
-```
-async def cancel(self, turn_id: UUID) -> SubagentStatus
-```
-
-**Purpose**: Describes how a tool can stop a running background subagent. It gives the parent a way to end child work that is no longer needed.
-
-**Data flow**: It takes a child turn id. An implementation finds that child, requests cancellation, and returns a SubagentStatus describing the child’s resulting state and message.
-
-**Call relations**: This is another operation supplied by the subagent lifecycle system through ctx.subagents. Tools call it when they decide a background child should not continue.
-
-
-##### `SubagentControl.message`  (lines 213–215)
-
-```
-async def message(self, turn_id: UUID, text: str, dedup_key: str, delivers_result: bool=False) -> SubagentStatus
-```
-
-**Purpose**: Describes how a tool can send a follow-up message to an already-spawned subagent. The deduplication key helps avoid sending the same follow-up twice after a retry.
-
-**Data flow**: It receives a child turn id, message text, a deduplication key, and whether the child should deliver the result itself. An implementation admits that message to the child turn once and returns a SubagentStatus showing what happened.
-
-**Call relations**: This protocol method is exposed on ToolContext when subagent control is available. It connects parent-tool decisions to a running child’s conversation.
-
-
-##### `TurnCleanup.register`  (lines 229–230)
-
-```
-def register(self, aclose: Callable[[], Awaitable[None]]) -> None
-```
-
-**Purpose**: Adds an asynchronous cleanup action to be run when the turn ends. Tools use this after opening something that must be closed, such as a browser connection or hosted session.
-
-**Data flow**: It receives an async close function and appends it to the cleanup list. Nothing is closed immediately. The change is stored in the TurnCleanup object for later.
-
-**Call relations**: Tools that create per-turn resources call this during first use. Later, the turn loop drains the cleanup registry so resources do not leak after the turn finishes or fails.
-
-
-##### `TurnCleanup.drain`  (lines 232–238)
-
-```
-async def drain(self) -> None
-```
-
-**Purpose**: Runs all registered cleanup actions, closing resources at the end of a turn. It keeps one failed cleanup from stopping the rest.
-
-**Data flow**: It reads the stored close functions, removes them one by one in reverse order, and awaits each one. If a closer raises an error, it logs the failure and continues. Afterward, the cleanup list is empty.
-
-**Call relations**: The turn loop calls this at turn end. It hands failures to the observability logger, so cleanup problems are visible without leaving later resources unclosed.
-
-*Call graph*: 1 external calls (log).
-
-
-##### `ToolContext.acting_member_id`  (lines 281–289)
-
-```
-def acting_member_id(self) -> UUID | None
-```
-
-**Purpose**: Figures out which workspace member’s authority this tool call is using. It prefers the live speaker, and falls back to the member the turn is acting on behalf of.
-
-**Data flow**: It reads speaker_member_id and on_behalf_of_member_id from the context. If there is a current speaker, it returns that id; otherwise it returns the carried behalf-of id, which may also be absent.
-
-**Call relations**: Other ToolContext helpers use this as the common answer to “who is this call for?” It feeds audience calculation and connector account selection.
-
-
-##### `ToolContext.effective_audience`  (lines 292–302)
-
-```
-def effective_audience(self) -> Audience
-```
-
-**Purpose**: Decides what audience should own a write made by this tool. This prevents private or cross-organization conversation facts from being stamped into the wrong memory space.
-
-**Data flow**: It reads the current audience and the acting member. If there is no acting member, or the conversation is not the workspace-shared audience, it returns the existing audience. If a member is acting in a shared workspace conversation, it returns that member’s conversation audience.
-
-**Call relations**: When tools write information, this property supplies the safe audience label. It calls the audience helper that builds a member-specific conversation audience when that special shared-room rule applies.
-
-*Call graph*: 1 external calls (conversation_audience).
-
-
-##### `ToolContext.read_subjects`  (lines 305–314)
-
-```
-def read_subjects(self) -> frozenset[str]
-```
-
-**Purpose**: Computes the set of subjects this tool may read from: the conversation’s subjects plus the requester’s own private subject. This is a privacy boundary for memory and source lookups.
-
-**Data flow**: It starts with the subjects implied by the current audience. If there is an acting member, it adds only that member’s private subject. It returns the combined set as an immutable frozenset.
-
-**Call relations**: Source and memory readers use this to decide which stored pages or facts are visible. It relies on audience and member-subject helpers to translate people and audiences into readable subject labels.
-
-*Call graph*: 2 external calls (audience_subjects, member_subject).
-
-
-##### `ToolContext.source_reader`  (lines 316–326)
-
-```
-def source_reader(self) -> SourceReader
-```
-
-**Purpose**: Creates a SourceReader that says who is asking to read synced source pages. This packages the current agent, live speaker, and readable subjects into one object for source-related extensions.
-
-**Data flow**: It reads the turn’s agent id, the current speaking member id, and the computed read_subjects. It builds and returns a SourceReader with those values. The context itself is not changed.
-
-**Call relations**: Memory and source extensions call this when searching, listing, or fetching source-backed content. It hands them a consistent permission view rather than making each extension rebuild the same rules.
-
-*Call graph*: called by 5 (memory_search_handler, get, list, _pages, get); 1 external calls (__init__).
-
-
-##### `ToolContext.meter_images`  (lines 328–337)
-
-```
-async def meter_images(self, model: str, images: int, micro_usd: int) -> None
-```
-
-**Purpose**: Records the cost of generated images against this turn’s accounting ledger. Image providers may know their own price, but core records the spend in the workspace’s official usage records.
-
-**Data flow**: It receives the model name, image count, and cost in micro-dollars. It opens a workspace database transaction and writes an image-usage record tied to the workspace and turn. It returns nothing, but the ledger is updated.
-
-**Call relations**: The OpenRouter image extension calls this after generating images. This function hands the actual database write to the accounting layer inside a workspace transaction.
-
-*Call graph*: called by 1 (generate); 2 external calls (record_image_usage, workspace_tx).
-
-
-##### `ToolContext.meter_videos`  (lines 339–347)
-
-```
-async def meter_videos(self, model: str, videos: int, micro_usd: int) -> None
-```
-
-**Purpose**: Records the cost of generated videos against this turn’s accounting ledger. This keeps video generation charges attached to the same workspace and turn as other model spending.
-
-**Data flow**: It receives the model name, video count, and cost in micro-dollars. It opens a workspace database transaction and writes a video-usage record for this workspace and turn. It returns nothing, but accounting state changes.
-
-**Call relations**: The OpenRouter video extension calls this after generating videos. The function delegates the ledger write to the accounting helper inside a workspace transaction.
-
-*Call graph*: called by 1 (generate); 2 external calls (record_video_usage, workspace_tx).
-
-
-##### `ToolContext.speaker_is_admin`  (lines 349–359)
-
-```
-async def speaker_is_admin(self) -> bool
-```
-
-**Purpose**: Checks whether the live requesting speaker is a workspace administrator. It intentionally returns false when there is no live speaker, so background work cannot silently use admin power.
-
-**Data flow**: It reads speaker_member_id. If no one is speaking, it returns false. Otherwise it opens a workspace transaction, asks the seats subsystem whether that member is an admin in this workspace, and returns the boolean answer.
-
-**Call relations**: Many object and credential operations call this before allowing workspace-wide or sensitive actions. It centralizes the admin check so callers do not each interpret background authority differently.
-
-*Call graph*: called by 20 (apply, delete, apply, delete, get, list, status, request_credentials_handler, _credential_authorization, connect_github (+10 more)); 2 external calls (workspace_tx, member_is_admin).
-
-
-##### `ToolContext.agent_is_main`  (lines 361–372)
-
-```
-async def agent_is_main(self) -> bool
-```
-
-**Purpose**: Checks whether the current agent is the workspace’s main agent. Some features expose different powers or visibility depending on whether the agent is the main one.
-
-**Data flow**: It opens a workspace transaction and queries the agent table for the current turn’s agent id and workspace id. It reads the stored is_main value and returns it as a boolean, returning false if no matching row is found.
-
-**Call relations**: Member, workspace, and web audience operations call this when deciding what the current agent is allowed to see or change. It uses SQLAlchemy to build the database query.
-
-*Call graph*: called by 6 (add, _visible_rows, apply, status, _grant, _revoke); 2 external calls (select, workspace_tx).
-
-
-##### `ToolContext.agent_visibility`  (lines 374–386)
-
-```
-async def agent_visibility(self) -> AgentVisibility
 ```
-
-**Purpose**: Reads whether the current agent is private or workspace-visible. It also guards against unexpected stored values.
-
-**Data flow**: It opens a workspace transaction, queries the agent table for the current agent’s visibility, and reads the stored string. If the value is private or workspace, it returns it; otherwise it raises a runtime error because the database contains a value this code does not understand.
-
-**Call relations**: The sites extension calls this when setting a homepage. This helper gives that extension the agent visibility without making it query the agent table itself.
-
-*Call graph*: called by 1 (set_homepage); 2 external calls (select, workspace_tx).
-
-
-##### `ToolContext.begin_credential_authorization`  (lines 388–390)
-
-```
-async def begin_credential_authorization(self, slot: str, payload: str) -> str
-```
-
-**Purpose**: Starts an authorization flow for an extension credential slot, such as asking an admin to approve storing a secret. It returns a sealed authorization token that can be shown or passed through safely.
-
-**Data flow**: It receives a credential slot name and a payload. It first runs the shared credential-authorization checks, getting the credential request service and member id. Then it asks that service to create an authorization for this workspace, member, slot, and payload, and returns the sealed string.
-
-**Call relations**: Coding and Slack extension connection flows call this when they need a member to authorize a credential. It relies on _credential_authorization to enforce the common safety checks before creating anything.
-
-*Call graph*: calls 1 internal fn (_credential_authorization); called by 2 (connect_github, _oauth_link).
-
-
-##### `ToolContext.open_credential_authorization`  (lines 392–394)
-
+def _reported_cost_micro_usd(usage: object) -> int | None
 ```
-async def open_credential_authorization(self, slot: str, sealed: str) -> str
-```
-
-**Purpose**: Opens and validates a sealed credential authorization for a given slot. This lets a tool recover the authorized payload only if it matches the same workspace, member, and credential slot.
-
-**Data flow**: It receives a slot name and sealed authorization string. It runs the shared authorization checks, then asks the credential request service to open the sealed value for this workspace, member, and slot. It returns the opened payload string.
-
-**Call relations**: This is the read side of the credential authorization flow. It uses the same _credential_authorization gate as beginning and fulfilling authorization, so all three steps follow the same rules.
-
-*Call graph*: calls 1 internal fn (_credential_authorization).
-
-
-##### `ToolContext.fulfill_credential_authorization`  (lines 396–401)
-
-```
-async def fulfill_credential_authorization(self, slot: str, sealed: str, plaintext: str) -> None
-```
 
-**Purpose**: Completes a credential authorization by validating the sealed approval and storing the plaintext secret in the workspace. This is the point where the approved credential is actually saved.
+**Purpose**: Reads a cost reported by OpenRouter and converts it into micro-dollars, which are millionths of a US dollar. It also understands the alternate cost field used when a customer brings their own upstream provider key.
 
-**Data flow**: It receives a slot name, sealed authorization, and plaintext secret. It runs the shared checks, opens the sealed authorization to prove it is valid, then writes the plaintext into the current workspace’s credential store. It returns nothing, but the credential store changes.
+**Data flow**: It receives a usage-like object. It looks first for `cost`, then for `cost_details.upstream_inference_cost`, accepts only positive numeric values, converts dollars to micro-USD, and returns that integer. If no usable cost is present, it returns nothing so callers can fall back to list prices.
 
-**Call relations**: Credential setup flows call this after authorization has been granted. It uses _credential_authorization for safety and then uses the current workspace object to store the secret.
+**Call relations**: Image charging calls this through `OpenRouterImages._charge`. Video job parsing calls it through `OpenRouterVideos._job`, so completed video jobs can carry their reported cost forward.
 
-*Call graph*: calls 1 internal fn (_credential_authorization); 1 external calls (ws_current).
+*Call graph*: called by 2 (_charge, _job).
 
 
-##### `ToolContext._credential_authorization`  (lines 403–412)
+##### `OpenRouterImages.generate`  (lines 775–812)
 
 ```
-async def _credential_authorization(self, slot: str) -> tuple[CredentialRequests, UUID]
+async def generate(self, ctx: ToolContext, args: GenerateImageInput) -> ToolResult
 ```
 
-**Purpose**: Performs the common safety checks needed before any credential authorization action. It makes sure there is a live speaker, the extension declared the credential slot, credential storage is configured, and the speaker is an admin.
+**Purpose**: Performs a full image-generation tool call: sends the request, saves returned images, records cost when appropriate, and returns both file paths and image content to the model. This is the main worker behind `generate_image`.
 
-**Data flow**: It receives the slot name and reads speaker_member_id, extension metadata, configured credential request support, and admin status. If any requirement is missing, it raises a ValueError. If everything is valid, it returns the credential request service and the speaker’s member id.
+**Data flow**: It receives the tool context and validated image arguments. It gets the OpenRouter key, posts the generation request, returns a tool error if OpenRouter refuses, decodes and checks images, writes them into the workspace, calculates the charge, meters the images unless the workspace supplied its own key, and returns a `ToolResult` containing JSON metadata plus the generated images.
 
-**Call relations**: The begin, open, and fulfill credential authorization methods all call this first. It in turn calls speaker_is_admin, so admin-only credential storage has one shared gate.
+**Call relations**: `_generate_image` constructs an `OpenRouterImages` instance and calls this. During the flow it uses `_refusal` for failed HTTP responses, `_images` to decode response data, `_save` to write files, and `_charge` to price the call.
 
-*Call graph*: calls 1 internal fn (speaker_is_admin); called by 3 (begin_credential_authorization, fulfill_credential_authorization, open_credential_authorization).
+*Call graph*: calls 5 internal fn (meter_images, _charge, _images, _refusal, _save); 6 external calls (__init__, __init__, __init__, model_dump, AsyncClient, dumps).
 
 
-##### `ToolContext.connector_account`  (lines 414–423)
+##### `OpenRouterImages._refusal`  (lines 814–829)
 
 ```
-async def connector_account(self, provider: str, account_id: str | None=None) -> str
+def _refusal(self, args: GenerateImageInput, response: httpx.Response) -> str
 ```
 
-**Purpose**: Returns the external connector account id that a connector tool is allowed to use. It is a convenience wrapper for callers that only need the broker’s account id, not the full connection details.
+**Purpose**: Builds a short, useful error message when OpenRouter rejects an image request. The goal is to give the model enough information to change the prompt or parameters and try again.
 
-**Data flow**: It receives a provider name and optionally a desired account id. It asks connector_connection to resolve the exact permitted connection, then returns only that connection’s account_id. The context is not changed.
+**Data flow**: It receives the attempted image arguments and the HTTP response. It tries to read a JSON error message, falls back to the raw response text, trims it to a safe length, and returns a sentence saying that no image was generated.
 
-**Call relations**: Connector execution tools and sample connector code call this before making broker-side external tool calls. It delegates the permission and ambiguity checks to connector_connection.
+**Call relations**: `OpenRouterImages.generate` calls this when the image API response is an error. The returned text becomes the content of an error `ToolResult`.
 
-*Call graph*: calls 1 internal fn (connector_connection); called by 2 (call_external_tool, _connector_execute).
+*Call graph*: called by 1 (generate); 1 external calls (json).
 
 
-##### `ToolContext.connector_connection`  (lines 425–462)
+##### `OpenRouterImages._images`  (lines 831–861)
 
 ```
-async def connector_connection(self, provider: str, account_id: str | None=None) -> ConnectorConnection
+def _images(self, args: GenerateImageInput, body: object) -> tuple[GeneratedImage, ...]
 ```
 
-**Purpose**: Selects the exact connected account this turn may use for a provider. It enforces private-by-default account access and reports clear errors when no account, the wrong account, or too many accounts are available.
+**Purpose**: Extracts usable images from OpenRouter's response and rejects responses that are missing images or contain files that are too large. This protects the workspace from broken or oversized output.
 
-**Data flow**: It receives a provider name and optionally a requested account id. It gets private and shared grant tiers, then either finds the requested account among them or chooses one account from the preferred tier. It returns a ConnectorConnection containing the connection id, external account id, and owning member id, or raises a ValueError if selection is impossible.
+**Data flow**: It receives the original arguments and the response body. It looks for base64-encoded image data, decodes each image into bytes, assigns a media type when missing, checks the byte-size limit, and returns `GeneratedImage` objects. If there are no images or one is too large, it raises `OpenRouterImageError`.
 
-**Call relations**: connector_account calls this when only the account id is needed, and source registration code calls it when it needs the full connection identity. It depends on _connector_account_tiers to separate private grants from shared grants before making a choice.
+**Call relations**: `OpenRouterImages.generate` calls this after a successful HTTP response and before saving anything. Its output is handed to `_save` and also returned to the model as image content.
 
-*Call graph*: calls 1 internal fn (_connector_account_tiers); called by 2 (connector_account, _resolved_account); 1 external calls (__init__).
+*Call graph*: called by 1 (generate); 3 external calls (__init__, __init__, b64decode).
 
 
-##### `ToolContext.connector_accounts`  (lines 464–472)
+##### `OpenRouterImages._save`  (lines 863–870)
 
 ```
-async def connector_accounts(self, provider: str) -> tuple[str, ...]
+async def _save(self, ctx: ToolContext, args: GenerateImageInput, index: int, image: GeneratedImage) -> str
 ```
 
-**Purpose**: Lists all connected account ids this turn may use for one provider. This lets tools show or validate the available choices without selecting one yet.
+**Purpose**: Writes one generated image into the workspace using a safe generated path. It gives the rest of the tool flow a file name that can later be shared.
 
-**Data flow**: It receives a provider name. It gets the private and shared grant tiers, combines their account ids, removes duplicates, sorts them, and returns them as a tuple. It does not modify grants or connections.
+**Data flow**: It receives the tool context, image arguments, the image's index in the batch, and the image data. It chooses a file extension from the image media type, writes the raw bytes under `generated-images/`, and returns the saved path.
 
-**Call relations**: Source registration code calls this when resolving which account should back a source. It uses _connector_account_tiers so the list follows the same access rules as connector_connection.
+**Call relations**: `OpenRouterImages.generate` calls this once for each decoded image. The collected paths are included in the final tool result.
 
-*Call graph*: calls 1 internal fn (_connector_account_tiers); called by 1 (_resolved_account).
+*Call graph*: called by 1 (generate).
 
 
-##### `ToolContext._connector_account_tiers`  (lines 474–493)
+##### `OpenRouterImages._charge`  (lines 872–879)
 
 ```
-async def _connector_account_tiers(self, provider: str) -> tuple[list[Grant], list[Grant]]
+def _charge(self, body: object, args: GenerateImageInput, images: int) -> int
 ```
-
-**Purpose**: Divides active connector grants into two groups: private grants owned by the acting member, and shared grants available to the agent. This is the core permission filter for connector account access.
-
-**Data flow**: It receives a provider name and reads the configured grant store and acting member id. If grants are unavailable, it raises ConnectUnavailable. Otherwise it loads active grants, filters them by provider and sharing rules, sorts each group by account id, and returns the private and shared lists.
-
-**Call relations**: connector_connection and connector_accounts both call this before selecting or listing accounts. By putting the filtering here, both higher-level methods use the same private-versus-shared access rule.
-
-*Call graph*: called by 2 (connector_accounts, connector_connection); 1 external calls (__init__).
-
-
-### `core/src/ufo/tools/registry.py`
 
-`data_model` · `startup and tool dispatch`
+**Purpose**: Calculates the cost of an image-generation call in micro-USD. It uses OpenRouter's reported charge when available and otherwise falls back to the model's listed per-image price.
 
-The project lets a model call named tools, such as reading a page, searching, writing a file, or asking another service to do something. This file gives each tool a clear record: its name, its plain description, the shape of input it expects, and the function that actually runs it. It also stores important safety flags. For example, a tool marked untrusted may return text from the outside world, so the engine must not treat that text as instructions. A tool marked side_effecting can change something outside the model, like posting to an API or writing durable data, so the engine can attach an idempotency key, which is a repeat-safe label that helps avoid doing the same external action twice after a retry.
+**Data flow**: It receives the response body, the image arguments, and the number of images produced. It asks `_reported_cost_micro_usd` for a reported cost. If none is found, it multiplies the chosen model's fallback image price by the image count and returns that total.
 
-The file also builds the schema sent to the model client. A schema is a machine-readable description of what arguments a tool accepts. Every tool schema is extended with a reserved requested_by field, used to say which message explicitly authorized a member-specific action.
+**Call relations**: `OpenRouterImages.generate` calls this after images have been successfully saved. The returned amount is used for metering and is included in the tool result metadata.
 
-ToolRegistry is the fixed catalog the engine uses at runtime. When created, it refuses duplicate tool names and refuses tools that already define the reserved requested_by input. Later, the engine can ask for all schemas or look up one tool by name. Without this file, tool calls would be harder to validate, dispatch safely, and explain to the model.
+*Call graph*: calls 1 internal fn (_reported_cost_micro_usd); called by 1 (generate).
 
-#### Function details
 
-##### `ToolDef.schema`  (lines 53–65)
+##### `_generate_image`  (lines 882–887)
 
 ```
-def schema(self) -> ToolSchema
+async def _generate_image(ctx: ToolContext, args: GenerateImageInput) -> ToolResult
 ```
 
-**Purpose**: Builds the public description of one tool that can be sent to the model client. It combines the tool’s name and description with the input shape expected by its Pydantic model, then adds the standard requested_by field used for authorization context.
+**Purpose**: Acts as the registered handler for the `generate_image` tool. It connects the generic tool system to the OpenRouter image generator.
 
-**Data flow**: It starts with a ToolDef, reads its input model, and asks that model for a JSON-style input schema. It makes sure the schema has a properties section, adds the reserved requested_by property with its type and explanation, and returns a ToolSchema object containing the tool name, description, and completed input schema.
+**Data flow**: It receives the tool context and validated image arguments. It checks that extension context is available, creates an `OpenRouterImages` helper using the extension credentials and optional test transport, and returns the result of running the image generation.
 
-**Call relations**: This is the bridge from the internal tool definition to the wire format the model sees. It creates a ToolSchema object, and ToolRegistry.schemas uses it when the system needs to publish the whole catalog of callable tools.
+**Call relations**: The `GENERATE_IMAGE_TOOL` definition points to this function. When an agent calls the tool, the tool runtime enters here and hands the real work to `OpenRouterImages.generate`.
 
 *Call graph*: 1 external calls (__init__).
 
 
-##### `ToolRegistry.__post_init__`  (lines 72–81)
+##### `GenerateVideoInput._within_model_limits`  (lines 941–965)
 
 ```
-def __post_init__(self) -> None
+def _within_model_limits(self) -> 'GenerateVideoInput'
 ```
 
-**Purpose**: Checks that a newly created registry is safe and unambiguous. It prevents two tools from having the same name, and it protects the reserved requested_by field from being reused by a tool’s own input model.
+**Purpose**: Validates a video-generation request against the chosen model's real limits. It catches unsupported durations, resolutions, and aspect ratios before starting a long external job.
 
-**Data flow**: It receives the registry after construction, reads all tool names, and looks for repeated names. It also inspects each tool’s input fields to see whether any tool has already claimed requested_by. If either problem is found, it raises an error immediately; otherwise, the registry remains usable and unchanged.
+**Data flow**: It reads the model, duration, resolution, and aspect ratio from the input object. It checks the duration range and allowed aspect ratios, fills in the model's default resolution if none was provided, and rejects unsupported resolution tiers. The output is the same input object, possibly with resolution filled in.
 
-**Call relations**: This runs automatically when a ToolRegistry is created. It acts like a gatekeeper at setup time, so later dispatch code can trust that a tool name points to exactly one tool and that the authorization field can be added consistently.
-
-
-##### `ToolRegistry.schemas`  (lines 83–84)
-
-```
-def schemas(self) -> tuple[ToolSchema, ...]
-```
-
-**Purpose**: Returns the model-facing schemas for every registered tool. This is used when the system needs to tell the model which tools exist and what arguments each one accepts.
-
-**Data flow**: It reads the registry’s tuple of ToolDef objects, asks each one to produce its ToolSchema, and returns those schemas as a tuple. It does not change the registry.
-
-**Call relations**: This function gathers the individual schemas produced by ToolDef.schema into one catalog. It is part of the setup or prompting path where the engine exposes available tools to the model.
+**Call relations**: Pydantic calls this automatically after `GenerateVideoInput` is built for the `generate_video` tool. Only validated arguments are passed to `OpenRouterVideos.generate`.
 
 
-##### `ToolRegistry.get`  (lines 86–90)
+##### `OpenRouterVideos.generate`  (lines 1007–1048)
 
 ```
-def get(self, name: str) -> ToolDef[Any]
+async def generate(self, ctx: ToolContext, args: GenerateVideoInput) -> ToolResult
 ```
 
-**Purpose**: Finds the registered tool definition with a given name. The engine uses this when the model asks to call a tool and the system must locate the matching handler function and safety settings.
+**Purpose**: Performs a full video-generation tool call: starts a video job, waits for it to finish, downloads the MP4, saves it, meters cost, and returns the saved file path. This is the main worker behind `generate_video`.
 
-**Data flow**: It takes a tool name as input, scans the registry’s tools one by one, and returns the ToolDef whose name matches. If no registered tool has that name, it raises a KeyError so the mistake is caught loudly instead of silently calling the wrong thing.
+**Data flow**: It receives the tool context and validated video arguments. It gets the OpenRouter key, posts a video-generation request, returns a tool error if no job starts, polls the job until it settles, reports provider failure if the job does not complete, downloads the finished video, saves it into the workspace, calculates cost, meters the video unless the workspace supplied its own key, and returns JSON metadata in a `ToolResult`.
 
-**Call relations**: During tool execution, core/src/ufo/loop/engine._dispatch_segments calls this lookup after seeing a requested tool name. The returned ToolDef gives the engine the handler to run and the flags, such as untrusted or side_effecting, that shape how the result or action is treated.
+**Call relations**: `_generate_video` constructs an `OpenRouterVideos` instance and calls this. The method uses `_refusal`, `_job`, `_settled`, `_failure`, `_download`, `_save`, and `_charge` as the separate steps of the video pipeline.
 
-*Call graph*: called by 1 (_dispatch_segments).
+*Call graph*: calls 8 internal fn (meter_videos, _charge, _download, _failure, _job, _refusal, _save, _settled); 5 external calls (__init__, __init__, model_dump, AsyncClient, dumps).
+
+
+##### `OpenRouterVideos._refusal`  (lines 1050–1065)
+
+```
+def _refusal(self, args: GenerateVideoInput, response: httpx.Response) -> str
+```
+
+**Purpose**: Builds a short, useful error message when OpenRouter refuses to start a video job. This lets the model see whether the problem was the prompt, parameters, balance, or another provider response.
+
+**Data flow**: It receives the attempted video arguments and the HTTP response. It tries to read a JSON error message, falls back to response text, trims it to a safe length, and returns a sentence saying that no video was generated.
+
+**Call relations**: `OpenRouterVideos.generate` calls this when the initial video request returns an HTTP error. The text becomes the content of an error `ToolResult`.
+
+*Call graph*: called by 1 (generate); 1 external calls (json).
+
+
+##### `OpenRouterVideos._job`  (lines 1067–1082)
+
+```
+def _job(self, body: object) -> VideoJob
+```
+
+**Purpose**: Parses OpenRouter's video job description into a small internal record. It refuses to continue if the response does not name a job and status, because there would be nothing reliable to poll.
+
+**Data flow**: It receives a response body from either job creation or polling. It reads the job id, status, optional error message, and optional reported cost, then returns a `VideoJob`. If the id or status is missing or not text, it raises `OpenRouterVideoError`.
+
+**Call relations**: `OpenRouterVideos.generate` calls this after the initial successful request. `_settled` calls it again after each poll response to update the job state.
+
+*Call graph*: calls 1 internal fn (_reported_cost_micro_usd); called by 2 (_settled, generate); 2 external calls (__init__, __init__).
+
+
+##### `OpenRouterVideos._settled`  (lines 1084–1105)
+
+```
+async def _settled(self, args: GenerateVideoInput, http: httpx.AsyncClient, job: VideoJob) -> VideoJob
+```
+
+**Purpose**: Polls a video job until it is no longer pending or in progress. It sets a time limit so a stuck external job does not hold the agent's turn open forever.
+
+**Data flow**: It receives the video arguments, an HTTP client, and the current `VideoJob`. While the job is still pending or running, it waits, asks OpenRouter for the latest status, parses the new job state, and repeats. It returns the final job state, or raises an error if polling fails or the timeout is reached.
+
+**Call relations**: `OpenRouterVideos.generate` calls this after creating a job. It uses `_job` to interpret each poll response and hands the settled job back so generation can either report failure or download the completed video.
+
+*Call graph*: calls 1 internal fn (_job); called by 1 (generate); 4 external calls (__init__, sleep, get, monotonic).
+
+
+##### `OpenRouterVideos._failure`  (lines 1107–1111)
+
+```
+def _failure(self, args: GenerateVideoInput, job: VideoJob) -> str
+```
+
+**Purpose**: Turns a completed-but-unsuccessful video job into readable error text. It prefers the provider's own message when one is available.
+
+**Data flow**: It receives the video arguments and the final job record. It chooses the job's error message or a generic status description, trims it to a safe length, and returns a sentence explaining that no video was generated.
+
+**Call relations**: `OpenRouterVideos.generate` calls this when polling finishes but the job status is not `completed`. The returned text becomes the tool error shown to the model.
+
+*Call graph*: called by 1 (generate).
+
+
+##### `OpenRouterVideos._download`  (lines 1113–1132)
+
+```
+async def _download(self, args: GenerateVideoInput, http: httpx.AsyncClient, job: VideoJob) -> bytes
+```
+
+**Purpose**: Downloads the finished MP4 for a completed video job and checks that it is present and not too large. This prevents saving empty or oversized media into the workspace.
+
+**Data flow**: It receives the video arguments, HTTP client, and completed job. It requests the job's first content item, rejects HTTP errors, rejects empty content, checks the byte-size limit, and returns the raw video bytes.
+
+**Call relations**: `OpenRouterVideos.generate` calls this only after `_settled` reports a completed job. The returned bytes are passed to `_save`.
+
+*Call graph*: called by 1 (generate); 2 external calls (__init__, get).
+
+
+##### `OpenRouterVideos._save`  (lines 1134–1138)
+
+```
+async def _save(self, ctx: ToolContext, args: GenerateVideoInput, video: bytes) -> str
+```
+
+**Purpose**: Writes the finished video into the workspace under a predictable generated path. It returns the path that the agent can later share.
+
+**Data flow**: It receives the tool context, video arguments, and raw MP4 bytes. It writes the bytes under `generated-videos/` using the requested file-name stem and returns that path.
+
+**Call relations**: `OpenRouterVideos.generate` calls this after downloading the completed video. The saved path is included in the final tool result.
+
+*Call graph*: called by 1 (generate).
+
+
+##### `OpenRouterVideos._charge`  (lines 1140–1148)
+
+```
+def _charge(self, args: GenerateVideoInput, job: VideoJob) -> int
+```
+
+**Purpose**: Calculates the cost of a video-generation job in micro-USD. It uses OpenRouter's reported charge when present and otherwise prices the video by model, resolution, and duration.
+
+**Data flow**: It receives the video arguments and final job record. If the job already contains a reported cost, it returns that. Otherwise it looks up the chosen model's per-second rate for the final resolution, multiplies by requested duration, and returns the total.
+
+**Call relations**: `OpenRouterVideos.generate` calls this after the video has been saved. The amount is used for video metering and included in the result metadata.
+
+*Call graph*: called by 1 (generate).
+
+
+##### `_generate_video`  (lines 1151–1156)
+
+```
+async def _generate_video(ctx: ToolContext, args: GenerateVideoInput) -> ToolResult
+```
+
+**Purpose**: Acts as the registered handler for the `generate_video` tool. It connects the generic tool system to the OpenRouter video generator.
+
+**Data flow**: It receives the tool context and validated video arguments. It checks that extension context is available, creates an `OpenRouterVideos` helper using the extension credentials and optional test transport, and returns the result of running video generation.
+
+**Call relations**: The `GENERATE_VIDEO_TOOL` definition points to this function. When an agent calls the tool, the tool runtime enters here and hands the real work to `OpenRouterVideos.generate`.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `manifest`  (lines 1168–1184)
+
+```
+def manifest() -> Manifest
+```
+
+**Purpose**: Describes this extension to the host application. It tells the system which OpenRouter chat models, tools, and credential slot this extension provides.
+
+**Data flow**: It takes no input. It packages the extension name, version, registered model specs, image and video tools, and the OpenRouter API-key credential description into a `Manifest`. The output is the manifest object the host reads when loading the extension.
+
+**Call relations**: The extension loader calls this when discovering available extensions. The returned manifest makes the OpenRouter models and media tools visible to the rest of the system.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+### `extensions/self_improvement/ufo_ext_self_improvement/model.py`
+
+`io_transport` · `during model calls in proposing, replay, and grading`
+
+This file is like a standard plug for the extension’s model use. The rest of the self-improvement code should not need to know every detail of the SDK’s model system. It only needs two abilities: ask for a plain text completion, or ask the model to take a turn that may involve tools.
+
+To make that possible, the file defines two small protocols. A protocol is a promise about what methods an object must have. `ModelLeg` promises a `complete` method that returns text. `ReplayLeg` promises a `turn` method that returns a full model message, including possible tool-related behavior.
+
+`ModelAccessLeg` is the real adapter. It wraps the SDK’s `ModelAccess`, which is the project’s metered model connection, meaning usage can be tracked and charged or limited by workspace. When code calls this adapter, it builds a `ModelRequest` with shared defaults: a maximum of 2048 output tokens, a short conversation cache lifetime of five minutes, and reasoning turned off. For tool replay, it also includes the available tool definitions.
+
+Without this file, different parts of the extension might call the model in inconsistent ways, with different limits or settings. This centralizes that choice so model behavior is easier to understand, test, and control.
+
+#### Function details
+
+##### `ModelLeg.complete`  (lines 13–13)
+
+```
+async def complete(self, system: str, messages: tuple[Message, ...]) -> str
+```
+
+**Purpose**: This defines the shape of a simple text-only model call. Anything that claims to be a `ModelLeg` must accept a system instruction and conversation messages, then return the model’s text answer.
+
+**Data flow**: The caller provides a system prompt, which is the high-level instruction for the model, and a tuple of messages, which is the conversation so far. An implementing object sends those to a model and returns a string. This protocol method itself only states the promise; it does not perform the work here.
+
+**Call relations**: Other self-improvement code can depend on this narrow promise instead of depending directly on the full SDK model object. `ModelAccessLeg.complete` is the concrete version in this file that fulfills the promise.
+
+
+##### `ReplayLeg.turn`  (lines 17–19)
+
+```
+async def turn(self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]) -> Message
+```
+
+**Purpose**: This defines the shape of a model call used when replaying a turn with tools available. It returns a full `Message`, not just plain text, because the model’s response may need to include tool-use information.
+
+**Data flow**: The caller provides a system prompt, the conversation messages so far, and a tuple of tool schemas, which describe tools the model is allowed to use. An implementing object uses those inputs to produce the model’s next message. This protocol method only defines that contract; it does not run the model itself.
+
+**Call relations**: Replay-related code can ask for this ability without caring which model backend is underneath. `ModelAccessLeg.turn` is the concrete adapter method that carries out this contract using the SDK.
+
+
+##### `ModelAccessLeg.complete`  (lines 28–38)
+
+```
+async def complete(self, system: str, messages: tuple[Message, ...]) -> str
+```
+
+**Purpose**: This sends a text-only request to the underlying SDK model using the extension’s standard model settings. It is used when the extension needs a plain answer rather than a tool-aware model turn.
+
+**Data flow**: It receives a system instruction and conversation messages. It wraps them in a `ModelRequest`, adding the selected model name, the shared 2048-token output limit, a five-minute conversation cache setting, and `reasoning` set to off. It sends that request through `self.model.complete` and returns the resulting text string.
+
+**Call relations**: This is the concrete implementation of the `ModelLeg.complete` promise. When higher-level self-improvement steps need a simple model completion, they call this adapter, which builds the SDK request object and hands it to the metered `ModelAccess` connection.
+
+*Call graph*: 1 external calls (__init__).
+
+
+##### `ModelAccessLeg.turn`  (lines 40–53)
+
+```
+async def turn(self, system: str, messages: tuple[Message, ...], tools: tuple[ToolSchema, ...]) -> Message
+```
+
+**Purpose**: This sends a tool-aware model request through the SDK and returns the model’s next message. It is meant for replay flows where the model may need to see or choose from available tools.
+
+**Data flow**: It receives a system instruction, conversation messages, and tool descriptions. It creates a `ModelRequest` containing those values plus the configured model name, the 2048-token output limit, the five-minute cache setting, and `reasoning` set to off. It passes that request to `self.model.turn` and returns the `Message` that comes back.
+
+**Call relations**: This is the concrete implementation of the `ReplayLeg.turn` promise. Replay code calls it when it needs the SDK model to produce a full conversational turn, and this method handles packaging the request in the one standard way used by the extension.
+
+*Call graph*: 1 external calls (__init__).
+
+
+### Self-improvement workflows
+Self-improvement workflows use model calls to propose prompt changes and replay prior conversations for evaluation.
+
+### `extensions/self_improvement/ufo_ext_self_improvement/proposer.py`
+
+`domain_logic` · `self-improvement proposal phase`
+
+This file is one step in a self-improvement loop. Imagine a coach reviewing moments where an assistant got stuck, then writing a small update to the assistant’s instructions so it does better next time. That is what this code does for system prompts, which are the hidden instructions that shape an AI agent’s behavior.
+
+The main class, PromptProposer, receives the agent’s current prompt and a TaskClass, which is a group of similar tasks where problems were found. If that task class has no mined examples, there is nothing to learn from, so it stops immediately. Otherwise it builds a careful request for a model: here is the current prompt, here is the task class, and here are short examples showing the user request and what went wrong. The model is told to return only the full revised prompt, not an explanation.
+
+After the model replies, the file cleans up common formatting noise, such as accidental Markdown code fences. It then rejects empty replies and rejects replies that are exactly the same as the current prompt. This matters because later parts of the system likely judge or apply candidates, and an unchanged prompt would be a wasted no-op. If the reply looks like a real change, it is wrapped as a PromptCandidate with the task name and proposed prompt text.
+
+#### Function details
+
+##### `PromptProposer.propose`  (lines 33–43)
+
+```
+async def propose(self, current_prompt: str, task_class: TaskClass) -> PromptCandidate | None
+```
+
+**Purpose**: This is the main action in the file: it tries to produce a revised system prompt for a task class where the agent has had trouble. Someone would use it when they have collected examples of failures and want a model-generated improvement candidate.
+
+**Data flow**: It receives the current prompt text and a task class. If the task class has no examples, it returns nothing. Otherwise it builds a user-facing prompt, sends it with the fixed proposer instruction to the model, cleans the model’s answer, checks that the answer is not empty and not identical to the old prompt, and finally returns a PromptCandidate containing the task name and new prompt text.
+
+**Call relations**: This function is the coordinator for the proposal step. It calls PromptProposer._prompt to prepare the material shown to the model, creates a Message for that model request, calls _clean to normalize the model’s answer, and creates a PromptCandidate only when the answer looks like a real proposed change.
+
+*Call graph*: calls 2 internal fn (_prompt, _clean); 2 external calls (__init__, __init__).
+
+
+##### `PromptProposer._prompt`  (lines 45–56)
+
+```
+def _prompt(self, current_prompt: str, task_class: TaskClass) -> str
+```
+
+**Purpose**: This function writes the actual instruction packet that will be shown to the model. It combines the task class name, the current system prompt, and a limited set of failure examples into one clear request.
+
+**Data flow**: It receives the current prompt and the task class. It takes up to the allowed number of examples, trims each request and problem description to the allowed character limit, formats them as numbered examples, and returns one complete text block asking for the full revised system prompt.
+
+**Call relations**: PromptProposer.propose calls this just before contacting the model. Its output becomes the user message in the model conversation, giving the model the context it needs to suggest a focused prompt improvement.
+
+*Call graph*: called by 1 (propose).
+
+
+##### `_clean`  (lines 59–68)
+
+```
+def _clean(text: str) -> str
+```
+
+**Purpose**: This helper removes simple wrapping that the model might add around its answer, especially Markdown code fences. It helps turn the model’s reply into plain prompt text that can be compared and stored.
+
+**Data flow**: It receives raw text from the model. It trims whitespace, removes an opening and closing triple-backtick block if present, trims again, and returns the cleaned text. It does not change anything outside that returned string.
+
+**Call relations**: PromptProposer.propose calls this after the model responds. The cleaned result is then checked for emptiness or sameness with the current prompt before a PromptCandidate is created.
+
+*Call graph*: called by 1 (propose).
+
+
+### `extensions/self_improvement/ufo_ext_self_improvement/replay.py`
+
+`domain_logic` · `self-improvement evaluation`
+
+This file is a safety wrapper for testing prompt changes against archived conversations. In a real agent run, the model may ask to use tools, such as search or code execution. Re-running those tools during evaluation could be slow, costly, unsafe, or simply produce different results. Instead, this replay system treats the archive like a recorded play: the model can ask for the same tool calls, and the system hands back the same recorded tool results.
+
+The main idea is to isolate the effect of the system prompt. The old final answer is removed, but the earlier user messages and tool history are kept. Reasoning-only blocks are also removed because they belong to the original model run and may be rejected or misleading when sent back to the provider.
+
+The replay then gives the new prompt, the trimmed conversation, and a small tool catalog to the model. If the model asks for a tool call that matches one from the archive, it receives the archived answer. If it asks for something different, the replay stops and grades whatever text the model has produced so far. A round limit prevents endless tool loops. This matters because prompt candidates can be compared without touching live systems or changing the outside world.
+
+#### Function details
+
+##### `_canonical_input`  (lines 40–41)
+
+```
+def _canonical_input(value: object) -> str
+```
+
+**Purpose**: Turns a tool input into a stable text form so two inputs can be compared reliably. This is needed because the same JSON-like data can be written with keys in different orders.
+
+**Data flow**: It receives any value used as a tool input. It converts that value to compact JSON text with keys sorted. The result is a consistent string that can be used as part of a lookup key.
+
+**Call relations**: When the archive is indexed, archived_tool_results uses this to label each recorded tool call. Later, _feed_archived uses the same conversion on a replayed tool call so it can find the matching archived result.
+
+*Call graph*: called by 2 (_feed_archived, archived_tool_results); 1 external calls (dumps).
+
+
+##### `replay_head`  (lines 44–60)
+
+```
+def replay_head(messages: tuple[Message, ...]) -> tuple[Message, ...]
+```
+
+**Purpose**: Builds the starting conversation for a replay by removing the original final answer. It keeps the parts needed to recreate the task context, especially the earlier tool-use rounds.
+
+**Data flow**: It receives the full archived message list. It removes trailing assistant messages that are final answers rather than tool requests, then cleans each remaining message of reasoning-only blocks. It returns the trimmed, safe-to-replay message tuple.
+
+**Call relations**: ReplayEvaluation.replay calls this at the start of a replay. replay_head delegates the message cleanup to _without_reasoning so the model is not given old hidden reasoning material.
+
+*Call graph*: calls 1 internal fn (_without_reasoning); called by 1 (replay).
+
+
+##### `_without_reasoning`  (lines 63–71)
+
+```
+def _without_reasoning(message: Message) -> Message
+```
+
+**Purpose**: Removes reasoning blocks from one message while leaving normal text, tool calls, and tool results intact. This avoids sending provider-specific or stale internal thinking back into a new model request.
+
+**Data flow**: It receives one message. If the message is plain text, it returns it unchanged. If the message contains structured blocks, it filters out thinking and reasoning blocks and returns a new message with the remaining content.
+
+**Call relations**: replay_head calls this for every message that remains in the replay context. Its output becomes part of the conversation sent by ReplayEvaluation.replay to the model leg.
+
+*Call graph*: called by 1 (replay_head); 1 external calls (__init__).
+
+
+##### `archived_tool_results`  (lines 74–96)
+
+```
+def archived_tool_results(messages: tuple[Message, ...]) -> dict[tuple[str, str], ToolResultBlock]
+```
+
+**Purpose**: Creates a lookup table of recorded tool answers from the archived conversation. This lets replay answer tool requests from history instead of actually running tools.
+
+**Data flow**: It reads the archived messages twice. First it gathers tool result blocks by their tool-use id. Then it finds tool-use blocks and pairs each one with its recorded result, using the tool name and canonicalized input as the lookup key. It returns a dictionary from that key to the archived result block.
+
+**Call relations**: ReplayEvaluation.replay calls this before the replay loop begins. _feed_archived later uses the resulting lookup table to answer the model’s replayed tool calls.
+
+*Call graph*: calls 1 internal fn (_canonical_input); called by 1 (replay).
+
+
+##### `replay_tools`  (lines 99–116)
+
+```
+def replay_tools(messages: tuple[Message, ...]) -> tuple[ToolSchema, ...]
+```
+
+**Purpose**: Builds the small list of tools that the replay model is allowed to call. The list is based only on tools that appeared in the archive, not on any live tool registry.
+
+**Data flow**: It scans the archived messages for tool-use blocks and records each distinct tool name once. For each name, it creates a permissive tool schema that allows object-shaped inputs. It returns those schemas as a tuple.
+
+**Call relations**: ReplayEvaluation.replay calls this during setup, then passes the returned tool schemas into each model turn. This gives the model enough information to reproduce archived calls without giving it access to unrelated live tools.
+
+*Call graph*: called by 1 (replay); 1 external calls (__init__).
+
+
+##### `_feed_archived`  (lines 119–135)
+
+```
+def _feed_archived(tool_uses: tuple[ToolUseBlock, ...], results: Mapping[tuple[str, str], ToolResultBlock]) -> Message | None
+```
+
+**Purpose**: Answers the model’s current tool calls using recorded tool results. If any requested call does not match the archive, it signals that the replay has left the recorded path.
+
+**Data flow**: It receives the tool calls requested in one replay round and the archived-result lookup table. For each call, it searches by tool name and canonicalized input. If all calls are found, it creates a user message containing copied tool-result blocks with the new call ids. If any call is missing, it returns None.
+
+**Call relations**: ReplayEvaluation.replay calls this whenever the model asks to use tools. A returned message is added to the replay conversation; None tells the replay loop to stop because the model requested a tool path the archive cannot safely answer.
+
+*Call graph*: calls 1 internal fn (_canonical_input); called by 1 (replay); 2 external calls (__init__, __init__).
+
+
+##### `ReplayEvaluation.replay`  (lines 148–169)
+
+```
+async def replay(self, archived: tuple[Message, ...], system_prompt: str) -> ReplayResult
+```
+
+**Purpose**: Runs the full counterfactual replay for one archived task and one candidate system prompt. It produces the final text that this prompt would likely have generated under the recorded tool history.
+
+**Data flow**: It receives archived messages and a system prompt. It builds the archived tool-result lookup, the replay tool list, and the trimmed conversation head. Then it repeatedly asks the replay model for the next assistant message. If the model gives a final answer, that text is returned. If it asks for tools, the method feeds back archived results when possible. If the model diverges or the round limit is reached, it returns the last useful text seen.
+
+**Call relations**: This is the main flow in the file. It calls archived_tool_results, replay_tools, and replay_head to prepare the replay, then uses _feed_archived inside the loop to keep the model on the recorded tool path. It wraps the outcome in ReplayResult for the caller that is comparing prompt candidates.
+
+*Call graph*: calls 4 internal fn (_feed_archived, archived_tool_results, replay_head, replay_tools); 1 external calls (__init__).
 
 ## 📊 State Registers Touched
 
-- `reg-effective-config` — The merged deployment settings that tell the process how to run, which services to use, and which safety options are enabled.
-- `reg-extension-registry` — The loaded list of installed extensions, packs, routes, tools, skills, jobs, credentials, backends, and migrations.
-- `reg-database-store` — The shared database connection and tables where workspaces, users, agents, turns, files, jobs, costs, and extension data are saved.
-- `reg-workspace-principals` — The current workspace, members, agents, controlling users, and ownership identities used to decide who is acting.
-- `reg-session-auth` — The login sessions, signed tokens, protected links, callback state, and request identities proving who a visitor or service is.
-- `reg-visibility-boundaries` — The saved rules for who may see each conversation, agent, transcript, source, memory, artifact, or workspace object.
-- `reg-credential-vault` — The encrypted store of API keys, OAuth tokens, and other secrets that can be injected only into approved places.
-- `reg-connection-grants` — The saved account connections and per-agent permissions that say which outside accounts an agent may use.
-- `reg-agent-settings` — The durable settings for each agent, including model choice, reasoning mode, internet access, sandbox size, tools, setup needs, icon, and visibility.
-- `reg-conversation-records` — The durable conversation rows that remember where a conversation came from, which agent owns it, its audience, title, sandbox, and current metadata.
-- `reg-turn-run-state` — The shared state of each unit of agent work, including queued, claimed, running, parked, canceled, recovered, or finished.
-- `reg-runtime-fleet` — The records of running server or worker instances, their heartbeats, listener claims, and cleanup ownership.
-- `reg-live-stream-state` — The live update stream that broadcasts turn progress, tool activity, subagent activity, cancellations, and final replies to connected clients.
-- `reg-model-usage-accounting` — The recorded token, image, video, embedding, sandbox, egress, and cost usage used for billing and audit trails.
-- `reg-tool-catalog` — The shared catalog of tools the model can call, including built-in tools, extension tools, connector tools, and their safety labels.
-- `reg-tool-execution-context` — The per-turn but shared rulebook passed through tools, saying who the tool acts for, what files, accounts, sandboxes, and subagents it may use.
-- `reg-sandbox-runtime` — The remembered sandbox handles, workspace directories, terminals, command sessions, ports, and cleanup state used for safe code execution.
-- `reg-egress-policy` — The network access rules and proxy authorization state that decide what sandboxed code may contact outside the system.
-- `reg-file-blob-store` — The shared byte storage for uploads, generated files, previews, media, and other raw data, separated by workspace or deployment scope.
-- `reg-artifact-registry` — The saved list of files deliberately shared with users, including ownership, access checks, preview metadata, and download links.
-- `reg-browser-site-runtime` — The shared browser sessions, hosted preview servers, public site links, and ownership records used to browse, test, and publish websites.
-- `reg-subagent-delegation` — The shared state for spawned helper agents, including their catalog entries, parent-child turn links, required results, names, and cancellation state.
-- `reg-extension-object-slots` — The extension-owned object and conversation-panel data, such as artifacts, sources, tasks, sites, automations, and custom workspace objects.
-- `reg-workspace-change-log` — The saved record of file changes made during a conversation, used to explain later what the agent changed in the workspace.
-- `reg-observability-traces` — The shared trace, metric, log, and traceparent information that lets operators connect startup, turns, tools, subagents, and billing events.
-- `reg-skill-assets-state` — The discovered skill packages, dependency metadata, copied helper files, and per-agent skill asset state used when building prompts and executing skill-backed work.
-- `reg-pending-human-interactions` — The durable pending questions, credential-collection prompts, setup requests, and checklist-style waits that tools create and surfaces later resolve.
-- `reg-sandbox-image-cache` — The local or remote sandbox image/build cache and validation state used to choose, compare, and launch safe execution environments.
-- `reg-connector-action-cache` — Dynamic connector/MCP action schemas, allowed-action listings, and runtime client/session caches reused when exposing and executing external-service actions.
-- `reg-active-cancellation-handles` — Process-local abort tokens and cancellation handles that bridge durable cancel requests to currently running turns, tools, sandboxes, and child turns.
-- `reg-turn-created-references` — Saved references or citations created by a turn so final replies, source panels, transcripts, and later turns can resolve cited material consistently.
-- `reg-conversation-workspace-files` — The mutable per-conversation working file tree that tools, skills, document automation, site building, artifacts, and cleanup read or modify before changes are snapshotted or shared.
+- `reg-effective-config` — The current trusted settings for how the service should run, including database, provider, deployment, and safety options.
+- `reg-database-session-workspace-scope` — The shared database access layer that keeps reads and writes inside the right workspace and transaction.
+- `reg-turn-state` — The shared status record for each unit of agent work, including claiming, running, completion, failure, parent-child links, and billing markers.
+- `reg-model-catalog` — The shared list of available AI models, their abilities, prices, limits, and required credentials.
+- `reg-billing-ledger` — The shared money and usage record for tokens, images, videos, sandbox use, egress, balances, caps, and exports.
+- `reg-observability-context` — The shared tracing, logging, metrics, health, and redaction context used to understand what happened safely.
+- `reg-proposal-state` — Durable proposed-change records, including pending, approved, or rejected prompt/config/self-improvement proposals and their before/after payloads.
+- `reg-evaluation-run-store` — Durable evaluation test cases, replay runs, comparison results, and self-improvement validation state used to accept or reject changes.
+- `reg-runtime-connection-pools` — Live pooled connections and reusable clients for shared services such as the database, Redis/live hub, blob storage, model providers, connector APIs, and sandbox/browser providers.

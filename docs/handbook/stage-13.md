@@ -1,30 +1,39 @@
-# External connector discovery, credentials, and action execution  `stage-13`
+# External Connectors, Credentials, and Egress Requests  `stage-13`
 
-This stage is shared behind-the-scenes support for letting the agent use outside services without directly handling private passwords or tokens. It is like a controlled service desk: the agent asks what tools are available, requests an action, and receives a cleaned-up result, while the sensitive account access stays behind a safe boundary.
+This stage is shared support for the moments when UFO must reach outside its own walls. Sync jobs use it to read data from services, and agents use it to call tools or send messages, while secrets stay controlled.
 
-The brokered and keyed connector backends connect to tool providers such as Composio, Pipedream, MCP servers, and simple API-key services. They discover available actions, choose allowed tools, proxy requests, run actions, and provide fake connectors for tests. The native integration parts do the same for familiar services: Slack message setup and search, iMessage through Spectrum, and GitHub credentials for coding work.
+The source connector framework gives sync jobs a common way to fetch records from different services. Direct and keyed connectors cover the simpler case where a member supplies an API key. The main connector access file defines the rules all providers must follow, and checks that a credential still belongs to the right workspace, member, provider, and account.
 
-core/src/ufo/connectors.py defines the safety rules for connected accounts, making sure secrets do not leak into the agent, sandbox, logs, or unrelated code. extensions/connectors/ufo_ext_connectors/tools.py gives the agent the generic controls to find connector tools, describe them, run them, move files in and out, and trim bulky results into something useful.
+Composio and Pipedream integrations act as safe middlemen. They manage connected accounts, expose available actions, proxy web requests, run tools, and handle files without handing raw tokens to the sandbox. Generic connector objects and agent tools make these accounts visible and usable inside UFO, while evaluation fakes provide predictable test versions.
+
+GitHub App credentials support coding work with verified, short-lived access. Slack and iMessage flows guide messaging setup. Finally, egress rules decide which network calls a sandboxed agent may make, and where secrets are safely added outside the sandbox.
 
 ## Sub-stages
 
-- [Brokered and keyed connector backends](stage-13.1.md) `stage-13.1` — 12 files
-- [Native communication and code-service integrations](stage-13.2.md) `stage-13.2` — 6 files
+- [Source Connector Framework](stage-13.1.md) `stage-13.1` — 2 files
+- [Direct and Keyed API-Credential Connectors](stage-13.2.md) `stage-13.2` — 2 files
+- [Composio Brokered Connector Integration](stage-13.3.md) `stage-13.3` — 6 files
+- [Pipedream Brokered Connector Integration](stage-13.4.md) `stage-13.4` — 4 files
+- [Generic Connector Objects, Agent Tools, and Evaluation Fakes](stage-13.5.md) `stage-13.5` — 3 files
+- [Coding GitHub App Connector Credentials](stage-13.6.md) `stage-13.6` — 2 files
+- [Slack and iMessage Connector Flows](stage-13.7.md) `stage-13.7` — 3 files
 
 ## Files in this stage
 
-### Connector Boundaries and Tools
-Defines the secure credential boundary for external connectors and exposes generic agent-facing tools to discover, describe, execute, and normalize connector actions.
+### Connector Access and Egress Policy
+Defines how external connector credentials are validated and translated into sandbox-safe outbound network rules.
 
-### `core/src/ufo/connectors.py`
+### `core/src/ufo/access/connectors.py`
 
-`domain_logic` · `cross-cutting`
+`domain_logic` · `cross-cutting: connector discovery, tool execution, feed sync credential resolution, and proxied request handling`
 
-This file is the connector “front desk” for the system. It defines how the rest of UFO asks for credentials, finds connector tools, runs brokered actions, and moves files without directly touching provider secrets. A credential here can take three forms: a special HTTP transport that sends requests through a broker, a bearer token, or provider-specific headers. The important rule is that secrets stay on the correct side of the boundary and are never logged.
+This file is the connector doorway for the system. A connector is code that lets UFO talk to outside services, like Gmail or GitHub. The file separates two very different ways of authenticating: a broker can keep the secret token on its own server and proxy requests, or UFO can read a workspace-owned key directly from its credential store. The `Credential` object represents exactly one of those paths, and it is designed not to reveal secrets if accidentally printed.
 
-There are two big paths. Feed-sync sources, which pull records from providers into UFO, ask an AuthProxy for a Credential. Dynamic connector tools, which let an agent call provider tools, go through a ConnectorBroker. The broker catalogs tools, supplies schemas, executes tool calls, stages uploads, and exposes generated file outputs as short-lived links rather than raw bytes.
+The file also defines the broker interface: how UFO asks a broker what tools exist, what inputs a tool needs, how to run a tool, how to stage files, and how to resolve credentials for feed sync. Think of the broker as a concierge: UFO asks for a service, but the concierge keeps the keys behind the desk.
 
-ConnectorRegistry is the routing table. It knows which provider belongs to which broker, can ask an open resolver about providers not explicitly registered, and can fall back to direct workspace credentials for bring-your-own-key setups. SourceCredentialResolver adds an extra safety layer for sync jobs: if a source was tied to a member-owned connection, every credential use is checked against the database to make sure that connection is still valid. Think of it like checking that a badge has not been revoked before opening each locked door.
+`ConnectorRegistry` is the routing table. It knows which provider belongs to which broker, can ask an open resolver about providers that were not registered one by one, and can fall back to direct credentials.
+
+The most important safety behavior is source binding. Feed-sync sources may be tied to a specific member-owned connection. Before using that connection, and again before each proxied HTTP request, the code checks the database to make sure the connection is still active and still matches the original owner, provider, and account. Without this, an old or reassigned source could keep using access it should no longer have.
 
 #### Function details
 
@@ -34,11 +43,11 @@ ConnectorRegistry is the routing table. It knows which provider belongs to which
 def __repr__(self) -> str
 ```
 
-**Purpose**: Returns a safe text version of a Credential for debugging. It deliberately hides tokens, headers, and broker transports so an accidental log line does not leak a secret.
+**Purpose**: Returns a safe text version of a credential without exposing the actual secret. This matters because credentials can accidentally appear in logs or error messages.
 
-**Data flow**: It reads which authentication path is present on the Credential: transport, bearer token, headers, or none. It turns that into a short label such as “bearer: redacted” and returns that label, without including the actual secret value.
+**Data flow**: It looks at the credential fields to see whether authentication is via a transport, bearer token, headers, or nothing. It returns a short label that says which kind is present, but replaces the sensitive value with “redacted”. It does not change the credential.
 
-**Call relations**: This is used whenever Python needs to display a Credential, such as in debugging or exception output. Other code can pass Credential objects around safely because this method prevents their sensitive contents from being printed.
+**Call relations**: This is used automatically by Python when a `Credential` is printed or shown in debugging output. It acts as a last line of defense if surrounding code accidentally includes a credential in a message.
 
 
 ##### `AuthProxy.credential`  (lines 85–85)
@@ -47,755 +56,500 @@ def __repr__(self) -> str
 async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
 ```
 
-**Purpose**: Defines the common promise for anything that can provide authentication for a feed-sync source. A concrete backend may return a broker transport, a bearer token, or special headers.
+**Purpose**: Defines the promise that an authentication backend can turn a workspace, provider, and account name into a usable `Credential`. Implementations may return a brokered transport, a bearer token, or provider-specific headers.
 
-**Data flow**: It receives a workspace ID, provider name, and account handle. An implementation uses those to find the right account or stored key, then returns a Credential describing how HTTP requests should be authenticated.
+**Data flow**: The caller supplies the workspace ID, provider slug, and account handle. An implementation checks its own storage or broker and returns a `Credential` object that the connector can use to make provider requests.
 
-**Call relations**: This is a protocol method, meaning this file defines the shape but not the body. The registry and source credential code call objects through this interface so they do not need to know whether credentials come from a broker or from direct stored workspace keys.
+**Call relations**: This is a protocol method, meaning this file defines the shape but not the body. `_credential` and bound source credential resolution call objects through this contract so the rest of the system does not need to know which authentication backend is installed.
 
 
-##### `stale_grant_guidance`  (lines 93–100)
+##### `GrantUnusable.__init__`  (lines 113–115)
+
+```
+def __init__(self, reason: str, *, awaits_grant: bool=False) -> None
+```
+
+**Purpose**: Creates an error that says a brokered account grant cannot currently be used. It also records whether the only fix is for the member to reconnect the account.
+
+**Data flow**: It receives a human-readable reason and an optional `awaits_grant` flag. It stores the reason in the normal exception machinery and saves the flag on the exception object for callers to inspect later.
+
+**Call relations**: Broker integrations such as Composio and Pipedream create this error when they discover a revoked, expired, unhealthy, or unknown account grant. Downstream sync code can treat this differently from a temporary provider outage, often parking the feed instead of raising an operator alert.
+
+*Call graph*: called by 4 (credential, _account, credential, _account).
+
+
+##### `stale_grant_guidance`  (lines 118–125)
 
 ```
 def stale_grant_guidance(provider: str) -> str
 ```
 
-**Purpose**: Builds a clear error message for the case where a broker no longer recognizes an account grant. It tells the user that retrying is not enough and that the member should reconnect the account.
+**Purpose**: Builds a clear error message for a grant that points to an account the current broker does not recognize. The message tells the reader that retrying will not help and that the member should reconnect.
 
-**Data flow**: It takes a provider name, inserts it into a human-readable explanation, and returns that explanation as a string. It does not read or change any outside state.
+**Data flow**: It takes a provider name and formats it into a standard guidance sentence. The output is just text; no state is read or changed.
 
-**Call relations**: Broker implementations can use this when a tool call or credential lookup points to an old or invalid broker-side account. It keeps the user-facing advice consistent across connector backends.
+**Call relations**: Broker implementations can use this helper when turning a stale or unknown account reference into a `GrantUnusable` error. It keeps the user-facing explanation consistent across broker backends.
 
 
-##### `ConnectorBroker.tools`  (lines 170–172)
+##### `ConnectorBroker.tools`  (lines 196–198)
 
 ```
 async def tools(self, workspace_id: UUID, provider: str, query: str) -> tuple[BrokerTool, ...]
 ```
 
-**Purpose**: Defines how a broker lists tools for a provider, optionally narrowed by a search query. These tools are what the agent may later describe or execute.
+**Purpose**: Defines how UFO asks a broker for the tools available for a provider, optionally filtered by a search query. A tool here means an action the agent can ask the outside service to perform.
 
-**Data flow**: It receives the workspace, provider, and query text. An implementation asks the broker’s catalog and returns matching BrokerTool entries.
+**Data flow**: The caller gives a workspace ID, provider name, and query text. An implementation returns a tuple of `BrokerTool` descriptions that match what the broker offers.
 
-**Call relations**: This is part of the ConnectorBroker protocol. Dynamic connector discovery code can call it through the registry without caring which broker, such as Composio or Pipedream, is behind the provider.
+**Call relations**: This is a protocol method. Dynamic connector discovery code calls broker implementations through this shape when it needs to list possible actions for an agent or user.
 
 
-##### `ConnectorBroker.schema`  (lines 174–174)
+##### `ConnectorBroker.schema`  (lines 200–200)
 
 ```
 async def schema(self, workspace_id: UUID, provider: str, slug: str) -> BrokerTool
 ```
 
-**Purpose**: Defines how to fetch the detailed input shape for one broker tool. The input schema tells the agent what arguments that tool accepts.
+**Purpose**: Defines how UFO asks for the detailed input shape of one broker tool. This lets the agent know what arguments it must provide before trying to run the tool.
 
-**Data flow**: It receives the workspace, provider, and tool slug. An implementation returns a BrokerTool with schema details, or raises UnknownBrokerTool if that slug is not valid for the provider.
+**Data flow**: The caller supplies the workspace ID, provider name, and tool slug. The implementation returns a `BrokerTool` with its input schema filled in, or raises `UnknownBrokerTool` if the slug is not known for that provider.
 
-**Call relations**: This method supports the describe phase of dynamic connector tools. Discovery or planning code asks for a schema before building a tool call.
+**Call relations**: This is part of the broker contract used by dynamic connector tools when describing a specific tool. It sits between high-level tool selection and actual execution.
 
 
-##### `ConnectorBroker.execute`  (lines 176–184)
+##### `ConnectorBroker.execute`  (lines 202–210)
 
 ```
 async def execute(self, workspace_id: UUID, provider: str, slug: str, arguments: Mapping[str, object], account_id: str, idempotency_key: str | None) -> dict[str, object]
 ```
 
-**Purpose**: Defines how to run one provider tool through the broker under a connected account. The broker injects the real account credential, so UFO does not have to expose the secret.
+**Purpose**: Defines how UFO asks a broker to run one provider tool under a connected account. The broker injects the real account secret on its side, so UFO does not receive the token.
 
-**Data flow**: It receives the workspace, provider, tool slug, argument values, account ID, and optional idempotency key. An implementation sends that request to the broker and returns the provider tool’s response as a dictionary.
+**Data flow**: The caller provides the workspace, provider, tool slug, tool arguments, account ID, and an optional idempotency key, which is a repeat-safe request identifier. The implementation sends the request to the broker and returns the broker’s response as a dictionary.
 
-**Call relations**: Dynamic connector execution reaches brokers through this method. It sits at the point where an agent’s chosen tool call becomes a real external-provider action, while keeping the account token broker-side.
+**Call relations**: Dynamic connector execution code calls broker implementations through this method after a tool has been chosen and arguments prepared. File staging and output extraction happen through separate broker methods around this execution step.
 
 
-##### `ConnectorBroker.file_outputs`  (lines 186–186)
+##### `ConnectorBroker.file_outputs`  (lines 212–212)
 
 ```
 def file_outputs(self, response: dict[str, object]) -> tuple[BrokerFile, ...]
 ```
 
-**Purpose**: Defines how a broker extracts file results from a tool response. It turns broker-specific response details into standard BrokerFile records.
+**Purpose**: Defines how a broker turns a tool response into downloadable file references. The actual file bytes stay outside the serve process.
 
-**Data flow**: It receives the raw response dictionary from a brokered execution. An implementation finds any produced files and returns their names and short-lived download URLs.
+**Data flow**: It receives the dictionary returned by a broker execution. The implementation extracts any produced files and returns them as `BrokerFile` objects containing names and short-lived download URLs.
 
-**Call relations**: After ConnectorBroker.execute returns, caller code can use this method to discover files the tool produced. The actual bytes are not carried through this seam; the sandbox downloads them from the provided URLs.
+**Call relations**: This protocol method is used after tool execution when a broker may have produced files. It keeps file transfer as references rather than moving bytes through the core service.
 
 
-##### `ConnectorBroker.stage_upload`  (lines 188–196)
+##### `ConnectorBroker.stage_upload`  (lines 214–222)
 
 ```
 async def stage_upload(self, workspace_id: UUID, provider: str, slug: str, filename: str, mimetype: str, md5: str) -> StagedUpload
 ```
 
-**Purpose**: Defines how to prepare a workspace file so a brokered tool can consume it. It gives the sandbox a place to upload the file directly to the broker’s storage.
+**Purpose**: Defines how UFO asks a broker where a workspace file should be uploaded before a tool consumes it. This supports tools that need file inputs without routing file contents through the main service.
 
-**Data flow**: It receives the workspace, provider, tool slug, filename, MIME type, and MD5 checksum. An implementation returns upload instructions, including a PUT URL when bytes must be uploaded and the argument value to pass to the tool.
+**Data flow**: The caller gives the workspace, provider, tool slug, filename, MIME type, and MD5 hash. The implementation returns a `StagedUpload` with a PUT URL when bytes must be uploaded, or no PUT URL when the broker already has the same content.
 
-**Call relations**: Tool-call setup code uses this before executing broker tools that accept files. This keeps file bytes out of the serve process: the sandbox uploads directly to the broker’s file store.
+**Call relations**: Dynamic connector tools use this before execution when an argument points to a workspace file. The sandbox performs the upload directly to the broker’s storage, then execution receives only the staged reference.
 
 
-##### `ConnectorBroker.search`  (lines 198–198)
+##### `ConnectorBroker.search`  (lines 224–224)
 
 ```
 async def search(self, workspace_id: UUID, provider: str, query: str) -> BrokerSearch
 ```
 
-**Purpose**: Defines semantic search over a broker’s tools. Instead of only matching names, a broker can return useful tools plus a plan, guidance, and warnings.
+**Purpose**: Defines semantic search over a broker’s tools. Instead of only matching names, the broker may return tools plus planning advice, guidance, or warnings.
 
-**Data flow**: It receives a workspace, provider, and natural-language query. An implementation returns a BrokerSearch containing matching tools and optional advice.
+**Data flow**: The caller supplies workspace ID, provider, and a query. The implementation returns a `BrokerSearch` containing matching tools and optional notes about how to use them.
 
-**Call relations**: Planning and discovery flows can call this when an agent asks for capabilities in everyday language. Brokers that know more about their services can provide richer guidance through the same interface.
+**Call relations**: This protocol method supports richer tool discovery. Broker implementations can provide smarter routing while callers still use one common interface.
 
 
-##### `ConnectorBroker.credential`  (lines 200–200)
+##### `ConnectorBroker.credential`  (lines 226–226)
 
 ```
 async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
 ```
 
-**Purpose**: Defines how a broker supplies feed-sync authentication for one connected account. For brokered accounts, this should usually be a proxy transport rather than a raw token.
+**Purpose**: Defines how a broker resolves feed-sync credentials for a connected account. For brokered accounts, this normally returns a transport that forwards requests through the broker instead of exposing the secret.
 
-**Data flow**: It receives the workspace, provider, and account handle. An implementation confirms the account is valid for that workspace and returns a Credential that lets sync code reach the provider safely.
+**Data flow**: The caller gives a workspace ID, provider, and account handle. The implementation verifies the account and returns a `Credential` that the feed-sync connector can use.
 
-**Call relations**: _credential calls this when a source is using a brokered account instead of direct workspace credentials. It is the broker-side path for sync authentication.
+**Call relations**: _credential calls this method after `_broker` finds the broker for a non-direct account. `_BoundSourceCredentials.credential` relies on the result and requires brokered source credentials to include a proxy transport.
 
 
-##### `RequestForwarder.forward`  (lines 219–221)
+##### `RequestForwarder.forward`  (lines 245–247)
 
 ```
 async def forward(self, account_id: str, method: str, url: str, headers: Mapping[str, str], body: bytes) -> ForwardedResponse
 ```
 
-**Purpose**: Defines how to forward one HTTP request through a broker using a connected account. This lets command-line tools in the sandbox appear authenticated without seeing the real token.
+**Purpose**: Defines how a captured provider HTTP request is sent through a broker using a granted account. This lets command-line tools in the sandbox authenticate without ever seeing the true provider token.
 
-**Data flow**: It receives an account ID, HTTP method, URL, request headers, and request body bytes. An implementation sends the request through the broker and returns a ForwardedResponse with status, headers, and body.
+**Data flow**: The caller provides the account ID, HTTP method, URL, headers, and body bytes. The implementation forwards the request through the broker and returns a `ForwardedResponse` with status, headers, and body from the provider side.
 
-**Call relations**: The egress proxy uses implementations of this interface when it intercepts a request carrying a broker sentinel instead of a real credential. The broker performs the real authenticated request and hands the response back.
+**Call relations**: This is used through `CliCredential`, where a connector declares which environment variable and header carry a harmless sentinel value. The egress proxy can then hand matching requests to the forwarder.
 
 
-##### `ConnectorResolver.transfer_hosts`  (lines 268–268)
+##### `ConnectorResolver.transfer_hosts`  (lines 302–302)
 
 ```
 def transfer_hosts(self) -> tuple[str, ...]
 ```
 
-**Purpose**: Names the extra file-transfer hosts that grants in an open connector namespace are allowed to contact. This is needed when brokers use their own storage hosts for uploads and downloads.
+**Purpose**: Defines which broker file-storage hosts are allowed for file transfers in an open connector namespace. These hosts are extra destinations the egress proxy may permit for grants handled by that resolver.
 
-**Data flow**: An implementation returns a tuple of host names. It does not take arguments because these hosts apply to the resolver’s broker namespace.
+**Data flow**: The implementation exposes a tuple of host names. Callers read it; nothing is changed.
 
-**Call relations**: Egress or grant setup code can read this property when deciding which broker file-store hosts the sandbox may access. It complements the dynamic provider routing supplied by the resolver.
+**Call relations**: This property belongs to the open-namespace resolver contract. It supports brokers that can serve many provider slugs without each one being explicitly registered.
 
 
-##### `ConnectorResolver.claims`  (lines 270–270)
+##### `ConnectorResolver.claims`  (lines 304–304)
 
 ```
 async def claims(self, provider: str) -> bool
 ```
 
-**Purpose**: Answers whether this resolver’s broker can serve a provider slug that was not explicitly registered. This prevents the open namespace from blindly claiming every unknown provider.
+**Purpose**: Defines how UFO asks whether an open resolver really serves a provider slug. This avoids assuming that an open namespace owns every unknown provider name.
 
-**Data flow**: It receives a provider name. An implementation checks the broker’s live catalog or routing rules and returns true or false.
+**Data flow**: The caller supplies a provider slug. The implementation may consult the broker’s live catalog and returns true if that provider is available, otherwise false.
 
-**Call relations**: Code choosing between a broker namespace and direct workspace credentials can ask this before routing a provider. The method is part of the open-provider extension point.
-
-
-##### `ConnectorResolver.entry`  (lines 272–272)
-
-```
-def entry(self, provider: str) -> ConnectorEntry
-```
-
-**Purpose**: Builds a ConnectorEntry for a provider served by the resolver. This gives the rest of the system the same shape it would get for an explicitly registered connector.
-
-**Data flow**: It receives a provider name and returns a ConnectorEntry with that provider, a label, and the shared broker. It is described as pure: it should not need network or database work.
-
-**Call relations**: ConnectorRegistry.entry uses this when a provider is not found in the fixed entries but a resolver exists. _credential also reaches broker credentials through resolver.entry for non-direct accounts.
+**Call relations**: This is part of the resolver protocol. Code choosing between brokered connectors and workspace-owned direct credentials can use it to avoid routing a provider to the wrong backend.
 
 
-##### `ConnectorResolver.catalog`  (lines 274–274)
-
-```
-async def catalog(self, query: str, limit: int) -> tuple[CatalogEntry, ...]
-```
-
-**Purpose**: Searches the broker’s live catalog for connectable services. This lets discovery show providers beyond the ones hard-coded into the registry.
-
-**Data flow**: It receives search text and a maximum number of results. An implementation asks the broker catalog and returns CatalogEntry records with provider slugs and labels.
-
-**Call relations**: ConnectorRegistry.search_catalog delegates to this method when an open resolver is installed. Discovery tools can then combine fixed connectors with live broker catalog results.
-
-
-##### `ConnectorRegistry.entry`  (lines 291–297)
+##### `ConnectorResolver.entry`  (lines 306–306)
 
 ```
 def entry(self, provider: str) -> ConnectorEntry
 ```
 
-**Purpose**: Finds the routing entry for a provider. It first checks explicitly installed connectors, then falls back to the open resolver if one exists.
+**Purpose**: Defines how an open resolver builds a `ConnectorEntry` for a provider it serves. The entry tells the registry which broker should receive requests for that provider.
 
-**Data flow**: It receives a provider name. It looks in the registry’s entries mapping; if found, it returns that ConnectorEntry. If not found and a resolver exists, it asks the resolver to build an entry. If neither path works, it raises a KeyError.
+**Data flow**: The caller provides a provider slug. The implementation returns a `ConnectorEntry` with that provider, a label, and the shared broker.
 
-**Call relations**: Dynamic connector tools use this as the main routing lookup before talking to a broker. It is the registry’s “which broker owns this provider?” decision point.
+**Call relations**: ConnectorRegistry.entry and the private `_broker` helper call this when a provider is not in the explicit registry but a resolver is installed. It is the bridge from an unknown slug to a concrete broker.
 
 
-##### `ConnectorRegistry.search_catalog`  (lines 299–304)
+##### `ConnectorResolver.catalog`  (lines 308–308)
+
+```
+async def catalog(self, query: str, limit: int, after: str | None) -> CatalogPage
+```
+
+**Purpose**: Defines how UFO pages through the broker’s live list of connectable services. This lets the discovery tool show services that were not hard-coded into the registry.
+
+**Data flow**: The caller gives search text, a maximum count, and an optional cursor saying where to continue. The implementation returns a `CatalogPage` with entries and possibly another cursor.
+
+**Call relations**: ConnectorRegistry.search_catalog and ConnectorRegistry.catalog call this when a resolver is present. The resolver’s answers are combined with explicitly registered connectors.
+
+
+##### `ConnectorRegistry.entry`  (lines 325–331)
+
+```
+def entry(self, provider: str) -> ConnectorEntry
+```
+
+**Purpose**: Finds the connector entry for a provider so later code knows which broker owns it. If the provider is not explicitly registered, it asks the open resolver if one exists.
+
+**Data flow**: It receives a provider slug. It first looks in the registry’s `entries` mapping, then asks the resolver to build an entry if a resolver is installed, and otherwise raises a clear `KeyError`.
+
+**Call relations**: This is the registry’s main routing lookup for dynamic connector code. It hands callers the `ConnectorEntry` that contains the broker they should use.
+
+
+##### `ConnectorRegistry.search_catalog`  (lines 333–338)
 
 ```
 async def search_catalog(self, query: str, limit: int) -> tuple[CatalogEntry, ...]
 ```
 
-**Purpose**: Returns live catalog search results from the open resolver, if the deployment has one. If there is no resolver, it returns no extra catalog entries.
+**Purpose**: Returns search results from the open connector catalog only. If no open resolver is installed, it returns an empty result.
 
-**Data flow**: It receives query text and a result limit. It checks whether resolver is present; without one it returns an empty tuple, and with one it awaits resolver.catalog and returns those results.
+**Data flow**: It receives query text and a limit. It asks the resolver for the first catalog page when available, then returns just that page’s entries as a tuple.
 
-**Call relations**: Discovery flows call this to append open broker catalog results to the known registered connectors. It delegates the real search to ConnectorResolver.catalog.
+**Call relations**: Discovery flows can use this to append live resolver results to known registered providers. It delegates the real search to `ConnectorResolver.catalog`.
 
 
-##### `_credential`  (lines 307–324)
+##### `ConnectorRegistry.catalog`  (lines 340–360)
+
+```
+async def catalog(self, query: str, limit: int, after: str | None) -> CatalogPage
+```
+
+**Purpose**: Builds one combined page of connectable services from explicitly registered connectors and the open resolver catalog. It also removes duplicates by provider name.
+
+**Data flow**: It receives search text, a limit, and an optional cursor. On the first page, it filters the explicit registry by provider or label text. It then asks the resolver for a page if one exists, appends those entries, keeps the first entry for each provider, and returns a `CatalogPage` with the resolver’s next cursor.
+
+**Call relations**: This is used by connector discovery when a caller wants both fixed registered providers and live broker-catalog providers in one answer. It creates `CatalogEntry` and `CatalogPage` objects while merging the two sources.
+
+*Call graph*: 2 external calls (__init__, __init__).
+
+
+##### `_broker`  (lines 363–369)
+
+```
+def _broker(registry: ConnectorRegistry, provider: str) -> ConnectorBroker | None
+```
+
+**Purpose**: Finds the broker responsible for a provider, or returns nothing if no broker is available. It is a small internal routing helper.
+
+**Data flow**: It receives a registry and provider slug. It looks for an explicit entry first, then asks the resolver for an entry if one exists, and returns that entry’s broker; if neither path works, it returns `None`.
+
+**Call relations**: _credential calls this when it needs brokered credentials for a non-direct account. `_broker` keeps that credential logic from duplicating registry lookup rules.
+
+*Call graph*: called by 1 (_credential).
+
+
+##### `_credential`  (lines 372–385)
 
 ```
 async def _credential(registry: ConnectorRegistry, workspace_id: UUID, provider: str, account: str) -> Credential
 ```
 
-**Purpose**: Chooses the correct credential backend for a source request. Brokered accounts go to the provider’s broker, while the special direct account goes to the configured fallback auth backend.
+**Purpose**: Chooses the right authentication path for a feed-sync source. Brokered accounts go to their connector broker; direct accounts go to the fallback authentication backend.
 
-**Data flow**: It receives the registry, workspace ID, provider, and account handle. If the account is not the direct account, it looks for a registered broker entry or resolver entry and asks that broker for a Credential. If the account is direct, it asks the fallback AuthProxy. If no suitable path exists, it raises a RuntimeError.
+**Data flow**: It receives the registry, workspace ID, provider, and account handle. If the account is not the special direct-account handle, it finds a broker and asks it for a credential. If the account is direct, it asks the fallback auth proxy. If no suitable path exists, it raises a runtime error.
 
-**Call relations**: _BoundSourceCredentials.credential calls this after deciding whether the source is direct or connection-bound. This helper centralizes the routing decision so source credential binding does not duplicate registry lookup rules.
+**Call relations**: _BoundSourceCredentials.credential calls this after enforcing source rules. `_credential` calls `_broker` to locate the broker for connected accounts.
 
-*Call graph*: called by 1 (credential).
+*Call graph*: calls 1 internal fn (_broker); called by 1 (credential).
 
 
-##### `_require_source_connection`  (lines 327–351)
+##### `_require_source_connection`  (lines 388–412)
 
 ```
 async def _require_source_connection(workspace_id: UUID, connection_id: UUID, owner_member_id: UUID, provider: str, account: str) -> None
 ```
 
-**Purpose**: Checks that a source’s saved connection still belongs to the same workspace, member, provider, and account. It prevents a sync source from continuing to use a connection after it has been removed or no longer matches.
+**Purpose**: Checks that a source’s saved connection is still valid for the same workspace, owner member, provider, and account. This prevents stale or mismatched feed sources from continuing to use access they no longer own.
 
-**Data flow**: It receives workspace ID, connection ID, owner member ID, provider, and account. Inside the workspace context, it opens a database transaction, queries the connection table for an exact match, and returns nothing if found. If no matching row exists, it raises ValueError.
+**Data flow**: It receives the workspace ID, connection ID, owner member ID, provider, and account. It enters the workspace context, opens a database transaction, and searches the connection table for an exact match. If the match exists, it returns nothing; if not, it raises `ValueError`.
 
-**Call relations**: _BoundSourceCredentials.credential calls this before issuing credentials for a brokered source. _ConnectionTransport.handle_async_request calls it again before each proxied HTTP request, so a connection revoked after credential creation is still caught.
+**Call relations**: _BoundSourceCredentials.credential calls this before issuing a brokered credential. `_ConnectionTransport.handle_async_request` calls it again before every proxied HTTP request, so revocation is noticed even after a credential transport has been created.
 
 *Call graph*: called by 2 (credential, handle_async_request); 3 external calls (select, workspace_tx, ws).
 
 
-##### `_ConnectionTransport.handle_async_request`  (lines 363–371)
+##### `_ConnectionTransport.handle_async_request`  (lines 424–432)
 
 ```
 async def handle_async_request(self, request: httpx.Request) -> httpx.Response
 ```
 
-**Purpose**: Wraps an HTTP transport with a fresh connection-validity check before every outgoing request. This is a safety gate for brokered feed-sync traffic.
+**Purpose**: Wraps a brokered HTTP transport with a fresh connection-validity check before each request. This keeps a feed-sync job from continuing to send provider requests after its connection is removed or changed.
 
-**Data flow**: It receives an httpx request object. It first calls _require_source_connection using the stored workspace, connection, member, provider, and account details. If the check passes, it forwards the request to the inner transport and returns the resulting HTTP response.
+**Data flow**: It receives an HTTP request from the connector. Before forwarding it, it calls `_require_source_connection` using the stored workspace, connection, owner, provider, and account. If the check passes, it passes the request to the inner transport and returns the inner transport’s HTTP response.
 
-**Call relations**: _BoundSourceCredentials.credential creates this wrapper when it returns brokered transport credentials. During actual HTTP use, httpx calls this method, which verifies the source connection before handing off to the broker transport.
+**Call relations**: _BoundSourceCredentials.credential creates this wrapper around broker-provided transports. It hands actual network forwarding to the inner transport only after the database check succeeds.
 
 *Call graph*: calls 1 internal fn (_require_source_connection).
 
 
-##### `_ConnectionTransport.aclose`  (lines 373–374)
+##### `_ConnectionTransport.aclose`  (lines 434–435)
 
 ```
 async def aclose(self) -> None
 ```
 
-**Purpose**: Closes the wrapped HTTP transport. This releases whatever network resources the underlying transport owns.
+**Purpose**: Closes the wrapped HTTP transport when the client is done with it. This releases whatever network resources the inner transport owns.
 
-**Data flow**: It takes no new data beyond the stored inner transport. It calls the inner transport’s asynchronous close method and returns nothing.
+**Data flow**: It takes no new data beyond the stored inner transport. It calls the inner transport’s close method and returns when that cleanup is complete.
 
-**Call relations**: HTTP client cleanup code calls this through the standard httpx transport interface. It simply passes shutdown through to the real transport that _ConnectionTransport protects.
+**Call relations**: HTTP client cleanup code calls this as part of normal transport shutdown. The wrapper does not own separate resources; it simply forwards the close operation to the transport it protects.
 
 
-##### `_BoundSourceCredentials.credential`  (lines 383–413)
+##### `_BoundSourceCredentials.credential`  (lines 444–474)
 
 ```
 async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential
 ```
 
-**Purpose**: Provides credentials for a specific sync source, while enforcing whether that source is allowed to use direct credentials or must use a member-owned connection. It is the main guardrail around source authentication.
+**Purpose**: Resolves credentials for one feed-sync source while enforcing whether that source is direct-key based or bound to a specific member-owned connection. It is the main guardrail around source credential use.
 
-**Data flow**: It receives workspace ID, provider, and account. If the account is the direct account, it rejects the request when this source is connection-bound, otherwise it delegates to _credential. For brokered accounts, it requires stored connection and member IDs, verifies the connection in the database, gets the broker credential through _credential, confirms that credential uses a proxy transport, then returns a new Credential whose transport is wrapped in _ConnectionTransport.
+**Data flow**: It receives a workspace ID, provider, and account. For the direct account handle, it rejects sources that are connection-bound, then delegates to `_credential`. For brokered accounts, it requires stored connection and owner IDs, verifies the database connection, gets a credential through `_credential`, requires that it contains a transport, and returns a new `Credential` whose transport is wrapped in `_ConnectionTransport`.
 
-**Call relations**: SourceCredentialResolver.bind creates instances of this class for the sync runner. This method calls _require_source_connection for the initial authorization check, calls _credential to get the actual backend credential, and creates _ConnectionTransport so later HTTP requests keep checking authorization too.
+**Call relations**: SourceCredentialResolver.bind creates this object for a particular source. This method then calls `_require_source_connection` and `_credential`, and wraps broker transports so `_ConnectionTransport.handle_async_request` can re-check access on every request.
 
 *Call graph*: calls 2 internal fn (_credential, _require_source_connection); 2 external calls (__init__, __init__).
 
 
-##### `SourceCredentialResolver.bind`  (lines 420–425)
+##### `SourceCredentialResolver.bind`  (lines 481–486)
 
 ```
 def bind(self, connection_id: UUID | None, owner_member_id: UUID | None) -> AuthProxy
 ```
 
-**Purpose**: Creates an AuthProxy view for one source, optionally tied to a specific member-owned connection. This lets the sync runner ask for credentials without repeatedly passing connection metadata around.
+**Purpose**: Creates an authentication proxy tied to a particular feed-sync source’s connection information. This lets the sync runner ask for credentials later without forgetting which source they belong to.
 
-**Data flow**: It receives an optional connection ID and optional owner member ID. It packages those with the registry into a _BoundSourceCredentials object and returns it as the credential resolver for that source.
+**Data flow**: It receives an optional connection ID and optional owner member ID. It packages those values with the registry into a `_BoundSourceCredentials` object and returns it as an `AuthProxy`.
 
-**Call relations**: The sync runner uses this at setup time for a source. After binding, calls to credential go through _BoundSourceCredentials.credential, which enforces the direct-versus-connection rules.
+**Call relations**: The sync runner uses this binding step before resolving source credentials. The returned object’s `credential` method performs the actual checks and routing when the source starts authenticating provider requests.
 
 *Call graph*: 1 external calls (__init__).
 
 
-### `extensions/connectors/ufo_ext_connectors/tools.py`
+### `core/src/ufo/access/egress_rules.py`
 
-`orchestration` · `tool request handling`
+`domain_logic` · `per-turn rule derivation before egress proxy enforcement`
 
-A connector broker is like a front desk for many outside services. Instead of teaching the agent one fixed tool for every service action, this file lets the agent search the live connector registry, inspect real tool schemas, and then execute the chosen tool through the right broker. Without it, the agent would have to guess tool names, could not use connected accounts safely, and would struggle with files or huge encoded results.
+A sandboxed agent should not be able to call any internet host it wants, and it should not directly see real API keys. This file builds the rulebook for the egress proxy, which is the gatekeeper for outgoing network traffic. Think of it like a security desk: it knows which doors are open, which visitors must be counted, and which badge placeholder should be replaced with a real badge only at the door.
 
-The file defines four public tool handlers: list connectors, describe connector tools, search tools inside one connector, and call a connector tool. During a call, it first checks which connected account should be used. If the call is a Slack message send, it adds a small “Sent using ufo” attribution footer so text posted into someone else’s Slack is marked.
+The rules are small value objects. A scope rule says which exact hosts are allowed. An internet rule allows broader public internet access for a live turn. An injection rule replaces a fake secret value, called a sentinel, with the real secret as the request leaves the sandbox. A meter rule says requests to a host should be counted for billing or usage tracking. A forward rule sends certain authenticated requests through the broker instead of using a local secret. A service rule allows special local services to be reached through synthetic hosts.
 
-File arguments get special care. If an argument points at a workspace file, the sandbox hashes and uploads it to the broker’s file store, so the main service process does not handle the bytes directly. Files produced by the connector are downloaded back into a safe workspace folder. If a connector returns base64-encoded data, small UTF-8 text is decoded inline, while binary or large data is written to workspace files. Finally, repeated large JSON objects are replaced with same_as pointers, preserving the facts while keeping the result small enough to stay readable.
+The derivation functions build these rules from different sources: the chosen model provider, extension manifests, artifact storage, workspace credentials, connector grants, and CLI-style connector credentials. A key design point is safety by omission: if a credential cannot be resolved, this file logs a warning and simply does not open that route. That keeps one bad secret from accidentally widening network access.
 
 #### Function details
 
-##### `list_external_tools`  (lines 254–277)
+##### `provider_host`  (lines 112–116)
 
 ```
-async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) -> ToolResult
+def provider_host(model: str) -> str
 ```
 
-**Purpose**: Searches for available connector providers, such as Slack or GitHub, using the current turn’s connector registry and broker catalog. It is used before choosing a specific connector, so the agent does not rely on hard-coded assumptions.
+**Purpose**: Finds which model provider host should be used for a model name. For example, model names starting with OpenAI-style prefixes map to OpenAI's API host, while Claude-style names map to Anthropic's host.
 
-**Data flow**: It receives the tool context and search queries. It reads the connector registry, matches provider IDs and labels locally, asks broker catalogs for additional matches, removes duplicates, and returns a JSON tool result containing connector source IDs and labels.
+**Data flow**: It receives a model name as text. It checks the known model-name prefixes in order and returns the matching API host. If no prefix matches, it raises an error because the system would not know where that model is served.
 
-**Call relations**: This is one of the public connector tools. It starts by getting the registry through _registry, asks multiple catalog searches at once with asyncio.gather, and wraps the final connector list with _json_result.
+**Call relations**: This is a helper used by derive_model_rules. Before the model rules can allow network access or inject the model API key, they need this function to identify the correct provider host.
 
-*Call graph*: calls 2 internal fn (_json_result, _registry); 1 external calls (gather).
-
-
-##### `describe_external_tools`  (lines 280–302)
-
-```
-async def describe_external_tools(ctx: ToolContext, args: DescribeExternalToolsInput) -> ToolResult
-```
-
-**Purpose**: Describes real tools inside one connector and can also discover matching tools by query. It prevents the agent from guessing tool slugs by returning actual names and input schemas from the broker.
-
-**Data flow**: It receives a connector source ID, optional exact tool names, and an optional search query. It looks up the connector, asks the broker for schemas for exact names, records any missing names, optionally searches for available tools, and returns JSON containing schemas, discovery rows, and unresolved names if any.
-
-**Call relations**: This public tool sits between connector selection and execution. It uses _registry to find the connector, _tool_json to shape schema data, _discovery_query when guessed names fail, _discovered_rows for safe discovery output, and _json_result to return the answer.
-
-*Call graph*: calls 5 internal fn (_discovered_rows, _discovery_query, _json_result, _registry, _tool_json).
+*Call graph*: called by 1 (derive_model_rules).
 
 
-##### `attribution_stripped`  (lines 305–309)
+##### `derive_model_rules`  (lines 119–134)
 
 ```
-def attribution_stripped(text: str) -> str
+def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Removes any ufo Slack attribution text from a message before deciding what the human actually wrote. This matters because an attribution footer should not be mistaken for a user mention or instruction.
+**Purpose**: Builds the network rules needed for the sandbox to call the selected language model provider. It allows only the provider's host, arranges for the real model API key to be injected at the proxy, and marks model traffic for token metering.
 
-**Data flow**: It receives a text string. It applies the attribution pattern anywhere in the text and returns the same text with those attribution fragments removed.
+**Data flow**: It receives a model name and the real API key for that model provider. It first turns the model name into a provider host, then chooses the right authentication header shape for that provider. It returns a small set of rules: allow the host, replace the sandbox's fake key with the real key, and meter the traffic as token usage.
 
-**Call relations**: This is a small helper for inbound Slack-style text interpretation. It does not call other project functions; it relies on the compiled attribution pattern defined in this file.
+**Call relations**: This function calls provider_host to identify the destination service. It then creates scope, injection, and meter rules that the egress proxy will later read when model requests leave the sandbox.
 
-
-##### `attributed_arguments`  (lines 312–339)
-
-```
-def attributed_arguments(arguments: dict[str, JsonValue], subject: str) -> dict[str, JsonValue]
-```
-
-**Purpose**: Adds a ufo attribution footer to Slack send arguments when there is a message body to mark. It avoids adding a second footer if one is already present.
-
-**Data flow**: It receives a connector argument dictionary and the attribution subject text. It checks whether the body already carries attribution, builds a Slack context block footer, appends it to existing blocks when possible, or converts text or markdown arguments into blocks with the footer added. It returns either the original arguments or a modified copy.
-
-**Call relations**: slack_attributed calls this when a connector call looks like a Slack message send. It uses _carries_attribution to avoid stacking footers, _appended_blocks for existing block payloads, and _body_blocks to turn plain text or markdown into Slack blocks.
-
-*Call graph*: calls 3 internal fn (_appended_blocks, _body_blocks, _carries_attribution); called by 1 (slack_attributed).
+*Call graph*: calls 1 internal fn (provider_host); 3 external calls (__init__, __init__, __init__).
 
 
-##### `_body_blocks`  (lines 342–370)
+##### `derive_manifest_rules`  (lines 137–139)
 
 ```
-def _body_blocks(arguments: dict[str, JsonValue]) -> list[JsonValue] | None
+def derive_manifest_rules(manifests: tuple[Manifest, ...]) -> tuple[InternetRule, ...]
 ```
 
-**Purpose**: Turns a Slack message body supplied as plain text or markdown into Slack block objects that can be followed by an attribution footer. It keeps each body in the Slack block type that renders its markup correctly.
+**Purpose**: Checks whether any installed extension asks for sandbox internet access, and if so grants live turns access to the public internet. Without this, extensions that genuinely need internet access would be blocked by default.
 
-**Data flow**: It reads the arguments dictionary. If markdown_text is present, it returns one markdown block. If text is present, it splits it into section blocks small enough for Slack’s per-section limit. If neither body is present, it returns None.
+**Data flow**: It receives the extension manifests. It looks for any manifest marked as needing sandbox internet. If at least one asks for it, it returns an internet rule; otherwise it returns no rules.
 
-**Call relations**: attributed_arguments calls this only when there are no existing blocks to append to. Its output becomes the body portion of a new blocks argument, followed by the attribution footer.
+**Call relations**: This is one input into the overall egress rule set. It does not call other project logic; it simply turns manifest declarations into the broad internet permission the proxy understands.
 
-*Call graph*: called by 1 (attributed_arguments).
-
-
-##### `_appended_blocks`  (lines 373–394)
-
-```
-def _appended_blocks(value: JsonValue, footer: dict[str, JsonValue]) -> JsonValue | None
-```
-
-**Purpose**: Adds an attribution footer to an existing Slack blocks argument when that argument is understandable and non-empty. It supports both normal block lists and serialized JSON strings, including URL-encoded strings.
-
-**Data flow**: It receives a blocks value and a footer block. If the value is a non-empty list, it returns a new list with the footer appended. If it is a string, it tries to parse it as JSON, checks that it is a block list without existing attribution, appends the footer, and serializes it back in the same style. If it cannot safely read or append, it returns None.
-
-**Call relations**: attributed_arguments calls this when the caller already provided Slack blocks. It uses _carries_attribution so a serialized message that already has a footer is left untouched.
-
-*Call graph*: calls 1 internal fn (_carries_attribution); called by 1 (attributed_arguments); 4 external calls (dumps, loads, quote, unquote).
+*Call graph*: 1 external calls (__init__).
 
 
-##### `_carries_attribution`  (lines 397–406)
+##### `derive_artifact_store_rules`  (lines 142–158)
 
 ```
-def _carries_attribution(value: JsonValue) -> bool
+async def derive_artifact_store_rules(blob: FilesystemBlobStore | S3BlobStore) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Checks whether a value already contains a full-line ufo attribution. This protects Slack messages from getting repeated footers on retries, edits, or reposts.
+**Purpose**: Allows the sandbox to upload shared files to the configured artifact store when that store is backed by S3. This matters because sharing a produced file may require the sandbox to PUT data to a presigned S3 URL, even if the agent otherwise has no public internet access.
 
-**Data flow**: It receives any JSON-like value. It searches strings directly, walks through lists item by item, and walks through dictionary values. It returns true as soon as it finds an attribution marker, otherwise false.
+**Data flow**: It receives the blob store configuration. If the store is S3, it asks the store for the upload host, then returns rules that allow exactly that host and meter requests to it. If the store is local filesystem storage, it returns no network rules because no external host is needed.
 
-**Call relations**: attributed_arguments uses it before changing any arguments, and _appended_blocks uses it after parsing serialized blocks. It is the guard that keeps attribution idempotent, meaning safe to apply more than once.
+**Call relations**: This function is used when composing the sandbox's allowed outbound routes. It hands the proxy exact host permission for artifact uploads without granting full public internet access.
 
-*Call graph*: called by 2 (_appended_blocks, attributed_arguments); 1 external calls (values).
-
-
-##### `slack_attributed`  (lines 409–423)
-
-```
-def slack_attributed(provider: str, slug: str, arguments: dict[str, JsonValue]) -> dict[str, JsonValue]
-```
-
-**Purpose**: Decides whether a connector call is a Slack message send and, if so, adds ufo attribution to its arguments. Reads, deletes, listings, non-Slack tools, and non-message tools are left unchanged.
-
-**Data flow**: It receives the provider name, tool slug, and arguments. It checks for the Slack provider and for message-send-like words in the slug. If the call qualifies, it returns the arguments after attributed_arguments adds the footer; otherwise it returns the original arguments.
-
-**Call relations**: call_external_tool calls this just before execution. It delegates the actual footer insertion to attributed_arguments, so the Slack-specific decision is separate from the block-editing details.
-
-*Call graph*: calls 1 internal fn (attributed_arguments); called by 1 (call_external_tool).
+*Call graph*: 3 external calls (__init__, __init__, put_host).
 
 
-##### `call_external_tool`  (lines 426–431)
+##### `derive_credential_rules`  (lines 161–224)
 
 ```
-async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult
+async def derive_credential_rules(slots: tuple[CredentialSlot, ...], workspace_id: UUID, store: CredentialStore) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Runs one real connector tool through its broker using the user’s connected account. It is the public execution path after the agent has discovered and described the tool schema.
+**Purpose**: Builds rules for workspace credentials that should be safely injected into outgoing requests. It lets a sandbox use stored credentials without ever placing the raw secret inside the sandbox itself.
 
-**Data flow**: It receives context plus a source ID, tool name, optional account ID, and tool arguments. It looks up the connector, resolves the connected account, adds Slack attribution when needed, creates a _ConnectorCall, runs it, and returns the resulting text inside a ToolResult.
+**Data flow**: It receives credential slot declarations, a workspace ID, and the credential store. For each slot that has an injection target, it tries to read the stored secret and resolve the host that credential is allowed to reach. If either step fails or produces no usable result, it logs a warning or skips the slot. For usable slots, it creates injection rules, groups them by host, adds one host allow rule per host, and adds metering when the slot declares a metering dimension. For Git basic authentication, it converts the username and secret into the Basic authorization format before building the injection rule.
 
-**Call relations**: This is the public side-effecting connector tool. It uses _registry for lookup, ToolContext.connector_account to choose the account, slack_attributed for Slack sends, and _ConnectorCall.run for the full upload-execute-download-cleanup flow.
+**Call relations**: This function is a major part of per-workspace egress setup. It calls the credential store helpers to fetch secrets and resolve hosts, uses warning logs when a slot cannot be used, and returns the rules the proxy needs to allow and authenticate only those credential-backed destinations.
 
-*Call graph*: calls 3 internal fn (connector_account, _registry, slack_attributed); 3 external calls (__init__, __init__, __init__).
-
-
-##### `_ConnectorCall.run`  (lines 459–472)
-
-```
-async def run(self, arguments: dict[str, JsonValue], account_id: str) -> str
-```
-
-**Purpose**: Executes one connector call from start to finish. It stages input files, calls the broker, fetches output files, translates encoded result data, and shrinks repeated objects.
-
-**Data flow**: It receives already prepared arguments and an account ID. It recursively replaces workspace file references with broker upload references, sends the staged arguments to the broker execute API, downloads any broker file outputs into the workspace, translates base64-like result content, adds workspace file listings when present, and returns the final JSON string.
-
-**Call relations**: call_external_tool creates the _ConnectorCall object and calls this method. It hands work to _staged_value, _fetched_files, _translated_node, and finally runs _deduped in a worker thread so the main async loop is not held up by result shrinking.
-
-*Call graph*: calls 3 internal fn (_fetched_files, _staged_value, _translated_node); 1 external calls (to_thread).
+*Call graph*: 7 external calls (__init__, __init__, __init__, b64encode, credential_host, slot_secret, warn).
 
 
-##### `_ConnectorCall._staged_value`  (lines 474–489)
+##### `derive_grant_rules`  (lines 227–244)
 
 ```
-async def _staged_value(self, value: object) -> object
+def derive_grant_rules(grants: tuple[Grant, ...], transfer_hosts: 'ConnectorTransferHosts | None'=None) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Walks through an argument value and finds any workspace file references that must be uploaded before the connector tool runs. This lets connector tools receive files without the model or broker directly reading arbitrary workspace paths.
+**Purpose**: Builds network allow and metering rules for active connector grants. A grant admits the connector provider's host, plus any broker file-transfer hosts needed to move tool input and output files.
 
-**Data flow**: It receives one argument value. If it is exactly a workspace_file object, it validates the path and sends it to _stage_file. If it is a dictionary or list, it recursively processes its children. Other values pass through unchanged.
+**Data flow**: It receives active grants and, optionally, a lookup object for connector transfer hosts. For each grant, it collects the provider host and any extra transfer hosts, removes duplicates while preserving order, and ignores empty host names. If any hosts remain, it returns a scope rule for them and a request-metering rule for each host.
 
-**Call relations**: _ConnectorCall.run calls this for every top-level argument before broker execution. It delegates the actual upload preparation for a single file to _stage_file.
+**Call relations**: This function is used when connector access has already been granted. It does not inject credentials; connector secrets live with the broker. It may ask ConnectorTransferHosts.of for extra file-store hosts, then hands the proxy only admission and metering rules.
 
-*Call graph*: calls 1 internal fn (_stage_file); called by 1 (run).
-
-
-##### `_ConnectorCall._stage_file`  (lines 491–527)
-
-```
-async def _stage_file(self, path: str) -> dict[str, object]
-```
-
-**Purpose**: Uploads one workspace file to the broker’s file store, or reuses an existing broker copy if the broker says it already has the file. It uses the sandbox to keep file reading and network transfer outside the main service process.
-
-**Data flow**: It receives a workspace path. Inside the sandbox it checks the path, computes an MD5 digest, and measures size. It rejects unreadable or oversized files, guesses a filename and media type, asks the broker for an upload location, optionally uses curl in the sandbox to PUT the file bytes there, and returns the broker argument value that refers to the staged file.
-
-**Call relations**: _staged_value calls this whenever it sees a workspace_file argument. It relies on sandbox helpers for path scoping and shell quoting, and it returns data that _ConnectorCall.run includes in the broker execute request.
-
-*Call graph*: called by 1 (_staged_value); 4 external calls (guess_type, PurePosixPath, quote, workspace_path).
+*Call graph*: 2 external calls (__init__, __init__).
 
 
-##### `_ConnectorCall._fetched_files`  (lines 529–562)
+##### `derive_cli_rules`  (lines 247–267)
 
 ```
-async def _fetched_files(self, files: tuple[BrokerFile, ...]) -> list[dict[str, str]]
+def derive_cli_rules(grants: tuple[Grant, ...], acting_member_id: UUID | None, clis: Mapping[str, CliCredential]) -> tuple[Rule, ...]
 ```
 
-**Purpose**: Downloads files produced by a connector tool into the workspace. It creates safe, unique destinations so provider-supplied filenames cannot overwrite or redirect other workspace files.
+**Purpose**: Creates forwarding rules for connector grants that expose a command-line-style credential. These rules say that requests carrying the grant's sentinel should be executed through the broker, where the real account credential lives.
 
-**Data flow**: It receives broker file records, each with a name and download URL. For each file, it reduces the name to a safe leaf filename, creates a fresh connector_files path, claims it through the sandbox containment guard, downloads the URL with curl inside the sandbox, and returns a list of file names and workspace paths.
+**Data flow**: It receives grants, the acting member ID if there is one, and a mapping of connector providers to CLI credential declarations. It keeps only grants whose provider has a CLI credential and whose account the acting member is allowed to use: either a shared connection or the member's own grant. For each allowed grant, it creates a forward rule with the host, header, sentinel, account ID, and broker forwarding behavior.
 
-**Call relations**: _ConnectorCall.run calls this after broker execution, using the broker’s file_outputs view of the response. The returned list is added to the final tool result under the workspace files key.
+**Call relations**: This sits beside connector tool authorization. It uses grant_sentinel to recognize the placeholder credential value, then returns forward rules that tell the egress proxy to send matching requests through the broker instead of trying to inject a local secret.
 
-*Call graph*: called by 1 (run); 3 external calls (quote, contained_leaf, uuid4).
-
-
-##### `_ConnectorCall._translated_node`  (lines 564–624)
-
-```
-async def _translated_node(self, node: Mapping[str, object], depth: int=0) -> dict[str, object]
-```
-
-**Purpose**: Looks at one result object and decodes provider-marked base64 fields into something the agent can actually use. Small text becomes readable text; large or binary content becomes a workspace file reference.
-
-**Data flow**: It receives a dictionary-like result node and a recursion depth. It finds marker fields saying the node contains base64, recursively translates child values, decodes marked content fields when valid, chooses a filename and media type, turns bytes into inline text or offloaded files, and updates the marker to say whether content is now UTF-8 text or offloaded.
-
-**Call relations**: _ConnectorCall.run starts result translation here, and _translated calls it for nested dictionaries. It uses _decoded_base64 for safe decoding and _translated_bytes to decide whether decoded content stays inline or becomes a file.
-
-*Call graph*: calls 3 internal fn (_translated, _translated_bytes, _decoded_base64); called by 2 (_translated, run); 1 external calls (guess_type).
+*Call graph*: 2 external calls (__init__, grant_sentinel).
 
 
-##### `_ConnectorCall._translated`  (lines 626–645)
+##### `ConnectorTransferHosts.of`  (lines 281–282)
 
 ```
-async def _translated(self, value: object, depth: int) -> object
+def of(self, provider: str) -> tuple[str, ...]
 ```
 
-**Purpose**: Recursively translates any value inside a connector result. It handles nested objects, lists, and data URLs while leaving ordinary values unchanged.
+**Purpose**: Looks up which file-transfer hosts should be allowed for a connector provider. If the provider was explicitly listed, it uses that provider's declared hosts; otherwise it falls back to the default open-namespace hosts.
 
-**Data flow**: It receives a value and the current depth. If nesting is too deep, it returns the value unchanged. For dictionaries it calls _translated_node; for lists it translates each item; for short enough data: URLs it calls _translated_data_url; otherwise it returns the original value.
+**Data flow**: It receives a provider name. It checks the explicit provider-to-hosts mapping stored on the object. If the provider is present, it returns that tuple of hosts; if not, it returns the default tuple.
 
-**Call relations**: _translated_node calls this for child values, so this method is the recursive walker. It hands special cases back to _translated_node or _translated_data_url depending on the shape of the value.
-
-*Call graph*: calls 2 internal fn (_translated_data_url, _translated_node); called by 1 (_translated_node).
+**Call relations**: derive_grant_rules calls this when it needs to add broker file-store hosts for a grant. This small lookup keeps the grant-rule code from needing to know how manifest defaults and explicit connector declarations were built.
 
 
-##### `_ConnectorCall._translated_data_url`  (lines 647–659)
+##### `connector_transfer_hosts`  (lines 285–296)
 
 ```
-async def _translated_data_url(self, value: str) -> object
+def connector_transfer_hosts(manifests: tuple[Manifest, ...]) -> ConnectorTransferHosts
 ```
 
-**Purpose**: Decodes a data URL that embeds base64 content directly in a string. This prevents large unreadable data URL text from filling the conversation when it can be shown as text or saved as a file.
+**Purpose**: Builds the lookup table that maps connector providers to the broker file-store hosts they may need. It also records default transfer hosts for providers covered by the open connector namespace.
 
-**Data flow**: It receives a string starting with data:. It checks whether it matches the expected base64 data URL pattern, decodes the payload if valid, uses the declared media type or a fallback type, chooses a reasonable fallback filename, and passes the bytes to _translated_bytes. If anything does not match or decode, it returns the original string.
+**Data flow**: It receives all manifests. It walks through every declared connector and records that connector's provider name with its declared transfer hosts. Then it checks for an open connector namespace and, if present, uses that namespace's transfer hosts as the default. It returns a ConnectorTransferHosts object containing both the explicit map and the default hosts.
 
-**Call relations**: _translated calls this only for strings that look like bounded-size data URLs. It uses _decoded_base64 for validation and _translated_bytes for the final inline-versus-file decision.
+**Call relations**: This function prepares data later used by derive_grant_rules. It calls open_connector_namespace to find the default namespace, then packages the result into ConnectorTransferHosts so grant rule derivation can make a simple provider lookup.
 
-*Call graph*: calls 2 internal fn (_translated_bytes, _decoded_base64); called by 1 (_translated); 1 external calls (guess_extension).
-
-
-##### `_ConnectorCall._translated_bytes`  (lines 661–670)
-
-```
-async def _translated_bytes(self, decoded: bytes, text: str | None, name: str, mimetype: str) -> object
-```
-
-**Purpose**: Chooses the most useful form for decoded bytes from a connector result. Readable small text stays directly in the JSON result; binary or large data is saved to a workspace file.
-
-**Data flow**: It receives raw bytes, optional decoded UTF-8 text, a filename, and a media type. If the text exists and is within the inline limit, it returns that text. Otherwise it calls _offloaded and returns a file reference object.
-
-**Call relations**: _translated_node and _translated_data_url both call this after decoding content. It delegates file writing to _offloaded only when inline text would be unsuitable.
-
-*Call graph*: calls 1 internal fn (_offloaded); called by 2 (_translated_data_url, _translated_node).
-
-
-##### `_ConnectorCall._offloaded`  (lines 672–714)
-
-```
-async def _offloaded(self, name: str, mimetype: str, data: bytes) -> dict[str, object]
-```
-
-**Purpose**: Writes decoded result bytes into the workspace and returns a reference to the saved file. It is used for binary data or text too large to keep inline.
-
-**Data flow**: It receives a name, media type, and byte content. It makes the filename safe, builds a content-addressed path using a SHA-256 digest, writes the bytes to a temporary part file through the sandbox, atomically places that file at the final path, and returns metadata including name, workspace path, media type, and byte count.
-
-**Call relations**: _translated_bytes calls this when decoded content should not be inline. It uses the sandbox’s write path and placement guard so repeated identical payloads share one destination safely.
-
-*Call graph*: called by 1 (_translated_bytes); 3 external calls (sha256, contained_leaf, uuid4).
-
-
-##### `_ConnectorCall._deduped`  (lines 716–774)
-
-```
-def _deduped(self, payload: dict[str, object]) -> str
-```
-
-**Purpose**: Serializes the connector result and, when it is safe and worthwhile, replaces repeated large objects with pointers to their first copy. This keeps denormalized results readable without losing information.
-
-**Data flow**: It receives the final payload dictionary. It serializes it once, checks size, structural complexity, and whether same_as already appears in provider data. If any guard says not to rewrite, it returns the original JSON string. Otherwise it walks each top-level value through _condensed and returns JSON for the condensed payload.
-
-**Call relations**: _ConnectorCall.run calls this in a worker thread after all transfers and translations are complete. It uses _condensed for the structural comparison and _escaped to build JSON Pointer paths.
-
-*Call graph*: calls 2 internal fn (_condensed, _escaped); 1 external calls (dumps).
-
-
-##### `_ConnectorCall._condensed`  (lines 776–852)
-
-```
-def _condensed(self, value: object, pointer: str, depth: int, first: dict[bytes, str]) -> tuple[object, bytes, int]
-```
-
-**Purpose**: Walks one part of a result and detects repeated dictionary objects by structural identity. Later copies of large identical objects become same_as references to the first copy.
-
-**Data flow**: It receives a value, its JSON Pointer path, the current depth, and a map of first-seen object digests. It recursively processes dictionaries and lists, computes a SHA-256 digest that represents each node’s structure and contents, records large first-seen dictionaries, and replaces later matching dictionaries with a pointer object. It returns the possibly changed value, its digest, and its original size estimate.
-
-**Call relations**: _deduped calls this for each top-level payload item. The method calls itself recursively and uses _escaped when extending pointer paths through dictionary keys.
-
-*Call graph*: calls 1 internal fn (_escaped); called by 1 (_deduped); 1 external calls (sha256).
-
-
-##### `_escaped`  (lines 855–858)
-
-```
-def _escaped(token: str) -> str
-```
-
-**Purpose**: Escapes one path token for use in a JSON Pointer, which is a standard way to point to a location inside JSON. This makes keys containing slash or tilde characters point to the correct place.
-
-**Data flow**: It receives a string token. It replaces ~ with ~0 and / with ~1, then returns the escaped token.
-
-**Call relations**: _deduped and _condensed use this when building same_as pointer paths. It is small, but without it a pointer could name the wrong JSON field.
-
-*Call graph*: called by 2 (_condensed, _deduped).
-
-
-##### `_decoded_base64`  (lines 861–885)
-
-```
-def _decoded_base64(value: object) -> tuple[bytes, str | None] | None
-```
-
-**Purpose**: Safely decodes a value that a provider marked as base64. It is strict, bounded, and leaves mislabeled values untouched instead of turning them into garbage.
-
-**Data flow**: It receives any value. If it is not a string or is too long, it returns None. Otherwise it removes whitespace, strictly base64-decodes the string, then tries to decode the bytes as UTF-8 text. It returns bytes plus text when available, or bytes plus None for binary data; invalid base64 returns None.
-
-**Call relations**: _translated_node and _translated_data_url call this before converting connector result content. It is the validation gate that decides whether a marked field really can be translated.
-
-*Call graph*: called by 2 (_translated_data_url, _translated_node); 1 external calls (b64decode).
-
-
-##### `search_connector_tools`  (lines 888–902)
-
-```
-async def search_connector_tools(ctx: ToolContext, args: SearchConnectorToolsInput) -> ToolResult
-```
-
-**Purpose**: Performs richer tool discovery inside one connector using a natural-language goal. It can return matching tools plus broker-provided advice such as plan steps, guidance, and pitfalls.
-
-**Data flow**: It receives a source ID and query. It looks up the connector, asks the broker search API for matches and advice, formats the tool rows with _discovered_rows, adds plan, guidance, and pitfalls, and returns the result as JSON.
-
-**Call relations**: This is a public discovery tool alongside describe_external_tools. It uses _registry for connector lookup, _discovered_rows to apply fallback and budget rules, and _json_result for the final ToolResult.
-
-*Call graph*: calls 3 internal fn (_discovered_rows, _json_result, _registry).
-
-
-##### `_registry`  (lines 905–908)
-
-```
-def _registry(ctx: ToolContext) -> ConnectorRegistry
-```
-
-**Purpose**: Returns the connector registry for the current turn, or raises a clear error if connector tools were invoked without one. This avoids later failures that would be harder to understand.
-
-**Data flow**: It receives the tool context. If ctx.connectors is present, it returns that registry. If it is missing, it raises a runtime error explaining that connector dispatch lacked the turn’s registry.
-
-**Call relations**: The public connector handlers call this at their start: list_external_tools, describe_external_tools, search_connector_tools, and call_external_tool. It is the common doorway from a tool request into the live connector setup.
-
-*Call graph*: called by 4 (call_external_tool, describe_external_tools, list_external_tools, search_connector_tools).
-
-
-##### `_tool_json`  (lines 911–912)
-
-```
-def _tool_json(tool: BrokerTool) -> dict[str, object]
-```
-
-**Purpose**: Converts a broker tool object into the simple JSON shape returned to the agent. It keeps the fields the agent needs: slug, description, and input schema.
-
-**Data flow**: It receives a BrokerTool. It reads its slug, description, and input_schema fields, and returns them in a dictionary.
-
-**Call relations**: describe_external_tools uses this for exact schema lookups, and _available_tools uses it when preparing discovery rows. It keeps tool descriptions consistent across both paths.
-
-*Call graph*: called by 2 (_available_tools, describe_external_tools).
-
-
-##### `_discovered_rows`  (lines 915–932)
-
-```
-async def _discovered_rows(entry: ConnectorEntry, workspace_id: UUID, query: str, found: tuple[BrokerTool, ...]) -> tuple[list[dict[str, object]], str]
-```
-
-**Purpose**: Builds the tool rows for discovery answers and adds notes when the answer is a fallback or was shortened. It makes sure a failed query is not a dead end.
-
-**Data flow**: It receives a connector entry, workspace ID, query, and broker-found tools. If the query was non-empty and found nothing, it asks the broker for the connector’s unqueried top tools instead. It trims the rows through _available_tools and returns the rows plus a note explaining fallback or omissions.
-
-**Call relations**: describe_external_tools and search_connector_tools both use this, so both discovery routes share the same fallback behavior and result-size limits.
-
-*Call graph*: calls 1 internal fn (_available_tools); called by 2 (describe_external_tools, search_connector_tools).
-
-
-##### `_available_tools`  (lines 935–948)
-
-```
-def _available_tools(listed: tuple[BrokerTool, ...]) -> list[dict[str, object]]
-```
-
-**Purpose**: Selects as many tool catalog rows as will fit within the inline result budget. This helps keep discovery output in the conversation instead of being offloaded to a file.
-
-**Data flow**: It receives a tuple of BrokerTool objects. It converts each one with _tool_json, estimates the JSON size, stops once adding more would exceed the budget after at least one row, and returns the rows kept.
-
-**Call relations**: _discovered_rows calls this for both normal search results and fallback top-tool lists. It uses json serialization only to estimate how much room the row will take.
-
-*Call graph*: calls 1 internal fn (_tool_json); called by 1 (_discovered_rows); 1 external calls (dumps).
-
-
-##### `_discovery_query`  (lines 951–958)
-
-```
-def _discovery_query(explicit: str, unresolved: list[str]) -> str
-```
-
-**Purpose**: Chooses the search query used when describe_external_tools needs discovery. If the caller gave explicit keywords, it uses them; otherwise it turns unresolved guessed slugs into useful words.
-
-**Data flow**: It receives an explicit query string and a list of unresolved tool names. If the explicit query is non-empty, it returns it. Otherwise it lowercases the unresolved names, replaces non-alphanumeric runs with spaces, removes duplicate words while preserving order, and returns the resulting search phrase.
-
-**Call relations**: describe_external_tools calls this when exact requested tool names were missing or when discovery is needed. It helps turn a bad guessed slug into a broker catalog search that may reveal the real slug.
-
-*Call graph*: called by 1 (describe_external_tools); 1 external calls (sub).
-
-
-##### `_json_result`  (lines 961–962)
-
-```
-def _json_result(payload: dict[str, object]) -> ToolResult
-```
-
-**Purpose**: Wraps a dictionary payload as a text-based ToolResult containing JSON. It is the common final packaging step for non-execution connector tools.
-
-**Data flow**: It receives a dictionary. It serializes it with json.dumps, puts that text into a TextContent object, and returns a ToolResult containing that content.
-
-**Call relations**: list_external_tools, describe_external_tools, and search_connector_tools call this after building their response payloads. call_external_tool does its own wrapping because _ConnectorCall.run already returns serialized text.
-
-*Call graph*: called by 3 (describe_external_tools, list_external_tools, search_connector_tools); 3 external calls (__init__, __init__, dumps).
+*Call graph*: 2 external calls (__init__, open_connector_namespace).
 
 ## 📊 State Registers Touched
 
-- `reg-extension-registry` — The loaded list of installed extensions, packs, routes, tools, skills, jobs, credentials, backends, and migrations.
-- `reg-database-store` — The shared database connection and tables where workspaces, users, agents, turns, files, jobs, costs, and extension data are saved.
-- `reg-workspace-principals` — The current workspace, members, agents, controlling users, and ownership identities used to decide who is acting.
-- `reg-session-auth` — The login sessions, signed tokens, protected links, callback state, and request identities proving who a visitor or service is.
-- `reg-visibility-boundaries` — The saved rules for who may see each conversation, agent, transcript, source, memory, artifact, or workspace object.
-- `reg-credential-vault` — The encrypted store of API keys, OAuth tokens, and other secrets that can be injected only into approved places.
-- `reg-connection-grants` — The saved account connections and per-agent permissions that say which outside accounts an agent may use.
-- `reg-model-usage-accounting` — The recorded token, image, video, embedding, sandbox, egress, and cost usage used for billing and audit trails.
-- `reg-spend-controls` — The workspace spending caps, prepaid balances, top-up settings, BYOK flags, and billing export state.
-- `reg-tool-catalog` — The shared catalog of tools the model can call, including built-in tools, extension tools, connector tools, and their safety labels.
-- `reg-tool-execution-context` — The per-turn but shared rulebook passed through tools, saying who the tool acts for, what files, accounts, sandboxes, and subagents it may use.
-- `reg-sandbox-runtime` — The remembered sandbox handles, workspace directories, terminals, command sessions, ports, and cleanup state used for safe code execution.
-- `reg-egress-policy` — The network access rules and proxy authorization state that decide what sandboxed code may contact outside the system.
-- `reg-source-sync-catalog` — The saved catalog of external sources, pages, sync cursors, deletion marks, retry backoff, and indexing needs.
-- `reg-search-index` — The shared keyword and embedding indexes that let conversations, tools, and background jobs find relevant stored documents.
-- `reg-connector-action-cache` — Dynamic connector/MCP action schemas, allowed-action listings, and runtime client/session caches reused when exposing and executing external-service actions.
+- `reg-effective-config` — The current trusted settings for how the service should run, including database, provider, deployment, and safety options.
+- `reg-extension-capability-registry` — The live catalog of everything enabled extensions add, such as tools, routes, jobs, credentials, hooks, and backends.
+- `reg-database-session-workspace-scope` — The shared database access layer that keeps reads and writes inside the right workspace and transaction.
+- `reg-member-auth-principals` — The shared answer to who the current person or service is and what member identity they are acting as.
+- `reg-surface-routing` — The mapping from outside places like web, Slack, terminal, and iMessage to the right workspace, conversation, member, and agent.
+- `reg-tool-catalog` — The current list of tools the agent may call, with their names, inputs, permissions, and implementations.
+- `reg-billing-ledger` — The shared money and usage record for tokens, images, videos, sandbox use, egress, balances, caps, and exports.
+- `reg-credential-vault` — The encrypted store of API keys, connected accounts, grants, and approvals that lets tools use outside services without exposing secrets.
+- `reg-egress-policy` — The shared network exit rules that decide which outside addresses sandboxes may contact and when secrets may be added.
+- `reg-sandbox-handles` — The remembered execution workspaces, browser workbenches, terminal sessions, and sandbox IDs used across a conversation or turn.
+- `reg-source-sync-state` — The saved state of connected content sources, including pages, checkpoints, errors, ownership, and read grants.
+- `reg-observability-context` — The shared tracing, logging, metrics, health, and redaction context used to understand what happened safely.
+- `reg-extension-data-store` — Durable extension-scoped key/value or JSON state used by installed extensions beyond their manifest capabilities and lockfile selection.
+- `reg-auth-and-oauth-flow-state` — Short-lived login and OAuth handoff state such as nonces, return targets, code-verifier data, pending claims, and callback correlation before it becomes an authenticated principal or stored credential.
+- `reg-runtime-connection-pools` — Live pooled connections and reusable clients for shared services such as the database, Redis/live hub, blob storage, model providers, connector APIs, and sandbox/browser providers.
+- `reg-egress-policy-generation` — Per-workspace egress-rule version or invalidation counter used to rebuild cached sandbox proxy rules after credential, grant, or network-policy changes.
