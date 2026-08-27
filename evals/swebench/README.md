@@ -87,9 +87,10 @@ explicit submissions path, and each grade is retained under
 `.local/swebench/grades/<subset>/<run-id>/`. That grade directory contains predictions when
 applicable, native `logs/run_evaluation/`, the official aggregate report, and `summary.json`;
 official output files are not moved or rewritten. Grading runs on the official prebuilt evaluation
-images from the `swebench` Docker Hub namespace — the harness's stock source. The wrapper pulls each
-image with `--platform linux/amd64`, grades that case, then aggregates the native reports. Pulling at
-the case boundary keeps the image working set bounded and supplies the platform omitted by the
-pinned harness. Local builds are no longer an option: the pinned specs have drifted from the world
+images from the `swebench` Docker Hub namespace — the harness's stock source. The wrapper verifies
+an exact `linux/amd64` image with an official repository digest or pulls it, grades that case, then
+aggregates the native reports. Prediction generation omits candidate changes to files owned by the
+case's official test patch, so agent-authored tests cannot prevent the grader tests from applying;
+the captured patch remains unchanged. Local builds are not an option: the pinned specs have drifted from the world
 (sympy's deleted `1.7` branch, pip 25.3 dropping `--no-use-pep517`), while the prebuilt images were
 frozen before that drift.

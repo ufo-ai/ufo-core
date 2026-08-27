@@ -2782,6 +2782,94 @@ async def test_a_foreground_wait_reads_the_terminal_only_after_workflow_completi
     assert terminal_reads == 1
 
 
+async def test_an_interruptible_foreground_wait_uses_the_workflow_until_completion(
+    db: None, dbos_launched: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent, member_id, _ = await _member_founded_parent(workspace_id, agent_id)
+    workflow_finished = asyncio.Event()
+    client = _RecordingClient(workflow_finished=workflow_finished)
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    ).authorize(member_id)
+    spawned = await subagents.spawn(
+        "research", {"task": "acme"}, background=True, dedup_key="interruptible"
+    )
+    terminal_reads = 0
+    terminal_or_park = Subagents._terminal_or_park
+
+    async def counted_terminal_or_park(self: Subagents, turn_id: UUID) -> TerminalFrame | None:
+        nonlocal terminal_reads
+        terminal_reads += 1
+        return await terminal_or_park(self, turn_id)
+
+    monkeypatch.setattr(Subagents, "_terminal_or_park", counted_terminal_or_park)
+    awaiting = asyncio.create_task(
+        subagents.spawn(
+            "research",
+            {"task": "acme"},
+            dedup_key="interruptible",
+            detach_on_arrival=True,
+        )
+    )
+    await client.workflow_retrieved.wait()
+    await client.handles[0].waiting.wait()
+    assert terminal_reads == 0
+
+    terminal = TerminalFrame(status="done", text='{"finding": "done"}')
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == spawned.turn_id)
+            .values(
+                status="done",
+                terminal=terminal.model_dump(mode="json"),
+                updated_at=sa.func.now(),
+            )
+        )
+    workflow_finished.set()
+
+    result = await asyncio.wait_for(awaiting, timeout=5)
+    assert result.terminal == terminal
+    assert terminal_reads == 1
+
+
+async def test_a_foreground_wait_failure_cancels_its_child(
+    db: None, dbos_launched: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    parent = await _parent(workspace_id, agent_id)
+    client = _RecordingClient()
+    subagents = Subagents(
+        client=client,
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    waited: list[UUID] = []
+
+    async def fail_wait(self: Subagents, turn_id: UUID) -> TerminalFrame | None:
+        waited.append(turn_id)
+        raise sa.exc.TimeoutError("pool exhausted")
+
+    monkeypatch.setattr(Subagents, "_await_terminal_or_detach", fail_wait)
+    with pytest.raises(sa.exc.TimeoutError, match="pool exhausted"):
+        await subagents.spawn(
+            "research",
+            {"task": "acme"},
+            dedup_key="wait-failed",
+            detach_on_arrival=True,
+        )
+
+    assert len(waited) == 1
+    assert client.enqueued == [str(waited[0])]
+    assert client.cancelled == [str(waited[0])]
+    assert await _child_state(waited[0]) == ("cancelled", None)
+
+
 async def test_a_foreground_wait_follows_the_workflow_that_resumes_its_child(
     db: None, dbos_launched: Config
 ) -> None:
@@ -2835,7 +2923,7 @@ async def test_a_foreground_wait_follows_the_workflow_that_resumes_its_child(
 
 
 DETACH_WAIT_SECONDS = 10
-DETACH_POLL_MARGIN_SECONDS = SUBAGENT_POLL_SECONDS * 5
+DETACH_POLL_MARGIN_SECONDS = SUBAGENT_POLL_SECONDS * 1.5
 
 
 async def _member_founded_parent(
@@ -2909,8 +2997,10 @@ async def test_a_foreground_spawn_answers_inline_while_no_member_speaks(
     leaves the wait running."""
     workspace_id, agent_id = await _workspace_agent()
     parent, member_id, admission = await _member_founded_parent(workspace_id, agent_id)
+    workflow_finished = asyncio.Event()
+    client = _RecordingClient(workflow_finished=workflow_finished)
     subagents = Subagents(
-        client=_RecordingClient(),
+        client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
         audience=conversation_audience(member_id),
@@ -2926,6 +3016,7 @@ async def test_a_foreground_spawn_answers_inline_while_no_member_speaks(
     assert not awaiting.done()
 
     await _finish_child(child.turn_id, '{"finding": "acme ships"}')
+    workflow_finished.set()
     async with asyncio.timeout(DETACH_WAIT_SECONDS):
         result = await awaiting
 
@@ -2944,7 +3035,7 @@ async def test_an_arriving_member_message_moves_the_wait_to_the_background(
     longer coming."""
     workspace_id, agent_id = await _workspace_agent()
     parent, member_id, admission = await _member_founded_parent(workspace_id, agent_id)
-    client = _RecordingClient()
+    client = _RecordingClient(workflow_finished=asyncio.Event())
     subagents = Subagents(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
@@ -2955,7 +3046,8 @@ async def test_an_arriving_member_message_moves_the_wait_to_the_background(
     awaiting = asyncio.create_task(
         subagents.spawn("research", {"task": "acme"}, dedup_key="acme", detach_on_arrival=True)
     )
-    await asyncio.sleep(DETACH_POLL_MARGIN_SECONDS)
+    await client.workflow_retrieved.wait()
+    await client.handles[0].waiting.wait()
     assert not awaiting.done()
 
     folded = await admission.admit_member(

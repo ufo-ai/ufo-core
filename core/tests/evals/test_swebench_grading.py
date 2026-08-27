@@ -120,6 +120,9 @@ def grading_workflow(
 def accept_test_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(grading, "verify_source", lambda _source, _upstream=None: None)
     monkeypatch.setattr(grading, "version", lambda _distribution: "4.1.0")
+    monkeypatch.setattr(
+        grading.SWEbenchGrading, "_ensure_official_image", lambda _self, _case: None
+    )
 
 
 def test_predictions_include_every_case_in_manifest_order_and_keep_missing_empty(
@@ -161,6 +164,32 @@ def test_predictions_include_every_case_in_manifest_order_and_keep_missing_empty
             separators=(",", ":"),
         ).encode(),
     ]
+
+
+def test_predictions_remove_changes_owned_by_the_official_test_patch(tmp_path: Path) -> None:
+    snapshot_value = snapshot(tmp_path / "snapshot")
+    case = snapshot_value.cases[0]
+    output = tmp_path / "predictions.jsonl"
+    production = (
+        "diff --git a/src/value.py b/src/value.py\n"
+        "--- a/src/value.py\n"
+        "+++ b/src/value.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    colliding_test = (
+        "diff --git a/test0.py b/test0.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/test0.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+assert True\n"
+    )
+
+    write_predictions((case,), {case.instance_id: production + colliding_test}, output, "ufo")
+
+    assert json.loads(output.read_text())["model_patch"] == production
 
 
 def test_predictions_reject_unexpected_submission_directories(tmp_path: Path) -> None:
@@ -217,7 +246,79 @@ def test_official_instance_images_are_the_pinned_harness_names() -> None:
     )
 
 
-def test_workflow_pulls_and_grades_each_image_before_aggregating_reports(
+def test_matching_local_official_image_skips_the_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_value = snapshot(tmp_path / "snapshot")
+    workflow = grading_workflow(tmp_path, snapshot_value)
+    case = workflow.selected_cases[0]
+    image = official_instance_image(case.instance_id)
+    repository = image.rsplit(":", maxsplit=1)[0]
+    inspected: list[tuple[str, ...]] = []
+
+    def inspect(command: Sequence[str], **_kwargs: object) -> str:
+        inspected.append(tuple(command))
+        return f"linux/amd64\n{repository}@sha256:{'a' * 64}\n"
+
+    def not_pulled(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a verified local image must not be pulled")
+
+    monkeypatch.setattr(grading.subprocess, "check_output", inspect)
+    monkeypatch.setattr(grading.subprocess, "run", not_pulled)
+
+    workflow._ensure_official_image(case)
+
+    assert inspected == [
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            grading.OFFICIAL_IMAGE_INSPECT_FORMAT,
+            image,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "cache_state",
+    ("missing", "wrong-platform", "wrong-repository", "malformed-digest"),
+)
+def test_unverified_local_official_image_is_pulled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache_state: str
+) -> None:
+    snapshot_value = snapshot(tmp_path / "snapshot")
+    workflow = grading_workflow(tmp_path, snapshot_value)
+    case = workflow.selected_cases[0]
+    image = official_instance_image(case.instance_id)
+    repository = image.rsplit(":", maxsplit=1)[0]
+    details = {
+        "wrong-platform": f"linux/arm64\n{repository}@sha256:{'a' * 64}\n",
+        "wrong-repository": f"linux/amd64\nother/image@sha256:{'a' * 64}\n",
+        "malformed-digest": f"linux/amd64\n{repository}@sha256:short\n",
+    }
+
+    def inspect(_command: Sequence[str], **_kwargs: object) -> str:
+        if cache_state == "missing":
+            raise subprocess.CalledProcessError(1, "docker image inspect")
+        return details[cache_state]
+
+    pulls: list[tuple[str, ...]] = []
+
+    def run(command: Sequence[str], *, check: bool) -> subprocess.CompletedProcess[bytes]:
+        assert check
+        pulls.append(tuple(command))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(grading.subprocess, "check_output", inspect)
+    monkeypatch.setattr(grading.subprocess, "run", run)
+
+    workflow._ensure_official_image(case)
+
+    assert pulls == [("docker", "pull", "--platform", "linux/amd64", image)]
+
+
+def test_workflow_grades_each_image_before_aggregating_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot_value = snapshot(tmp_path / "snapshot")
@@ -253,40 +354,27 @@ def test_workflow_pulls_and_grades_each_image_before_aggregating_reports(
     grade = workflow.grade_directory.resolve()
     predictions = grade / "predictions.jsonl"
     expected_case_calls = [
-        call
-        for case_id in SMOKE_CASE_IDS
-        for call in (
+        (
             (
-                (
-                    "docker",
-                    "pull",
-                    "--platform",
-                    "linux/amd64",
-                    official_instance_image(case_id),
-                ),
-                None,
+                sys.executable,
+                "-m",
+                "swebench.harness.run_evaluation",
+                "--dataset_name",
+                str(workflow.parquet.resolve().parent),
+                "--split",
+                "test",
+                "--predictions_path",
+                str(predictions),
+                "--max_workers",
+                "1",
+                "--instance_ids",
+                case_id,
+                "--run_id",
+                "official-smoke",
             ),
-            (
-                (
-                    sys.executable,
-                    "-m",
-                    "swebench.harness.run_evaluation",
-                    "--dataset_name",
-                    str(workflow.parquet.resolve().parent),
-                    "--split",
-                    "test",
-                    "--predictions_path",
-                    str(predictions),
-                    "--max_workers",
-                    "1",
-                    "--instance_ids",
-                    case_id,
-                    "--run_id",
-                    "official-smoke",
-                ),
-                grade,
-            ),
+            grade,
         )
+        for case_id in SMOKE_CASE_IDS
     ]
     assert calls == [
         *expected_case_calls,
@@ -331,7 +419,7 @@ def test_workflow_pulls_and_grades_each_image_before_aggregating_reports(
     }
 
 
-def test_gold_mode_uses_official_gold_predictions_and_pulls_only_selected_images(
+def test_gold_mode_uses_official_gold_predictions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot_value = snapshot(tmp_path / "snapshot")
@@ -361,8 +449,6 @@ def test_gold_mode_uses_official_gold_predictions_and_pulls_only_selected_images
 
     workflow.run()
 
-    pulled = [command[-1] for command in commands if command[:2] == ("docker", "pull")]
-    assert pulled == [official_instance_image(case_id) for case_id in selected]
     command = commands[-1]
     assert command[command.index("--predictions_path") + 1] == "gold"
     assert "--namespace" not in command

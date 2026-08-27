@@ -283,6 +283,26 @@ neighbors. No external module imports the branch, and writer output is unchanged
 the edit and its direct test local to inspector.py; do not create public utility helpers or alter
 DOT rendering."""
 
+AUTODOC_DISCOVERY_MESSAGE = """You are at the failing-test diagnosis step of a coding task. Do not
+use tools or implement. Return only the first wrong discovery boundary, the complete producer and
+consumer path, the rejected partial boundary, and focused public regression coverage.
+
+Sphinx must document a property wrapped by classmethod through both an explicit autoproperty
+directive and autoclass with :members:. A patch extends PropertyDocumenter.can_document_member(),
+import_object(), and add_directive_header(). The direct autoproperty and Python-domain tests pass,
+but autoclass omits the member entirely. Member discovery calls getdoc() with self.parent and
+self.object_name instead of the owning class and current member name. Sphinx's inspect helpers can
+unwrap a classmethod descriptor through the class MRO when given that owner and name. Identify the
+first wrong boundary and the smallest complete path to the already-working renderer."""
+
+AUTODOC_DIRECT_MESSAGE = """You are at the implementation-boundary decision step of a coding task.
+Do not use tools or implement. Return only the smallest edit and direct regression test.
+
+Autoclass discovery, getdoc(), and classmethod descriptor unwrapping through the class MRO are
+already proven. Explicit autoproperty reaches PropertyDocumenter but omits :classmethod: from its
+directive header. Keep the change at the renderer and test its direct output; do not edit discovery
+or inspect helpers."""
+
 MRO_PRECEDENCE_MESSAGE = """You are at the failing-test diagnosis step of a coding task. Do not use
 tools or implement. Return only the ordering rule, attribute-read rule, companion write-path edit,
 and focused regression coverage.
@@ -299,6 +319,64 @@ A serializer's documented merge contract is explicitly base-to-derived: defaults
 Left, then Child, so later classes override earlier keys. Direct-state reads are already proven.
 State the traversal for Child(Left, Base) and preserve the documented base-first contract; do not
 replace it with Python lookup precedence."""
+
+STATEFUL_TRANSFORM_MESSAGE = """You are at the failing-test diagnosis step of a coding task. Do not
+use tools or implement. Return only the state owner, the required producer and consumer edges, the
+rejected partial boundary, and focused public round-trip coverage.
+
+A coordinate library adds direct transforms between ITRS and observed AltAz/HADec frames. A patch
+subtracts observed_frame.location inside the direct function, but ITRS owns only cartesian data and
+obstime. observed_to_itrs() therefore returns a frame with no observer location, and later ITRS to
+CIRS or TETE edges silently use the geocentric default. State the frame attribute that must own the
+location, how both direct and intermediate transform directions must propagate it, and tests across
+same and different locations and obstimes. Matrix and refraction formulas are already proven."""
+
+STATELESS_TRANSFORM_MESSAGE = """You are at the implementation-boundary decision step of a coding
+task. Do not use tools or implement. Return only the smallest edit and focused round-trip test.
+
+A graphics library adds Pixel(x, y) to Normalized(u, v) transforms. Both frames contain only their
+coordinate pair; scale and translation are explicit function arguments, and no origin, calibration,
+time, or location survives a call. The two local conversion functions already cover every consumer.
+Keep this proven stateless boundary local; do not add frame attributes or edit unrelated
+transforms."""
+
+DERIVED_STATE_REMOVAL_MESSAGE = """You are at the failing-test diagnosis step of a coding task. Do
+not use tools or implement. Return only the canonical surviving state, the first wrong production
+operation, the minimal repair, and focused branch coverage.
+
+In xarray, Dataset(coords={'x': [1, 2]}).reset_index('x', drop=True) removes the only coordinate and
+index. A patch passes the remaining variables and indexes through Dataset._replace(), which retains
+self._dims, so the empty Dataset still reports dimension x: 2. It also adds a DataVariables.__len__
+assertion. State how dimensions must be reconstructed and test the last-owner deletion path without
+weakening or merely checking the invariant."""
+
+DERIVED_STATE_SURVIVOR_MESSAGE = """You are at the implementation-boundary decision step of a coding
+task. Do not use tools or implement. Return only the canonical state rule and focused neighboring
+regression.
+
+Dataset({'value': ('x', [3, 4])}, coords={'x': [1, 2]}).reset_index('x', drop=True) removes the
+index coordinate, but the surviving value variable still owns dimension x. State how reconstruction
+from surviving variables retains x here while removing it when no variable references it. Do not
+delete the named dimension unconditionally or add a length clamp."""
+
+LOCAL_VALIDATION_MESSAGE = """You are at the validation-planning step of a pinned coding task. Do
+not use tools or implement. Return only the tests to run, their connection to the change, and the
+stop condition.
+
+A one-function change makes infer_node() return the declared type for a TypeAlias expression
+instead of None. A direct inference test covers the new branch. The nearest public consumer is one
+writer test that renders the inferred type. The full core suite takes 600 seconds, while a ten-file
+inference sweep takes 900 seconds and crosses unrelated packages. Choose the validation boundary
+after the implementation and focused regressions are in place."""
+
+CROSS_CUTTING_VALIDATION_MESSAGE = """You are at the validation-planning step of a coding task. Do
+not use tools or implement. Return only the tests to run, their connection to the change, and the
+stop condition.
+
+The shared InferenceResult protocol changes a serialized field used by every analyzer adapter and
+public writer. The patch updates the protocol, every implementation, and every direct consumer.
+One focused contract test proves the new wire shape. Choose the remaining validation boundary for
+this cross-package public contract change."""
 
 
 def _response_evidence_scorer(
@@ -323,10 +401,10 @@ def _response_evidence_scorer(
 
 
 def cross_layer_error_emitter_scorer() -> Grader:
-    """The NaN path must move to DecimalValidator, not acquire a second partial field fix."""
+    """The NaN path must repair the first error emitter or restore the shared validator path."""
     return _response_evidence_scorer(
-        "the answer traces the upstream NaN emitter, restores DecimalValidator ownership, and "
-        "tests the public value placeholder",
+        "the answer traces the active NaN emitter, repairs its value params, and tests the "
+        "public value placeholder",
         (
             ("DecimalField.validate", ("decimalfield.validate",)),
             (
@@ -339,7 +417,7 @@ def cross_layer_error_emitter_scorer() -> Grader:
                 ),
             ),
             (
-                "removal of redundant field validation",
+                "the production repair",
                 (
                     "remove decimalfield.validate",
                     "delete decimalfield.validate",
@@ -349,6 +427,8 @@ def cross_layer_error_emitter_scorer() -> Grader:
                     "let decimalvalidator",
                     "allow decimalvalidator",
                     "delegate to decimalvalidator",
+                    "params={'value': value}",
+                    'params={"value": value}',
                 ),
             ),
             ("the NaN case", ("nan",)),
@@ -393,10 +473,6 @@ def composite_modulus_boundary_scorer() -> Grader:
     return _response_evidence_scorer(
         "the answer decomposes the full composite nth-root solver and tests its public boundary",
         (
-            (
-                "the composite-modulus requirement",
-                ("composite modulus", "composite moduli", "composite-modulus"),
-            ),
             ("prime-power factorization", ("prime-power", "prime power", "factorint")),
             (
                 "root lifting",
@@ -643,6 +719,71 @@ def pyreverse_consumer_scorer(*, public_output: bool) -> Grader:
     )
 
 
+def discovery_boundary_scorer(*, public_discovery: bool) -> Grader:
+    if public_discovery:
+        return _response_evidence_scorer(
+            "the answer repairs public member discovery through the existing renderer",
+            (
+                ("the public collection boundary", ("autoclass", ":members:", "member discovery")),
+                ("the metadata producer", ("getdoc",)),
+                ("the owning class", ("self.object",)),
+                ("the current member", ("membername", "member name")),
+                ("descriptor lookup", ("getmro", "class mro", "__dict__")),
+                ("descriptor unwrapping", ("__func__", "unwrap")),
+                ("the render consumer", ("propertydocumenter",)),
+                (
+                    "public regression coverage",
+                    (
+                        "autoclass includes",
+                        "autoclass output",
+                        "class members",
+                        "test_ext_autodoc_autoclass",
+                        "all through public entry points",
+                        "focused public regression",
+                    ),
+                ),
+                (
+                    "rejection of the direct-only patch",
+                    (
+                        "direct-only",
+                        "direct only",
+                        "incomplete",
+                        "not sufficient",
+                        "rejected partial boundary",
+                        "extra compensation in propertydocumenter",
+                        "specialized unwrap",
+                    ),
+                ),
+            ),
+        )
+    return _response_evidence_scorer(
+        "the answer keeps proven discovery unchanged and repairs only the direct renderer",
+        (
+            ("the renderer owner", ("propertydocumenter",)),
+            ("the directive header", ("add_directive_header", "directive header")),
+            ("the classmethod option", (":classmethod:", "classmethod option")),
+            (
+                "direct regression coverage",
+                (
+                    "direct autoproperty",
+                    "autoproperty output",
+                    "direct output",
+                    "direct regression test",
+                    "do_autodoc(app, 'property'",
+                ),
+            ),
+        ),
+        (
+            "change getdoc",
+            "edit getdoc",
+            "change getmro",
+            "edit getmro",
+            "change member discovery",
+            "edit member discovery",
+        ),
+    )
+
+
 def precedence_scorer(*, python_mro: bool) -> Grader:
     if python_mro:
         return _response_evidence_scorer(
@@ -659,13 +800,27 @@ def precedence_scorer(*, python_mro: bool) -> Grader:
                         "unreversed",
                         "drop the reversal",
                         "drop reversal",
+                        ".__mro__ forward",
+                        "from most specific to least specific",
+                        "from the subclass through its bases",
+                        "from left to right",
                     ),
                 ),
                 ("direct class state", ("__dict__", "direct pytestmark")),
                 ("the expected order", ("c, a, b", "['c', 'a', 'b']", "c then a then b")),
                 (
                     "the local store path",
-                    ("consider_mro=false", "consider_mro = false", "direct marks in store_mark"),
+                    (
+                        "consider_mro=false",
+                        "consider_mro = false",
+                        "direct marks in store_mark",
+                        "store_mark copies only direct marks",
+                        "store_mark copy and update only",
+                        "store_mark read the target class",
+                        "store_mark copy and extend only",
+                        "decorated class's directly declared pytestmark",
+                        "target class's direct pytestmark",
+                    ),
                 ),
             ),
         )
@@ -683,6 +838,173 @@ def precedence_scorer(*, python_mro: bool) -> Grader:
             "use python lookup precedence",
             "walk child, left, base",
             "traverse child, left, base",
+        ),
+    )
+
+
+def transform_state_scorer(*, stateful: bool) -> Grader:
+    if stateful:
+        return _response_evidence_scorer(
+            "the answer gives location one frame owner and propagates it through every transform "
+            "edge that consumes it",
+            (
+                (
+                    "the ITRS location owner",
+                    ("itrs.location", "earthlocationattribute", "location attribute on itrs"),
+                ),
+                (
+                    "the observed-to-ITRS producer",
+                    ("observed_to_itrs", "altaz to itrs", "hadec to itrs"),
+                ),
+                (
+                    "the intermediate consumers",
+                    ("cirs and tete", "itrs_to_cirs", "itrs_to_tete"),
+                ),
+                (
+                    "both transform directions",
+                    ("both directions", "to and from", "each direction", "round trip"),
+                ),
+                ("the location branch", ("different locations", "location-to-location")),
+                ("the time branch", ("different obstimes", "different obstime")),
+                ("public round-trip coverage", ("round trip", "round-trip")),
+            ),
+        )
+    return _response_evidence_scorer(
+        "the answer keeps a proven stateless transform local",
+        (
+            ("the local conversions", ("pixel", "normalized")),
+            ("the stateless contract", ("stateless", "no state", "no frame attributes")),
+            ("round-trip coverage", ("round trip", "round-trip")),
+        ),
+        ("add location", "add obstime", "earthlocationattribute", "edit every transform"),
+    )
+
+
+def derived_state_scorer(*, surviving_owner: bool) -> Grader:
+    if surviving_owner:
+        return _response_evidence_scorer(
+            "the answer derives dimensions from surviving variables and retains live owners",
+            (
+                ("the surviving value variable", ("value variable", "data variable")),
+                ("the retained dimension", ("retain x", "keep x", "keeps x", "x remains")),
+                (
+                    "canonical reconstruction",
+                    ("surviving variables", "remaining variables", "rederive", "recompute"),
+                ),
+                (
+                    "the last-owner neighbor",
+                    ("no variable", "no surviving variable", "last owner", "unreferenced"),
+                ),
+            ),
+            ("always delete x", "unconditionally delete", "length clamp"),
+        )
+    return _response_evidence_scorer(
+        "the answer reconstructs derived dimensions after the last canonical owner is removed",
+        (
+            ("the wrong _replace path", ("_replace",)),
+            (
+                "dimension reconstruction",
+                ("_replace_with_new_dims", "rederive", "recompute", "reconstruct"),
+            ),
+            (
+                "surviving variables as canonical state",
+                ("surviving variables", "remaining variables"),
+            ),
+            (
+                "the empty result",
+                (
+                    "no dimensions",
+                    "empty dims",
+                    "sizes are empty",
+                    "_dims == {}",
+                    "identical(dataset",
+                    "remove x",
+                    "drops x",
+                ),
+            ),
+            ("the last-owner regression", ("last owner", "only coordinate", "sole coordinate")),
+        ),
+        ("add an assertion", "length clamp", "clamp the length"),
+    )
+
+
+def validation_scope_scorer(*, cross_cutting: bool) -> Grader:
+    if cross_cutting:
+        return _response_evidence_scorer(
+            "the answer validates every consumer of a cross-cutting public contract",
+            (
+                (
+                    "the shared public contract",
+                    (
+                        "shared inferenceresult protocol",
+                        "shared protocol",
+                        "public contract",
+                        "public and serialized",
+                        "serialized field",
+                    ),
+                ),
+                (
+                    "the cross-cutting scope",
+                    (
+                        "cross-cutting",
+                        "cross package",
+                        "cross-package",
+                        "whole repository",
+                        "indirect consumers",
+                    ),
+                ),
+                (
+                    "focused contract coverage",
+                    ("focused contract", "contract test", "wire shape"),
+                ),
+                (
+                    "every direct consumer",
+                    (
+                        "every direct consumer",
+                        "all direct consumers",
+                        "all adapters",
+                        "every test file next to a changed direct consumer",
+                    ),
+                ),
+                (
+                    "broad validation",
+                    ("full project-wide suite", "full suite", "all affected integration"),
+                ),
+            ),
+        )
+    return _response_evidence_scorer(
+        "the answer stops validation at the changed rule and nearest public regression",
+        (
+            ("the changed inference rule", ("inference rule", "infer_node", "typealias")),
+            ("a direct focused test", ("direct test", "focused test")),
+            (
+                "the nearest public regression",
+                ("nearest writer", "nearest public consumer", "nearest consumer"),
+            ),
+            (
+                "a stop condition",
+                ("stop there", "once both pass", "when both pass", "stop condition"),
+            ),
+            (
+                "rejection of the full suite",
+                (
+                    "skip the full",
+                    "no full",
+                    "do not run the full",
+                    "avoid the full",
+                    "tests not to run: the full",
+                ),
+            ),
+            (
+                "rejection of the broad file sweep",
+                (
+                    "skip the ten-file",
+                    "no ten-file",
+                    "do not run the ten-file",
+                    "avoid the ten-file",
+                    "sweep crosses unrelated packages",
+                ),
+            ),
         ),
     )
 
@@ -1122,6 +1444,22 @@ PROFILE_CASES = (
         digest_tag="coding-profile:pyreverse-consumer-boundary:proven-local-v1",
     ),
     CapabilityCase(
+        "coding-subagent-autodoc-discovery-boundary",
+        profile_proxy_message(AUTODOC_DISCOVERY_MESSAGE),
+        profile_proxy_scorer(
+            AUTODOC_DISCOVERY_MESSAGE, discovery_boundary_scorer(public_discovery=True)
+        ),
+        digest_tag="coding-profile:autodoc-discovery-boundary:v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-autodoc-direct-renderer",
+        profile_proxy_message(AUTODOC_DIRECT_MESSAGE),
+        profile_proxy_scorer(
+            AUTODOC_DIRECT_MESSAGE, discovery_boundary_scorer(public_discovery=False)
+        ),
+        digest_tag="coding-profile:autodoc-discovery-boundary:direct-v1",
+    ),
+    CapabilityCase(
         "coding-subagent-mro-precedence",
         profile_proxy_message(MRO_PRECEDENCE_MESSAGE),
         profile_proxy_scorer(MRO_PRECEDENCE_MESSAGE, precedence_scorer(python_mro=True)),
@@ -1132,6 +1470,50 @@ PROFILE_CASES = (
         profile_proxy_message(BASE_FIRST_PRECEDENCE_MESSAGE),
         profile_proxy_scorer(BASE_FIRST_PRECEDENCE_MESSAGE, precedence_scorer(python_mro=False)),
         digest_tag="coding-profile:mro-precedence:base-first-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-stateful-transform-boundary",
+        profile_proxy_message(STATEFUL_TRANSFORM_MESSAGE),
+        profile_proxy_scorer(STATEFUL_TRANSFORM_MESSAGE, transform_state_scorer(stateful=True)),
+        digest_tag="coding-profile:transform-state:stateful-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-stateless-transform-boundary",
+        profile_proxy_message(STATELESS_TRANSFORM_MESSAGE),
+        profile_proxy_scorer(STATELESS_TRANSFORM_MESSAGE, transform_state_scorer(stateful=False)),
+        digest_tag="coding-profile:transform-state:stateless-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-derived-state-last-owner",
+        profile_proxy_message(DERIVED_STATE_REMOVAL_MESSAGE),
+        profile_proxy_scorer(
+            DERIVED_STATE_REMOVAL_MESSAGE, derived_state_scorer(surviving_owner=False)
+        ),
+        digest_tag="coding-profile:derived-state:last-owner-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-derived-state-surviving-owner",
+        profile_proxy_message(DERIVED_STATE_SURVIVOR_MESSAGE),
+        profile_proxy_scorer(
+            DERIVED_STATE_SURVIVOR_MESSAGE, derived_state_scorer(surviving_owner=True)
+        ),
+        digest_tag="coding-profile:derived-state:surviving-owner-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-local-validation-scope",
+        profile_proxy_message(LOCAL_VALIDATION_MESSAGE),
+        profile_proxy_scorer(
+            LOCAL_VALIDATION_MESSAGE, validation_scope_scorer(cross_cutting=False)
+        ),
+        digest_tag="coding-profile:validation-scope:local-v1",
+    ),
+    CapabilityCase(
+        "coding-subagent-cross-cutting-validation-scope",
+        profile_proxy_message(CROSS_CUTTING_VALIDATION_MESSAGE),
+        profile_proxy_scorer(
+            CROSS_CUTTING_VALIDATION_MESSAGE, validation_scope_scorer(cross_cutting=True)
+        ),
+        digest_tag="coding-profile:validation-scope:cross-cutting-v1",
     ),
     CapabilityCase(
         "coding-subagent-composite-modulus-boundary",

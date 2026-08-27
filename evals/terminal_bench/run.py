@@ -92,7 +92,7 @@ def harbor_command(
         "uv",
         "run",
         "--with",
-        f"harbor=={harbor_version}",
+        f"harbor[modal]=={harbor_version}",
         "harbor",
         "run",
         "--path",

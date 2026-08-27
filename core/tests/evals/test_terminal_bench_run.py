@@ -61,7 +61,14 @@ def test_harbor_command_runs_one_remote_job_at_bounded_concurrency(tmp_path: Pat
         "0.21.0",
     )
 
-    assert command[:6] == ("uv", "run", "--with", "harbor==0.21.0", "harbor", "run")
+    assert command[:6] == (
+        "uv",
+        "run",
+        "--with",
+        "harbor[modal]==0.21.0",
+        "harbor",
+        "run",
+    )
     assert CUSTOM_AGENT == "evals.terminal_bench.agent:UfoAgent"
     assert command[command.index("--env") + 1] == REMOTE_ENVIRONMENT == "modal"
     assert command[command.index("--n-concurrent") + 1] == "24"

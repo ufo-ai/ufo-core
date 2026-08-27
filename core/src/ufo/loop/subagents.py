@@ -78,7 +78,7 @@ from ufo.turns.contracts import Contract, input_contract, output_contract
 from ufo.turns.delivery_register import DELIVERY_REGISTER_BLOCK
 from ufo.turns.untrusted import wall
 
-SUBAGENT_POLL_SECONDS = 0.1
+SUBAGENT_POLL_SECONDS = 1.0
 SUBAGENT_WORKFLOW_POLL_SECONDS = 1.0
 PROFILE_TARGET_KIND = "profile"
 AGENT_TARGET_KIND = "agent"
@@ -298,18 +298,22 @@ class Subagents:
             await self._enqueue(turn_id, conversation_id)
         if background:
             return SpawnResult(turn_id=turn_id, conversation_id=conversation_id, output=None)
-        if detach_on_arrival:
-            awaited = await self._await_terminal_or_detach(turn_id)
-            if awaited is None:
-                return SpawnResult(
-                    turn_id=turn_id,
-                    conversation_id=conversation_id,
-                    output=None,
-                    detached_on_arrival=True,
-                )
-            terminal = awaited
-        else:
-            terminal = await self._await_terminal(turn_id)
+        try:
+            if detach_on_arrival:
+                awaited = await self._await_terminal_or_detach(turn_id)
+                if awaited is None:
+                    return SpawnResult(
+                        turn_id=turn_id,
+                        conversation_id=conversation_id,
+                        output=None,
+                        detached_on_arrival=True,
+                    )
+                terminal = awaited
+            else:
+                terminal = await self._await_terminal(turn_id)
+        except Exception:
+            await cancel_one_turn(self.client, turn_id)
+            raise
         if terminal.status != "done":
             diagnostic = ": ".join(
                 part
@@ -904,20 +908,27 @@ class Subagents:
         The child's terminal is read first, and the move is refused for a child that already
         committed one, so a message landing in the same instant the child finishes resolves to the
         child's result: the caller gets the answer it waited for, and the conversation is not woken
-        by a result the parent already holds."""
+        by a result the parent already holds. The workflow wait uses DBOS's bounded polling pool;
+        only the interrupt signal polls the application database, so concurrent foreground spawns
+        cannot exhaust the turn pool by polling their child rows."""
         detachable = not self.parent.spawned
-        while True:
-            terminal = await self._terminal_or_park(turn_id)
-            if terminal is not None:
-                return terminal
-            if detachable and await self._member_waiting() and await self._detach(turn_id):
-                log(
-                    "subagent.detached_on_arrival",
-                    turn_id=str(turn_id),
-                    parent_turn_id=str(self.parent.id),
-                )
-                return None
-            await asyncio.sleep(SUBAGENT_POLL_SECONDS)
+        terminal_wait = asyncio.create_task(self._await_terminal(turn_id))
+        try:
+            while True:
+                finished, _ = await asyncio.wait((terminal_wait,), timeout=SUBAGENT_POLL_SECONDS)
+                if finished:
+                    return await terminal_wait
+                if detachable and await self._member_waiting() and await self._detach(turn_id):
+                    log(
+                        "subagent.detached_on_arrival",
+                        turn_id=str(turn_id),
+                        parent_turn_id=str(self.parent.id),
+                    )
+                    return None
+        finally:
+            if not terminal_wait.done():
+                terminal_wait.cancel()
+            await asyncio.gather(terminal_wait, return_exceptions=True)
 
     async def _terminal_or_park(self, turn_id: UUID) -> TerminalFrame | None:
         async with workspace_tx() as connection:

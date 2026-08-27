@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -23,6 +24,7 @@ OFFICIAL_IMAGE_NAMESPACE = "swebench"
 OFFICIAL_IMAGE_ARCHITECTURE = "x86_64"
 OFFICIAL_IMAGE_TAG = "latest"
 OFFICIAL_IMAGE_PLATFORM = "linux/amd64"
+OFFICIAL_IMAGE_INSPECT_FORMAT = '{{.Os}}/{{.Architecture}}{{println}}{{join .RepoDigests "\\n"}}'
 DEFAULT_SNAPSHOT = Path(".local/swebench/snapshot")
 DEFAULT_PARQUET = Path(".local/swebench/assets/test.parquet")
 DEFAULT_GRADES_ROOT = Path(".local/swebench/grades")
@@ -30,6 +32,36 @@ PREDICTIONS_FILE = "predictions.jsonl"
 SUMMARY_FILE = "summary.json"
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 GradingSubset = Literal["smoke", "hillclimb", "holdout", "hard", "all"]
+
+
+def _diff_sections(patch: str) -> tuple[str, ...]:
+    starts = tuple(match.start() for match in re.finditer(r"^diff --git ", patch, re.MULTILINE))
+    if not starts:
+        return ()
+    return tuple(
+        patch[start:stop] for start, stop in zip(starts, (*starts[1:], len(patch)), strict=True)
+    )
+
+
+def _diff_paths(section: str) -> frozenset[str]:
+    header = section.partition("\n")[0]
+    try:
+        tokens = shlex.split(header)
+    except ValueError:
+        return frozenset()
+    if len(tokens) != 4 or tokens[:2] != ["diff", "--git"]:
+        return frozenset()
+    return frozenset(token[2:] if token.startswith(("a/", "b/")) else token for token in tokens[2:])
+
+
+def _remove_official_test_changes(case: SWEbenchCase, patch: str) -> str:
+    test_paths = frozenset(
+        path for section in _diff_sections(case.test_patch) for path in _diff_paths(section)
+    )
+    sections = _diff_sections(patch)
+    if not test_paths or not sections:
+        return patch
+    return "".join(section for section in sections if _diff_paths(section).isdisjoint(test_paths))
 
 
 def official_instance_image(instance_id: str) -> str:
@@ -49,7 +81,7 @@ def write_predictions(
         json.dumps(
             {
                 "instance_id": case.instance_id,
-                "model_patch": patches[case.instance_id],
+                "model_patch": _remove_official_test_changes(case, patches[case.instance_id]),
                 "model_name_or_path": model_name,
             },
             separators=(",", ":"),
@@ -173,7 +205,7 @@ class SWEbenchGrading:
             )
         )
         for case in self.selected_cases:
-            self._pull_official_image(case)
+            self._ensure_official_image(case)
             self._invoke_official_harness(
                 grade_directory, predictions_path, (case,), rewrite_reports=False
             )
@@ -210,14 +242,36 @@ class SWEbenchGrading:
                 f"{HARNESS_DISTRIBUTION}=={installed}"
             )
 
-    def _pull_official_image(self, case: SWEbenchCase) -> None:
+    def _ensure_official_image(self, case: SWEbenchCase) -> None:
+        image = official_instance_image(case.instance_id)
+        try:
+            details = subprocess.check_output(
+                (
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    OFFICIAL_IMAGE_INSPECT_FORMAT,
+                    image,
+                ),
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).splitlines()
+        except subprocess.CalledProcessError:
+            details = []
+        repository = image.rsplit(":", maxsplit=1)[0]
+        if details[:1] == [OFFICIAL_IMAGE_PLATFORM] and any(
+            re.fullmatch(rf"{re.escape(repository)}@sha256:[0-9a-f]{{64}}", digest)
+            for digest in details[1:]
+        ):
+            return
         subprocess.run(
             (
                 "docker",
                 "pull",
                 "--platform",
                 OFFICIAL_IMAGE_PLATFORM,
-                official_instance_image(case.instance_id),
+                image,
             ),
             check=True,
         )

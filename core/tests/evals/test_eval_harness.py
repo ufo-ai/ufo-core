@@ -3473,13 +3473,26 @@ async def test_cross_layer_error_emitter_scorer_requires_the_active_public_path(
             CapabilityOutput(response.replace("DecimalField.validate", "the form field"), ())
         )
     ).passed
+    assert (
+        await grader(
+            CapabilityOutput(
+                response.replace(
+                    "Remove the DecimalField.validate override and let DecimalValidator own "
+                    "the non-finite check.",
+                    "Add params={'value': value} to the ValidationError raised by "
+                    "DecimalField.validate.",
+                ),
+                (),
+            )
+        )
+    ).passed
     assert not (
         await grader(
             CapabilityOutput(
                 response.replace(
                     "Remove the DecimalField.validate override and let DecimalValidator own "
                     "the non-finite check.",
-                    "Add params with value to DecimalField.validate too.",
+                    "Keep DecimalField.validate unchanged.",
                 ),
                 (),
             )
@@ -3587,6 +3600,10 @@ async def test_composite_modulus_boundary_scorer_requires_the_full_decomposition
         "The shortcut does not complete the composite modulus algorithm. Use factorint, Hensel "
         "lift each root including every non-invertible derivative branch, take the Cartesian "
         "product, and use the Chinese remainder theorem. Test modulus 74 and modulus 100.",
+        "The patch does not complete the request. Factor the modulus with factorint, solve each "
+        "prime power, Hensel lift roots with a singular-root branch when the derivative is zero, "
+        "then take the Cartesian product and combine every tuple with CRT. Test 29, 31, 74 and "
+        "0, 7, 100.",
     ),
 )
 async def test_composite_modulus_boundary_scorer_accepts_equivalent_decompositions(
@@ -3659,6 +3676,22 @@ def test_error_emitter_cases_are_single_sample_target_and_scope_neighbor() -> No
     assert all(
         case.samples == 1 for case in coding_subagent.PROFILE_CASES if "error-emitter" in case.name
     )
+
+
+def test_transform_and_derived_state_cases_are_paired_with_scope_neighbors() -> None:
+    names = {
+        case.name
+        for case in coding_subagent.PROFILE_CASES
+        if "transform-boundary" in case.name or "derived-state" in case.name
+    }
+
+    assert names == {
+        "coding-subagent-stateful-transform-boundary",
+        "coding-subagent-stateless-transform-boundary",
+        "coding-subagent-derived-state-last-owner",
+        "coding-subagent-derived-state-surviving-owner",
+    }
+    assert all(case.samples == 1 for case in coding_subagent.PROFILE_CASES if case.name in names)
 
 
 def test_coding_profile_cases_are_explicit_and_pin_the_profile_target() -> None:
