@@ -275,8 +275,9 @@ function AgentRow({
 }
 
 /** The clock-fired tasks the app holds. Radar reads them across the workspace, beside what they
- *  did; here they are read and written for the one app they run on, which is where a member sets
- *  one up. */
+ *  did; here they are read for the one app they run on. A member writes one on the workspace's own
+ *  tasks screen, which is the screen that asks which app runs it — this panel names one app already,
+ *  and a second place to write a task is a second place that has to state the same rules. */
 const TASK_KIND = "scheduled_task";
 
 /** An app's three reads, standing over the screen they were opened from rather than beside it. The
@@ -605,6 +606,7 @@ export function Agents({
               key={shown.id}
               agentId={shown.id}
               kind={TASK_KIND}
+              makes={false}
               opens={scheduled}
               onPlace={(next) => setScheduled(next.opens ?? [])}
             />

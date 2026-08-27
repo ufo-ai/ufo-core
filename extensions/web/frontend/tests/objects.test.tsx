@@ -908,6 +908,24 @@ test("an app's Scheduled tab lists that app's tasks, and a row opens inside the 
   expect(dialog).toBeTruthy();
 });
 
+/** A task is written on the workspace's tasks screen, which asks which app runs it. The app's own
+ *  panel names one app already, so it reads and opens that app's tasks and offers no act that
+ *  writes another. */
+test("an app's Scheduled tab offers no act that writes a task", async () => {
+  wire({
+    "/settings": () => json(SETTINGS),
+    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [TASK_ROW]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID;
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  const dialog = await openAgentSettings("Assistant", "Scheduled");
+
+  expect(await within(dialog).findByText("daily-brief")).toBeTruthy();
+  expect(within(dialog).queryByRole("button", { name: "New scheduled task" })).toBeNull();
+});
+
 /** The form that writes a record is a lane of the track like any other, so it stands beside the
  *  record the route named rather than taking its place: the address still holds that record, and
  *  the member writes the new one with the old one still readable beside it. */

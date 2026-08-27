@@ -227,6 +227,7 @@ export function ObjectPane({
   title,
   section,
   lead,
+  makes = true,
   opens,
   onPlace,
 }: {
@@ -234,6 +235,10 @@ export function ObjectPane({
   kind: string;
   /** What heads this listing where a page carries more than one kind. */
   section?: string;
+  /** Whether the listing offers the act that writes another record. A screen that already names one
+   *  app passes false: the kind's own workspace screen is where a member writes one, and it is the
+   *  screen that asks which app runs it. */
+  makes?: boolean;
   /** What a page holding more than one kind says about which one is showing. It leads the toolbar,
    *  where what family to show already stands. */
   lead?: ReactNode;
@@ -254,6 +259,7 @@ export function ObjectPane({
         title={title}
         section={section}
         lead={lead}
+        makes={makes}
         opens={opens}
         onOpen={(at) => onPlace({ opens: opened(opens, slotOf(at), undefined) })}
       />
@@ -341,6 +347,7 @@ function ObjectIndex({
   title,
   section,
   lead,
+  makes,
   opens,
   onOpen,
 }: {
@@ -349,6 +356,7 @@ function ObjectIndex({
   title?: string;
   section?: string;
   lead?: ReactNode;
+  makes: boolean;
   opens: string[];
   onOpen: (at: ObjectAddress) => void;
 }) {
@@ -397,7 +405,7 @@ function ObjectIndex({
       <Panel state={state}>
       {(payload) => {
         const narrowing = Boolean(query || narrowed);
-        const acts = payload.applies && payload.spec_schema !== null && owner !== null;
+        const acts = makes && payload.applies && payload.spec_schema !== null && owner !== null;
         const owned = agentId !== null && payload.fields.includes(OWNER_FIELD);
         const prose = payload.fields.includes(PROMPT_FIELD) ? null : "summary";
         const shown = payload.fields.filter(
