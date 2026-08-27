@@ -1,7 +1,8 @@
 """What the sites pack declares: the website tools, the `build_website` delegation tool, the
 website-building subagent profile, the website-building skill the agent loads before building, the
-`sites` surface that serves a hosted site's frame, and the `site` object kind chat re-gates one
-through.
+`sites` surface that serves a hosted site's frame, the `site` object kind chat re-gates one
+through, and the sweep that releases the page a main agent held as its homepage once the chat app
+becomes that agent.
 
 `serve` sources the tools into the turn's tool set and the profile into the SubagentRegistry, so an
 agent granted these tools can build and serve a site, and `build_website` (or the generic
@@ -19,6 +20,7 @@ parent; its `game/`, `shared/`, and `informational/` subdirectories are ordinary
 
 from pathlib import Path
 
+from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import HookSpec, Manifest, PromptSection, SkillSpec
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION,
@@ -35,6 +37,12 @@ from ufo_ext_sites.application_builder import (
 )
 from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.delegation import DELEGATION_TOOLS
+from ufo_ext_sites.main_homepage import (
+    RELEASE_JOB_NAME,
+    RELEASE_JOB_SCHEDULE,
+    release_main_homepage,
+    unreleased_main_homepage_workspaces,
+)
 from ufo_ext_sites.objects import SITE_OBJECT
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
 from ufo_ext_sites.surface import SITES_SURFACE
@@ -81,4 +89,12 @@ def manifest() -> Manifest:
             ),
         ),
         conversation_slots=(SITES_SLOT,),
+        jobs=(
+            JobSpec(
+                name=RELEASE_JOB_NAME,
+                schedule=RELEASE_JOB_SCHEDULE,
+                handler=release_main_homepage,
+                candidates=unreleased_main_homepage_workspaces(NAME),
+            ),
+        ),
     )

@@ -214,7 +214,7 @@ async def _sync(driver: SyncDriver) -> None:
         handler=_handler,
         candidates=driver.candidate_workspaces,
     )
-    runner = JobRunner(bindings=bindings_from((), (spec,)))
+    runner = JobRunner(bindings=bindings_from((), (spec,)), manifests=())
     for workspace_id in await runner.candidates(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}"):
         await runner.fire(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}", workspace_id)
 
@@ -233,7 +233,7 @@ async def _fire_page_change(runner: PageChangeRunner, consumer: PageChangeConsum
 
     name = f"{PAGE_CHANGE_JOB}:{consumer.extension}:{consumer.discriminator}"
     spec = JobSpec(name=name, schedule=None, handler=_handler, candidates=_candidates)
-    job_runner = JobRunner(bindings=bindings_from((), (spec,)))
+    job_runner = JobRunner(bindings=bindings_from((), (spec,)), manifests=())
     for workspace_id in await job_runner.candidates(f"{CORE_EXTENSION}:{name}"):
         await job_runner.fire(f"{CORE_EXTENSION}:{name}", workspace_id)
 

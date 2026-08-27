@@ -211,7 +211,8 @@ async def test_an_installed_extension_fires_through_the_loader(
     ExtensionStore(catalog=_catalog(), lockfile=lock).install(sample.NAME)
     workspace_id = await _workspace()
     await _seed_note(workspace_id)
-    runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
+    manifests = load_manifests()
+    runner = JobRunner(bindings=bindings_from(manifests, ()), manifests=manifests)
     with ws(workspace_id):
         for workspace_id in await runner.candidates(f"{sample.NAME}:{sample.JOB_NAME}"):
             await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}", workspace_id)
@@ -307,7 +308,8 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
     assert [manifest.name for manifest in load_manifests()] == [sample.NAME]
     workspace_id = await _workspace()
     await _seed_note(workspace_id)
-    runner = JobRunner(bindings=bindings_from(load_manifests(), ()))
+    manifests = load_manifests()
+    runner = JobRunner(bindings=bindings_from(manifests, ()), manifests=manifests)
     with ws(workspace_id):
         for workspace_id in await runner.candidates(f"{sample.NAME}:{sample.JOB_NAME}"):
             await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}", workspace_id)

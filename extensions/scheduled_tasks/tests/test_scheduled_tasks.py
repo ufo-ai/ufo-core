@@ -1614,8 +1614,10 @@ async def test_manifest_job_fires_through_job_runner(db: None) -> None:
         )
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    declared = manifest()
     runner = JobRunner(
-        bindings=bindings_from((manifest(),), ()),
+        bindings=bindings_from((declared,), ()),
+        manifests=(declared,),
         invoker_factory=lambda wid: AdmissionInvoker(admission=admission, workspace_id=wid),
     )
     with ws(workspace_id), agent(agent_id):

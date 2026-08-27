@@ -508,6 +508,32 @@ class HostedSites:
             )
             return await self._read(connection, conversation_id, name)
 
+    async def release_homepage(
+        self, conversation_id: UUID, name: str, visibility: Visibility
+    ) -> None:
+        """Clear one site's homepage binding and state the level its own column resumes at.
+
+        The column is dormant while the row is bound — a bound site answers the agent's visibility —
+        so releasing it hands the page back to whatever level was written before the binding, which
+        is why the caller states the level rather than leaving the row to resume on its own. The
+        generation moves with it: it is what a held authorization is checked against, so a level
+        that changed under a member's grant must not leave that grant standing."""
+        async with self.transaction() as connection:
+            await connection.execute(
+                sa.update(hosted_site)
+                .where(
+                    hosted_site.c.workspace_id == self.workspace_id,
+                    hosted_site.c.conversation_id == conversation_id,
+                    hosted_site.c.name == name,
+                )
+                .values(
+                    homepage_agent_id=None,
+                    visibility=visibility,
+                    generation=uuid4(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
     async def unregister(self, conversation_id: UUID, name: str) -> None:
         """Drop the site's registration: the link stops resolving. The sandbox keeps serving the
         port until its own lifecycle ends — hosting a site is registering a port, so unregistering

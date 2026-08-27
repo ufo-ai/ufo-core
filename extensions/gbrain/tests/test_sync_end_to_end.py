@@ -82,7 +82,7 @@ async def _sync(driver: SyncDriver) -> None:
         handler=_handler,
         candidates=driver.candidate_workspaces,
     )
-    runner = JobRunner(bindings=bindings_from((), (spec,)))
+    runner = JobRunner(bindings=bindings_from((), (spec,)), manifests=())
     for workspace_id in await runner.candidates(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}"):
         await runner.fire(f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}", workspace_id)
 

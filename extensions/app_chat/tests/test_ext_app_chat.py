@@ -3,6 +3,8 @@ from pathlib import Path
 
 import ufo_ext_app_chat.manifest as app_chat
 
+from ufo.schema.records import DEFAULT_AGENT_NAME
+
 SKILL_DIR = Path(app_chat.__file__).parent / "skills" / "app-chat-home"
 BUILD_ENTRY = (
     Path(app_chat.__file__).parents[2] / "web" / "frontend" / "apps" / "chat" / "index.html"
@@ -19,6 +21,13 @@ def test_app_chat_ships_one_workspace_agent() -> None:
     assert provision.spec.visibility == "workspace"
     assert "app-chat-home" in provision.spec.prompt
     assert provision.tools is None
+
+
+def test_the_chat_app_is_the_workspaces_main_agent() -> None:
+    provision = app_chat.manifest().agents[0]
+    assert provision.main
+    assert provision.spec.internet_access_allowed
+    assert provision.name == DEFAULT_AGENT_NAME
 
 
 def test_app_chat_ships_the_home_skill() -> None:

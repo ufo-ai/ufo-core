@@ -397,7 +397,12 @@ async def test_memory_index_job_fires_bound_only_on_workspaces_with_unindexed_it
     job = next(j for j in manifest.jobs if j.name == memory_manifest.MEMORY_INDEX_JOB)
     assert set(await job.candidates()) == {ws_with_work}
 
-    runner = JobRunner(bindings=bindings_from((manifest,), ()), index=index, embed=embed)
+    runner = JobRunner(
+        bindings=bindings_from((manifest,), ()),
+        manifests=(manifest,),
+        index=index,
+        embed=embed,
+    )
     index_key = f"{memory_manifest.NAME}:{memory_manifest.MEMORY_INDEX_JOB}"
     for workspace_id in await runner.candidates(index_key):
         await runner.fire(index_key, workspace_id)

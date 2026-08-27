@@ -235,9 +235,10 @@ export function AgentPane({
   // thinner page from fewer sources, and a member who wants to see it before every todo is settled
   // gets to.
   //
-  // Only an app an extension shipped is sent there. The main agent and an agent a member built
-  // have no bound site and are never meant to have one — they draw their conversation column, and
-  // a gate that read "no site" as "never built" made that column unreachable at its own address.
+  // Only an app an extension shipped is sent there — the main agent among them, since the chat
+  // app is that row. An agent a member built has no bound site and is never meant to have one: it
+  // draws its conversation column, and a gate that read "no site" as "never built" made that
+  // column unreachable at its own address.
   //
   // And only an answer that says so in as many words sends the member away: a read that failed, or
   // one whose payload states nothing, leaves them on the page they asked for.

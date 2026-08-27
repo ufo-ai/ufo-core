@@ -8536,7 +8536,7 @@ async def test_profile_target_uses_the_main_agent_as_an_explicit_spawn_proxy(
 
     async def resolve(agent_name: str, selected: UUID | None):
         resolutions.append(agent_name)
-        assert agent_name == "assistant"
+        assert agent_name == "chat"
         assert selected == workspace_id
         return workspace_id, agent_id, "main prompt", MODEL, AGENT_REASONING
 
@@ -8571,7 +8571,7 @@ async def test_profile_target_uses_the_main_agent_as_an_explicit_spawn_proxy(
             workspace_id=workspace_id,
         )
 
-    assert resolutions == ["assistant"]
+    assert resolutions == ["chat"]
     assert recorder.agent_prompt == CODING_PROFILE.prompt
 
 

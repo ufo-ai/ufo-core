@@ -622,13 +622,15 @@ class AgentProvision:
     `icon` names the portal mark the created row draws — a tabler outline slug or one of the
     portal's own pack, never a URL or markup; unset, the row is dealt one from the pack.
     `spec.purpose` is required here and nowhere else: an agent a member built has its author to
-    ask, and a shipped one has nobody."""
+    ask, and a shipped one has nobody.
+    `main` applies the provision to the workspace's main agent instead of creating another row."""
 
     name: str
     spec: AgentSpec
     tools: tuple[str, ...] | None = None
     setup: AgentSetup = field(default_factory=AgentSetup)
     icon: str | None = None
+    main: bool = False
 
     def __post_init__(self) -> None:
         if not AGENT_NAME_RE.match(self.name):

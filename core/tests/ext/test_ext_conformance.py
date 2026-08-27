@@ -1182,7 +1182,7 @@ async def test_job_fires_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     await _seed_note(workspace_id)
     manifest = _sample_manifest()
-    runner = JobRunner(bindings=bindings_from((manifest,), ()))
+    runner = JobRunner(bindings=bindings_from((manifest,), ()), manifests=(manifest,))
     with ws(workspace_id):
         for workspace_id in await runner.candidates(f"{manifest.name}:{sample.JOB_NAME}"):
             await runner.fire(f"{manifest.name}:{sample.JOB_NAME}", workspace_id)
@@ -1280,7 +1280,7 @@ async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> N
     first = await _workspace()
     await _seed_note(first)
     manifest = _sample_manifest()
-    runner = JobRunner(bindings=bindings_from((manifest,), ()))
+    runner = JobRunner(bindings=bindings_from((manifest,), ()), manifests=(manifest,))
     with ws(first):
         for workspace_id in await runner.candidates(f"{manifest.name}:{sample.JOB_NAME}"):
             await runner.fire(f"{manifest.name}:{sample.JOB_NAME}", workspace_id)
@@ -1387,6 +1387,7 @@ async def test_job_reads_trajectories_and_opens_a_governed_proposal(
     agent_id = await _seed_trajectory(workspace_id, blob)
     runner = JobRunner(
         bindings=bindings_from((manifest,), ()),
+        manifests=(manifest,),
         blob=blob,
         sandboxes=_sandboxes(workspace_root),
         probes=_probes(_sandboxes(workspace_root)),

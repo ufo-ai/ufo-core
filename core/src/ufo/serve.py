@@ -568,6 +568,7 @@ def _launch_jobs(
     )
     JobRunner(
         bindings=bindings,
+        manifests=runtime.manifests,
         invoker_factory=invoker_for,
         index=runtime.index,
         embed=runtime.embed,

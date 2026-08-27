@@ -19,7 +19,7 @@ per candidate workspace, milliseconds — so a tick never waits behind a slow jo
 slot."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -647,7 +647,6 @@ class _Binding:
     declared: frozenset[str]
     spec: JobSpec
     member_context_read: bool = False
-    manifest: Manifest | None = None
 
 
 def bindings_from(
@@ -675,7 +674,6 @@ def bindings_from(
                 declared=declared,
                 spec=spec,
                 member_context_read=manifest.member_context_read,
-                manifest=manifest,
             )
             for spec in manifest.jobs
         )
@@ -700,6 +698,7 @@ class JobRunner:
     for a job that declares `needs_deploy_model`, which keeps `auto_model`."""
 
     bindings: tuple[_Binding, ...]
+    manifests: tuple[Manifest, ...]
     invoker_factory: InvokerFactory | None = None
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
@@ -709,6 +708,7 @@ class JobRunner:
     registry: ModelRegistry | None = None
     probes: ConversationProbes | None = None
     background_model: str | None = None
+    provisioned_workspaces: set[UUID] = field(default_factory=set, compare=False, repr=False)
 
     def launch(self) -> None:
         global _firing
@@ -766,8 +766,9 @@ class JobRunner:
     async def fire(self, key: str, workspace_id: UUID) -> None:
         binding = self._binding(key)
         with ws(workspace_id):
-            if binding.manifest is not None and binding.manifest.agents:
-                await AgentProvisioning((binding.manifest,)).apply(workspace_id)
+            if workspace_id not in self.provisioned_workspaces:
+                await AgentProvisioning(self.manifests).apply(workspace_id)
+                self.provisioned_workspaces.add(workspace_id)
             invoker = None if self.invoker_factory is None else self.invoker_factory(workspace_id)
             context = context_for(
                 binding.extension,

@@ -688,7 +688,12 @@ async def test_index_job_runs_through_the_job_runner_on_stale_candidates(db: Non
     keys = {binding.key for binding in bindings}
     assert index_key in keys
     assert f"{CORE_EXTENSION}:{SKILL_INDEX_JOB}" not in keys
-    runner = JobRunner(bindings=bindings, index=index, embed=StubEmbed(vec((0, 1.0))))
+    runner = JobRunner(
+        bindings=bindings,
+        manifests=(declared,),
+        index=index,
+        embed=StubEmbed(vec((0, 1.0))),
+    )
     for workspace_id in await runner.candidates(index_key):
         await runner.fire(index_key, workspace_id)
 

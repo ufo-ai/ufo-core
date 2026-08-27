@@ -119,11 +119,17 @@ async def test_seat_grants_the_signup_balance_once(onboard_client: AsyncClient) 
         with ws(workspace_id):
             async with workspace_tx() as connection:
                 after_create = await read_balance(connection, workspace_id)
+                await connection.execute(
+                    sa.update(tables.agent)
+                    .where(tables.agent.c.is_main.is_(True))
+                    .values(name="assistant")
+                )
         assert after_create is not None
         assert after_create.granted_micro_usd == SIGNUP_GRANT_MICRO_USD
         assert after_create.reserve_micro_usd == SIGNUP_RESERVE_MICRO_USD
 
-        # A teammate joining must never fund the workspace a second time.
+        # A teammate can join a workspace whose main agent still has the prior default name, and
+        # joining must never fund the workspace a second time.
         joined = await client.post(
             "/internal/onboard/seat",
             json={**body, "email": "teammate@acme.com"},

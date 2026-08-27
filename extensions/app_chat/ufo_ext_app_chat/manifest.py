@@ -1,14 +1,11 @@
-"""The chat app: a workspace agent whose homepage lists the workspace's conversations so a member
-opens one from the page. It ships as an ordinary `agents` provision, so it becomes an app on the
-same path a user-defined app takes — the Applications flyout, a seeded homepage, and the chat column
-beside it."""
+"""The chat screen on the workspace's main agent."""
 
 from pathlib import Path
 
 from ufo.sdk.manifest import AgentProvision, AgentSpec, Manifest, SkillSpec
 
 NAME = "app_chat"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SKILLS_ROOT = Path(__file__).parent / "skills"
 HOME_SKILL = "app-chat-home"
 CHAT_APP_AGENT_NAME = "chat"
@@ -28,10 +25,11 @@ CHAT_APP_AGENT = AgentProvision(
         purpose=CHAT_APP_PURPOSE,
         model="auto",
         reasoning="medium",
-        internet_access_allowed=False,
+        internet_access_allowed=True,
         visibility="workspace",
     ),
     icon="message-circle",
+    main=True,
 )
 
 

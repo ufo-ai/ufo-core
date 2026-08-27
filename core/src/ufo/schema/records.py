@@ -237,7 +237,7 @@ PENDING: ProposalStatus = "pending"
 APPROVED: ProposalStatus = "approved"
 REJECTED: ProposalStatus = "rejected"
 
-DEFAULT_AGENT_NAME = "assistant"
+DEFAULT_AGENT_NAME = "chat"
 TURN_QUEUE_NAME = "turns"
 TURN_WORKFLOW_NAME = "turn"
 DBOS_APP_NAME = "ufo"

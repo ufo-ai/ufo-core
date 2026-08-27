@@ -13,6 +13,8 @@ changes reaches new workspaces only, and the member's own edits are never overwr
 A shipped agent is identified by the extension that ships it and the name that extension declared,
 never by the row's own name. A name already in use — by a member's agent or by a second extension's
 — sends the shipped agent to a free variant. Nothing is overwritten and nothing is stuck.
+
+A main provision adopts the workspace's main agent without replacing its configuration or edges.
 """
 
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
 from ufo.ext.manifest import AgentProvision, Manifest
+from ufo.kinds.agents import ARCHIVED_AGENT_NAME_PREFIX
 from ufo.schema import tables
 from ufo.schema.records import auto_agent_icon
 from ufo.workspace import ws
@@ -71,6 +74,8 @@ class AgentProvisioning:
                         member_name.label("name"),
                         tables.agent.c.purpose,
                         tables.agent.c.setup,
+                        tables.agent.c.is_main,
+                        tables.agent.c.archived_at,
                     ).where(
                         tables.agent.c.workspace_id == workspace_id,
                         tables.agent.c.provisioned_by == extension,
@@ -78,6 +83,23 @@ class AgentProvisioning:
                     )
                 )
             ).one_or_none()
+            if shipped is not None and provision.main and not shipped.is_main:
+                values: dict[str, object] = {
+                    "provisioned_by": None,
+                    "provisioned_name": None,
+                    "provisioned_version": None,
+                    "updated_at": sa.func.now(),
+                }
+                if shipped.archived_at is None:
+                    values.update(
+                        archived_name=shipped.name,
+                        name=f"{ARCHIVED_AGENT_NAME_PREFIX}{shipped.id}",
+                        archived_at=sa.func.now(),
+                    )
+                await connection.execute(
+                    sa.update(tables.agent).where(tables.agent.c.id == shipped.id).values(**values)
+                )
+                shipped = None
             if shipped is not None:
                 await self._fill(connection, shipped, manifest, provision)
                 return ProvisionOutcome(extension, shipped.name, PRESENT)
@@ -86,6 +108,7 @@ class AgentProvisioning:
                 await connection.execute(
                     sa.select(
                         tables.agent.c.id,
+                        tables.agent.c.name,
                         tables.agent.c.prompt,
                         tables.agent.c.model,
                         tables.agent.c.reasoning,
@@ -96,13 +119,15 @@ class AgentProvisioning:
                         tables.agent.c.purpose,
                     ).where(
                         tables.agent.c.workspace_id == workspace_id,
-                        tables.agent.c.name == provision.name,
+                        tables.agent.c.is_main.is_(True)
+                        if provision.main
+                        else tables.agent.c.name == provision.name,
                         tables.agent.c.provisioned_by.is_(None),
                         tables.agent.c.archived_at.is_(None),
                     )
                 )
             ).one_or_none()
-            if standing is not None and self._identical(standing, provision):
+            if standing is not None and (provision.main or self._identical(standing, provision)):
                 await connection.execute(
                     sa.update(tables.agent)
                     .values(
@@ -115,7 +140,7 @@ class AgentProvisioning:
                     )
                     .where(tables.agent.c.id == standing.id)
                 )
-                return ProvisionOutcome(extension, provision.name, ADOPTED)
+                return ProvisionOutcome(extension, standing.name, ADOPTED)
 
             name = await self._free_name(connection, workspace_id, extension, provision.name)
             await self._create(connection, workspace_id, manifest, provision, name)
@@ -234,7 +259,7 @@ class AgentProvisioning:
                 purpose=spec.purpose,
                 model=spec.model,
                 reasoning=spec.reasoning,
-                is_main=False,
+                is_main=provision.main,
                 internet_access_allowed=spec.internet_access_allowed,
                 sandbox_size=spec.sandbox_size,
                 visibility=spec.visibility,

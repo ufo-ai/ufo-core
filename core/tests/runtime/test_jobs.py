@@ -66,7 +66,7 @@ async def _workspace() -> UUID:
 
 
 def _runner(core_jobs: tuple[JobSpec, ...]) -> JobRunner:
-    return JobRunner(bindings=bindings_from((), core_jobs))
+    return JobRunner(bindings=bindings_from((), core_jobs), manifests=())
 
 
 def test_bindings_exclude_only_named_jobs() -> None:
@@ -234,7 +234,10 @@ async def test_a_job_runs_its_own_model_calls_on_the_background_jobs_model(db: N
         name="titles", schedule="* * * * * *", handler=_record_model, candidates=_candidate
     )
     runner = JobRunner(
-        bindings=bindings_from((), (spec,)), registry=registry, background_model="gpt-5.6-luna"
+        bindings=bindings_from((), (spec,)),
+        manifests=(),
+        registry=registry,
+        background_model="gpt-5.6-luna",
     )
     await runner.fire(f"{CORE_EXTENSION}:titles", workspace_id)
     assert seen == ["gpt-5.6-luna"]
@@ -274,6 +277,7 @@ async def test_a_job_model_call_meters_its_tokens_and_latency_under_the_key_that
     )
     runner = JobRunner(
         bindings=bindings_from((), (spec,)),
+        manifests=(),
         registry=_stub_registry(),
         background_model=BACKGROUND_MODEL,
     )
@@ -320,7 +324,10 @@ async def test_a_job_that_needs_the_deploy_model_keeps_it(db: None) -> None:
         needs_deploy_model=True,
     )
     runner = JobRunner(
-        bindings=bindings_from((), (spec,)), registry=registry, background_model="gpt-5.6-luna"
+        bindings=bindings_from((), (spec,)),
+        manifests=(),
+        registry=registry,
+        background_model="gpt-5.6-luna",
     )
     await runner.fire(f"{CORE_EXTENSION}:replay", workspace_id)
     assert seen == ["claude-opus-5"]

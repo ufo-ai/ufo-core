@@ -314,9 +314,7 @@ class OnboardControl:
                         created_at=sa.func.now(),
                         updated_at=sa.func.now(),
                     )
-                    .on_conflict_do_nothing(
-                        index_elements=[tables.agent.c.workspace_id, tables.agent.c.name],
-                    )
+                    .on_conflict_do_nothing()
                 )
                 if founded and await credit(
                     connection,

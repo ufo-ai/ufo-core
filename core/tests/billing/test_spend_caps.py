@@ -66,7 +66,7 @@ async def _dispatch(client: object, dispatch_batch: int = TURN_DISPATCH_BATCH_TU
         handler=_handler,
         candidates=dispatcher.candidate_workspaces,
     )
-    runner = JobRunner(bindings=bindings_from((), (spec,)))
+    runner = JobRunner(bindings=bindings_from((), (spec,)), manifests=())
     for workspace_id in await runner.candidates(f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}"):
         await runner.fire(f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}", workspace_id)
 

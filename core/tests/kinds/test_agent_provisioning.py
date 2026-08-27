@@ -33,7 +33,7 @@ from ufo.kinds.agent_setup import (
     pending_setup,
     setup_skill,
 )
-from ufo.kinds.agents import AgentSpec
+from ufo.kinds.agents import ARCHIVED_AGENT_NAME_PREFIX, AgentSpec
 from ufo.kinds.provisioning import ADOPTED, CREATED, PRESENT, AgentProvisioning
 from ufo.loop.queue import _agent_tools, _apply_provisions, _provisioned_workspaces
 from ufo.object_name import validate_object_name
@@ -60,6 +60,7 @@ def _provision(
     name: str = PROVISIONED_AGENT_NAME,
     icon: str | None = None,
     setup: AgentSetup | None = None,
+    main: bool = False,
     **overrides: object,
 ) -> AgentProvision:
     spec = AgentSpec(
@@ -75,6 +76,7 @@ def _provision(
         tools=("sample_echo", *SETUP_TOOLS),
         icon=icon,
         setup=setup if setup is not None else AgentSetup(),
+        main=main,
     )
 
 
@@ -309,6 +311,119 @@ async def test_an_identical_row_is_adopted(
     )
 
 
+async def _names(workspace_id: UUID) -> list[str]:
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            return sorted(
+                (
+                    await connection.execute(
+                        sa.select(tables.agent.c.name).where(
+                            tables.agent.c.workspace_id == workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+
+async def test_a_main_provision_lands_on_the_workspaces_main_agent(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision()),)).apply(workspace_id)
+    old = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    assert old is not None
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(name="helper")
+                .where(tables.agent.c.name == DEFAULT_AGENT_NAME)
+            )
+    before = await _row(workspace_id, "helper")
+    assert before is not None
+    manifest = _manifest(OTHER_EXTENSION, _provision(main=True))
+
+    outcomes = await AgentProvisioning((manifest,)).apply(workspace_id)
+    adopted = await _row(workspace_id, "helper")
+    assert [(outcome.result, outcome.name) for outcome in outcomes] == [(ADOPTED, "helper")]
+    assert set(await _names(workspace_id)) == {
+        f"{ARCHIVED_AGENT_NAME_PREFIX}{old.id}",
+        "helper",
+    }
+    assert adopted is not None
+    assert (adopted.provisioned_by, adopted.provisioned_name, adopted.provisioned_version) == (
+        OTHER_EXTENSION,
+        PROVISIONED_AGENT_NAME,
+        "0.1.0",
+    )
+    assert adopted.is_main
+    assert (adopted.id, adopted.prompt, adopted.icon, adopted.internet_access_allowed) == (
+        before.id,
+        before.prompt,
+        before.icon,
+        before.internet_access_allowed,
+    )
+    assert adopted.purpose == PROVISIONED_AGENT_PURPOSE
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            retired = (
+                await connection.execute(sa.select(tables.agent).where(tables.agent.c.id == old.id))
+            ).one()
+    assert retired.archived_at is not None
+    assert retired.archived_name == PROVISIONED_AGENT_NAME
+    assert retired.provisioned_by is None
+
+    again = await AgentProvisioning((manifest,)).apply(workspace_id)
+    assert [outcome.result for outcome in again] == [PRESENT]
+    assert set(await _names(workspace_id)) == {
+        f"{ARCHIVED_AGENT_NAME_PREFIX}{old.id}",
+        "helper",
+    }
+
+
+async def test_a_main_provision_creates_the_main_agent_where_a_workspace_holds_none(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.agent)
+                .values(is_main=False, name="orphan")
+                .where(tables.agent.c.name == DEFAULT_AGENT_NAME)
+            )
+
+    outcomes = await AgentProvisioning((_manifest(OTHER_EXTENSION, _provision(main=True)),)).apply(
+        workspace_id
+    )
+    created = await _row(workspace_id, PROVISIONED_AGENT_NAME)
+    orphan = await _row(workspace_id, "orphan")
+    assert [outcome.result for outcome in outcomes] == [CREATED]
+    assert created is not None and orphan is not None
+    assert created.is_main
+    assert not orphan.is_main
+    assert orphan.provisioned_by is None
+
+
+async def test_a_provision_that_is_not_main_leaves_the_main_agent_alone(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
+    workspace_id = await _workspace(database_url, tmp_path, ())
+    outcomes = await AgentProvisioning(
+        (_manifest(OTHER_EXTENSION, _provision(name=DEFAULT_AGENT_NAME)),)
+    ).apply(workspace_id)
+    main = await _row(workspace_id, DEFAULT_AGENT_NAME)
+    assert [outcome.result for outcome in outcomes] == [CREATED]
+    assert [outcome.name for outcome in outcomes] == [f"{DEFAULT_AGENT_NAME}-{OTHER_EXTENSION}"]
+    assert main is not None
+    assert (main.is_main, main.provisioned_by) == (True, None)
+
+
 async def test_a_visibility_difference_does_not_adopt_a_standing_row(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -507,7 +622,7 @@ async def test_a_workspace_that_predates_the_extension_gets_the_agent_on_its_nex
     assert await _row(workspace_id, PROVISIONED_AGENT_NAME) is None
 
 
-async def test_an_extension_job_provisions_its_agent_before_the_handler(
+async def test_an_extension_job_applies_every_manifest_before_the_handler(
     db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-provision")
@@ -520,15 +635,22 @@ async def test_an_extension_job_provisions_its_agent_before_the_handler(
     async def candidates() -> tuple[UUID, ...]:
         return (workspace_id,)
 
-    manifest = Manifest(
+    job_manifest = Manifest(
         name=sample.NAME,
         version=sample.manifest().version,
-        agents=sample.manifest().agents,
         jobs=(JobSpec(name="probe", schedule=None, handler=handler, candidates=candidates),),
     )
-    runner = JobRunner(bindings=bindings_from((manifest,), ()))
+    agent_manifest = _manifest(OTHER_EXTENSION, _provision())
+    manifests = (job_manifest, agent_manifest)
+    runner = JobRunner(bindings=bindings_from(manifests, ()), manifests=manifests)
     await runner.fire(f"{sample.NAME}:probe", workspace_id)
-    assert observed == [True]
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.agent).where(tables.agent.c.provisioned_by == OTHER_EXTENSION)
+            )
+    await runner.fire(f"{sample.NAME}:probe", workspace_id)
+    assert observed == [True, False]
 
 
 async def test_a_suffixed_name_is_addressable_by_an_extension_whose_own_name_is_not(

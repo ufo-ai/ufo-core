@@ -510,7 +510,10 @@ async def test_manifest_job_fires_through_job_runner(
     workspace_id, _, _ = await _seed()
     async with workspace_tx() as connection:
         await record_workspace_usage(connection, workspace_id, MODEL, Usage(input_tokens=100))
-    runner = JobRunner(bindings=bindings_from((metronome.manifest(),), ()), registry=_registry())
+    declared = metronome.manifest()
+    runner = JobRunner(
+        bindings=bindings_from((declared,), ()), manifests=(declared,), registry=_registry()
+    )
     for workspace_id in await runner.candidates(f"{metronome.NAME}:{metronome.JOB_NAME}"):
         await runner.fire(f"{metronome.NAME}:{metronome.JOB_NAME}", workspace_id)
     (request,) = recorder.ingests()

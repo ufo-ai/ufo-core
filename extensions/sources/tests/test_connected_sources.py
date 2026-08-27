@@ -183,7 +183,8 @@ async def _connect_without_the_hook(state: _Workspace, agent_id: UUID, provider:
 
 
 def _runner() -> JobRunner:
-    return JobRunner(bindings=bindings_from((sources_manifest.manifest(),), ()))
+    declared = sources_manifest.manifest()
+    return JobRunner(bindings=bindings_from((declared,), ()), manifests=(declared,))
 
 
 async def _tick(state: _Workspace) -> None:

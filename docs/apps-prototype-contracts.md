@@ -125,7 +125,7 @@ Apps and their pages (prototype):
 | app_artifacts | `workspace/artifacts`, `objects/site` | list files+sites; click → open link |
 | app_wiki | `workspace/memory`, `objects/member` | list memory + roster; click a member → navigate |
 
-`app_chat` ships the agent, its homepage skill, and the prompt that maintains the page.
+`app_chat` ships its homepage skill and the page source. Its provision names the workspace's main agent (`AgentProvision.main`) rather than shipping a second agent, so the chat screen is the page of the agent every unbound surface already routes to.
 
 ## Ownership (parallel workstreams — file-disjoint)
 
