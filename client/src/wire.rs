@@ -1,6 +1,7 @@
 //! The directive wire: tab-separated lines over held HTTP POST streams.
 
 use std::cell::OnceCell;
+use std::error::Error as _;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 const AGENT_IDLE_REFRESH: Duration = Duration::from_secs(4);
 const FALLBACK_TIMEOUT_SECONDS: u64 = 600;
 const MAX_SYSTEM_SKILLS_BYTES: u64 = 128 * 1024 * 1024;
@@ -192,9 +194,14 @@ pub struct Session {
 }
 
 fn build_agent() -> ureq::Agent {
+    build_agent_with_write_timeout(WRITE_TIMEOUT)
+}
+
+fn build_agent_with_write_timeout(write_timeout: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(CONNECT_TIMEOUT)
         .timeout_read(READ_TIMEOUT)
+        .timeout_write(write_timeout)
         .build()
 }
 
@@ -572,6 +579,19 @@ fn opened(outcome: Result<ureq::Response, ureq::Error>) -> Result<ureq::Response
         Err(ureq::Error::Status(code, response)) => {
             let body = response.into_string().unwrap_or_default();
             Err(format!("chat failed ({code}): {}", body.trim()))
+        }
+        Err(ureq::Error::Transport(error))
+            if error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .is_some_and(|source| {
+                    matches!(
+                        source.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    )
+                }) =>
+        {
+            Err("lost connection (timed out)".to_string())
         }
         Err(error) => Err(format!("lost connection ({error})")),
     }
@@ -1008,6 +1028,35 @@ mod tests {
         assert!(session.agent.get().is_none());
         let _ = session.request("POST", &session.endpoint());
         assert!(session.agent.get().is_some());
+    }
+
+    #[test]
+    fn a_stalled_request_write_ends_as_a_transport_timeout() {
+        use std::sync::mpsc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let port = listener.local_addr().expect("the bound address").port();
+        let (release, held) = mpsc::channel();
+        let serving = std::thread::spawn(move || {
+            let (_socket, _) = listener.accept().expect("the client connects");
+            let _ = held.recv_timeout(Duration::from_secs(2));
+        });
+        let mut session = stopping(format!("http://127.0.0.1:{port}"));
+        session
+            .agent
+            .set(build_agent_with_write_timeout(Duration::from_millis(100)))
+            .expect("the test agent is new");
+
+        let started = std::time::Instant::now();
+        let outcome = session.post(PostBody::Message("x".repeat(32 * 1024 * 1024)));
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        serving.join().expect("the server thread");
+
+        let error = outcome.err().expect("the stalled write fails");
+        assert_eq!(error, "lost connection (timed out)");
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+        assert!(format!("{:?}", build_agent()).contains("timeout_write: Some(120s)"));
     }
 
     #[test]
