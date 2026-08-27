@@ -66,6 +66,7 @@ from evals.driver import (
 from evals.harness.capability import (
     MAX_LINKED_ARTIFACT_BYTES,
     MAX_LINKED_TOTAL_BYTES,
+    ArtifactProbe,
     ArtifactProbeResult,
     CapabilityCase,
     CapabilityOutput,
@@ -807,6 +808,7 @@ def test_stateful_and_scenario_tasks_are_exclusive() -> None:
         "skill_authoring",
         "skill_loading_member",
         "skill_gtm",
+        "ufo-app-qa-replay",
     }
 
 
@@ -5704,6 +5706,16 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
         assert output.response == "created"
         return "fire the created task"
 
+    first_call = ToolInvocation("create_object", {}, has_result=True, call_id="create-object-1")
+    followup_call = ToolInvocation("apply_object", {}, has_result=True, call_id="apply-object-1")
+
+    async def capture(output: CapabilityOutput, _probe: WorkspaceProbe) -> ArtifactProbeResult:
+        assert output.response == "asked"
+        return ArtifactProbeResult(
+            artifacts=(SharedArtifact("final.json", b"final"),),
+            error="final probe warning",
+        )
+
     @dataclass
     class FollowupTarget:
         judge: None = None
@@ -5712,9 +5724,14 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
             return TargetResult(
                 CapabilityOutput(
                     "created",
-                    (),
+                    (first_call,),
+                    tool_errors=("create warning",),
+                    artifacts=(SharedArtifact("initial.json", b"initial"),),
+                    artifact_error="initial probe warning",
                     tokens=2,
                     cost_micro_usd=3,
+                    own_tools=("create_object",),
+                    own_calls=(first_call,),
                     timing=FIRST_TURN_TIMING,
                     handoffs=(FIRST_TURN_HANDOFF,),
                 ),
@@ -5727,13 +5744,34 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
                 ),
             )
 
+        async def capture_artifacts(
+            self,
+            continued_conversation_id: UUID,
+            output: CapabilityOutput,
+            artifact_probe: ArtifactProbe,
+        ) -> CapabilityOutput:
+            assert continued_conversation_id == conversation_id
+            captured = await artifact_probe(output, cast(WorkspaceProbe, object()))
+            return replace(
+                output,
+                artifacts=(*output.artifacts, *captured.artifacts),
+                artifact_error=captured.error,
+            )
+
         async def step(
             self, continued_conversation_id: UUID, message: str, idempotency_key: str
         ) -> TargetResult:
             stepped.append((continued_conversation_id, message, idempotency_key))
             return TargetResult(
                 CapabilityOutput(
-                    "asked", (), tokens=5, cost_micro_usd=7, handoffs=(FOLLOWUP_HANDOFF,)
+                    "asked",
+                    (first_call, followup_call),
+                    tool_errors=("create warning", "apply warning"),
+                    tokens=5,
+                    cost_micro_usd=7,
+                    handoffs=(FOLLOWUP_HANDOFF,),
+                    own_tools=("create_object", "apply_object"),
+                    own_calls=(first_call, followup_call),
                 ),
                 clean=True,
                 trajectory=EvalTrajectory(
@@ -5749,6 +5787,7 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
         "create",
         exact_scorer("asked"),
         followup=followup,
+        followup_artifact_probe=capture,
     )
     result = await run_capability_case(case, FollowupTarget())  # type: ignore[arg-type]
 
@@ -5759,12 +5798,18 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
     attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
     assert attempt["tokens"] == 7
     assert attempt["costMicroUsd"] == 10
+    assert [call["name"] for call in attempt["calls"]] == ["create_object", "apply_object"]
+    assert attempt["toolErrors"] == ["create warning", "apply warning"]
+    assert attempt["ownTools"] == ["create_object", "apply_object"]
+    assert attempt["artifacts"] == ["initial.json", "final.json"]
+    assert attempt["artifactError"] == "initial probe warning; final probe warning"
     assert attempt["timing"] == FIRST_TURN_TIMING.model_dump(mode="json")
     assert attempt["handoffs"] == [
         FIRST_TURN_HANDOFF.model_dump(mode="json"),
         FOLLOWUP_HANDOFF.model_dump(mode="json"),
     ]
     assert "followup" in case.payload()
+    assert "followupArtifactProbe" in case.payload()
 
 
 async def test_capability_none_followup_grades_the_first_output() -> None:

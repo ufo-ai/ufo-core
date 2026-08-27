@@ -202,7 +202,7 @@ MCP_ATLAS_JOB = "evals:mcp_atlas"
 MCP_ATLAS_URL_ENV = "MCP_ATLAS_URL"
 MCP_ATLAS_EXTERNAL_URL_ENV = "MCP_ATLAS_EXTERNAL_URL"
 MCP_ATLAS_TIMEOUT_SECONDS = 1_800.0
-UFO_APP_TASKS = ("ufo-app-bench", "ufo-app-copy")
+UFO_APP_TASKS = ("ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay")
 TERMINAL_BENCH_TOKEN_TTL = timedelta(days=1)
 
 
@@ -1096,7 +1096,15 @@ async def _run(
                     compaction=compaction,
                     loadable_skills=loadable_skills,
                     workspace_probe_for=(
-                        lambda conversation_id: AppBenchWorkspaceProbe(conversation_id, driver)
+                        lambda conversation_id: AppBenchWorkspaceProbe(
+                            conversation_id,
+                            driver,
+                            (
+                                config.sandbox.image_ref
+                                if any(task.name == "ufo-app-qa-replay" for task in tasks)
+                                else None
+                            ),
+                        )
                     )
                     if config.sandbox.backend in UFO_APP_BENCH_BACKENDS
                     and any(task.name in UFO_APP_TASKS for task in tasks)

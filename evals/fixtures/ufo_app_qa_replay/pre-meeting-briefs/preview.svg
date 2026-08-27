@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" width="1440" height="900">
+  <defs>
+    <style>
+      .bg { fill: #fcfcfc; }
+      .text-title { font-family: Inter, system-ui, sans-serif; font-size: 26px; font-weight: 600; fill: #111111; }
+      .text-subtitle { font-family: Inter, system-ui, sans-serif; font-size: 13px; fill: #676767; }
+      .text-body { font-family: Inter, system-ui, sans-serif; font-size: 13px; fill: #111111; }
+      .text-body-soft { font-family: Inter, system-ui, sans-serif; font-size: 12px; fill: #676767; }
+      .text-code { font-family: "Roboto Mono", monospace; font-size: 11px; fill: #676767; }
+      .panel { fill: #ffffff; stroke: #e5e5e5; stroke-width: 1; rx: 6px; }
+      .panel-active { fill: #ffffff; stroke: #111111; stroke-width: 2; rx: 6px; }
+      .subcard { fill: #f7f7f7; stroke: #eaeaea; stroke-width: 1; rx: 4px; }
+      .btn-primary { fill: #111111; rx: 4px; }
+      .btn-primary-text { font-family: Inter, system-ui, sans-serif; font-size: 13px; font-weight: 500; fill: #ffffff; }
+      .btn-secondary { fill: #ffffff; stroke: #d1d1d1; stroke-width: 1; rx: 4px; }
+      .btn-secondary-text { font-family: Inter, system-ui, sans-serif; font-size: 13px; font-weight: 500; fill: #111111; }
+      .tag-warn { fill: #fff3e0; stroke: #ffe0b2; }
+      .tag-warn-text { fill: #b76e00; font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 600; }
+      .tag-fresh { fill: #e8f5e9; stroke: #c8e6c9; }
+      .tag-fresh-text { fill: #2e7d32; font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 600; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1440" height="900" class="bg" />
+
+  <!-- Region 1: Header / Orientation -->
+  <g id="region-header" data-app-region="header" data-app-role="orientation">
+    <text x="48" y="46" class="text-title">Pre-Meeting Briefs</text>
+    <text x="48" y="70" class="text-subtitle">Next 3 upcoming meetings on Monday, 24 August 2026 synthesized across Calendar, Email, Drive, and GitHub</text>
+    <rect x="1160" y="28" width="232" height="38" class="subcard" />
+    <circle cx="1180" cy="47" r="4" fill="#2e7d32" />
+    <text x="1192" y="51" class="text-code">Sources: 4 active • UTC sync</text>
+  </g>
+
+  <!-- Region 2: Meeting Tabs / Selector -->
+  <g id="region-meeting-tabs" data-app-region="meeting-tabs">
+    <!-- Meeting 1 Tab (Selected) -->
+    <rect x="48" y="92" width="430" height="84" class="panel-active" />
+    <text x="68" y="118" class="text-body" font-weight="600">1. Northstar renewal</text>
+    <text x="68" y="138" class="text-body-soft">16:00 – 16:30 UTC • maya@northstar.example, jordan@northstar.example</text>
+    <rect x="68" y="148" width="168" height="18" rx="3" class="tag-fresh" />
+    <text x="74" y="161" class="tag-fresh-text">Drive: 12 Aug (12d) • Email: 21 Aug (3d)</text>
+
+    <!-- Meeting 2 Tab -->
+    <rect x="502" y="92" width="430" height="84" class="panel" />
+    <text x="522" y="118" class="text-body" font-weight="600">2. Product design sync</text>
+    <text x="522" y="138" class="text-body-soft">18:00 – 18:50 UTC • dana@evalco.test, priya@evalco.test</text>
+    <rect x="522" y="148" width="156" height="18" rx="3" class="tag-fresh" />
+    <text x="528" y="161" class="tag-fresh-text">Drive: 24 Aug • Issues: #2040, #2042</text>
+
+    <!-- Meeting 3 Tab -->
+    <rect x="956" y="92" width="436" height="84" class="panel" />
+    <text x="976" y="118" class="text-body" font-weight="600">3. Investor update review</text>
+    <text x="976" y="138" class="text-body-soft">21:00 – 21:30 UTC • investor@transpose.example</text>
+    <rect x="976" y="148" width="204" height="18" rx="3" class="tag-warn" />
+    <text x="982" y="161" class="tag-warn-text">⚠️ No Drive notes • 100-person waitlist email</text>
+  </g>
+
+  <!-- Region 3: Active Meeting Detail & Context -->
+  <g id="region-context-signals" data-app-region="context-signals">
+    <!-- Left column: Meeting Overview & Context -->
+    <rect x="48" y="194" width="650" height="670" class="panel" />
+    <text x="72" y="226" class="text-body" font-weight="600" font-size="15px">Meeting Overview &amp; Source Audit</text>
+    
+    <!-- Source freshness bar -->
+    <rect x="72" y="242" width="602" height="46" class="subcard" />
+    <text x="88" y="262" class="text-body-soft" font-weight="600">Source Audit Trail &amp; Age</text>
+    <text x="88" y="278" class="text-code">Calendar: Confirmed (16:00 UTC) | Email: 21 Aug (3d old) | Drive: 12 Aug (12d old) | GitHub: Live</text>
+
+    <!-- Prior Context Card -->
+    <rect x="72" y="300" width="602" height="160" class="subcard" />
+    <text x="88" y="324" class="text-body" font-weight="600">Prior Context &amp; Key Decisions</text>
+    <text x="88" y="346" class="text-body">• Contract renewal offer is $48,000/yr contingent on SSO commitment by 18 September.</text>
+    <text x="88" y="368" class="text-body">• Jordan is running Northstar security review; promised implementation date at today's call.</text>
+    <text x="88" y="390" class="text-body">• Product design sync closed #2042 (button moved to foot) and opened #2040 (domain login).</text>
+    <text x="88" y="412" class="text-body">• Investor review requests metrics on the 100-person waitlist, weekly burn, and activation.</text>
+    <text x="88" y="442" class="text-code">Sources: Drive doc-northstar (12 Aug), Email from Maya (21 Aug), GitHub #2040, #2042</text>
+
+    <!-- Live Work Card -->
+    <rect x="72" y="472" width="602" height="176" class="subcard" />
+    <text x="88" y="496" class="text-body" font-weight="600">Live Engineering &amp; Repository State</text>
+    <text x="88" y="518" class="text-body">• Issue #2077: Northstar SSO security review (Assigned: Priya, Status: Open)</text>
+    <text x="88" y="540" class="text-body">• Issue #412: Confirm SSO launch scope (Assigned: Jordan, Status: Open)</text>
+    <text x="88" y="562" class="text-body">• Issue #2040: Decide personal-domain login policy (Assigned: member, Status: Open)</text>
+    <text x="88" y="584" class="text-body">• Closed #2042: Move new application button to page foot (Dana)</text>
+    <text x="88" y="606" class="text-body">• PR #741: Calendar cursor repair (Alex • Approved • Conflict resolving)</text>
+    <text x="88" y="632" class="text-code">GitHub evalco/app sync: 32 PRs merged in window, 78% linked to issues</text>
+
+    <!-- Missing / Uncertain Card -->
+    <rect x="72" y="660" width="602" height="186" class="subcard" stroke="#ffe0b2" fill="#fffdfa" />
+    <text x="88" y="684" class="text-body" font-weight="600" fill="#b76e00">Missing &amp; Uncertain Data Gaps</text>
+    <text x="88" y="706" class="text-body">• Final SSO technical scope is pending confirmation from Jordan before checklist completion.</text>
+    <text x="88" y="728" class="text-body">• Drive notes for Northstar are 12 days old (12 Aug); relying on 21 Aug email terms.</text>
+    <text x="88" y="750" class="text-body">• Investor update meeting has no prior meeting notes in Drive; context comes only from email.</text>
+    <text x="88" y="772" class="text-body">• Verification needed on whether 100-person waitlist activation meets 14 September goal.</text>
+    <text x="88" y="802" class="text-code">Data Freshness Alert: Ensure all team members align on 28 Aug runbook &amp; 2 Sep cutover</text>
+  </g>
+
+  <!-- Region 4: Points to Raise & Meeting Actions -->
+  <g id="region-action-points" data-app-region="action-points" data-app-role="primary-action">
+    <!-- Right column: Points to raise and action items -->
+    <rect x="718" y="194" width="674" height="670" class="panel" />
+    <text x="742" y="226" class="text-body" font-weight="600" font-size="15px">3 Key Points to Raise in Discussion</text>
+
+    <!-- Point 1 -->
+    <rect x="742" y="242" width="626" height="106" class="subcard" />
+    <text x="758" y="266" class="text-body" font-weight="600">1. Commit to SSO delivery before 18 September</text>
+    <text x="758" y="288" class="text-body">Confirm that our 14 September platform release satisfies Northstar's 18 September requirement</text>
+    <text x="758" y="308" class="text-body">to lock in the $48,000 annual contract renewal without further review delay.</text>
+    <text x="758" y="332" class="text-code">Source: Email from Maya (21 Aug) &amp; Northstar call notes (12 Aug)</text>
+
+    <!-- Point 2 -->
+    <rect x="742" y="360" width="626" height="106" class="subcard" />
+    <text x="758" y="384" class="text-body" font-weight="600">2. Hand off finalized SSO scope for Jordan's checklist</text>
+    <text x="758" y="406" class="text-body">Provide Priya and Jordan the exact SSO scope definition so Jordan can unblock and finish the</text>
+    <text x="758" y="426" class="text-body">security review checklist (tracked in Issue #412 and Issue #2077).</text>
+    <text x="758" y="450" class="text-code">Source: Google Meet transcript (24 Aug) &amp; GitHub Issue #412</text>
+
+    <!-- Point 3 -->
+    <rect x="742" y="478" width="626" height="106" class="subcard" />
+    <text x="758" y="502" class="text-body" font-weight="600">3. Coordinate billing cutover with renewal timeline</text>
+    <text x="758" y="524" class="text-body">Align the 2 September billing system transition with Northstar's renewal paperwork to ensure</text>
+    <text x="758" y="544" class="text-body">invoicing continuity and eliminate billing discrepancy risks (Dana posting date by Tuesday).</text>
+    <text x="758" y="568" class="text-code">Source: Launch review transcript (Dana)</text>
+
+    <!-- Action Section -->
+    <text x="742" y="612" class="text-body" font-weight="600">Prepared Actions &amp; Meeting Tools</text>
+    
+    <!-- Action button 1 -->
+    <rect x="742" y="628" width="626" height="54" class="subcard" />
+    <text x="758" y="652" class="text-body" font-weight="500">Copy pre-meeting brief summary to clipboard</text>
+    <rect x="1220" y="638" width="132" height="32" class="btn-primary" />
+    <text x="1248" y="658" class="btn-primary-text">Copy Brief</text>
+
+    <!-- Action button 2 -->
+    <rect x="742" y="692" width="626" height="54" class="subcard" />
+    <text x="758" y="716" class="text-body" font-weight="500">Create support runbook task for Priya (#900)</text>
+    <rect x="1204" y="702" width="148" height="32" class="btn-secondary" />
+    <text x="1220" y="722" class="btn-secondary-text">Create Task (#900)</text>
+
+    <!-- Action button 3 -->
+    <rect x="742" y="756" width="626" height="54" class="subcard" />
+    <text x="758" y="780" class="text-body" font-weight="500">Assign webhook ordering issue (#521) to Alex</text>
+    <rect x="1204" y="766" width="148" height="32" class="btn-secondary" />
+    <text x="1220" y="786" class="btn-secondary-text">Assign Issue (#521)</text>
+
+    <!-- Note -->
+    <text x="742" y="836" class="text-body-soft">Select any meeting tab to update context, points to raise, live issues, and copy tools.</text>
+    <text x="742" y="854" class="text-code">Sources: Calendar • Gmail • Drive • GitHub</text>
+  </g>
+</svg>

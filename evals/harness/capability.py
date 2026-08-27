@@ -94,6 +94,14 @@ class ToolInvocation:
         return self.has_result and not self.is_error
 
 
+def merge_tool_calls(
+    before: tuple[ToolInvocation, ...], after: tuple[ToolInvocation, ...]
+) -> tuple[ToolInvocation, ...]:
+    """Merge a later transcript without repeating calls already present by id."""
+    known = frozenset(call.call_id for call in before if call.call_id)
+    return (*before, *(call for call in after if not call.call_id or call.call_id not in known))
+
+
 def shared_file_names(call: ToolInvocation) -> tuple[str, ...]:
     """The download names one successful `share_file` call delivered, in share order, read from
     its result payload — one entry per file the call's list named."""
@@ -358,6 +366,7 @@ class CapabilityCase:
     seed: CapabilitySeed | None = None
     prepare: WorkspacePrepare | None = None
     artifact_probe: ArtifactProbe | None = None
+    followup_artifact_probe: ArtifactProbe | None = None
     judge_on_deterministic_failure: bool = False
     wait_for_background: bool = False
 
@@ -369,6 +378,8 @@ class CapabilityCase:
             raise ValueError(
                 "an undelivered round answers a member message: prior_messages must end on one"
             )
+        if self.followup_artifact_probe is not None and self.followup is None:
+            raise ValueError("a followup artifact probe requires a followup")
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -437,6 +448,8 @@ class CapabilityCase:
             payload["prepare"] = source_digest(self.prepare)
         if self.artifact_probe is not None:
             payload["artifactProbe"] = source_digest(self.artifact_probe)
+        if self.followup_artifact_probe is not None:
+            payload["followupArtifactProbe"] = source_digest(self.followup_artifact_probe)
         return payload
 
 
@@ -606,20 +619,39 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
                 message,
                 f"{case.name}:followup:{trajectory.conversation_id}",
             )
+            output = replace(result.output, workspace_dir=first_output.workspace_dir)
+            if case.followup_artifact_probe is not None:
+                output = await target.capture_artifacts(
+                    trajectory.conversation_id,
+                    output,
+                    case.followup_artifact_probe,
+                )
             result = replace(
                 result,
                 output=replace(
-                    result.output,
+                    output,
                     tokens=first_output.tokens + result.output.tokens,
                     cost_micro_usd=first_output.cost_micro_usd + result.output.cost_micro_usd,
-                    artifacts=first_output.artifacts,
+                    calls=merge_tool_calls(first_output.calls, output.calls),
+                    tool_errors=(
+                        output.tool_errors
+                        if frozenset(call.call_id for call in first_output.calls if call.call_id)
+                        & frozenset(call.call_id for call in output.calls if call.call_id)
+                        else (*first_output.tool_errors, *output.tool_errors)
+                    ),
+                    artifacts=(*first_output.artifacts, *output.artifacts),
                     artifact_references=first_output.artifact_references,
-                    artifact_error=first_output.artifact_error,
+                    artifact_error="; ".join(
+                        error
+                        for error in (first_output.artifact_error, output.artifact_error)
+                        if error
+                    ),
                     log=first_output.log,
                     compactions=first_output.compactions,
                     compaction_records=first_output.compaction_records,
                     timing=first_output.timing,
                     handoffs=first_output.handoffs + result.output.handoffs,
+                    own_calls=merge_tool_calls(first_output.own_calls, output.own_calls),
                 ),
             )
             if not result.clean:

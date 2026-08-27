@@ -1,0 +1,93 @@
+{
+  "facts": [
+    {
+      "label": "#521",
+      "alternatives": [
+        "#521"
+      ]
+    },
+    {
+      "label": "#522",
+      "alternatives": [
+        "#522"
+      ]
+    },
+    {
+      "label": "19",
+      "alternatives": [
+        "19"
+      ]
+    },
+    {
+      "label": "7",
+      "alternatives": [
+        "7"
+      ]
+    },
+    {
+      "label": "platform",
+      "alternatives": [
+        "platform"
+      ]
+    },
+    {
+      "label": "billing",
+      "alternatives": [
+        "billing"
+      ]
+    },
+    {
+      "label": "alex",
+      "alternatives": [
+        "alex"
+      ]
+    },
+    {
+      "label": "priya",
+      "alternatives": [
+        "priya"
+      ]
+    },
+    {
+      "label": "2 open",
+      "alternatives": [
+        "2 open"
+      ]
+    },
+    {
+      "label": "1 open",
+      "alternatives": [
+        "1 open"
+      ]
+    },
+    {
+      "label": "Prepare assignment or Prepare an assignment or Prepared Assignment or Prepare note for review",
+      "alternatives": [
+        "Prepare assignment",
+        "Prepare an assignment",
+        "Prepared Assignment",
+        "Prepare note for review"
+      ]
+    },
+    {
+      "label": "Review in chat or Open chat to review or Assignments are made in chat",
+      "alternatives": [
+        "Review in chat",
+        "Open chat to review",
+        "Assignments are made in chat"
+      ]
+    },
+    {
+      "label": "Webhook retries",
+      "alternatives": [
+        "Webhook retries"
+      ]
+    },
+    {
+      "label": "refund fees",
+      "alternatives": [
+        "refund fees"
+      ]
+    }
+  ]
+}

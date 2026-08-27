@@ -1,0 +1,27 @@
+{
+  "sha256": "84092d0549952c885b2ee2f485af12ff64500e651eab2ca024ed53bcf59ac6a8",
+  "issues": [
+    {
+      "code": "contrast",
+      "message": "Fix text contrast: light 1440px \"Drive: No prior notes\" at span rgb(183, 110, 0) on rgb(255, 243, 224) is 3.65:1; needs 4.5:1; light 1440px \"⚠ Missing & Uncertain Data Gaps\" at span rgb(183, 110, 0) on rgb(255, 251, 245) is 3.88:1; needs 4.5:1; dark 1440px \"Drive: No prior notes\" at span rgb(183, 110, 0) on rgb(255, 243, 224) is 3.65:1; needs 4.5:1; dark 1440px \"⚠ Missing & Uncertain Data Gaps\" at span rgb(183, 110, 0) on rgb(255, 251, 245) is 3.88:1; needs 4.5:1.",
+      "terms": []
+    },
+    {
+      "code": "clipping",
+      "message": "Fix clipped content: light 390px div: Attendees: maya@northstar.example, jorda; dark 390px div: Attendees: maya@northstar.example, jorda.",
+      "terms": []
+    },
+    {
+      "code": "above_fold",
+      "message": "Move these facts above the fold: light #2040; light #2042; light 100-person waitlist; dark #2040; dark #2042; dark 100-person waitlist.",
+      "terms": [
+        "#2040",
+        "#2042",
+        "100-person waitlist",
+        "#2040",
+        "#2042",
+        "100-person waitlist"
+      ]
+    }
+  ]
+}

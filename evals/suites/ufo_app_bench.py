@@ -47,7 +47,6 @@ from ufo_ext_eval_env.manifest import (
 )
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
-    APPLICATION_AUDIT_SERVER,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
     DESKTOP_WIDTH,
     MIN_CONTROLS,
@@ -95,6 +94,8 @@ from evals.harness.harness import EvalMetric, EvalReport, Json, JsonObject
 from evals.harness.registry import EvalTask
 from evals.harness.scorers import combine, content_words, skill_scorer
 from evals.harness.target import CapabilityTarget
+from evals.suites.app_audit_probe import AUDIT_CONTENT as AUDIT_CONTENT
+from evals.suites.app_audit_probe import AUDIT_DIGEST, app_audit_command
 from ufo.access.grants import GrantStore
 from ufo.agent_scope import agent
 from ufo.blob import WorkspaceBlobStore
@@ -106,9 +107,7 @@ from ufo.workspace import ws
 
 HOUSE_STYLE_SKILL = "ufo-style"
 SITE_SKILL = "website-building"
-AUDIT_CONTENT = files("ufo_ext_sites").joinpath("scripts/audit_application.cjs").read_bytes()
 COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read_bytes()
-AUDIT_DIGEST = sha256(AUDIT_CONTENT).hexdigest()
 COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()
 APP_INDEX_CONTENT = (
     files("ufo_ext_app_wiki").joinpath("skills/app-wiki-home/index.html").read_bytes()
@@ -184,6 +183,7 @@ APP_DESIGN_PATH = f"{APP_WORKSPACE_ROOT}/application-design.svg"
 PROBE_OUTPUT = ".eval-output"
 PROBE_PORT = 8137
 PROBE_TIMEOUT_SECONDS = 120
+DOCKER_INSPECT_TIMEOUT_SECONDS = 10
 DESKTOP_HEIGHT = 900
 NARROW_WIDTH = APPLICATION_NARROW_WIDTH
 NARROW_HEIGHT = 844
@@ -999,13 +999,91 @@ class AppBenchWorkspaceProbe(WorkspaceProbe):
 
     conversation_id: UUID
     driver: WorkspaceDriver | None = None
+    ephemeral_image_ref: str | None = None
 
     async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
         async with _browser_probe_slot():
+            container = f"ufo-sbx-{self.conversation_id}"
+            if self.ephemeral_image_ref is not None:
+                inspected = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "container",
+                    "inspect",
+                    container,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    inspect_stdout, inspect_stderr = await asyncio.wait_for(
+                        inspected.communicate(), DOCKER_INSPECT_TIMEOUT_SECONDS
+                    )
+                except TimeoutError:
+                    inspected.kill()
+                    await inspected.wait()
+                    return ProbeCommandResult(
+                        124,
+                        "",
+                        "container inspection timed out",
+                        DOCKER_INSPECT_TIMEOUT_SECONDS,
+                    )
+                if inspected.returncode != 0:
+                    detail = inspect_stderr.decode(errors="replace")
+                    if "No such object" not in detail and "No such container" not in detail:
+                        return ProbeCommandResult(
+                            inspected.returncode or 1,
+                            inspect_stdout.decode(errors="replace"),
+                            detail,
+                        )
+                    if self.driver is None:
+                        return ProbeCommandResult(1, "", "replay probe has no workspace driver")
+                    probe_container = f"ufo-qa-probe-{self.conversation_id}"
+                    workspace = self.driver.workspace_path(self.conversation_id, "").resolve()
+                    process = await asyncio.create_subprocess_exec(
+                        "docker",
+                        "run",
+                        "--rm",
+                        "--name",
+                        probe_container,
+                        "--add-host",
+                        "host.docker.internal:host-gateway",
+                        "-v",
+                        f"{workspace}:/workspace",
+                        "--entrypoint",
+                        "bash",
+                        self.ephemeral_image_ref,
+                        "-lc",
+                        command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    try:
+                        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
+                    except TimeoutError:
+                        process.kill()
+                        await process.wait()
+                        cleanup = await asyncio.create_subprocess_exec(
+                            "docker",
+                            "rm",
+                            "-f",
+                            probe_container,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        try:
+                            await asyncio.wait_for(cleanup.wait(), DOCKER_INSPECT_TIMEOUT_SECONDS)
+                        except TimeoutError:
+                            cleanup.kill()
+                            await cleanup.wait()
+                        return ProbeCommandResult(124, "", "probe timed out", timeout_s)
+                    return ProbeCommandResult(
+                        process.returncode or 0,
+                        stdout.decode(errors="replace"),
+                        stderr.decode(errors="replace"),
+                    )
             process = await asyncio.create_subprocess_exec(
                 "docker",
                 "exec",
-                f"ufo-sbx-{self.conversation_id}",
+                container,
                 "bash",
                 "-lc",
                 command,
@@ -1120,51 +1198,13 @@ class _AppBenchProbe:
 
     def _command(self) -> str:
         directory = f"/workspace/{PROBE_OUTPUT}/{self.name}"
-        audit = base64.b64encode(AUDIT_CONTENT).decode()
-        server = base64.b64encode(APPLICATION_AUDIT_SERVER).decode()
-        readiness = f"""python3 - <<'PY'
-import socket
-import time
-
-deadline = time.time() + 15
-while time.time() < deadline:
-    try:
-        with socket.create_connection(('127.0.0.1', {PROBE_PORT}), timeout=1):
-            raise SystemExit(0)
-    except OSError:
-        time.sleep(0.2)
-raise SystemExit(1)
-PY"""
-        return (
-            "set -eu\n"
-            f"capture={shlex.quote(directory)}\n"
-            'rm -rf "$capture"\n'
-            'mkdir -p "$capture"\n'
-            f"printf %s {shlex.quote(audit)} | base64 -d > /tmp/ufo-app-bench-audit.cjs\n"
-            f"printf %s {shlex.quote(server)} | base64 -d > /tmp/ufo-app-bench-server.py\n"
-            f"test -s {APP_WORKSPACE_ROOT}/app.tsx\n"
-            f"test -s {APP_DESIGN_PATH}\n"
-            f'cp {APP_DESIGN_PATH} "$capture/{self.name}-design.svg"\n'
-            'printf \'%s\' \'<!doctype html><html lang="en"><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            "<style>html,body{margin:0;min-height:100%;background:#f5f5f5}main{padding:24px}"
-            "svg{display:block;width:100%;height:auto;background:white}</style></head>"
-            "<body><main>' "
-            f'> "$capture/{self.name}-design.html"\n'
-            f'cat {APP_DESIGN_PATH} >> "$capture/{self.name}-design.html"\n'
-            "printf '%s' '</main></body></html>' "
-            f'>> "$capture/{self.name}-design.html"\n'
-            f"(fuser -k {PROBE_PORT}/tcp 2>/dev/null || true)\n"
-            f"nohup python3 /tmp/ufo-app-bench-server.py {APP_WORKSPACE_ROOT} {PROBE_PORT} "
-            f'"$capture/{self.name}-design.svg" '
-            ">/tmp/ufo-app-bench-server.log 2>&1 &\n"
-            f"{readiness}\n"
-            "node /tmp/ufo-app-bench-audit.cjs "
-            f"http://localhost:{PROBE_PORT}/preview.html "
-            f'"$capture/{self.name}-audit.json" "$capture/{self.name}-light.png" '
-            f'"$capture/{self.name}-dark.png" "$capture/{self.name}-interactive.html" '
-            f'"$capture/{self.name}-static.html" '
-            f"http://localhost:{PROBE_PORT}/accepted-design.svg"
+        return app_audit_command(
+            name=self.name,
+            output_dir=directory,
+            project=APP_WORKSPACE_ROOT,
+            design_path=APP_DESIGN_PATH,
+            port=PROBE_PORT,
+            compile_source=False,
         )
 
 

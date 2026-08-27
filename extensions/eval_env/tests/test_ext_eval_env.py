@@ -9,6 +9,7 @@ import asyncio
 import json
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -43,12 +44,170 @@ from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
+from ufo.sdk.manifest import HookContext, PreToolUse
+from ufo.tools.builtins import EditInput, FileEdit, ReadInput
 from ufo.tools.context import ToolContext
 from ufo.workspace import ws
 
 TOOL_NARRATION = "using the connected account"
 
 BOB = "bob@evalco.test"
+
+
+def _repair_hook_context(
+    tool_name: str,
+    tool_input,
+    *,
+    store: ScopedStore | None = None,
+    turn: Turn | None = None,
+) -> HookContext:
+    return HookContext(
+        ext=ExtensionContext(
+            store=store or ScopedStore(extension=env.NAME),
+            credentials=CredentialAccess(declared=frozenset()),
+        ),
+        payload=PreToolUse(tool_name=tool_name, tool_input=tool_input),
+        agent=Agent(
+            prompt="repair",
+            model="google/gemini-3.7-flash",
+            name=env.APP_QA_REPAIR_AGENT_NAME,
+        ),
+        turn=turn,
+    )
+
+
+async def test_app_qa_repair_agent_and_hook_keep_one_exact_edit_surface() -> None:
+    manifest = env.manifest()
+    repair = next(agent for agent in manifest.agents if agent.name == env.APP_QA_REPAIR_AGENT_NAME)
+
+    assert repair.spec.model == "google/gemini-3.7-flash"
+    assert repair.spec.use_workspace_skills is False
+    assert repair.tools == ("read", "edit")
+    assert (
+        await env.bound_app_qa_repair_tools(
+            _repair_hook_context("read", ReadInput(file_path=env.APP_QA_SOURCE_PATH))
+        )
+        is None
+    )
+    wrong_path = await env.bound_app_qa_repair_tools(
+        _repair_hook_context("read", ReadInput(file_path="/workspace/ufo-app/preview.svg"))
+    )
+    replace_all = await env.bound_app_qa_repair_tools(
+        _repair_hook_context(
+            "edit",
+            EditInput(
+                file_path=env.APP_QA_SOURCE_PATH,
+                edits=(FileEdit(old_string="old", new_string="new", replace_all=True),),
+            ),
+        )
+    )
+
+    assert wrong_path is not None
+    assert wrong_path.reason == f"app QA repair can change only {env.APP_QA_SOURCE_PATH}"
+    assert replace_all is not None
+    assert replace_all.reason == "app QA repair does not allow replace_all"
+
+
+async def test_app_qa_repair_hook_enforces_exact_edit_budget_boundaries(db: None) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        store = ScopedStore(extension=env.NAME)
+        calls_turn = Turn(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            conversation_id=uuid4(),
+            agent_id=uuid4(),
+            seq=1,
+            status="running",
+            inbound="repair",
+            created_at=datetime(2026, 8, 27, tzinfo=UTC),
+        )
+        small = EditInput(
+            file_path=env.APP_QA_SOURCE_PATH,
+            edits=(FileEdit(old_string="old", new_string="new"),),
+        )
+        for _ in range(env.APP_QA_EDIT_CALL_LIMIT):
+            assert (
+                await env.bound_app_qa_repair_tools(
+                    _repair_hook_context("edit", small, store=store, turn=calls_turn)
+                )
+                is None
+            )
+        over_calls = await env.bound_app_qa_repair_tools(
+            _repair_hook_context("edit", small, store=store, turn=calls_turn)
+        )
+
+        for field, limit in (
+            ("old_string", env.APP_QA_EDIT_OLD_BYTES_LIMIT),
+            ("new_string", env.APP_QA_EDIT_NEW_BYTES_LIMIT),
+        ):
+            exact_turn = calls_turn.model_copy(update={"id": uuid4()})
+            over_turn = calls_turn.model_copy(update={"id": uuid4()})
+            exact = {"old_string": "old", "new_string": "new", field: "x" * limit}
+            over = {"old_string": "old", "new_string": "new", field: "x" * (limit + 1)}
+            assert (
+                await env.bound_app_qa_repair_tools(
+                    _repair_hook_context(
+                        "edit",
+                        EditInput(
+                            file_path=env.APP_QA_SOURCE_PATH,
+                            edits=(FileEdit(**exact),),
+                        ),
+                        store=store,
+                        turn=exact_turn,
+                    )
+                )
+                is None
+            )
+            denied = await env.bound_app_qa_repair_tools(
+                _repair_hook_context(
+                    "edit",
+                    EditInput(
+                        file_path=env.APP_QA_SOURCE_PATH,
+                        edits=(FileEdit(**over),),
+                    ),
+                    store=store,
+                    turn=over_turn,
+                )
+            )
+            assert denied is not None
+            assert field.split("_")[0] in denied.reason
+
+    assert over_calls is not None
+    assert str(env.APP_QA_EDIT_CALL_LIMIT) in over_calls.reason
+
+
+async def test_app_qa_repair_hook_denies_the_retained_47140_byte_full_source(db: None) -> None:
+    source = (
+        Path(__file__).parents[3] / "evals/fixtures/ufo_app_qa_replay/pre-meeting-briefs/app.tsx"
+    ).read_text()
+    assert len(source.encode()) == 47_140
+    workspace_id = await _workspace()
+    turn = Turn(
+        id=uuid4(),
+        workspace_id=workspace_id,
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=1,
+        status="running",
+        inbound="repair",
+        created_at=datetime(2026, 8, 27, tzinfo=UTC),
+    )
+    with ws(workspace_id):
+        denied = await env.bound_app_qa_repair_tools(
+            _repair_hook_context(
+                "edit",
+                EditInput(
+                    file_path=env.APP_QA_SOURCE_PATH,
+                    edits=(FileEdit(old_string=source, new_string="replacement"),),
+                ),
+                store=ScopedStore(extension=env.NAME),
+                turn=turn,
+            )
+        )
+
+    assert denied is not None
+    assert "old_string byte limit" in denied.reason
 
 
 @dataclass(frozen=True)

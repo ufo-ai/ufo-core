@@ -21,6 +21,8 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from evals.harness.capability import (
+    ArtifactProbe,
+    ArtifactProbeResult,
     CapabilityCase,
     CapabilityOutput,
     EvalTrajectory,
@@ -214,6 +216,13 @@ class CapabilityTarget(Protocol):
         self, conversation_id: UUID, message: str, idempotency_key: str
     ) -> TargetResult: ...
 
+    async def capture_artifacts(
+        self,
+        conversation_id: UUID,
+        output: CapabilityOutput,
+        capture: ArtifactProbe,
+    ) -> CapabilityOutput: ...
+
     async def invoke(
         self,
         conversation_id: UUID,
@@ -359,25 +368,35 @@ class InProcessTarget:
                 compaction_records=compaction_snapshots(records),
             )
         if case.artifact_probe is not None:
-            if self.ctx.probes is not None:
-                probe: WorkspaceProbe = _ConversationWorkspaceProbe(
-                    self.ctx.probes, conversation_id
-                )
-            elif self.workspace_probe_for is not None:
-                probe = self.workspace_probe_for(conversation_id)
-            else:
-                raise RuntimeError("an artifact probe requires conversation probes")
-            captured = await case.artifact_probe(output, probe)
-            names = [artifact.name for artifact in (*output.artifacts, *captured.artifacts)]
-            if len(names) != len(set(names)):
-                raise RuntimeError("an artifact probe produced a duplicate artifact name")
-            errors = "; ".join(error for error in (output.artifact_error, captured.error) if error)
-            output = replace(
-                output,
-                artifacts=(*output.artifacts, *captured.artifacts),
-                artifact_error=errors,
-            )
+            output = await self.capture_artifacts(conversation_id, output, case.artifact_probe)
         return replace(result, output=output)
+
+    async def capture_artifacts(
+        self,
+        conversation_id: UUID,
+        output: CapabilityOutput,
+        capture: ArtifactProbe,
+    ) -> CapabilityOutput:
+        """Run one grader-owned workspace probe and join its bounded artifacts."""
+
+        if self.ctx.probes is not None:
+            probe: WorkspaceProbe = _ConversationWorkspaceProbe(self.ctx.probes, conversation_id)
+        elif self.workspace_probe_for is not None:
+            probe = self.workspace_probe_for(conversation_id)
+        else:
+            raise RuntimeError("an artifact probe requires conversation probes")
+        captured = await capture(output, probe)
+        if not isinstance(captured, ArtifactProbeResult):
+            raise RuntimeError("an artifact probe returned an invalid result")
+        names = [artifact.name for artifact in (*output.artifacts, *captured.artifacts)]
+        if len(names) != len(set(names)):
+            raise RuntimeError("an artifact probe produced a duplicate artifact name")
+        errors = "; ".join(error for error in (output.artifact_error, captured.error) if error)
+        return replace(
+            output,
+            artifacts=(*output.artifacts, *captured.artifacts),
+            artifact_error=errors,
+        )
 
     async def _settled_workflow(
         self, conversation_id: UUID, turn_id: UUID, inbound: str

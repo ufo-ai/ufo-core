@@ -31,7 +31,16 @@ from ufo.sdk.connectors import (
     UnknownBrokerTool,
 )
 from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
-from ufo.sdk.manifest import ConnectorProvider, Manifest
+from ufo.sdk.manifest import (
+    AgentProvision,
+    AgentSpec,
+    ConnectorProvider,
+    Deny,
+    HookContext,
+    HookSpec,
+    Manifest,
+    PreToolUse,
+)
 from ufo.sdk.objects import (
     ObjectDetail,
     ObjectKind,
@@ -79,6 +88,29 @@ OWN_ADDRESS = "assistant@evalco.test"
 MAX_LIST_LIMIT = 50
 CONFIRMED = "confirmed"
 CANCELLED = "cancelled"
+APP_QA_REPAIR_AGENT_NAME = "app-qa-repair"
+APP_QA_SOURCE_PATH = "/workspace/ufo-app/app.tsx"
+APP_QA_EDIT_CALL_LIMIT = 8
+APP_QA_EDIT_OLD_BYTES_LIMIT = 16_384
+APP_QA_EDIT_NEW_BYTES_LIMIT = 16_384
+APP_QA_EDIT_BUDGET_KEY = "app-qa-repair/{turn_id}/edit-budget"
+APP_QA_REPAIR_PROMPT = """You repair one existing ufo application from deterministic product QA.
+
+The first turn is a warm-up. Reply only `READY`. Do not use tools.
+
+The next turn contains the live audit issues. Read `/workspace/ufo-app/app.tsx`, then use exact,
+small edits to fix only those issues. Keep the data, behavior, structure, and `preview.svg`
+unchanged. Do not build, audit, deploy, replace the full source, or change another path. Finish
+after the edits land."""
+
+
+class AppQaEditBudget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    calls: int = Field(ge=0)
+    old_bytes: int = Field(ge=0)
+    new_bytes: int = Field(ge=0)
+
 
 _metadata = sa.MetaData()
 
@@ -743,6 +775,81 @@ APP_ACTION_OBJECT = ObjectKind(
 )
 
 
+async def bound_app_qa_repair_tools(ctx: HookContext):
+    if ctx.agent is None or ctx.agent.name != APP_QA_REPAIR_AGENT_NAME:
+        return None
+    if not isinstance(ctx.payload, PreToolUse):
+        raise RuntimeError("app QA repair bounds require pre_tool_use")
+    tool_input = ctx.payload.tool_input.model_dump()
+    match ctx.payload.tool_name, tool_input:
+        case "read", {"file_path": path} if path == APP_QA_SOURCE_PATH:
+            return None
+        case "edit", {"file_path": path, "edits": edits} if path == APP_QA_SOURCE_PATH:
+            if any(edit.get("replace_all") is True for edit in edits):
+                return Deny(reason="app QA repair does not allow replace_all")
+            if ctx.turn is None:
+                raise RuntimeError("app QA repair edit budget requires a turn")
+            old_bytes = 0
+            new_bytes = 0
+            for edit in edits:
+                old_string = edit.get("old_string")
+                new_string = edit.get("new_string")
+                if not isinstance(old_string, str) or not isinstance(new_string, str):
+                    raise RuntimeError("app QA repair received invalid edit strings")
+                old_bytes += len(old_string.encode())
+                new_bytes += len(new_string.encode())
+            key = APP_QA_EDIT_BUDGET_KEY.format(turn_id=ctx.turn.id)
+            stored = await ctx.ext.store.get(key)
+            budget = (
+                AppQaEditBudget(calls=0, old_bytes=0, new_bytes=0)
+                if stored is None
+                else AppQaEditBudget.model_validate(stored)
+            )
+            updated = AppQaEditBudget(
+                calls=budget.calls + 1,
+                old_bytes=budget.old_bytes + old_bytes,
+                new_bytes=budget.new_bytes + new_bytes,
+            )
+            if updated.calls > APP_QA_EDIT_CALL_LIMIT:
+                return Deny(reason=f"app QA repair allows {APP_QA_EDIT_CALL_LIMIT} edit calls")
+            if updated.old_bytes > APP_QA_EDIT_OLD_BYTES_LIMIT:
+                return Deny(
+                    reason=(f"app QA repair old_string byte limit is {APP_QA_EDIT_OLD_BYTES_LIMIT}")
+                )
+            if updated.new_bytes > APP_QA_EDIT_NEW_BYTES_LIMIT:
+                return Deny(
+                    reason=(f"app QA repair new_string byte limit is {APP_QA_EDIT_NEW_BYTES_LIMIT}")
+                )
+            if not await ctx.ext.store.put_if(
+                key,
+                updated.model_dump(mode="json"),
+                stored,
+            ):
+                return Deny(reason="app QA repair edit budget changed concurrently")
+            return None
+        case "read" | "edit", _:
+            return Deny(reason=f"app QA repair can change only {APP_QA_SOURCE_PATH}")
+        case _:
+            return Deny(reason="app QA repair allows only read and edit")
+
+
+APP_QA_REPAIR_AGENT = AgentProvision(
+    name=APP_QA_REPAIR_AGENT_NAME,
+    spec=AgentSpec(
+        prompt=APP_QA_REPAIR_PROMPT,
+        purpose="Repairs one fixed application source from deterministic product QA issues.",
+        model="google/gemini-3.7-flash",
+        reasoning="medium",
+        internet_access_allowed=False,
+        use_workspace_skills=False,
+        sandbox_size="large",
+        visibility="private",
+    ),
+    tools=("read", "edit"),
+    icon="tool",
+)
+
+
 def manifest() -> Manifest:
     broker = EvalEnvBroker()
     return Manifest(
@@ -791,4 +898,12 @@ def manifest() -> Manifest:
             ),
         ),
         objects=(APP_ACTION_OBJECT,),
+        agents=(APP_QA_REPAIR_AGENT,),
+        hooks=(
+            HookSpec(
+                event="pre_tool_use",
+                handler=bound_app_qa_repair_tools,
+                tools=("read", "edit"),
+            ),
+        ),
     )

@@ -1,0 +1,90 @@
+{
+  "facts": [
+    {
+      "label": "Northstar renewal",
+      "alternatives": [
+        "Northstar renewal"
+      ]
+    },
+    {
+      "label": "Product design sync",
+      "alternatives": [
+        "Product design sync"
+      ]
+    },
+    {
+      "label": "Investor update review",
+      "alternatives": [
+        "Investor update review"
+      ]
+    },
+    {
+      "label": "$48,000",
+      "alternatives": [
+        "$48,000"
+      ]
+    },
+    {
+      "label": "18 September",
+      "alternatives": [
+        "18 September"
+      ]
+    },
+    {
+      "label": "#2040",
+      "alternatives": [
+        "#2040"
+      ]
+    },
+    {
+      "label": "#2042",
+      "alternatives": [
+        "#2042"
+      ]
+    },
+    {
+      "label": "100-person waitlist",
+      "alternatives": [
+        "100-person waitlist"
+      ]
+    },
+    {
+      "label": "Drive",
+      "alternatives": [
+        "Drive"
+      ]
+    },
+    {
+      "label": "GitHub",
+      "alternatives": [
+        "GitHub"
+      ]
+    },
+    {
+      "label": "12 August or Aug 12",
+      "alternatives": [
+        "12 August",
+        "Aug 12"
+      ]
+    },
+    {
+      "label": "21 August or Aug 21",
+      "alternatives": [
+        "21 August",
+        "Aug 21"
+      ]
+    },
+    {
+      "label": "SSO",
+      "alternatives": [
+        "SSO"
+      ]
+    },
+    {
+      "label": "renewal",
+      "alternatives": [
+        "renewal"
+      ]
+    }
+  ]
+}

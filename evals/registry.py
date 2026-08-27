@@ -61,6 +61,7 @@ from evals.suites import (
     tool_activity,
     tool_calling,
     ufo_app_bench,
+    ufo_app_qa_replay,
     web_research,
     writing_subagent,
 )
@@ -143,6 +144,7 @@ TASKS: tuple[EvalTask, ...] = (
         ),
         ufo_app_bench._scored_task,
     ),
+    ufo_app_qa_replay.TASK,
     capability_task(
         "ufo-app-copy",
         ufo_app_bench.COPY_CASES,

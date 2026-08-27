@@ -13,8 +13,8 @@ from evals.harness.capability import (
     CapabilityOutput,
     CapabilityVerdict,
     EvalSeed,
-    ToolInvocation,
     grading_statement,
+    merge_tool_calls,
     source_digest,
 )
 from evals.harness.handoff import SubagentHandoff
@@ -205,13 +205,6 @@ def _scenario_evidence(
     return replace(result, output=replace(result.output, timing=timing, handoffs=handoffs))
 
 
-def _merge_calls(
-    before: tuple[ToolInvocation, ...], after: tuple[ToolInvocation, ...]
-) -> tuple[ToolInvocation, ...]:
-    known = frozenset(call.call_id for call in before if call.call_id)
-    return (*before, *(call for call in after if not call.call_id or call.call_id not in known))
-
-
 @dataclass(frozen=True)
 class _Trial:
     """One independent run of the case's conversation and its verdict. `infra` marks a trial whose
@@ -388,8 +381,8 @@ class _ScenarioRun:
                 if followup.output.timing is not None:
                     timings.append(followup.output.timing)
                 handoffs.extend(followup.output.handoffs)
-                calls = _merge_calls(last.output.calls, followup.output.calls)
-                own_calls = _merge_calls(last.output.own_calls, followup.output.own_calls)
+                calls = merge_tool_calls(last.output.calls, followup.output.calls)
+                own_calls = merge_tool_calls(last.output.own_calls, followup.output.own_calls)
                 merged = replace(
                     last.output,
                     calls=calls,

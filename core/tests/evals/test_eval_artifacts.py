@@ -2079,7 +2079,10 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         assert "test -s /workspace/ufo-app/application-design.svg" in probe_command
         assert f'"$capture/{case.name}-design.html"' in probe_command
         assert f'"$capture/{case.name}-design.svg"' in probe_command
-        assert f'"$capture/{case.name}-design.svg" >/tmp/ufo-app-bench-server.log' in probe_command
+        assert (
+            f'"$capture/{case.name}-design.svg" "$health_token" '
+            ">/tmp/ufo-app-bench-server.log" in probe_command
+        )
         assert f"http://localhost:{PROBE_PORT}/preview.html" in probe_command
         assert f"http://localhost:{PROBE_PORT}/accepted-design.svg" in probe_command
         assert "rglob('*.html')" not in probe_command

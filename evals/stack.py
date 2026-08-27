@@ -47,7 +47,7 @@ from ufo.schema.records import ReasoningEffort
 RUNS_ROOT = Path(".local/evals")
 DEFAULT_OUT = Path("eval-reports")
 STACK_OWNER_EMAIL = "evals@localhost"
-APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy"})
+APP_SUITES = frozenset({"ufo-app-bench", "ufo-app-copy", "ufo-app-qa-replay"})
 CREATION_SUITES = frozenset({"new_application"})
 CREATION_DISABLED_JOBS = ("web:seed_homepages",)
 APPLICATION_BUILD_PRODUCTS = (

@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" width="1440" height="900">
+  <defs>
+    <style>
+      .bg { fill: #f9f9f9; }
+      .surface { fill: #ffffff; stroke: #e0e0e0; stroke-width: 1; }
+      .card { fill: #ffffff; stroke: #dcdcdc; stroke-width: 1; rx: 6px; }
+      .card-selected { fill: #f8fafc; stroke: #2563eb; stroke-width: 2; rx: 6px; }
+      .badge-urgent { fill: #fee2e2; stroke: #fca5a5; stroke-width: 1; rx: 4px; }
+      .badge-area { fill: #e0e7ff; stroke: #c7d2fe; stroke-width: 1; rx: 4px; }
+      .badge-neutral { fill: #f3f4f6; stroke: #e5e7eb; stroke-width: 1; rx: 4px; }
+      .text-title { font-family: Inter, sans-serif; font-size: 24px; font-weight: 600; fill: #111827; }
+      .text-subtitle { font-family: Inter, sans-serif; font-size: 14px; fill: #676767; }
+      .text-heading { font-family: Inter, sans-serif; font-size: 16px; font-weight: 600; fill: #111827; }
+      .text-body { font-family: Inter, sans-serif; font-size: 13px; fill: #1f2937; }
+      .text-muted { font-family: Inter, sans-serif; font-size: 12px; fill: #676767; }
+      .text-badge { font-family: Inter, sans-serif; font-size: 11px; font-weight: 500; }
+      .btn-primary { fill: #2563eb; rx: 4px; }
+      .btn-secondary { fill: #ffffff; stroke: #d1d5db; stroke-width: 1; rx: 4px; }
+      .btn-text-white { font-family: Inter, sans-serif; font-size: 13px; font-weight: 500; fill: #ffffff; text-anchor: middle; }
+      .btn-text-dark { font-family: Inter, sans-serif; font-size: 13px; font-weight: 500; fill: #1f2937; text-anchor: middle; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect class="bg" width="1440" height="900"/>
+
+  <!-- Top Header / Orientation -->
+  <g id="header-region" data-app-region="header" data-app-role="orientation">
+    <rect class="surface" x="0" y="0" width="1440" height="88"/>
+    <text class="text-title" x="48" y="44">Issue Ownership &amp; Triage</text>
+    <text class="text-subtitle" x="48" y="68">evalco/app • 2 unassigned issues require triage</text>
+    
+    <!-- Quick summary pills on header right -->
+    <rect class="badge-neutral" x="1080" y="28" width="140" height="32"/>
+    <text class="text-muted" x="1092" y="49">Open Issues: <tspan font-weight="600" fill="#111827">8</tspan></text>
+    <rect class="badge-urgent" x="1232" y="28" width="160" height="32"/>
+    <text class="text-badge" fill="#b91c1c" x="1244" y="49">Needs Triage: 2 issues</text>
+  </g>
+
+  <!-- Left Column: Unassigned Issues List -->
+  <g id="unassigned-issues-region" data-app-region="unassigned-issues">
+    <rect class="surface" x="48" y="112" width="760" height="740" rx="8"/>
+    <text class="text-heading" x="72" y="148">Unassigned Newly Opened Issues</text>
+    <text class="text-muted" x="72" y="170">Select an issue to inspect suggested owner matching, load stats, and review chat handoff.</text>
+
+    <!-- Issue 1: #521 Selected -->
+    <g id="issue-card-521" transform="translate(72, 190)">
+      <rect class="card-selected" width="712" height="150"/>
+      <text class="text-heading" x="20" y="32">#521 Webhook retries lose delivery order</text>
+      <rect class="badge-urgent" x="20" y="46" width="60" height="22"/>
+      <text class="text-badge" fill="#b91c1c" x="28" y="61">urgent</text>
+      <rect class="badge-area" x="88" y="46" width="70" height="22"/>
+      <text class="text-badge" fill="#3730a3" x="96" y="61">platform</text>
+
+      <text class="text-body" x="20" y="94">Age: <tspan font-weight="600">19 hours</tspan> • Area: <tspan font-weight="600">platform</tspan> • Status: <tspan font-weight="600">Triage</tspan></text>
+      <text class="text-body" x="20" y="116">Suggested Owner: <tspan font-weight="600" fill="#1d4ed8">alex</tspan> (Platform lead, 2 open issues)</text>
+      <text class="text-muted" x="20" y="134">Reason: Owns platform and queues areas; lowest platform workload.</text>
+    </g>
+
+    <!-- Issue 2: #522 -->
+    <g id="issue-card-522" transform="translate(72, 356)">
+      <rect class="card" width="712" height="150"/>
+      <text class="text-heading" x="20" y="32">#522 Billing export omits refund fees</text>
+      <rect class="badge-area" x="20" y="46" width="60" height="22"/>
+      <text class="text-badge" fill="#3730a3" x="28" y="61">billing</text>
+
+      <text class="text-body" x="20" y="94">Age: <tspan font-weight="600">7 hours</tspan> • Area: <tspan font-weight="600">billing</tspan> • Status: <tspan font-weight="600">Triage</tspan></text>
+      <text class="text-body" x="20" y="116">Suggested Owner: <tspan font-weight="600" fill="#1d4ed8">priya</tspan> (Billing lead, 1 open issue)</text>
+      <text class="text-muted" x="20" y="134">Reason: Primary area match for billing; currently light load.</text>
+    </g>
+  </g>
+
+  <!-- Right Column: Detail & Chat Action Review -->
+  <g id="action-review-region" data-app-region="action-review" data-app-role="primary-action">
+    <rect class="surface" x="832" y="112" width="560" height="740" rx="8"/>
+    <text class="text-heading" x="856" y="148">Prepared Assignment Review</text>
+    <text class="text-muted" x="856" y="170">Assignments are made in chat</text>
+
+    <!-- Target summary box -->
+    <g transform="translate(856, 190)">
+      <rect class="card" width="512" height="240" fill="#f8fafc"/>
+      <text class="text-heading" x="20" y="32">Active Proposal: Assign #521 to Alex</text>
+      <line x1="20" y1="46" x2="492" y2="46" stroke="#e5e7eb" stroke-width="1"/>
+      
+      <text class="text-muted" x="20" y="72">Target Issue</text>
+      <text class="text-body" x="140" y="72">#521 • Webhook retries lose delivery order</text>
+
+      <text class="text-muted" x="20" y="98">Assigned Area</text>
+      <text class="text-body" x="140" y="98">platform</text>
+
+      <text class="text-muted" x="20" y="124">Candidate</text>
+      <text class="text-body" x="140" y="124">Alex (alex • America/Los_Angeles)</text>
+
+      <text class="text-muted" x="20" y="150">Current Load</text>
+      <text class="text-body" x="140" y="150">2 open issues</text>
+
+      <text class="text-muted" x="20" y="176">Rationale</text>
+      <text class="text-body" x="140" y="176">Matches area expertise in platform and queues.</text>
+
+      <text class="text-muted" x="20" y="210">Safety Rule</text>
+      <text class="text-badge" fill="#4b5563" x="140" y="210">Direct assignments disabled. Assignments are made in chat.</text>
+    </g>
+
+    <!-- Action Buttons Box -->
+    <g transform="translate(856, 450)">
+      <rect class="btn-primary" width="512" height="44"/>
+      <text class="btn-text-white" x="256" y="27">Review in chat</text>
+    </g>
+    
+    <!-- Team Load Reference Table -->
+    <g transform="translate(856, 520)">
+      <text class="text-heading" x="0" y="24">Repository Team Load &amp; Ownership Areas</text>
+      
+      <rect class="card" y="40" width="512" height="180"/>
+      <!-- Row 1 -->
+      <text class="text-body" font-weight="600" x="20" y="75">Alex (@alex)</text>
+      <text class="text-muted" x="180" y="75">Areas: platform, queues</text>
+      <text class="text-body" font-weight="600" x="420" y="75">2 issues</text>
+      <line x1="20" y1="90" x2="492" y2="90" stroke="#f3f4f6"/>
+
+      <!-- Row 2 -->
+      <text class="text-body" font-weight="600" x="20" y="120">Priya (@priya)</text>
+      <text class="text-muted" x="180" y="120">Areas: billing, payments</text>
+      <text class="text-body" font-weight="600" x="420" y="120">1 issue</text>
+      <line x1="20" y1="135" x2="492" y2="135" stroke="#f3f4f6"/>
+
+      <!-- Row 3 -->
+      <text class="text-body" font-weight="600" x="20" y="165">Dana (@dana)</text>
+      <text class="text-muted" x="180" y="165">Areas: frontend, design systems</text>
+      <text class="text-body" font-weight="600" x="420" y="165">6 issues</text>
+    </g>
+  </g>
+</svg>

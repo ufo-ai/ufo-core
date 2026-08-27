@@ -1,0 +1,29 @@
+name = "app-builder-qa-replay"
+base = "HEAD"
+suites = ["ufo-app-qa-replay"]
+cases = ["pre-meeting-briefs", "issue-owner"]
+agent = "app-qa-repair"
+repeats = 3
+concurrency = 1
+max_stacks = 1
+budget_usd = 10.0
+est_usd_per_case = 0.50
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+[[arm]]
+name = "minimal-repair-prompt"
+
+[[arm.replacements]]
+path = "extensions/eval_env/ufo_ext_eval_env/manifest.py"
+old = '''The next turn contains the live audit issues. Read `/workspace/ufo-app/app.tsx`, then use exact,
+small edits to fix only those issues. Keep the data, behavior, structure, and `preview.svg`
+unchanged. Do not build, audit, deploy, replace the full source, or change another path. Finish
+after the edits land.'''
+new = '''The next turn contains the live audit issues. Repair the application from those issues.'''
