@@ -96,7 +96,7 @@ class UfoAgent(BaseInstalledAgent):
         }
         await self.exec_as_agent(
             environment,
-            command=shlex.join((CLIENT_TARGET, "--json", instruction)),
+            command=f"{shlex.join((CLIENT_TARGET, '--json', instruction))} </dev/null",
             env={
                 "UFO_HOME": HOME_TARGET,
                 "WORKSPACE_URL": self._workspace_url,

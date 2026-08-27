@@ -1,6 +1,8 @@
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -121,6 +123,34 @@ def test_token_reaches_harbor_only_through_the_environment(tmp_path: Path) -> No
         "UFO_BENCH_TOKEN": TOKEN,
         "UFO_BENCH_WORKSPACE_URL": "https://eval.ufo.test",
     }
+
+
+async def test_terminal_bench_agent_closes_json_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("harbor")
+    from harbor.models.agent.context import AgentContext
+
+    from evals.terminal_bench.agent import UfoAgent
+
+    environment = SimpleNamespace(context_id=uuid4())
+    agent = UfoAgent(tmp_path)
+    agent._workspace_url = "https://eval.ufo.test"
+    agent._workspace_host = "eval.ufo.test"
+    execute = AsyncMock()
+    monkeypatch.setattr(agent, "exec_as_agent", execute)
+
+    await agent.run("repair 'quoted' input", environment, AgentContext())
+
+    execute.assert_awaited_once_with(
+        environment,
+        command="/installed-agent/ufo --json 'repair '\"'\"'quoted'\"'\"' input' </dev/null",
+        env={
+            "UFO_HOME": "/installed-agent/home",
+            "WORKSPACE_URL": "https://eval.ufo.test",
+            "UFO_CHANNEL": execute.await_args.kwargs["env"]["UFO_CHANNEL"],
+        },
+    )
 
 
 def test_full_run_keeps_harbor_grading_and_one_concurrent_job(
