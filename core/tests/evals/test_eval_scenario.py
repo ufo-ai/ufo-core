@@ -7,7 +7,7 @@ stand-ins are the turn worker (a ScriptedWorker landing the rows and transcript 
 would, one turn per invoke) and the member's LLM leg (a scripted message list)."""
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import gettempdir
 from typing import cast
@@ -18,7 +18,13 @@ import httpx
 import pytest
 import sqlalchemy as sa
 
-from evals.harness.capability import CapabilityVerdict, DescribedGrader
+from evals.harness.capability import (
+    ArtifactProbeResult,
+    CapabilityVerdict,
+    DescribedGrader,
+    ProbeCommandResult,
+    SharedArtifact,
+)
 from evals.harness.registry import scenario_task
 from evals.harness.scenario import (
     MAX_SIMULATOR_REPLY_CHARS,
@@ -139,6 +145,12 @@ class ScriptedMember:
         self.systems.append(system)
         self.histories.append(messages)
         return self.script[len(self.histories) - 1]
+
+
+@dataclass(frozen=True)
+class _UnusedWorkspaceProbe:
+    async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
+        raise AssertionError("scenario artifact capture must use its supplied artifacts")
 
 
 @dataclass
@@ -437,6 +449,79 @@ async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) ->
     assert [call["name"] for call in cast(list[dict[str, object]], attempt["calls"])] == [
         "build_ufo_application"
     ]
+
+
+async def test_scenario_followup_retains_offline_artifacts(db: None, tmp_path) -> None:
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = ScriptedWorker(
+        blob,
+        workspace_id,
+        replies=(
+            (Message(role="assistant", content="Application created."),),
+            (Message(role="assistant", content="Homepage built."),),
+        ),
+    )
+    member = ScriptedMember(("Create an application.", STOP_TOKEN))
+
+    async def followup(outcome: ScenarioOutcome, target: CapabilityTarget):
+        async with workspace_tx() as connection:
+            conversation_id = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id).where(
+                        tables.conversation.c.workspace_id == workspace_id
+                    )
+                )
+            ).scalar_one()
+        return await target.invoke(
+            conversation_id,
+            agent_id,
+            "Build the homepage.",
+            "homepage-seed",
+            on_behalf_of_member_id=None,
+            as_scheduled=True,
+        )
+
+    async def artifacts(output, probe):
+        assert output.workspace_dir is not None
+        assert isinstance(probe, _UnusedWorkspaceProbe)
+        return ArtifactProbeResult(
+            artifacts=(
+                SharedArtifact("homepage-interactive.html", b"<main>App</main>"),
+                SharedArtifact("homepage-light.png", b"png"),
+            )
+        )
+
+    async def grade(outcome: ScenarioOutcome) -> CapabilityVerdict:
+        return CapabilityVerdict(bool(outcome.output.artifacts), "artifacts retained")
+
+    case = ScenarioCase(
+        "creation-artifacts",
+        _SUM_USER,
+        grade,
+        max_turns=2,
+        followup=followup,
+        artifact_probe=artifacts,
+    )
+    target = replace(
+        _target(workspace_id, agent_id, blob, worker, member),
+        workspace_probe_for=lambda _conversation_id: _UnusedWorkspaceProbe(),
+    )
+
+    with ws(workspace_id):
+        result = await run_scenario_case(case, target)
+
+    assert result.passed, result.reason
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["artifacts"] == ["homepage-interactive.html", "homepage-light.png"]
+    contents = cast(list[dict[str, str]], attempt["artifactContents"])
+    assert [item["name"] for item in contents] == [
+        "homepage-interactive.html",
+        "homepage-light.png",
+    ]
+    assert all(item["dataUri"].startswith("data:") for item in contents)
+    assert attempt["artifactError"] is None
 
 
 async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -> None:

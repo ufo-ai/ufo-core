@@ -5,7 +5,8 @@
 # at a build's cost. `base = "HEAD"` again holds the grader still: this branch reads the regions off
 # the worker's own design call and refuses one that drops what the member accepted.
 #
-# One arm, because there is one paragraph. Its control is the same prompt with the paragraph in.
+# Each arm returns one current clause to the prior generic worker-owned design. The control is the
+# shipped prompt.
 name = "app-builder-accepted-design"
 base = "HEAD"
 suites = ["new_application"]
@@ -13,7 +14,7 @@ cases = ["A07-named-homepage-journey", "A08-guided-homepage-journey"]
 repeats = 1
 concurrency = 2
 max_stacks = 2
-budget_usd = 80.0
+budget_usd = 108.0
 est_usd_per_case = 18.00
 
 [template]
@@ -25,11 +26,10 @@ sandbox = { backend = "docker" }
 # The pack installs `research`, whose seam serve refuses to start without a provider.
 research = { search_provider = "perplexity" }
 
-# The accepted design goes back to being one input among the application instructions, with no
-# sentence saying it is settled and no instruction to mark one region per accepted region. The
-# worker still writes a design contract; the question is whether it writes the member's.
+# Remove only the statement that the accepted contract is settled. The region-marking instruction
+# stays exact. This asks whether the settlement statement preserves accepted priority and layout.
 [[arm]]
-name = "no-accepted-binding"
+name = "drop-settled-contract"
 
 [[arm.replacements]]
 path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
@@ -37,14 +37,21 @@ old = '''The `Homepage design` in the application instructions is settled: the m
 and accepted it. Its regions, its first-screen priority, and its layout are the contract you
 implement, not a starting point you revise.
 
-Before source work, call `write_application_design` once with one complete SVG of the first laptop
-screen. Use the real facts, information order, component shapes, labels, and action placement you
-will implement. Mark one region per accepted region, in the accepted display order, with unique
+'''
+new = ''''''
+
+# Return only the accepted-region marking instruction to generic worker-owned regions. The settled
+# contract statement stays. This asks whether exact accepted identities and order depend on the
+# marking instruction.
+[[arm]]
+name = "generic-region-marks"
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/prompts/subagent_ufo_application_builder.md"
+old = '''Mark one region per accepted region, in the accepted display order, with unique
 `data-app-region` values on SVG `<g>` elements — 2–6 of them, major and non-overlapping. Where the
 instructions carry no accepted design, the regions are yours to settle. Use the same values on the
 semantic app containers that implement those regions.'''
-new = '''Before source work, call `write_application_design` once with one complete SVG of the first laptop
-screen. Use the real facts, information order, component shapes, labels, and action placement you
-will implement. Mark 2–6 major, non-overlapping semantic regions with unique `data-app-region`
+new = '''Mark 2–6 major, non-overlapping semantic regions with unique `data-app-region`
 values on SVG `<g>` elements. Use the same values on the semantic app containers that implement
 those regions.'''

@@ -5,37 +5,8 @@ import shlex
 from hashlib import sha256
 from importlib.resources import files
 
-from ufo_ext_sites.application_audit import APPLICATION_AUDIT_SERVER
-
 AUDIT_CONTENT = files("ufo_ext_sites").joinpath("scripts/audit_application.cjs").read_bytes()
 AUDIT_DIGEST = sha256(AUDIT_CONTENT).hexdigest()
-
-
-def app_audit_server_readiness(port: int) -> str:
-    return f"""python3 - "$server_pid" "$health_token" <<'PY'
-import os
-import sys
-import time
-from urllib.error import URLError
-from urllib.request import urlopen
-
-pid = int(sys.argv[1])
-health_token = sys.argv[2]
-deadline = time.time() + 15
-while time.time() < deadline:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        raise SystemExit(1)
-    try:
-        with urlopen(f'http://127.0.0.1:{port}/health/{{health_token}}', timeout=1) as response:
-            if response.read().decode() == health_token:
-                raise SystemExit(0)
-    except URLError:
-        pass
-    time.sleep(0.2)
-raise SystemExit(1)
-PY"""
 
 
 def app_audit_command(
@@ -44,25 +15,9 @@ def app_audit_command(
     output_dir: str,
     project: str,
     design_path: str,
-    port: int,
     compile_source: bool,
 ) -> str:
     audit = base64.b64encode(AUDIT_CONTENT).decode()
-    handler = b"    def do_GET(self):\n"
-    if APPLICATION_AUDIT_SERVER.count(handler) != 1:
-        raise RuntimeError("application audit server has no single GET handler")
-    health_handler = b"""    def do_GET(self):
-        health_token = sys.argv[4]
-        if self.path.partition("?")[0] == f"/health/{health_token}":
-            data = health_token.encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-"""
-    server = base64.b64encode(APPLICATION_AUDIT_SERVER.replace(handler, health_handler)).decode()
     compile_command = (
         'compile_started=$(python3 -c "import time;print(time.monotonic_ns())")\n'
         f"cd {shlex.quote(project)} && vite build\n"
@@ -76,7 +31,6 @@ def app_audit_command(
         'rm -rf "$capture"\n'
         'mkdir -p "$capture"\n'
         f"printf %s {shlex.quote(audit)} | base64 -d > /tmp/ufo-app-bench-audit.cjs\n"
-        f"printf %s {shlex.quote(server)} | base64 -d > /tmp/ufo-app-bench-server.py\n"
         f"test -s {project}/app.tsx\n"
         f"test -s {design_path}\n"
         f'cp {design_path} "$capture/{name}-design.svg"\n'
@@ -89,22 +43,27 @@ def app_audit_command(
         f'cat {design_path} >> "$capture/{name}-design.html"\n'
         "printf '%s' '</main></body></html>' "
         f'>> "$capture/{name}-design.html"\n'
+        f'node /tmp/ufo-app-bench-audit.cjs --design "$capture/{name}-design.svg" '
+        f'> "$capture/{name}-design-regions.json"\n'
+        f'python3 - "$capture/{name}-design.svg" "$capture/{name}-design-regions.json" '
+        f"\"$capture/{name}-design-evidence.json\" <<'PY'\n"
+        + "import hashlib\nimport json\nimport sys\n"
+        + "_, design_path, regions_path, evidence_path = sys.argv\n"
+        + "with open(design_path, 'rb') as source:\n"
+        + "    digest = hashlib.sha256(source.read()).hexdigest()\n"
+        + "with open(regions_path) as source:\n"
+        + "    regions = json.load(source)\n"
+        + "with open(evidence_path, 'w') as target:\n"
+        + "    json.dump({'version': 1, 'design_sha256': digest, 'regions': regions}, target)\n"
+        + "PY\n"
         + compile_command
-        + "health_token=$(python3 -c 'import secrets;print(secrets.token_hex(32))')\n"
-        + f"python3 /tmp/ufo-app-bench-server.py {project} {port} "
-        f'"$capture/{name}-design.svg" "$health_token" '
-        ">/tmp/ufo-app-bench-server.log 2>&1 &\n"
-        + "server_pid=$!\n"
-        + "trap 'kill \"$server_pid\" 2>/dev/null || true' EXIT\n"
-        + 'kill -0 "$server_pid"\n'
-        + f"{app_audit_server_readiness(port)}\n"
-        + 'kill -0 "$server_pid"\n'
         + 'audit_started=$(python3 -c "import time;print(time.monotonic_ns())")\n'
         + "node /tmp/ufo-app-bench-audit.cjs "
-        f"http://localhost:{port}/preview.html "
+        f"{project} "
         f'"$capture/{name}-audit.json" "$capture/{name}-light.png" '
         f'"$capture/{name}-dark.png" "$capture/{name}-interactive.html" '
-        f'"$capture/{name}-static.html" http://localhost:{port}/accepted-design.svg\n'
+        f'"$capture/{name}-static.html" "$capture/{name}-design.svg" '
+        f'"$capture/{name}-design-evidence.json"\n'
         + 'audit_stopped=$(python3 -c "import time;print(time.monotonic_ns())")\n'
         + 'python3 - "$capture/timing.json" "$compile_started" "$compile_stopped" '
         '"$audit_started" "$audit_stopped" <<\'PY\'\n'

@@ -1,11 +1,8 @@
 import json
 import shutil
-import socket
-import subprocess
-import sys
-import time
 from dataclasses import replace
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 from ufo_ext_eval_env.manifest import (
@@ -13,6 +10,7 @@ from ufo_ext_eval_env.manifest import (
     APP_QA_EDIT_NEW_BYTES_LIMIT,
     APP_QA_EDIT_OLD_BYTES_LIMIT,
 )
+from ufo_ext_sites.application_audit import ApplicationAuditInteraction, ApplicationAuditReport
 from ufo_ext_sites.application_builder import APPLICATION_BUILD_TIMEOUT_SECONDS
 from ufo_ext_sites.tools import APPLICATION_AUDIT_TIMEOUT_SECONDS
 
@@ -21,14 +19,16 @@ from evals.harness.capability import (
     CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
+    ProbeCommandResult,
     SharedArtifact,
     ToolInvocation,
+    linked_artifacts,
     run_capability_case,
 )
 from evals.harness.harness import EvalMetric, EvalReport
 from evals.harness.target import TargetResult
 from evals.registry import TASKS
-from evals.suites.app_audit_probe import app_audit_command, app_audit_server_readiness
+from evals.suites.app_audit_probe import app_audit_command
 from evals.suites.ufo_app_qa_replay import (
     CASES,
     FIXTURE_ROOT,
@@ -130,7 +130,6 @@ def test_replay_probe_compiles_and_audits_without_agent_build_or_deploy_tools() 
         output_dir="/workspace/.eval-output/case/initial",
         project="/workspace/ufo-app",
         design_path="/workspace/ufo-app/preview.svg",
-        port=8139,
         compile_source=True,
     )
 
@@ -138,49 +137,15 @@ def test_replay_probe_compiles_and_audits_without_agent_build_or_deploy_tools() 
     assert "audit_application" not in command
     assert "ufo-app-bench-audit.cjs" in command
     assert "/workspace/ufo-app/preview.svg" in command
+    assert "--design" in command
+    assert "design_sha256" in command
+    assert "case-initial-design-evidence.json" in command
     assert "deploy" not in command
-    assert 'kill -0 "$server_pid"' in command
+    assert "node /tmp/ufo-app-bench-audit.cjs /workspace/ufo-app" in command
+    assert "ufo-app-bench-server" not in command
     assert replay.PROBE_TIMEOUT_SECONDS == (
         APPLICATION_BUILD_TIMEOUT_SECONDS + APPLICATION_AUDIT_TIMEOUT_SECONDS
     )
-
-
-def test_app_audit_readiness_rejects_a_competing_listener_when_its_server_exited() -> None:
-    with socket.socket() as reserved:
-        reserved.bind(("127.0.0.1", 0))
-        port = reserved.getsockname()[1]
-    competitor = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        deadline = time.monotonic() + 2
-        while True:
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                    break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.01)
-        exited = subprocess.Popen([sys.executable, "-c", "pass"])
-        exited.wait(timeout=2)
-        result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                f"server_pid={exited.pid}\nhealth_token=owned-server\n"
-                f"{app_audit_server_readiness(port)}",
-            ],
-            check=False,
-            timeout=2,
-        )
-    finally:
-        competitor.terminate()
-        competitor.wait(timeout=2)
-
-    assert result.returncode != 0
 
 
 def test_contract_bytes_are_validated_and_move_case_identity(tmp_path, monkeypatch) -> None:
@@ -240,6 +205,53 @@ async def test_followup_refuses_a_moved_initial_feedback_fingerprint() -> None:
 
     with pytest.raises(RuntimeError, match="initial feedback moved"):
         await _repair_followup(fixture)(output)
+
+
+async def test_final_probe_is_a_self_contained_artifact_set(tmp_path: Path) -> None:
+    fixture = FIXTURES[0]
+    app = tmp_path / "ufo-app"
+    app.mkdir()
+    (app / "app.tsx").write_bytes(fixture.source)
+    report = ApplicationAuditReport(
+        views=(),
+        interaction=ApplicationAuditInteraction(controls=(), successes=(), states=(), console=()),
+    ).model_dump_json(by_alias=True)
+
+    class Probe:
+        async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
+            phase = "final" if "/final" in command else "initial"
+            name = f"{fixture.name}-{phase}"
+            directory = tmp_path / ".eval-output" / "ufo-app-qa-replay" / fixture.name / phase
+            directory.mkdir(parents=True)
+            for suffix in ("design.html", "interactive.html", "static.html"):
+                (directory / f"{name}-{suffix}").write_text(suffix)
+            (directory / f"{name}-audit.json").write_text(report)
+            for scheme in replay.SCHEMES:
+                (directory / f"{name}-{scheme}.png").write_bytes(b"png")
+            (directory / f"{name}-design.svg").write_text("<svg/>")
+            (directory / f"{name}-design-evidence.json").write_text("{}")
+            (directory / "timing.json").write_text('{"compileMs":1,"auditMs":2}')
+            return ProbeCommandResult(0, "", "")
+
+    output = CapabilityOutput("READY", (), workspace_dir=tmp_path)
+    initial = await AppQaReplayProbe(fixture, "initial")(output, Probe())
+    final = await AppQaReplayProbe(fixture, "final")(output, Probe())
+
+    assert not initial.error
+    assert not final.error
+    names = {artifact.name for artifact in final.artifacts}
+    assert sum(len(artifact.content) for artifact in final.artifacts) <= final.max_payload_bytes
+    assert {item["name"] for item in linked_artifacts(final.artifacts, ())} == names
+    assert f"{fixture.name}-initial-evidence.json" in names
+    assert f"{fixture.name}-final-evidence.json" in names
+    assert f"{fixture.name}-final-audit.json" in names
+    assert f"{fixture.name}-final-interactive.html" in names
+    assert f"{fixture.name}-final-light.png" in names
+    assert not any(
+        name.startswith(f"{fixture.name}-initial-")
+        for name in names
+        if name != f"{fixture.name}-initial-evidence.json"
+    )
 
 
 async def test_failed_initial_probe_persists_its_bounded_root_error() -> None:

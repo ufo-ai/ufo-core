@@ -105,7 +105,6 @@ from evals.suites.ufo_app_bench import (
     MEMBER_QUERIES,
     NARROW_HEIGHT,
     NARROW_WIDTH,
-    PROBE_PORT,
     SCHEMES,
     SETUP_CASES,
     SETUP_CONTRACTS,
@@ -167,29 +166,6 @@ window.__ufoApplicationLifecycle = Object.freeze({
   endObservation: () => Promise.resolve(),
 });
 </script>"""
-AUDIT_SERVER_CONTENT = b"""import http.server
-import os
-import subprocess
-import sys
-import threading
-
-os.chdir(sys.argv[1])
-server = http.server.ThreadingHTTPServer(
-    ("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler
-)
-thread = threading.Thread(target=server.serve_forever)
-thread.start()
-origin = f"http://127.0.0.1:{server.server_port}"
-try:
-    result = subprocess.run(
-        [argument.replace("{origin}", origin) for argument in sys.argv[2:]], check=False
-    )
-finally:
-    server.shutdown()
-    thread.join()
-    server.server_close()
-raise SystemExit(result.returncode)
-"""
 AUDIT_DESIGN_REGIONS = (
     {
         "name": "queue",
@@ -289,7 +265,8 @@ def test_secondary_text_regression_materializes_one_matched_token_difference(
             root = tmp_path / name
             roots.append(root)
             ablation._materialize(patch, base, root, None)
-            assert (root / "ablate-matrix.toml").is_file()
+            assert spec.repeats == 1
+            assert (root / "ablate-matrix-0.toml").is_file()
             files = {path: (root / path).read_text() for path in source}
             compile(files[builder_path], builder_path, "exec")
             materialized[name] = files
@@ -386,7 +363,8 @@ def test_filled_control_regression_materializes_the_application_runtime_prompt_u
             root = tmp_path / arm.name
             roots.append(root)
             ablation._materialize(arm, base, root, None)
-            assert (root / "ablate-matrix.toml").is_file()
+            assert spec.repeats == 1
+            assert (root / "ablate-matrix-0.toml").is_file()
             files = {path: (root / path).read_text() for path in paths}
             compile(files[builder_path], builder_path, "exec")
             materialized[arm.name] = files
@@ -667,10 +645,12 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     assert "const ready = await waitForApplicationReadyUntil(frame, deadline)" in source
     assert "const measured = await measureApplication(frame, AA_FLOOR)" in source
     assert "frame.evaluate(measure, AA_FLOOR)" not in source
-    assert "designRegionAudit(browser, acceptedDesignUrl.href)" in source
+    assert "designRegionAudit(browser, acceptedDesignUrl.href)" not in source
+    assert "acceptedDesignUrl" not in source
     assert "document.querySelectorAll('[data-app-region]')" in source
     assert "}).slice(0, 20);" in source
-    assert "designRegions, views, interaction" in source
+    assert "const report = { url, floor: AA_FLOOR, designRegions, views, interaction };" in source
+    assert "acceptedDesignRegions(acceptedDesignPath, acceptedEvidencePath)" in source
     assert "fs.writeFileSync(staticPath, await frame.content())" in source
     assert "window.__ufoCalls || []" in source
     assert "window.__ufoNavigations || []" in source
@@ -700,8 +680,59 @@ def _run_application_audit(
     container: str, report_stem: str, artifact_stem: str
 ) -> subprocess.CompletedProcess[str]:
     subprocess.run(
-        ("docker", "exec", "-i", container, "tee", "/workspace/audit-server.py"),
-        input=AUDIT_SERVER_CONTENT,
+        (
+            "docker",
+            "exec",
+            container,
+            "sh",
+            "-c",
+            "mkdir -p /workspace/app/dist && "
+            "cp /workspace/fixture.html /workspace/app/preview.html && "
+            "cp /workspace/fixture.html /workspace/app/dist/index.html",
+        ),
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    regions = subprocess.run(
+        (
+            "docker",
+            "exec",
+            container,
+            "node",
+            "/workspace/app-audit.cjs",
+            "--design",
+            "/workspace/accepted-design.svg",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    ).stdout
+    subprocess.run(
+        ("docker", "exec", "-i", container, "tee", "/workspace/design-regions.json"),
+        input=regions,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    subprocess.run(
+        (
+            "docker",
+            "exec",
+            container,
+            "python3",
+            "-c",
+            "import hashlib,json,sys;"
+            "svg=open(sys.argv[1],'rb').read();"
+            "regions=json.load(open(sys.argv[2]));"
+            "json.dump({'version':1,'design_sha256':hashlib.sha256(svg).hexdigest(),"
+            "'regions':regions},open(sys.argv[3],'w'))",
+            "/workspace/accepted-design.svg",
+            "/workspace/design-regions.json",
+            "/workspace/accepted-design.json",
+        ),
         check=True,
         capture_output=True,
         timeout=120,
@@ -711,18 +742,16 @@ def _run_application_audit(
             "docker",
             "exec",
             container,
-            "python3",
-            "/workspace/audit-server.py",
-            "/workspace",
             "node",
             "/workspace/app-audit.cjs",
-            "{origin}/fixture.html",
+            "/workspace/app",
             f"/workspace/{report_stem}.json",
             f"/workspace/{artifact_stem}light.png",
             f"/workspace/{artifact_stem}dark.png",
             f"/workspace/{artifact_stem}interactive.html",
             f"/workspace/{artifact_stem}static.html",
-            "{origin}/accepted-design.svg",
+            "/workspace/accepted-design.svg",
+            "/workspace/accepted-design.json",
         ),
         check=False,
         capture_output=True,
@@ -1151,6 +1180,17 @@ def test_app_bench_design_measurement_uses_painted_pixels(
     assert audit.returncode == 0, audit.stderr
     report = loads((workspace / "design-report.json").read_bytes())
     assert report["designRegions"] == definitions
+    graded = asyncio.run(
+        _design_region_scorer()(
+            CapabilityOutput(
+                "Built app",
+                (),
+                artifacts=(SharedArtifact("design-report-audit.json", dumps(report).encode()),),
+            )
+        )
+    )
+    assert graded.evidence["appDesignTotal"] > 0
+    assert all(region["width"] > 0 and region["height"] > 0 for region in report["designRegions"])
 
 
 async def test_app_copy_probe_returns_the_browser_rendered_dom_and_text(tmp_path: Path) -> None:
@@ -2173,16 +2213,11 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         assert case.artifact_probe is not None
         assert isinstance(case.artifact_probe, _AppBenchProbe)
         probe_command = case.artifact_probe._command()
-        assert "/tmp/ufo-app-bench-server.py /workspace/ufo-app" in probe_command
+        assert "node /tmp/ufo-app-bench-audit.cjs /workspace/ufo-app" in probe_command
         assert "test -s /workspace/ufo-app/application-design.svg" in probe_command
         assert f'"$capture/{case.name}-design.html"' in probe_command
         assert f'"$capture/{case.name}-design.svg"' in probe_command
-        assert (
-            f'"$capture/{case.name}-design.svg" "$health_token" '
-            ">/tmp/ufo-app-bench-server.log" in probe_command
-        )
-        assert f"http://localhost:{PROBE_PORT}/preview.html" in probe_command
-        assert f"http://localhost:{PROBE_PORT}/accepted-design.svg" in probe_command
+        assert "ufo-app-bench-server" not in probe_command
         assert "rglob('*.html')" not in probe_command
         assert f'"$capture/{case.name}-interactive.html"' in probe_command
         assert f'"$capture/{case.name}-static.html"' in probe_command

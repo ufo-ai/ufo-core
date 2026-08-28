@@ -10,10 +10,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from evals.harness.capability import (
+    ArtifactProbe,
     CapabilityOutput,
     CapabilityVerdict,
     EvalSeed,
     grading_statement,
+    linked_artifacts,
     merge_tool_calls,
     source_digest,
 )
@@ -135,6 +137,7 @@ class ScenarioCase:
     tier: int = 1
     rubric: tuple[str, ...] = ()
     followup: ScenarioFollowup | None = None
+    artifact_probe: ArtifactProbe | None = None
 
     def __post_init__(self) -> None:
         if self.trials < 1:
@@ -158,6 +161,8 @@ class ScenarioCase:
             payload["judgeRevision"] = JUDGE_REVISION
         if self.followup is not None:
             payload["followup"] = source_digest(self.followup)
+        if self.artifact_probe is not None:
+            payload["artifactProbe"] = source_digest(self.artifact_probe)
         if self.member_key is not None:
             payload["memberKey"] = self.member_key
         return payload
@@ -399,6 +404,7 @@ class _ScenarioRun:
                     ).output,
                 )
                 if not followup.clean:
+                    last = await self._capture_artifacts(last, followup)
                     return _Trial(
                         tuple(turns),
                         stopped,
@@ -418,6 +424,7 @@ class _ScenarioRun:
                         ),
                         followups=followups[: index + 1],
                     )
+            last = await self._capture_artifacts(last, followups[-1])
             outcome = ScenarioOutcome(
                 tuple(turns),
                 last.output,
@@ -453,6 +460,27 @@ class _ScenarioRun:
             followups=followups,
         )
 
+    async def _capture_artifacts(self, result: TargetResult, source: TargetResult) -> TargetResult:
+        if self.case.artifact_probe is None:
+            return result
+        trajectory = source.trajectory
+        if trajectory is None:
+            return replace(
+                result,
+                output=replace(
+                    result.output,
+                    artifact_error="application artifact capture has no followup trajectory",
+                ),
+            )
+        output = replace(
+            result.output,
+            workspace_dir=self.target.conversations.workspace_path(trajectory.conversation_id, ""),
+        )
+        captured = await self.target.capture_artifacts(
+            trajectory.conversation_id, output, self.case.artifact_probe
+        )
+        return replace(result, output=captured)
+
     def _attempt(self, trial: _Trial) -> Json:
         output = trial.last.output if trial.last is not None else CapabilityOutput("", ())
         calls: list[Json] = [
@@ -472,6 +500,18 @@ class _ScenarioRun:
             "response": output.response,
             "calls": calls,
             "toolErrors": list(output.tool_errors),
+            "artifacts": [artifact.name for artifact in output.artifacts],
+            "artifactContents": linked_artifacts(output.artifacts, output.artifact_references),
+            "artifactReferences": [
+                {
+                    "name": artifact.name,
+                    "blobKey": artifact.blob_key,
+                    "digest": artifact.digest,
+                    "sizeBytes": artifact.size_bytes,
+                }
+                for artifact in output.artifact_references
+            ],
+            "artifactError": output.artifact_error or None,
             "turns": [
                 {"userMessage": turn.user_message, "reply": turn.reply} for turn in trial.turns
             ],

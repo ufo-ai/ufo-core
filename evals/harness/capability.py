@@ -56,8 +56,7 @@ ARTIFACT_MEDIA_TYPES = {
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 ARTIFACT_MEDIA_DEFAULT = "application/octet-stream"
-MAX_LINKED_ARTIFACT_BYTES = 4 * 1024 * 1024
-MAX_LINKED_TOTAL_BYTES = 12 * 1024 * 1024
+MAX_ARTIFACT_PAYLOAD_BYTES = 12 * 1024 * 1024
 ARTIFACT_JOIN = "\n\n"
 ARTIFACT_CUT = "\n\n[shared Markdown cut to fit the judge's answer budget]"
 
@@ -160,6 +159,7 @@ class ArtifactProbeResult:
 
     artifacts: tuple[SharedArtifact, ...] = ()
     error: str = ""
+    max_payload_bytes: int = MAX_ARTIFACT_PAYLOAD_BYTES
 
 
 @dataclass(frozen=True)
@@ -493,7 +493,9 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "calls": calls,
                 "toolErrors": list(sample_output.tool_errors),
                 "artifacts": [artifact.name for artifact in sample_output.artifacts],
-                "artifactContents": _linked_artifacts(sample_output.artifacts),
+                "artifactContents": linked_artifacts(
+                    sample_output.artifacts, sample_output.artifact_references
+                ),
                 "artifactReferences": [
                     {
                         "name": artifact.name,
@@ -627,6 +629,16 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
                     output,
                     case.followup_artifact_probe,
                 )
+            followup_has_artifact_evidence = bool(output.artifacts or output.artifact_references)
+            final_artifacts = (
+                output.artifacts if followup_has_artifact_evidence else first_output.artifacts
+            )
+            final_artifact_references = (
+                output.artifact_references
+                if followup_has_artifact_evidence
+                else first_output.artifact_references
+            )
+            _offline_artifacts(final_artifacts, final_artifact_references)
             result = replace(
                 result,
                 output=replace(
@@ -640,8 +652,8 @@ async def sample_capability(case: CapabilityCase, target: CapabilityTarget) -> C
                         & frozenset(call.call_id for call in output.calls if call.call_id)
                         else (*first_output.tool_errors, *output.tool_errors)
                     ),
-                    artifacts=(*first_output.artifacts, *output.artifacts),
-                    artifact_references=first_output.artifact_references,
+                    artifacts=final_artifacts,
+                    artifact_references=final_artifact_references,
                     artifact_error="; ".join(
                         error
                         for error in (first_output.artifact_error, output.artifact_error)
@@ -761,18 +773,13 @@ def _markdown_artifacts(artifacts: tuple[SharedArtifact, ...]) -> tuple[str, ...
     return tuple(readable)
 
 
-def _linked_artifacts(artifacts: tuple[SharedArtifact, ...]) -> list[Json]:
-    """Each shared artifact as a bounded, embeddable data URI so the offline report previews images
-    inline and offers every deliverable as a download — the report carries the whole record and
-    reaches no blob store. An artifact past the per-file or cumulative budget is omitted here; its
-    name, digest, and size still record under artifactReferences."""
+def linked_artifacts(
+    artifacts: tuple[SharedArtifact, ...],
+    references: tuple[SharedArtifactReference, ...],
+) -> list[Json]:
+    """Each shared artifact that fits the offline report payload budget as a data URI."""
     linked: list[Json] = []
-    total = 0
-    for artifact in artifacts:
-        size = len(artifact.content)
-        if size > MAX_LINKED_ARTIFACT_BYTES or total + size > MAX_LINKED_TOTAL_BYTES:
-            continue
-        total += size
+    for artifact in _offline_artifacts(artifacts, references):
         media_type = ARTIFACT_MEDIA_TYPES.get(
             PurePosixPath(artifact.name).suffix.lower(), ARTIFACT_MEDIA_DEFAULT
         )
@@ -784,6 +791,37 @@ def _linked_artifacts(artifacts: tuple[SharedArtifact, ...]) -> list[Json]:
             }
         )
     return linked
+
+
+def _offline_artifacts(
+    artifacts: tuple[SharedArtifact, ...],
+    references: tuple[SharedArtifactReference, ...],
+) -> tuple[SharedArtifact, ...]:
+    durable = {(reference.name, reference.digest, reference.size_bytes) for reference in references}
+    retained: list[SharedArtifact] = []
+    total = 0
+    for artifact in artifacts:
+        size = len(artifact.content)
+        digest = f"sha256:{sha256(artifact.content).hexdigest()}"
+        identity = (artifact.name, digest, size)
+        if size > MAX_ARTIFACT_PAYLOAD_BYTES:
+            if identity in durable:
+                continue
+            raise ValueError(
+                f"artifact {artifact.name!r} ({digest}, {size} bytes) has no durable reference "
+                f"and exceeds the {MAX_ARTIFACT_PAYLOAD_BYTES}-byte offline payload limit"
+            )
+        if total + size > MAX_ARTIFACT_PAYLOAD_BYTES:
+            if identity in durable:
+                continue
+            raise ValueError(
+                f"artifact {artifact.name!r} ({digest}, {size} bytes) has no durable reference "
+                f"and exceeds the {MAX_ARTIFACT_PAYLOAD_BYTES}-byte cumulative offline payload "
+                "limit"
+            )
+        total += size
+        retained.append(artifact)
+    return tuple(retained)
 
 
 def _page_images(artifacts: tuple[SharedArtifact, ...]) -> tuple[ImageBlock, ...]:

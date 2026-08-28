@@ -13,16 +13,24 @@ never created a second time and never rewritten, because applying its name is an
 from __future__ import annotations
 
 import asyncio
-import re
+import io
+import json
+import stat
+import zipfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+from itertools import permutations
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 import yaml
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from ufo_ext_sites.application_audit import ApplicationAuditRegion, application_region_relation
 from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_DELEGATION_TOOL,
     APPLICATION_BUILDER_DEPLOY_TOOL,
@@ -40,14 +48,18 @@ from ufo_ext_sites.store import hosted_site
 from ufo_ext_web.surface import SEED_PROMPT
 
 from evals.harness.capability import (
+    ArtifactProbeResult,
     CapabilityOutput,
     CapabilityVerdict,
     DescribedGrader,
+    SharedArtifact,
     ToolInvocation,
+    WorkspaceProbe,
 )
 from evals.harness.memory_fence import forget_workspace_memory
 from evals.harness.scenario import EvalSeed, ScenarioCase, ScenarioOutcome, ScenarioUser
 from evals.harness.target import CapabilityTarget
+from evals.suites.app_audit_probe import app_audit_command
 from evals.suites.ufo_app_bench import APP_WORKSPACE_FILES
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore
@@ -67,36 +79,14 @@ SANDBOX_CONTAINER_PREFIX = "ufo-sbx-"
 REPAIR_EVIDENCE_EXTENSION = "evals"
 REPAIR_SOURCE_KEY = "application-repair/source/{application_id}"
 REPAIR_BOUND_KEY = "application-repair/bound/{application_id}"
-CONTRACT_CONNECTIVE_WORDS = frozenset(
-    {
-        "a",
-        "an",
-        "and",
-        "as",
-        "be",
-        "can",
-        "each",
-        "every",
-        "in",
-        "it",
-        "let",
-        "member",
-        "on",
-        "one",
-        "read",
-        "s",
-        "see",
-        "show",
-        "so",
-        "the",
-        "their",
-        "this",
-        "to",
-        "what",
-        "with",
-        "you",
-        "your",
-    }
+APPLICATION_ARTIFACT_NAME = "homepage"
+APPLICATION_ARTIFACT_OUTPUT = ".eval-output/homepage"
+APPLICATION_ARTIFACT_TIMEOUT_SECONDS = 120
+APPLICATION_ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
+APPLICATION_BUNDLE_MAX_BYTES = 2 * 1024 * 1024
+APPLICATION_BUNDLE_MAX_FILES = 1_000
+REGION_IDENTITY_CONNECTIVES = frozenset(
+    {"a", "an", "and", "for", "of", "on", "the", "to", "with", "you", "your"}
 )
 EXISTING_APPLICATION = "invoice-intake"
 EXISTING_PROMPT = "You file invoices for the finance team. Ask before paying anything."
@@ -119,25 +109,249 @@ GUIDED_REVISION_INSTRUCTION = (
 )
 
 
-async def _application(name: str) -> sa.Row | None:
-    """One application as its durable row, by the name this conversation's own apply wrote — so an
-    application another trial left in the workspace can never stand in this case's count."""
+class _ObjectApplyResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    kind: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    result: Literal["created", "updated"]
+    agent: str | None = Field(default=None, min_length=1)
+
+
+@dataclass(frozen=True)
+class _ApplicationIdentity:
+    name: str
+    create_index: int
+    final_apply_index: int
+
+
+@dataclass(frozen=True)
+class _AcceptedApplicationDesign:
+    application: _ApplicationIdentity
+    preview_index: int
+    preview: ToolInvocation
+    contract: RenderApplicationPreviewInput
+
+
+@dataclass(frozen=True)
+class _ApplicationRecord:
+    id: UUID
+    name: str
+    prompt: str
+    model: str
+    reasoning: str
+    visibility: str
+    owner_member_id: UUID | None
+
+
+@dataclass(frozen=True)
+class _CreatedApplication:
+    identity: _ApplicationIdentity
+    application: _ApplicationRecord
+
+
+class _IncompleteApplicationPreview(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class _ApplicationHomepageArtifacts:
+    def directory(self, workspace: Path, relative: Path, required: bool) -> Path:
+        resolved_workspace = workspace.resolve(strict=True)
+        if not workspace.is_dir() or relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("application artifact root is outside its workspace")
+        current = workspace
+        for part in relative.parts:
+            current /= part
+            if current.is_symlink():
+                raise ValueError(f"application artifact root {relative} contains a symlink")
+            if current.exists() and not current.is_dir():
+                raise ValueError(f"application artifact root {relative} is not a directory")
+            if not current.exists():
+                if required:
+                    raise ValueError(f"application artifact root {relative} does not exist")
+        resolved = current.resolve(strict=required)
+        if not resolved.is_relative_to(resolved_workspace):
+            raise ValueError("application artifact root is outside its workspace")
+        return current
+
+    def file(self, workspace: Path, path: Path) -> bytes:
+        if path.is_symlink():
+            raise ValueError(f"application artifact file {path.name} is a symlink")
+        status = path.lstat()
+        if not stat.S_ISREG(status.st_mode):
+            raise ValueError(f"application artifact file {path.name} is not a regular file")
+        if not path.resolve(strict=True).is_relative_to(workspace.resolve(strict=True)):
+            raise ValueError("application artifact file is outside its workspace")
+        return path.read_bytes()
+
+    def preview_bundle(self, workspace: Path) -> bytes:
+        root = self.directory(workspace, Path("ufo-app"), required=True)
+        preview = root / "preview.html"
+        dist_path = root / "dist"
+        if not preview.exists() or not dist_path.exists():
+            raise _IncompleteApplicationPreview("application has no runnable preview bundle")
+        dist = self.directory(workspace, Path("ufo-app/dist"), required=True)
+        index = dist / "index.html"
+        if not index.exists():
+            raise _IncompleteApplicationPreview("application has no runnable preview bundle")
+        candidates = sorted(dist.rglob("*"))
+        paths: list[Path] = [preview]
+        for path in candidates:
+            if path.is_symlink():
+                raise ValueError("application preview bundle contains an unsafe file")
+            if not path.resolve(strict=True).is_relative_to(workspace.resolve(strict=True)):
+                raise ValueError("application preview bundle escapes its workspace")
+            if path.is_dir():
+                continue
+            paths.append(path)
+        if index not in paths:
+            raise _IncompleteApplicationPreview("application has no runnable preview bundle")
+        if len(paths) > APPLICATION_BUNDLE_MAX_FILES:
+            raise ValueError("application preview bundle has an invalid file count")
+        entries: list[tuple[str, bytes]] = []
+        total = 0
+        for path in paths:
+            relative = path.relative_to(root).as_posix()
+            if relative.startswith("/") or ".." in Path(relative).parts:
+                raise ValueError("application preview bundle contains an unsafe path")
+            content = self.file(workspace, path)
+            total += len(content)
+            if total > APPLICATION_BUNDLE_MAX_BYTES:
+                raise _IncompleteApplicationPreview("application preview bundle is too large")
+            entries.append((relative, content))
+        body = io.BytesIO()
+        with zipfile.ZipFile(body, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, content in entries:
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                archive.writestr(info, content)
+        bundle = body.getvalue()
+        if len(bundle) > APPLICATION_BUNDLE_MAX_BYTES:
+            raise _IncompleteApplicationPreview("application preview bundle is too large")
+        return bundle
+
+    def artifact(
+        self, workspace: Path, relative_root: Path, name: str, artifact_name: str
+    ) -> SharedArtifact | None:
+        root = self.directory(workspace, relative_root, required=True)
+        path = root / name
+        if not path.exists():
+            return None
+        return SharedArtifact(artifact_name, self.file(workspace, path))
+
+    async def __call__(
+        self, output: CapabilityOutput, probe: WorkspaceProbe
+    ) -> ArtifactProbeResult:
+        if output.workspace_dir is None:
+            return ArtifactProbeResult(error="application artifact capture has no workspace")
+        workspace = output.workspace_dir
+        application = self.directory(workspace, Path("ufo-app"), required=False)
+        if not application.exists():
+            return ArtifactProbeResult(error="application artifact root ufo-app does not exist")
+        self.directory(workspace, Path(".eval-output/homepage"), required=False)
+        source = await asyncio.to_thread(
+            self.artifact, workspace, Path("ufo-app"), "app.tsx", "homepage-app.tsx"
+        )
+        design = await asyncio.to_thread(
+            self.artifact,
+            workspace,
+            Path("ufo-app"),
+            "application-design.svg",
+            "homepage-design.svg",
+        )
+        artifacts = tuple(item for item in (source, design) if item is not None)
+        if source is None:
+            return ArtifactProbeResult(
+                artifacts=artifacts,
+                error="application artifact capture found no generated app.tsx",
+                max_payload_bytes=APPLICATION_ARTIFACT_MAX_BYTES,
+            )
+        bundle: SharedArtifact | None = None
+        bundle_error = ""
+        try:
+            content = await asyncio.to_thread(self.preview_bundle, workspace)
+            bundle = SharedArtifact("homepage-preview.zip", content)
+        except _IncompleteApplicationPreview as error:
+            bundle_error = str(error)
+        result = await probe.run(
+            app_audit_command(
+                name=APPLICATION_ARTIFACT_NAME,
+                output_dir=f"/workspace/{APPLICATION_ARTIFACT_OUTPUT}",
+                project="/workspace/ufo-app",
+                design_path="/workspace/ufo-app/application-design.svg",
+                compile_source=False,
+            ),
+            APPLICATION_ARTIFACT_TIMEOUT_SECONDS,
+        )
+        captured_root = self.directory(workspace, Path(APPLICATION_ARTIFACT_OUTPUT), required=False)
+        names = (
+            ("homepage-interactive.html", "homepage-interactive.html"),
+            ("homepage-audit.json", "homepage-audit.json"),
+            ("homepage-light.png", "homepage-light.png"),
+            ("homepage-dark.png", "homepage-dark.png"),
+            ("homepage-static.html", "homepage-static.html"),
+            ("homepage-design-evidence.json", "homepage-design-evidence.json"),
+        )
+        captured: list[SharedArtifact | None] = []
+        if captured_root.exists():
+            captured = await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        self.artifact,
+                        workspace,
+                        Path(APPLICATION_ARTIFACT_OUTPUT),
+                        path,
+                        artifact_name,
+                    )
+                    for path, artifact_name in names
+                )
+            )
+        details = []
+        if bundle_error:
+            details.append(bundle_error)
+        if result.exit_code != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "no command output"
+            details.append(f"application audit artifact capture failed: {detail[:500]}")
+        retained = tuple(item for item in (*captured, *artifacts, bundle) if item is not None)
+        return ArtifactProbeResult(
+            artifacts=retained,
+            error="; ".join(details),
+            max_payload_bytes=APPLICATION_ARTIFACT_MAX_BYTES,
+        )
+
+
+APPLICATION_HOMEPAGE_ARTIFACTS = _ApplicationHomepageArtifacts()
+
+
+async def _applications(name: str) -> tuple[_ApplicationRecord, ...]:
     async with workspace_tx() as connection:
-        return (
+        rows = (
             await connection.execute(
                 sa.select(
+                    tables.agent.c.id,
                     tables.agent.c.name,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
                     tables.agent.c.reasoning,
                     tables.agent.c.visibility,
+                    tables.agent.c.owner_member_id,
                 ).where(
                     tables.agent.c.workspace_id == ws_current().workspace_id,
                     tables.agent.c.name == name,
                     tables.agent.c.is_main.is_(False),
                 )
             )
-        ).one_or_none()
+        ).all()
+    return tuple(_ApplicationRecord(*row) for row in rows)
+
+
+async def _application(name: str) -> _ApplicationRecord | None:
+    """One application as its durable row, by the name this conversation's own apply wrote — so an
+    application another trial left in the workspace can never stand in this case's count."""
+    applications = await _applications(name)
+    return applications[0] if len(applications) == 1 else None
 
 
 async def _fixture_row() -> sa.Row | None:
@@ -262,6 +476,54 @@ def _agent_applies(output: CapabilityOutput) -> tuple[tuple[int, str], ...]:
     return tuple(applies)
 
 
+def _created_application_identity(
+    output: CapabilityOutput,
+) -> tuple[_ApplicationIdentity | None, str | None]:
+    identity: _ApplicationIdentity | None = None
+    for index, call in enumerate(output.calls):
+        if call.name != "object_apply" or not call.succeeded:
+            continue
+        try:
+            result = _ObjectApplyResult.model_validate_json(call.result)
+        except ValueError:
+            try:
+                manifest = yaml.safe_load(str(call.input.get("manifest", "")))
+            except yaml.YAMLError:
+                continue
+            if isinstance(manifest, dict) and manifest.get("kind") == AGENT_KIND:
+                return None, f"object_apply call {index + 1} returned a malformed result"
+            continue
+        if result.kind != AGENT_KIND:
+            continue
+        if result.result == "created":
+            if identity is not None:
+                return None, "more than one application was created"
+            identity = _ApplicationIdentity(result.name, index, index)
+            continue
+        if identity is None:
+            return None, "an application update preceded its create"
+        if result.name != identity.name:
+            return None, (f"object_apply updated {result.name!r} after creating {identity.name!r}")
+        identity = _ApplicationIdentity(identity.name, identity.create_index, index)
+    if identity is None:
+        return None, "no successful object_apply created an application"
+    return identity, None
+
+
+async def _created_application(
+    output: CapabilityOutput,
+) -> tuple[_CreatedApplication | None, str | None]:
+    identity, failure = _created_application_identity(output)
+    if identity is None:
+        return None, failure
+    applications = await _applications(identity.name)
+    if len(applications) != 1:
+        return None, (
+            f"created {identity.name!r} but found {len(applications)} durable application rows"
+        )
+    return _CreatedApplication(identity, applications[0]), None
+
+
 def _asks(output: CapabilityOutput) -> tuple[int, ...]:
     return tuple(
         index
@@ -368,30 +630,35 @@ def _design_pass_failure(
     return None
 
 
-def _accepted_contract(output: CapabilityOutput) -> RenderApplicationPreviewInput | None:
-    """The design the member accepted: the last one the run rendered before it created the
-    application. A render after the create asked the member nothing and settled nothing, so the
-    prompt and the page the worker builds both answer to the one that stood before the choice."""
-    applies = _agent_applies(output)
-    create = applies[0][0] if applies else len(output.calls)
-    rendered = tuple(
-        call
-        for index, call in enumerate(output.calls)
-        if index < create and call.name == PREVIEW_TOOL and call.succeeded
-    )
-    return RenderApplicationPreviewInput.model_validate(rendered[-1].input) if rendered else None
+def _accepted_design(
+    output: CapabilityOutput,
+) -> tuple[_AcceptedApplicationDesign | None, str | None]:
+    """The last valid design preview before the one successful application create."""
+    application, failure = _created_application_identity(output)
+    if application is None:
+        return None, failure
+    previews: list[tuple[int, ToolInvocation, RenderApplicationPreviewInput]] = []
+    for index, call in enumerate(output.calls[: application.create_index]):
+        if call.name != PREVIEW_TOOL or not call.succeeded:
+            continue
+        try:
+            contract = RenderApplicationPreviewInput.model_validate(call.input)
+        except ValueError:
+            continue
+        previews.append((index, call, contract))
+    if not previews:
+        return None, "the application has no valid accepted preview before its create"
+    preview_index, preview, contract = previews[-1]
+    return _AcceptedApplicationDesign(application, preview_index, preview, contract), None
 
 
-def _accepted_contract_failure(output: CapabilityOutput, prompt: str) -> str | None:
+def _accepted_contract_failure(accepted: _AcceptedApplicationDesign, prompt: str) -> str | None:
     """Whether the design block the renderer returned reaches the application prompt. The renderer
     composes the block from the accepted contract and the skill places it, so this grader recomposes
     nothing: it renders the same block from the same contract and reads it back out of the durable
     prompt. Only the run of whitespace between words is free, because a block copied into a YAML
     scalar is free to wrap where the line ends."""
-    contract = _accepted_contract(output)
-    if contract is None:
-        return "the application has no accepted preview contract"
-    block = " ".join(homepage_design_block(contract).split())
+    block = " ".join(homepage_design_block(accepted.contract).split())
     if block not in " ".join(prompt.split()):
         return f"the application prompt omits the accepted design block: {block}"
     return None
@@ -430,19 +697,11 @@ async def _creation_failure(outcome: ScenarioOutcome, visibility: str) -> Capabi
 
 async def _prepare_created_homepage(
     outcome: ScenarioOutcome, target: CapabilityTarget
-) -> tuple[sa.Row, UUID]:
-    applies = _agent_applies(outcome.output)
-    if len(applies) != 1:
-        raise RuntimeError("homepage followup requires exactly one created application")
-    async with workspace_tx() as connection:
-        application = (
-            await connection.execute(
-                sa.select(tables.agent.c.id, tables.agent.c.owner_member_id).where(
-                    tables.agent.c.workspace_id == ws_current().workspace_id,
-                    tables.agent.c.name == applies[0][1],
-                )
-            )
-        ).one()
+) -> tuple[_ApplicationRecord, UUID]:
+    created, failure = await _created_application(outcome.output)
+    if created is None:
+        raise RuntimeError(failure or "homepage followup found no created application")
+    application = created.application
     if application.owner_member_id is None:
         raise RuntimeError("created application has no owner for its homepage turn")
     await ScopedStore(extension=WEB_EXTENSION).put(
@@ -578,43 +837,150 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
 
 
 def _built_design_failure(
-    calls: tuple[ToolInvocation, ...], accepted: tuple[str, ...]
+    calls: tuple[ToolInvocation, ...],
+    accepted: RenderApplicationPreviewInput,
 ) -> str | None:
-    """Whether the page the worker drew is the page the member accepted. The accepted contract names
-    the regions in display order; the worker's SVG marks its own with `data-app-region`, and the
-    audit already refuses one that draws them overlapping or out of that order. So the one thing
-    left to grade here is that they are the same regions: the design the member was shown is what
-    got built, not a second design the worker preferred. A region is matched on its significant
-    words, because the slug an SVG carries is the member's words in a slug's spelling."""
+    """Whether the rendered worker design keeps the accepted region identities, display order,
+    first-screen priority, and layout."""
     designs = tuple(
         call for call in calls if call.name == APPLICATION_BUILDER_DESIGN_TOOL and call.succeeded
     )
     if not designs:
         return "the worker accepted no design"
-    marked = tuple(
-        dict.fromkeys(
-            re.findall(r'data-app-region="([^"]+)"', str(designs[-1].input.get("content")))
+    design = designs[-1]
+
+    def terms(value: str) -> frozenset[str]:
+        words = "".join(
+            character if character.isalnum() else " " for character in value.casefold()
+        ).split()
+        variants = set(words) - {"s"}
+        for word in words:
+            if len(word) > 3 and word.endswith("ies"):
+                variants.add(f"{word[:-3]}y")
+            elif len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+                variants.add(word[:-1])
+        return frozenset(variants)
+
+    try:
+        payload = json.loads(design.result)
+        rendered = tuple(
+            ApplicationAuditRegion.model_validate(region) for region in payload["rendered_regions"]
         )
-    )
-    if len(marked) != len(accepted):
+    except (KeyError, TypeError, ValueError):
+        return "the worker design has no rendered region measurements"
+    rendered_names = tuple(region.name for region in rendered)
+    if len(rendered_names) != len(accepted.regions):
         return (
-            f"the worker drew {len(marked)} regions for the {len(accepted)} the member accepted: "
-            f"{', '.join(marked)}"
+            f"the worker rendered {len(rendered_names)} regions for the "
+            f"{len(accepted.regions)} the member accepted: {', '.join(rendered_names)}"
         )
-    unbuilt = tuple(
-        region
-        for region, slug in zip(accepted, marked, strict=True)
-        if not (
-            {
-                term
-                for term in re.findall(r"[a-z0-9]+", region.casefold())
-                if term not in CONTRACT_CONNECTIVE_WORDS
-            }
-            & set(re.findall(r"[a-z0-9]+", slug.casefold()))
-        )
+    if any(not name.strip() for name in rendered_names):
+        return "the worker rendered an empty region identity"
+    if len(rendered_names) != len(set(rendered_names)):
+        return "the worker rendered duplicate region identities"
+    count = len(rendered)
+    accepted_identity_terms = []
+    for name in accepted.regions:
+        name_terms = terms(name)
+        accepted_identity_terms.append(name_terms - REGION_IDENTITY_CONNECTIVES or name_terms)
+    rendered_identity_terms = tuple(
+        terms(f"{region.name} {region.visible_text}") for region in rendered
     )
-    if unbuilt:
-        return f"the built design drops accepted regions: {', '.join(unbuilt)}"
+    overlap_scores = tuple(
+        tuple(len(accepted_terms & rendered_terms) for rendered_terms in rendered_identity_terms)
+        for accepted_terms in accepted_identity_terms
+    )
+    diagonal_scores = tuple(overlap_scores[index][index] for index in range(count))
+    if 0 in diagonal_scores:
+        index = diagonal_scores.index(0)
+        return (
+            f"rendered region {index + 1} does not carry accepted identity "
+            f"{accepted.regions[index]!r}: {rendered[index].name}"
+        )
+    identity_score = sum(diagonal_scores)
+    assignment_scores = tuple(
+        sum(
+            overlap_scores[index][rendered_index] for index, rendered_index in enumerate(assignment)
+        )
+        for assignment in permutations(range(count))
+    )
+    best_score = max(assignment_scores)
+    if identity_score < best_score:
+        return "the rendered semantic region order differs from the accepted design"
+    if assignment_scores.count(best_score) != 1:
+        return "the rendered region identities are semantically ambiguous"
+    if not any(character.isalnum() for character in rendered[0].visible_text):
+        return "the first rendered region has no material visible content"
+    match accepted.layout:
+        case "timeline":
+            expected_boxes = tuple((0.0, index / count, 1.0, 1.0 / count) for index in range(count))
+        case "queue-detail":
+            side_count = count - 1
+            expected_boxes = (
+                (0.0, 0.0, 0.6, 1.0),
+                *tuple(
+                    (0.6, index / side_count, 0.4, 1.0 / side_count) for index in range(side_count)
+                ),
+            )
+        case "metrics" | "summary-detail":
+            columns = 3 if accepted.layout == "metrics" else 2
+            rows = (count + columns - 1) // columns
+            expected_boxes = tuple(
+                (
+                    (index % columns) / columns,
+                    (index // columns) / rows,
+                    1.0 / columns,
+                    1.0 / rows,
+                )
+                for index in range(count)
+            )
+    expected = tuple(
+        ApplicationAuditRegion(
+            name=name,
+            left=box[0],
+            top=box[1],
+            width=box[2],
+            height=box[3],
+        )
+        for name, box in zip(rendered_names, expected_boxes, strict=True)
+    )
+    for first_index, first_region in enumerate(rendered):
+        for second_index in range(first_index + 1, count):
+            actual_relation = application_region_relation(first_region, rendered[second_index])
+            expected_relation = application_region_relation(
+                expected[first_index], expected[second_index]
+            )
+            if actual_relation != expected_relation:
+                return (
+                    f"the rendered {accepted.layout} layout changes the accepted relation for "
+                    f"{first_region.name} and {rendered[second_index].name}"
+                )
+    widths = tuple(region.width for region in rendered)
+    heights = tuple(region.height for region in rendered)
+    match accepted.layout:
+        case "queue-detail":
+            side = rendered[1:]
+            if rendered[0].width < max(region.width for region in side) * 1.25:
+                return "the rendered queue-detail first region is not wider than its detail column"
+            if min(region.width for region in side) < max(region.width for region in side) * 0.7:
+                return "the rendered queue-detail detail regions have inconsistent widths"
+            first_bottom = rendered[0].top + rendered[0].height
+            side_bottom = max(region.top + region.height for region in side)
+            if (
+                rendered[0].top > min(region.top for region in side) + 0.02
+                or first_bottom + 0.02 < side_bottom
+            ):
+                return "the rendered queue-detail first region does not span its detail column"
+        case "timeline":
+            if min(widths) < max(widths) * 0.7:
+                return "the rendered timeline regions have inconsistent widths"
+            if min(heights) < max(heights) * 0.6:
+                return "the rendered timeline regions have inconsistent heights"
+        case "metrics" | "summary-detail":
+            if min(widths) < max(widths) * 0.7:
+                return f"the rendered {accepted.layout} regions have inconsistent widths"
+            if min(heights) < max(heights) * 0.6:
+                return f"the rendered {accepted.layout} regions have inconsistent heights"
     return None
 
 
@@ -636,7 +1002,9 @@ def _application_worker_tool_failure(calls: tuple[ToolInvocation, ...]) -> str |
     return None
 
 
-async def _homepage_journey_failure(outcome: ScenarioOutcome) -> str | None:
+async def _homepage_journey_failure(
+    outcome: ScenarioOutcome, accepted: _AcceptedApplicationDesign
+) -> str | None:
     followup = outcome.followup
     if followup is None:
         return "the created application ran no homepage turn"
@@ -676,16 +1044,11 @@ async def _homepage_journey_failure(outcome: ScenarioOutcome) -> str | None:
         return f"the Opus application parent entered the build loop: {', '.join(parent_work)}"
     if failure := _application_worker_tool_failure(followup.calls):
         return failure
-    name = _agent_applies(outcome.output)[0][1]
+    created, failure = await _created_application(outcome.output)
+    if created is None:
+        return failure or "no durable application exists"
+    application = created.application
     async with workspace_tx() as connection:
-        application = (
-            await connection.execute(
-                sa.select(tables.agent.c.id, tables.agent.c.prompt).where(
-                    tables.agent.c.workspace_id == ws_current().workspace_id,
-                    tables.agent.c.name == name,
-                )
-            )
-        ).one()
         homepage = (
             await connection.execute(
                 sa.select(hosted_site.c.source_manifest).where(
@@ -722,25 +1085,27 @@ async def _homepage_journey_failure(outcome: ScenarioOutcome) -> str | None:
     task = ApplicationBuilderTask.model_validate_json(children[0].inbound)
     if application.prompt not in task.objective:
         return "the Gemini task omitted the created application's instructions"
-    contract = _accepted_contract(outcome.output)
-    if contract is None:
-        return "the application has no accepted preview contract"
-    return _built_design_failure(followup.calls, contract.regions)
+    return _built_design_failure(followup.calls, accepted.contract)
 
 
-async def _named_design_failure(outcome: ScenarioOutcome) -> str | None:
+async def _named_design_failure(
+    outcome: ScenarioOutcome,
+) -> tuple[str | None, _AcceptedApplicationDesign | None]:
     """The design pass on the path that opens with the member's own words: one preview and the
     choice it asks for stand between the answered form and the create, and the contract they agreed
     to is in the application's prompt. Nothing opens this run, so the interview and the design are
     the whole of what is asked."""
     design_failure = _design_pass_failure(outcome.output, 1, opening_asks=0)
     if design_failure is not None:
-        return design_failure
+        return design_failure, None
     name = _agent_applies(outcome.output)[0][1]
     row = await _application(name)
     if row is None:
-        return f"applied {name!r} but no such application stands"
-    return _accepted_contract_failure(outcome.output, row.prompt)
+        return f"applied {name!r} but no such application stands", None
+    accepted, failure = _accepted_design(outcome.output)
+    if accepted is None:
+        return failure or "the application has no accepted design", None
+    return _accepted_contract_failure(accepted, row.prompt), accepted
 
 
 async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdict:
@@ -791,7 +1156,10 @@ async def _graded_carries_the_design(outcome: ScenarioOutcome) -> CapabilityVerd
     row = await _application(name)
     if row is None:
         return CapabilityVerdict(False, f"applied {name!r} but no such application stands")
-    failure = _accepted_contract_failure(outcome.output, row.prompt)
+    accepted, failure = _accepted_design(outcome.output)
+    if accepted is None:
+        return CapabilityVerdict(False, failure or "the application has no accepted design")
+    failure = _accepted_contract_failure(accepted, row.prompt)
     if failure is not None:
         return CapabilityVerdict(False, failure)
     return CapabilityVerdict(True, f"{name} carries the design block the member accepted")
@@ -801,7 +1169,7 @@ async def _graded_support_desk(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "workspace")
     if failure is not None:
         return failure
-    named_failure = await _named_design_failure(outcome)
+    named_failure, _ = await _named_design_failure(outcome)
     if named_failure is not None:
         return CapabilityVerdict(False, named_failure)
     return CapabilityVerdict(
@@ -813,7 +1181,7 @@ async def _graded_stated_up_front(outcome: ScenarioOutcome) -> CapabilityVerdict
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
-    named_failure = await _named_design_failure(outcome)
+    named_failure, _ = await _named_design_failure(outcome)
     if named_failure is not None:
         return CapabilityVerdict(False, named_failure)
     return CapabilityVerdict(
@@ -836,7 +1204,7 @@ async def _graded_daily_brief(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
-    named_failure = await _named_design_failure(outcome)
+    named_failure, _ = await _named_design_failure(outcome)
     if named_failure is not None:
         return CapabilityVerdict(False, named_failure)
     apply = _agent_applies(outcome.output)[0]
@@ -859,51 +1227,63 @@ async def _graded_daily_brief(outcome: ScenarioOutcome) -> CapabilityVerdict:
     return CapabilityVerdict(True, "one private Daily Brief application holds the complete job")
 
 
-async def _graded_guided_build(outcome: ScenarioOutcome) -> CapabilityVerdict:
+async def _guided_design_grade(
+    outcome: ScenarioOutcome, *, revisions: int
+) -> tuple[CapabilityVerdict, _AcceptedApplicationDesign | None]:
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
-        return failure
-    design_failure = _design_pass_failure(outcome.output, 1, opening_asks=1)
+        return failure, None
+    design_failure = _design_pass_failure(outcome.output, revisions + 1, opening_asks=1)
     if design_failure is not None:
-        return CapabilityVerdict(False, design_failure)
+        return CapabilityVerdict(False, design_failure), None
     name = _agent_applies(outcome.output)[0][1]
     row = await _application(name)
     if row is None:
-        return CapabilityVerdict(False, f"applied {name!r} but no such application stands")
-    contract_failure = _accepted_contract_failure(outcome.output, row.prompt)
+        return CapabilityVerdict(False, f"applied {name!r} but no such application stands"), None
+    accepted, accepted_failure = _accepted_design(outcome.output)
+    if accepted is None:
+        return (
+            CapabilityVerdict(False, accepted_failure or "the application has no accepted design"),
+            None,
+        )
+    contract_failure = _accepted_contract_failure(accepted, row.prompt)
     if contract_failure is not None:
-        return CapabilityVerdict(False, contract_failure)
-    return CapabilityVerdict(True, "one proposal, interview, and preview precede the create")
+        return CapabilityVerdict(False, contract_failure), None
+    if revisions:
+        prompt = row.prompt.casefold()
+        if "overdue" not in prompt or "queue" not in prompt:
+            return (
+                CapabilityVerdict(
+                    False, "the accepted overdue-queue revision is absent from prompt"
+                ),
+                None,
+            )
+        reason = "the second preview and its accepted revision precede create"
+    else:
+        reason = "one proposal, interview, and preview precede the create"
+    return CapabilityVerdict(True, reason), accepted
+
+
+async def _graded_guided_build(outcome: ScenarioOutcome) -> CapabilityVerdict:
+    verdict, _ = await _guided_design_grade(outcome, revisions=0)
+    return verdict
 
 
 async def _graded_guided_revision(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    failure = await _creation_failure(outcome, "private")
-    if failure is not None:
-        return failure
-    design_failure = _design_pass_failure(outcome.output, 2, opening_asks=1)
-    if design_failure is not None:
-        return CapabilityVerdict(False, design_failure)
-    name = _agent_applies(outcome.output)[0][1]
-    row = await _application(name)
-    if row is None:
-        return CapabilityVerdict(False, f"applied {name!r} but no such application stands")
-    contract_failure = _accepted_contract_failure(outcome.output, row.prompt)
-    if contract_failure is not None:
-        return CapabilityVerdict(False, contract_failure)
-    prompt = row.prompt.casefold()
-    if "overdue" not in prompt or "queue" not in prompt:
-        return CapabilityVerdict(False, "the accepted overdue-queue revision is absent from prompt")
-    return CapabilityVerdict(True, "the second preview and its accepted revision precede create")
+    verdict, _ = await _guided_design_grade(outcome, revisions=1)
+    return verdict
 
 
 async def _graded_named_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
     failure = await _creation_failure(outcome, "private")
     if failure is not None:
         return failure
-    named_failure = await _named_design_failure(outcome)
+    named_failure, accepted = await _named_design_failure(outcome)
     if named_failure is not None:
         return CapabilityVerdict(False, named_failure)
-    journey_failure = await _homepage_journey_failure(outcome)
+    if accepted is None:
+        return CapabilityVerdict(False, "the application has no accepted design")
+    journey_failure = await _homepage_journey_failure(outcome, accepted)
     if journey_failure is not None:
         return CapabilityVerdict(False, journey_failure)
     return CapabilityVerdict(
@@ -913,10 +1293,12 @@ async def _graded_named_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
 
 
 async def _graded_guided_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    creation = await _graded_guided_build(outcome)
+    creation, accepted = await _guided_design_grade(outcome, revisions=0)
     if not creation.passed:
         return creation
-    journey_failure = await _homepage_journey_failure(outcome)
+    if accepted is None:
+        return CapabilityVerdict(False, "the application has no accepted design")
+    journey_failure = await _homepage_journey_failure(outcome, accepted)
     if journey_failure is not None:
         return CapabilityVerdict(False, journey_failure)
     return CapabilityVerdict(
@@ -926,10 +1308,12 @@ async def _graded_guided_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
 
 
 async def _graded_guided_revision_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
-    creation = await _graded_guided_revision(outcome)
+    creation, accepted = await _guided_design_grade(outcome, revisions=1)
     if not creation.passed:
         return creation
-    journey_failure = await _homepage_journey_failure(outcome)
+    if accepted is None:
+        return CapabilityVerdict(False, "the application has no accepted design")
+    journey_failure = await _homepage_journey_failure(outcome, accepted)
     if journey_failure is not None:
         return CapabilityVerdict(False, journey_failure)
     return CapabilityVerdict(
@@ -1193,6 +1577,7 @@ SCENARIOS = (
         ),
         digest_tag="new-application:named-homepage-journey",
         followup=_build_created_homepage,
+        artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
     ScenarioCase(
         "A08-guided-homepage-journey",
@@ -1213,6 +1598,7 @@ SCENARIOS = (
         ),
         digest_tag="new-application:guided-homepage-journey",
         followup=_build_created_homepage,
+        artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
     ScenarioCase(
         "A09-revised-homepage-journey",
@@ -1232,6 +1618,7 @@ SCENARIOS = (
         ),
         digest_tag="new-application:revised-homepage-journey",
         followup=_build_created_homepage,
+        artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
     ScenarioCase(
         "A10-failed-repaired-homepage-journey",
@@ -1262,6 +1649,7 @@ SCENARIOS = (
         ),
         digest_tag="new-application:failed-repaired-homepage-journey",
         followup=_repair_created_homepage,
+        artifact_probe=APPLICATION_HOMEPAGE_ARTIFACTS,
     ),
     ScenarioCase(
         "A11-named-shows-the-design",

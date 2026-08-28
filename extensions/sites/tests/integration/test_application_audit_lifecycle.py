@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from ufo_ext_sites.application_audit import DESIGN_VISIBLE_TEXT_MAX_CHARS
+from ufo_ext_sites.application_builder import APPLICATION_DESIGN_AUDIT_MAX_BYTES
 from ufo_ext_sites.source import KIT_DIR
 
 AUDIT_SCRIPT = Path(__file__).parents[2] / "ufo_ext_sites" / "scripts" / "audit_application.cjs"
@@ -13,6 +15,52 @@ DRAW_TIMEOUT_SECONDS = 30
 CONTAINER_FIXTURE_MODE = 0o755
 
 pytestmark = pytest.mark.docker
+
+
+def test_dense_cjk_design_text_is_bounded_in_six_real_regions(
+    tmp_path: Path, sandbox_image: str
+) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker executable is not available")
+    shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
+    dense = "会議準備顧客情報" * 20
+    rows = "".join(
+        f'<g data-app-region="region-{index}">'
+        f'<text x="8" y="{80 + index * 120}" font-size="32">{dense}</text>'
+        "</g>"
+        for index in range(6)
+    )
+    (tmp_path / "design.svg").write_text(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800">{rows}</svg>'
+    )
+    tmp_path.chmod(CONTAINER_FIXTURE_MODE)
+
+    drawn = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "node",
+            "-v",
+            f"{tmp_path}:/fixture:ro",
+            sandbox_image,
+            "/fixture/audit_application.cjs",
+            "--design",
+            "/fixture/design.svg",
+        ],
+        capture_output=True,
+        timeout=DRAW_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+    assert drawn.returncode == 0, (drawn.stderr or drawn.stdout).decode(errors="replace")
+    assert len(drawn.stdout) < APPLICATION_DESIGN_AUDIT_MAX_BYTES
+    regions = json.loads(drawn.stdout)
+    assert [region["name"] for region in regions] == [f"region-{index}" for index in range(6)]
+    assert [region["visibleText"] for region in regions] == [
+        dense[:DESIGN_VISIBLE_TEXT_MAX_CHARS]
+    ] * 6
 
 
 def _page() -> str:
@@ -210,7 +258,8 @@ mountApp(document.getElementById('root'), () => h(Harness));
 
 @pytest.fixture(scope="module")
 def lifecycle_results(tmp_path_factory: pytest.TempPathFactory, sandbox_image: str) -> dict:
-    image = sandbox_image
+    if shutil.which("docker") is None:
+        pytest.skip("Docker executable is not available")
     tmp_path = tmp_path_factory.mktemp("application-lifecycle")
     shutil.copytree(KIT_DIR, tmp_path / "kit")
     lifecycle_bundle = next(
@@ -221,10 +270,6 @@ def lifecycle_results(tmp_path_factory: pytest.TempPathFactory, sandbox_image: s
     shutil.copy2(lifecycle_bundle, tmp_path / "kit" / "lifecycle-reload.js")
     shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
     (tmp_path / "missing.html").write_text("<!doctype html><p>No application kit</p>")
-    (tmp_path / "accepted-design.svg").write_text(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800">'
-        '<rect width="1280" height="800" fill="white"/></svg>'
-    )
     page = tmp_path / "index.html"
     page.write_text(_page())
     runner = tmp_path / "runner.cjs"
@@ -232,7 +277,6 @@ def lifecycle_results(tmp_path_factory: pytest.TempPathFactory, sandbox_image: s
         """const fs = require('fs');
 const http = require('http');
 const path = require('path');
-const { spawn } = require('child_process');
 const { chromium } = require('/usr/local/lib/node_modules/playwright');
 const {
   ApplicationLifecycleError,
@@ -399,32 +443,6 @@ server.listen(0, '127.0.0.1', async () => {
     } finally {
       await missing.close();
     }
-    const runCli = (pathname, name) => new Promise((resolve, reject) => {
-      const report = `/tmp/${name}.json`;
-      const child = spawn(process.execPath, [
-        '/fixture/audit_application.cjs', `${origin}${pathname}`, report,
-        `/tmp/${name}-light.png`, `/tmp/${name}-dark.png`,
-        `/tmp/${name}-interactive.html`, `/tmp/${name}-static.html`,
-        `${origin}/accepted-design.svg`,
-      ]);
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (data) => { stdout += data; });
-      child.stderr.on('data', (data) => { stderr += data; });
-      child.on('error', reject);
-      child.on('close', (code) => {
-        const diagnosticPath = report + '.lifecycle.json';
-        resolve({
-          code,
-          stdout,
-          stderr,
-          diagnostic: fs.existsSync(diagnosticPath) ?
-            JSON.parse(fs.readFileSync(diagnosticPath, 'utf8')) : null,
-        });
-      });
-    });
-    results.cliMissing = await runCli('/missing.html', 'missing');
-    results.cliPersistent = await runCli('/index.html?fixture=persistent', 'persistent');
     const fatal = await page.locator('#out').textContent();
     if (fatal) throw new Error(fatal);
     process.stdout.write('BEGIN' + JSON.stringify(results) + 'END');
@@ -445,7 +463,7 @@ server.listen(0, '127.0.0.1', async () => {
             "node",
             "-v",
             f"{tmp_path}:/fixture:ro",
-            image,
+            sandbox_image,
             "/fixture/runner.cjs",
         ],
         capture_output=True,
@@ -477,7 +495,8 @@ def test_terminal_application_work_reaches_stable_render(lifecycle_results: dict
 def test_interaction_audit_waits_for_delayed_visible_state(
     tmp_path: Path, sandbox_image: str
 ) -> None:
-    image = sandbox_image
+    if shutil.which("docker") is None:
+        pytest.skip("Docker executable is not available")
     shutil.copytree(KIT_DIR, tmp_path / "kit")
     shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
     (tmp_path / "index.html").write_text(_page())
@@ -533,7 +552,7 @@ server.listen(0, '127.0.0.1', async () => {
             "node",
             "-v",
             f"{tmp_path}:/fixture:ro",
-            image,
+            sandbox_image,
             "/fixture/runner.cjs",
         ],
         capture_output=True,
@@ -614,123 +633,3 @@ def test_readiness_uses_captured_frames_and_a_node_deadline(lifecycle_results: d
         "application lifecycle did not become ready"
     )
     assert lifecycle_results["stalledEvaluate"]["elapsed"] < 500
-
-
-def test_full_cli_fails_quietly_with_private_lifecycle_artifact(lifecycle_results: dict) -> None:
-    missing = lifecycle_results["cliMissing"]
-    persistent = lifecycle_results["cliPersistent"]
-    assert (missing["code"], missing["stdout"], missing["stderr"]) == (3, "", "")
-    assert missing["diagnostic"] == {
-        "code": "application_lifecycle",
-        "reason": "application lifecycle signal is missing",
-        "snapshot": None,
-    }
-    assert (persistent["code"], persistent["stdout"], persistent["stderr"]) == (3, "", "")
-    assert persistent["diagnostic"]["code"] == "application_lifecycle"
-    assert persistent["diagnostic"]["reason"] == "application lifecycle did not become ready"
-    assert persistent["diagnostic"]["snapshot"]["blocking"]["stream"] == 1
-
-
-def test_success_removes_a_stale_lifecycle_artifact(tmp_path: Path, sandbox_image: str) -> None:
-    image = sandbox_image
-    shutil.copytree(KIT_DIR, tmp_path / "kit")
-    shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
-    (tmp_path / "index.html").write_text(_page())
-    (tmp_path / "missing.html").write_text("<!doctype html><p>No application kit</p>")
-    (tmp_path / "accepted-design.svg").write_text(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800">'
-        '<rect width="1280" height="800" fill="white"/></svg>'
-    )
-    runner = tmp_path / "stale-runner.cjs"
-    runner.write_text(
-        """const fs = require('fs');
-const http = require('http');
-const path = require('path');
-const { spawn } = require('child_process');
-const root = '/fixture';
-const server = http.createServer((request, response) => {
-  const relative = decodeURIComponent(new URL(request.url, 'http://localhost').pathname).slice(1) ||
-    'index.html';
-  const target = path.resolve(root, relative);
-  if (!target.startsWith(root + path.sep)) {
-    response.writeHead(403).end();
-    return;
-  }
-  fs.readFile(target, (error, content) => {
-    if (error) {
-      response.writeHead(404).end();
-      return;
-    }
-    const type = target.endsWith('.js') ? 'text/javascript' :
-      target.endsWith('.css') ? 'text/css' :
-      target.endsWith('.svg') ? 'image/svg+xml' : 'text/html';
-    response.writeHead(200, { 'Content-Type': type });
-    response.end(content);
-  });
-});
-server.listen(0, '127.0.0.1', async () => {
-  try {
-    const origin = `http://127.0.0.1:${server.address().port}`;
-    const report = '/tmp/reused.json';
-    const run = (pathname) => new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [
-        '/fixture/audit_application.cjs', `${origin}${pathname}`, report,
-        '/tmp/reused-light.png', '/tmp/reused-dark.png',
-        '/tmp/reused-interactive.html', '/tmp/reused-static.html',
-        `${origin}/accepted-design.svg`,
-      ]);
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (data) => { stdout += data; });
-      child.stderr.on('data', (data) => { stderr += data; });
-      child.on('error', reject);
-      child.on('close', (code) => resolve({ code, stdout, stderr }));
-    });
-    const failed = await run('/missing.html');
-    const afterFailure = fs.existsSync(report + '.lifecycle.json');
-    const passed = await run('/index.html?fixture=interval');
-    process.stdout.write('BEGIN' + JSON.stringify({
-      failed,
-      afterFailure,
-      passed,
-      afterSuccess: fs.existsSync(report + '.lifecycle.json'),
-    }) + 'END');
-  } finally {
-    server.close();
-  }
-});
-"""
-    )
-    tmp_path.chmod(CONTAINER_FIXTURE_MODE)
-    drawn = subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "node",
-            "-v",
-            f"{tmp_path}:/fixture:ro",
-            image,
-            "/fixture/stale-runner.cjs",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=DRAW_TIMEOUT_SECONDS,
-        check=False,
-    )
-    if drawn.returncode != 0:
-        pytest.fail((drawn.stderr or drawn.stdout)[-2000:])
-    found = re.search(r"BEGIN(.*?)END", drawn.stdout, re.S)
-    if not found:
-        pytest.fail((drawn.stderr or drawn.stdout)[-2000:])
-    result = json.loads(html.unescape(found.group(1)))
-    assert (result["failed"]["code"], result["failed"]["stdout"], result["failed"]["stderr"]) == (
-        3,
-        "",
-        "",
-    )
-    assert result["afterFailure"] is True
-    assert result["passed"]["code"] == 0
-    assert result["passed"]["stderr"] == ""
-    assert result["afterSuccess"] is False

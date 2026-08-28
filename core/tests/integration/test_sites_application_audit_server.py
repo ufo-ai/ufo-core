@@ -1,57 +1,128 @@
-from dataclasses import dataclass
-from hashlib import sha256
+import hashlib
+import json
+import shutil
+import subprocess
 from pathlib import Path
-from typing import cast
-from uuid import uuid4
 
 import pytest
-from ufo_ext_docker import DockerCarrier
-from ufo_ext_sites import tools as sites_tools
-from ufo_ext_sites.application_audit import APPLICATION_AUDIT_SERVER
-from ufo_ext_sites.tools import _serve, _stop_server
 
 from evals.sandbox_image import SandboxImagePlan
 from sandbox.build_template import build_definition_digest
-from ufo.sandbox.session import SandboxHandle, SandboxSession
-from ufo.tools.context import ToolContext
 
 pytestmark = pytest.mark.docker
 
-DESIGN = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"></svg>'
-FETCH = """import sys
-import urllib.request
-with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
-    sys.stdout.buffer.write(str(response.status).encode() + b"\\n" + response.read())
+AUDIT_SCRIPT = (
+    Path(__file__).parents[3]
+    / "extensions"
+    / "sites"
+    / "ufo_ext_sites"
+    / "scripts"
+    / "audit_application.cjs"
+)
+TIMEOUT_SECONDS = 120
+PREVIEW = (
+    '<!doctype html><html><head><link rel="manifest" href="/app.webmanifest"></head>'
+    '<body><iframe name="ufo-app" src="./dist/index.html"></iframe></body></html>'
+)
+APPLICATION = """<!doctype html><html><head>
+<link rel="stylesheet" href="/assets/app.css"><style>main{padding:1rem}</style></head><body><main>
+<h1>Audit fixture</h1><p id="state">Ready</p>
+<button onclick="document.querySelector('#state').textContent='First changed'">First</button>
+<button onclick="document.querySelector('#state').textContent='Second changed'">Second</button>
+</main><script>
+const blocking=Object.freeze({
+  startup:0,observation:0,unary:0,stream:0,timeout:0,interval:0
+});
+const snapshot=()=>Object.freeze({
+  version:1,generation:1,epoch:0,mounted:true,state:'idle',revision:1,
+  blockingWork:0,blocking
+});
+const afterPaint=()=>new Promise(resolve=>requestAnimationFrame(
+  ()=>requestAnimationFrame(resolve)
+));
+Object.defineProperty(window,'__ufoApplicationLifecycle',{value:Object.freeze({
+  snapshot,afterPaint,beginObservation:()=>0,endObservation:()=>Promise.resolve()
+})});
+</script></body></html>"""
+ROUTE_RUNNER = r"""const http = require('http');
+const {
+  closeApplicationAudit,
+  closeApplicationServer,
+  startApplicationServer,
+  validatedApplicationRoot,
+} = require('/fixture/audit_application.cjs');
+const request = (port, pathname) => new Promise((resolve, reject) => {
+  const call = http.request({ host: '127.0.0.1', port, path: pathname }, (response) => {
+    const chunks = [];
+    response.on('data', (chunk) => chunks.push(chunk));
+    response.on('end', () => resolve({
+      body: Buffer.concat(chunks).toString(),
+      contentType: response.headers['content-type'] || '',
+      status: response.statusCode,
+    }));
+  });
+  call.on('error', reject);
+  call.end();
+});
+void (async () => {
+  const application = await validatedApplicationRoot('/fixture/app');
+  const { server, sockets, url } = await startApplicationServer(application);
+  const address = server.address();
+  const checks = [];
+  for (const pathname of [
+    '/preview.html',
+    '/root.css',
+    '/app.webmanifest',
+    '/nested/font.woff2',
+    '/nested/app.js',
+    '/nested/image.svg',
+    '/dist/index.html',
+    '/assets/app.css',
+    '/dist/assets/data.json',
+    '/dist/assets',
+    '/assets/escape.txt',
+    '/assets/%2e%2e/%2e%2e/outside.txt',
+    '/assets/%2E%2E%2F%2E%2E%2Foutside.txt',
+    '/../outside.txt',
+    '/%2e%2e/outside.txt',
+    '//etc/passwd',
+    '/%2Fetc%2Fpasswd',
+    '/escape-root.txt',
+  ]) checks.push([pathname, await request(address.port, pathname)]);
+  await closeApplicationServer(server, sockets);
+  let refused = false;
+  try {
+    await request(address.port, '/preview.html');
+  } catch (error) {
+    refused = Boolean(error.code);
+  }
+  const failedClose = await startApplicationServer(application);
+  const failurePort = failedClose.server.address().port;
+  let closeFailure = '';
+  try {
+    await closeApplicationAudit({ close: async () => {
+      throw new Error('forced browser close failure');
+    } }, failedClose.server, failedClose.sockets);
+  } catch (error) {
+    closeFailure = error.message;
+  }
+  let failureRefused = false;
+  try {
+    await request(failurePort, '/preview.html');
+  } catch (error) {
+    failureRefused = Boolean(error.code);
+  }
+  process.stdout.write(JSON.stringify({
+    address, checks, closeFailure, failureRefused, refused, url
+  }));
+})().catch((error) => {
+  process.stderr.write(String(error));
+  process.exitCode = 1;
+});
 """
-REFUSED = """import sys
-import urllib.request
-try:
-    urllib.request.urlopen(sys.argv[1], timeout=1)
-except OSError:
-    raise SystemExit(7)
-raise SystemExit(0)
-"""
-TASK_STOPPED = """pid=$(cat "$1.pid") || exit 2
-if kill -0 "$pid" 2>/dev/null; then exit 3; fi
-test -s "$1.exit"
-"""
-TASK_PID = 'cat "$1.pid"'
 
 
-def _task_base(key: str, port: int, log_path: str) -> str:
-    identity = f"{key}:{port}:{log_path}"
-    return (
-        f"/workspace/runtime/tool-output/server-tasks/{sha256(identity.encode()).hexdigest()[:16]}"
-    )
-
-
-@dataclass(frozen=True)
-class _Context:
-    sandbox: SandboxSession
-    idempotency_key: str
-
-
-def test_application_eval_image_runs_the_detached_task_protocol(
+def test_application_eval_image_runs_the_node_owned_audit_protocol(
     sandbox_image: str, tmp_path: Path
 ) -> None:
     SandboxImagePlan(
@@ -61,122 +132,231 @@ def test_application_eval_image_runs_the_detached_task_protocol(
     ).prepare()
 
 
-async def test_detached_application_audit_server_survives_its_start_exec(
-    sandbox_container: tuple[str, Path], unused_tcp_port: int
+def test_node_owned_audit_serves_only_the_application_and_closes(
+    tmp_path: Path, sandbox_image: str
 ) -> None:
-    container, workspace = sandbox_container
-    carrier = DockerCarrier()
-    handle = SandboxHandle(
-        conversation_id=uuid4(),
-        container_id=container,
-        workspace_host_path=str(workspace),
-        runtime_root="/workspace/runtime",
+    if shutil.which("docker") is None:
+        pytest.skip("Docker executable is not available")
+    app = tmp_path / "app"
+    assets = app / "dist" / "assets"
+    nested = app / "nested"
+    assets.mkdir(parents=True)
+    nested.mkdir()
+    shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
+    (tmp_path / "outside.txt").write_text("outside")
+    (tmp_path / "route-runner.cjs").write_text(ROUTE_RUNNER)
+    (app / "preview.html").write_text(PREVIEW)
+    (app / "root.css").write_text("body{color:black}")
+    (app / "app.webmanifest").write_text('{"name":"Audit fixture"}')
+    (nested / "font.woff2").write_bytes(b"font")
+    (nested / "app.js").write_text("window.loaded=true")
+    (nested / "image.svg").write_text("<svg/>")
+    (app / "dist" / "index.html").write_text(APPLICATION)
+    (assets / "app.css").write_text("body{color:#111;background:#fff}")
+    (assets / "data.json").write_text('{"ok":true}')
+    (assets / "escape.txt").symlink_to(tmp_path / "outside.txt")
+    (app / "escape-root.txt").symlink_to(tmp_path / "outside.txt")
+
+    routed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "node",
+            "-v",
+            f"{tmp_path}:/fixture:ro",
+            sandbox_image,
+            "/fixture/route-runner.cjs",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT_SECONDS,
+        check=False,
     )
-    sandbox = SandboxSession(carrier=carrier, handle=handle)
-    ctx = cast(ToolContext, _Context(sandbox=sandbox, idempotency_key="sites-audit-server"))
-    await carrier.exec(handle, ("mkdir", "-p", "/workspace/runtime", "/workspace/site"), 30)
-    await carrier.write(handle, "/workspace/server.py", APPLICATION_AUDIT_SERVER)
-    await carrier.write(handle, "/workspace/accepted-design.svg", DESIGN)
-    command = (
-        f"python3 /workspace/server.py /workspace/site {unused_tcp_port} "
-        "/workspace/accepted-design.svg"
-    )
-    url = f"http://localhost:{unused_tcp_port}/accepted-design.svg"
 
-    try:
-        served = await _serve(
-            ctx, command, "/workspace/site", unused_tcp_port, "/workspace/runtime/audit.log"
-        )
-        fetched = await carrier.exec(handle, ("python3", "-c", FETCH, url), 30)
-    finally:
-        await _stop_server(ctx, unused_tcp_port)
+    assert routed.returncode == 0, routed.stderr or routed.stdout
+    result = json.loads(routed.stdout)
+    assert result["address"]["address"] == "127.0.0.1"
+    assert result["address"]["family"] == "IPv4"
+    assert result["closeFailure"] == "forced browser close failure"
+    assert result["failureRefused"] is True
+    assert result["refused"] is True
+    checks = dict(result["checks"])
+    assert checks["/preview.html"]["contentType"] == "text/html; charset=utf-8"
+    assert checks["/root.css"] == {
+        "body": "body{color:black}",
+        "contentType": "text/css; charset=utf-8",
+        "status": 200,
+    }
+    assert checks["/app.webmanifest"] == {
+        "body": '{"name":"Audit fixture"}',
+        "contentType": "application/manifest+json",
+        "status": 200,
+    }
+    assert checks["/nested/font.woff2"] == {
+        "body": "font",
+        "contentType": "font/woff2",
+        "status": 200,
+    }
+    assert checks["/nested/app.js"]["contentType"] == "text/javascript; charset=utf-8"
+    assert checks["/nested/image.svg"]["contentType"] == "image/svg+xml"
+    assert checks["/dist/index.html"]["status"] == 200
+    assert checks["/assets/app.css"] == {
+        "body": "body{color:#111;background:#fff}",
+        "contentType": "text/css; charset=utf-8",
+        "status": 200,
+    }
+    assert checks["/dist/assets/data.json"]["contentType"] == ("application/json; charset=utf-8")
+    for pathname in (
+        "/dist/assets",
+        "/assets/escape.txt",
+        "/assets/%2e%2e/%2e%2e/outside.txt",
+        "/assets/%2E%2E%2F%2E%2E%2Foutside.txt",
+        "/../outside.txt",
+        "/%2e%2e/outside.txt",
+        "//etc/passwd",
+        "/%2Fetc%2Fpasswd",
+        "/escape-root.txt",
+    ):
+        assert checks[pathname]["status"] == 404
 
-    refused = await carrier.exec(handle, ("python3", "-c", REFUSED, url), 30)
-    assert served["url"] == f"http://localhost:{unused_tcp_port}"
-    assert fetched.exit_code == 0, fetched.stderr
-    assert fetched.stdout.encode() == b"200\n" + DESIGN
-    assert refused.exit_code == 7
 
-
-async def test_a_second_start_on_one_identity_serves_again(
-    sandbox_container: tuple[str, Path], unused_tcp_port: int
+def test_root_cli_writes_ordered_outputs_and_closes_on_success_and_failure(
+    tmp_path: Path, sandbox_image: str
 ) -> None:
-    """A turn may audit its application three times, and every audit starts the server on the same
-    port and log, so the second start resolves the first start's task journal. `ufo run --task`
-    reattaches to a journal that holds a pid instead of launching, so this is what proves the second
-    start leaves a server answering rather than a finished run adopted."""
-    container, workspace = sandbox_container
-    carrier = DockerCarrier()
-    handle = SandboxHandle(
-        conversation_id=uuid4(),
-        container_id=container,
-        workspace_host_path=str(workspace),
-        runtime_root="/workspace/runtime",
+    if shutil.which("docker") is None:
+        pytest.skip("Docker executable is not available")
+    app = tmp_path / "app"
+    dist = app / "dist"
+    dist.mkdir(parents=True)
+    (dist / "assets").mkdir()
+    shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
+    (app / "preview.html").write_text(PREVIEW)
+    (dist / "index.html").write_text(APPLICATION)
+    (app / "app.webmanifest").write_text('{"name":"Audit fixture"}')
+    (dist / "assets" / "app.css").write_text("body{color:#111;background:#fff}")
+    design = (
+        b'<svg viewBox="0 0 1280 800">'
+        b'<g data-app-region="queue"><rect width="600" height="800" /></g>'
+        b'<g data-app-region="detail"><rect x="680" width="600" height="800" /></g>'
+        b"</svg>"
     )
-    sandbox = SandboxSession(carrier=carrier, handle=handle)
-    key = "sites-audit-server-restart"
-    ctx = cast(ToolContext, _Context(sandbox=sandbox, idempotency_key=key))
-    log_path = "/workspace/runtime/restart.log"
-    task_base = _task_base(key, unused_tcp_port, log_path)
-    await carrier.exec(handle, ("mkdir", "-p", "/workspace/runtime", "/workspace/site"), 30)
-    await carrier.write(handle, "/workspace/server.py", APPLICATION_AUDIT_SERVER)
-    await carrier.write(handle, "/workspace/accepted-design.svg", DESIGN)
-    command = (
-        f"python3 /workspace/server.py /workspace/site {unused_tcp_port} "
-        "/workspace/accepted-design.svg"
+    (tmp_path / "accepted-design.svg").write_bytes(design)
+    evidence = {
+        "version": 1,
+        "design_sha256": hashlib.sha256(design).hexdigest(),
+        "regions": [
+            {"name": "queue", "left": 0, "top": 0, "width": 0.46875, "height": 1},
+            {
+                "name": "detail",
+                "left": 0.53125,
+                "top": 0,
+                "width": 0.46875,
+                "height": 1,
+            },
+        ],
+    }
+    (tmp_path / "accepted-design.json").write_text(json.dumps(evidence))
+    command = """set -eu
+if node /fixture/audit_application.cjs \
+  http://127.0.0.1:49123/preview.html \
+  /tmp/refused.json /tmp/refused-light.png /tmp/refused-dark.png \
+  /tmp/refused-interactive.html /tmp/refused-static.html \
+  /fixture/accepted-design.svg /fixture/accepted-design.json \
+  >/tmp/refused.out 2>/tmp/refused.err; then exit 11; fi
+node /fixture/audit_application.cjs /fixture/app \
+  /fixture/report.json /fixture/light.png /fixture/dark.png \
+  /fixture/interactive.html /fixture/static.html \
+  /fixture/accepted-design.svg /fixture/accepted-design.json
+python3 - <<'PY'
+import json
+from urllib.error import URLError
+from urllib.request import urlopen
+url = json.load(open('/fixture/report.json'))['url']
+try:
+    urlopen(url, timeout=1)
+except URLError:
+    raise SystemExit(0)
+raise SystemExit(12)
+PY
+cp /fixture/app/dist/index.html /fixture/complete.html
+cp /fixture/app/preview.html /fixture/complete-preview.html
+sed 's|/assets/app.css|/missing.css|' /fixture/complete.html > /fixture/app/dist/index.html
+if node /fixture/audit_application.cjs /fixture/app \
+  /fixture/missing-report.json /fixture/missing-light.png /fixture/missing-dark.png \
+  /fixture/missing-interactive.html /fixture/missing-static.html \
+  /fixture/accepted-design.svg /fixture/accepted-design.json \
+  >/fixture/missing.out 2>/fixture/missing.err; then
+  exit 14
+else
+  test "$?" -eq 1
+  test ! -e /fixture/missing-report.json
+  grep -q 'application resource failed: stylesheet .*missing.css returned 404' /fixture/missing.err
+fi
+cp /fixture/complete.html /fixture/app/dist/index.html
+sed 's|/app.webmanifest|/missing.webmanifest|' \
+  /fixture/complete-preview.html > /fixture/app/preview.html
+if node /fixture/audit_application.cjs /fixture/app \
+  /fixture/missing-manifest-report.json /fixture/missing-manifest-light.png \
+  /fixture/missing-manifest-dark.png /fixture/missing-manifest-interactive.html \
+  /fixture/missing-manifest-static.html \
+  /fixture/accepted-design.svg /fixture/accepted-design.json \
+  >/fixture/missing-manifest.out 2>/fixture/missing-manifest.err; then
+  exit 15
+else
+  test "$?" -eq 1
+  test ! -e /fixture/missing-manifest-report.json
+  grep -q 'application resource failed: manifest .*missing.webmanifest returned 404' \
+    /fixture/missing-manifest.err
+fi
+cp /fixture/complete-preview.html /fixture/app/preview.html
+cp /fixture/app/dist/index.html /fixture/failed.html
+printf '%s' '<!doctype html><p>No lifecycle</p>' > /fixture/app/dist/index.html
+if timeout 25 node /fixture/audit_application.cjs /fixture/app \
+  /fixture/failed-report.json /fixture/failed-light.png /fixture/failed-dark.png \
+  /fixture/failed-interactive.html /fixture/failed-static.html \
+  /fixture/accepted-design.svg /fixture/accepted-design.json; then
+  exit 13
+else
+  test "$?" -eq 3
+fi
+"""
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "bash",
+            "-v",
+            f"{tmp_path}:/fixture",
+            sandbox_image,
+            "-c",
+            command,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT_SECONDS,
+        check=False,
     )
-    url = f"http://localhost:{unused_tcp_port}/accepted-design.svg"
 
-    try:
-        await _serve(ctx, command, "/workspace/site", unused_tcp_port, log_path)
-        first_pid = await carrier.exec(handle, ("sh", "-c", TASK_PID, "sh", task_base), 30)
-        served = await _serve(ctx, command, "/workspace/site", unused_tcp_port, log_path)
-        second_pid = await carrier.exec(handle, ("sh", "-c", TASK_PID, "sh", task_base), 30)
-        fetched = await carrier.exec(handle, ("python3", "-c", FETCH, url), 30)
-    finally:
-        await _stop_server(ctx, unused_tcp_port)
-
-    assert served["url"] == f"http://localhost:{unused_tcp_port}"
-    assert first_pid.exit_code == 0, first_pid.stderr
-    assert second_pid.exit_code == 0, second_pid.stderr
-    assert second_pid.stdout.strip() != first_pid.stdout.strip()
-    assert fetched.exit_code == 0, fetched.stderr
-    assert fetched.stdout.encode() == b"200\n" + DESIGN
-
-
-async def test_failed_readiness_stops_the_detached_task(
-    sandbox_container: tuple[str, Path], unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    container, workspace = sandbox_container
-    carrier = DockerCarrier()
-    handle = SandboxHandle(
-        conversation_id=uuid4(),
-        container_id=container,
-        workspace_host_path=str(workspace),
-        runtime_root="/workspace/runtime",
-    )
-    sandbox = SandboxSession(carrier=carrier, handle=handle)
-    key = "sites-audit-never-ready"
-    ctx = cast(ToolContext, _Context(sandbox=sandbox, idempotency_key=key))
-    log_path = "/workspace/runtime/never-ready.log"
-    task_base = _task_base(key, unused_tcp_port, log_path)
-    await carrier.exec(handle, ("mkdir", "-p", "/workspace/runtime", "/workspace/site"), 30)
-    monkeypatch.setattr(sites_tools, "READINESS_TIMEOUT_SECONDS", 1)
-
-    try:
-        with pytest.raises(RuntimeError):
-            await _serve(
-                ctx,
-                "while :; do sleep 1; done",
-                "/workspace/site",
-                unused_tcp_port,
-                log_path,
-            )
-        stopped = await carrier.exec(handle, ("sh", "-c", TASK_STOPPED, "sh", task_base), 30)
-        assert stopped.exit_code == 0, stopped.stderr
-    finally:
-        await carrier.exec(
-            handle,
-            ("sh", "-c", 'kill "$(cat "$1.pid")" 2>/dev/null || true', "sh", task_base),
-            30,
-        )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert [(view["scheme"], view["width"]) for view in report["views"]] == [
+        ("light", 1440),
+        ("dark", 1440),
+        ("light", 390),
+        ("dark", 390),
+    ]
+    assert report["designRegions"] == evidence["regions"]
+    assert [control["name"] for control in report["interaction"]["controls"]] == [
+        "First",
+        "Second",
+    ]
+    assert (tmp_path / "light.png").stat().st_size > 0
+    assert (tmp_path / "dark.png").stat().st_size > 0
+    assert "Audit fixture" in (tmp_path / "interactive.html").read_text()
+    assert "Audit fixture" in (tmp_path / "static.html").read_text()
+    diagnostic = json.loads((tmp_path / "failed-report.json.lifecycle.json").read_text())
+    assert diagnostic["reason"] == "application lifecycle signal is missing"

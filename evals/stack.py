@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import socket
 import sys
 import tomllib
@@ -638,6 +639,7 @@ class EvalStack:
             env=self.env,
             stdout=self.eval_log,
             stderr=self.eval_log,
+            start_new_session=True,
         )
         self._process_event("started", "eval", child)
         child_wait = asyncio.ensure_future(child.wait())
@@ -645,33 +647,52 @@ class EvalStack:
             asyncio.ensure_future(serve.wait()): ("serve", serve),
             asyncio.ensure_future(egress.wait()): ("egress", egress),
         }
-        done, pending = await asyncio.wait(
-            (child_wait, *infra), return_when=asyncio.FIRST_COMPLETED
-        )
-        for future in done:
-            if future is child_wait:
-                self._process_event("exited", "eval", child)
-            elif future in infra:
-                name, process = infra[future]
-                self._process_event("exited", name, process)
-        dead = next((infra[future] for future in infra if future in done), None)
-        if dead is not None and child_wait not in done:
-            name, process = dead
+        try:
+            done, _ = await asyncio.wait((child_wait, *infra), return_when=asyncio.FIRST_COMPLETED)
+            for future in done:
+                if future is child_wait:
+                    self._process_event("exited", "eval", child)
+                elif future in infra:
+                    name, process = infra[future]
+                    self._process_event("exited", name, process)
+            dead = next((infra[future] for future in infra if future in done), None)
+            if dead is not None and child_wait not in done:
+                name, process = dead
+                await self._stop_eval(child, child_wait)
+                raise RuntimeError(
+                    f"{name} exited {process.returncode} mid-run — see {self._log_path(name)}"
+                )
+            return await child_wait
+        except asyncio.CancelledError:
+            await self._stop_eval(child, child_wait)
+            raise
+        finally:
+            for future in infra:
+                if not future.done():
+                    future.cancel()
+            await asyncio.gather(*infra, return_exceptions=True)
+
+    async def _stop_eval(
+        self,
+        child: asyncio.subprocess.Process,
+        child_wait: asyncio.Future[int],
+    ) -> None:
+        if child.returncode is None:
             self._process_event("terminate", "eval", child)
-            child.terminate()
             try:
-                await asyncio.wait_for(asyncio.shield(child_wait), SHUTDOWN_GRACE_SECONDS)
-            except TimeoutError:
-                self._process_event("kill", "eval", child)
-                child.kill()
-                await child.wait()
-            self._process_event("exited", "eval", child)
-            raise RuntimeError(
-                f"{name} exited {process.returncode} mid-run — see {self._log_path(name)}"
-            )
-        for future in pending:
-            future.cancel()
-        return await child_wait
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        try:
+            await asyncio.wait_for(asyncio.shield(child_wait), SHUTDOWN_GRACE_SECONDS)
+        except TimeoutError:
+            self._process_event("kill", "eval", child)
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await child_wait
+        self._process_event("exited", "eval", child)
 
     def _child_args(self, readiness: Path | None = None) -> tuple[str, ...]:
         argv = list(self.spec.args)
@@ -710,32 +731,41 @@ class EvalStack:
         for name, process in (("egress", egress), ("serve", serve)):
             if process is None or process.returncode is not None:
                 continue
-            self._process_event("terminate", name, process)
-            process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), SHUTDOWN_GRACE_SECONDS)
-            except TimeoutError:
-                self._process_event("kill", name, process)
-                process.kill()
-                await process.wait()
-            self._process_event("exited", name, process)
-        await self._release_sandboxes()
+                self._process_event("terminate", name, process)
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), SHUTDOWN_GRACE_SECONDS)
+                except TimeoutError:
+                    self._process_event("kill", name, process)
+                    process.kill()
+                    await process.wait()
+                self._process_event("exited", name, process)
+            except Exception as error:
+                self._cleanup_event(name, f"{type(error).__name__}: {error}")
+        try:
+            await self._release_sandboxes()
+        except Exception as error:
+            self._cleanup_event("sandboxes", f"{type(error).__name__}: {error}")
 
     def _process_event(self, action: str, name: str, process: asyncio.subprocess.Process) -> None:
+        self._log_event(
+            {
+                "action": action,
+                "name": name,
+                "pid": process.pid,
+                "returncode": process.returncode,
+            }
+        )
+
+    def _log_event(self, fields: dict[str, object]) -> None:
         self.process_log.write(
-            json.dumps(
-                {
-                    "at": datetime.now(UTC).isoformat(),
-                    "action": action,
-                    "name": name,
-                    "pid": process.pid,
-                    "returncode": process.returncode,
-                },
-                separators=(",", ":"),
-            )
-            + "\n"
+            json.dumps({"at": datetime.now(UTC).isoformat()} | fields, separators=(",", ":")) + "\n"
         )
         self.process_log.flush()
+
+    def _cleanup_event(self, name: str, detail: str) -> None:
+        self._log_event({"action": "cleanup_failed", "name": name, "detail": detail})
 
     async def _release_sandboxes(self) -> None:
         """Release the Docker sandboxes this stack's serve created.
@@ -749,6 +779,12 @@ class EvalStack:
 
         Scoped by this stack's own workspace root, whose per-conversation directory names are
         exactly the container and network suffixes, so a stack can only ever release its own.
+
+        Every step runs whatever the one before it answered. Teardown reaches here from a `finally`,
+        so a raise would both abandon every container and subnet after the failing step and replace
+        the run's own outcome — and docker refusing one step is ordinary: a network whose egress or
+        sandbox endpoint still detaches answers `has active endpoints`, and a host with no `docker`
+        on it fails the call outright. A refused step lands in `process.log` instead.
         """
         workspaces = self.config.sandbox.workspace_root
         if self.config.sandbox.backend != DOCKER_BACKEND or not workspaces.is_dir():
@@ -758,27 +794,45 @@ class EvalStack:
                 conversation = UUID(path.name)
             except ValueError:
                 continue
-            await _docker("rm", "-f", f"{SANDBOX_CONTAINER_PREFIX}{conversation}")
-            await _docker("network", "rm", f"{SANDBOX_NETWORK_PREFIX}{conversation.hex}")
+            for argv in (
+                ("rm", "-f", f"{SANDBOX_CONTAINER_PREFIX}{conversation}"),
+                ("network", "rm", f"{SANDBOX_NETWORK_PREFIX}{conversation.hex}"),
+            ):
+                try:
+                    failure = await _docker(*argv)
+                except Exception as error:
+                    failure = f"{type(error).__name__}: {error}"
+                if failure is not None:
+                    self._release_event(argv, failure)
+
+    def _release_event(self, argv: tuple[str, ...], detail: str) -> None:
+        self._log_event({"action": "release-failed", "name": " ".join(argv), "detail": detail})
 
     def _log_path(self, step: str) -> Path:
         return self.root / f"{step}.log"
 
 
-async def _docker(*argv: str) -> None:
-    """One best-effort `docker` call. A stack tears down whatever it can and never fails a recorded
-    run over cleanup: a box already gone, a network still held by another container, or no Docker on
-    this host are all the same non-event here."""
+async def _docker(*argv: str) -> str | None:
+    command = f"docker {' '.join(argv)}"
     try:
         process = await asyncio.create_subprocess_exec(
             "docker",
             *argv,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-    except OSError:
-        return
-    await process.wait()
+        stdout, stderr = await process.communicate()
+    except OSError as error:
+        return f"{command} failed: {error}"
+    if process.returncode == 0:
+        return None
+    detail = (stderr or stdout).decode("utf-8", "replace").strip()
+    target = argv[-1]
+    missing_container = argv[:2] == ("rm", "-f") and f"No such container: {target}" in detail
+    missing_network = argv[:2] == ("network", "rm") and f"network {target} not found" in detail
+    if missing_container or missing_network:
+        return None
+    return f"{command} exited {process.returncode}: {detail}"
 
 
 def _mint_egress_ca() -> tuple[str, str]:

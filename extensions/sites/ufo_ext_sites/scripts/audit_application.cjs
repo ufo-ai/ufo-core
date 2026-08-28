@@ -7,7 +7,7 @@
 // element owed — so the numbers decide the case and this file cannot soften it. A page whose text
 // all clears 4.5:1 reports no text entry at all.
 //
-// Usage: node app-audit.cjs <url> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <design-url>
+// Usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <accepted-design.svg> <accepted-design-evidence.json>
 //        node app-audit.cjs --design <application-design.svg>
 // The sandbox image installs playwright globally under /usr/local and exports NODE_PATH so the bare
 // name resolves; a carrier that starts the sandbox without that env leaves it unresolvable, so fall
@@ -20,20 +20,25 @@ const { chromium } = (() => {
   }
 })();
 const fs = require('fs');
+const crypto = require('crypto');
+const http = require('http');
+const path = require('path');
 
 const AA_FLOOR = 4.5;
 const DESIGN_ALPHA_FLOOR = 0.15;
 const DESIGN_REGION_MAX = 6;
+const DESIGN_VISIBLE_TEXT_MAX_CHARS = 72;
 const DESIGN_VIEWPORT = { width: 1280, height: 800 };
 const DESIGN_ELEMENT_MAX = 4096;
 const DESIGN_PROPERTY_MAX = 96;
 const DESIGN_DECLARATION_MAX = DESIGN_ELEMENT_MAX * DESIGN_PROPERTY_MAX;
 const DESIGN_CLONE_BYTE_MAX = 2 * 1024 * 1024;
-const DESIGN_OUTPUT_BYTE_MAX = 2048;
+const DESIGN_OUTPUT_BYTE_MAX = 4096;
 const DESIGN_ANIMATED_POINT_MAX = 4096;
 const DESIGN_ANIMATED_ATTRIBUTE_BYTE_MAX = 128 * 1024;
 const APPLICATION_LIFECYCLE_TIMEOUT_MS = 15000;
 const APPLICATION_INTERACTION_TIMEOUT_MS = 300;
+const TEXT_FRAGMENT_TOUCH_PX = 1;
 const APPLICATION_LIFECYCLE_DIAGNOSTIC_SUFFIX = '.lifecycle.json';
 const SVG_PRESENTATION_PROPERTIES = new Set(
   ('alignment-baseline baseline-shift clip-path clip-rule color color-interpolation ' +
@@ -53,8 +58,285 @@ const VIEWS = [
   { scheme: 'light', width: 390, height: 844, shoot: false },
   { scheme: 'dark', width: 390, height: 844, shoot: false },
 ];
+const MIME_TYPES = new Map([
+  ['.avif', 'image/avif'],
+  ['.eot', 'application/vnd.ms-fontobject'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.gif', 'image/gif'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.ico', 'image/x-icon'],
+  ['.jpeg', 'image/jpeg'],
+  ['.jpg', 'image/jpeg'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.mjs', 'text/javascript; charset=utf-8'],
+  ['.otf', 'font/otf'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.ttf', 'font/ttf'],
+  ['.txt', 'text/plain; charset=utf-8'],
+  ['.wasm', 'application/wasm'],
+  ['.webp', 'image/webp'],
+  ['.webmanifest', 'application/manifest+json'],
+  ['.woff', 'font/woff'],
+  ['.woff2', 'font/woff2'],
+  ['.xml', 'application/xml'],
+]);
+const APPLICATION_RESOURCE_TYPES = new Set([
+  'stylesheet',
+  'script',
+  'font',
+  'image',
+  'fetch',
+  'xhr',
+  'manifest',
+]);
 
-function measure(floor) {
+function contained(root, target) {
+  return target === root || target.startsWith(root + path.sep);
+}
+
+async function validatedApplicationRoot(input) {
+  if (!path.isAbsolute(input)) throw new Error('application root must be absolute');
+  const root = await fs.promises.realpath(input);
+  const rootStat = await fs.promises.stat(root);
+  if (!rootStat.isDirectory()) throw new Error('application root must be a directory');
+  const previewInput = path.join(root, 'preview.html');
+  const distInput = path.join(root, 'dist');
+  const [previewInputStat, distInputStat] = await Promise.all([
+    fs.promises.lstat(previewInput),
+    fs.promises.lstat(distInput),
+  ]);
+  if (previewInputStat.isSymbolicLink() || !previewInputStat.isFile()) {
+    throw new Error('application preview must be a regular file');
+  }
+  if (distInputStat.isSymbolicLink() || !distInputStat.isDirectory()) {
+    throw new Error('application dist must be a directory');
+  }
+  const preview = await fs.promises.realpath(previewInput);
+  const dist = await fs.promises.realpath(distInput);
+  if (!contained(root, preview) || !contained(root, dist)) {
+    throw new Error('application root inputs must stay inside the application root');
+  }
+  const [previewStat, distStat] = await Promise.all([
+    fs.promises.stat(preview),
+    fs.promises.stat(dist),
+  ]);
+  if (!previewStat.isFile()) throw new Error('application preview must be a regular file');
+  if (!distStat.isDirectory()) throw new Error('application dist must be a directory');
+  return { root, preview, dist };
+}
+
+function acceptedDesignRegions(svgInput, evidenceInput) {
+  if (!path.isAbsolute(svgInput) || !path.isAbsolute(evidenceInput)) {
+    throw new Error('accepted application design paths must be absolute');
+  }
+  const svgPath = fs.realpathSync(svgInput);
+  const evidencePath = fs.realpathSync(evidenceInput);
+  const svg = fs.readFileSync(svgPath);
+  const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+  const digest = crypto.createHash('sha256').update(svg).digest('hex');
+  if (evidence.version !== 1 || evidence.design_sha256 !== digest) {
+    throw new Error('accepted application design evidence does not match the design');
+  }
+  if (!Array.isArray(evidence.regions) || evidence.regions.length < 2 ||
+      evidence.regions.length > DESIGN_REGION_MAX) {
+    throw new Error('accepted application design evidence has invalid regions');
+  }
+  const names = new Set();
+  for (const region of evidence.regions) {
+    if (!region || typeof region.name !== 'string' || !region.name || region.name.length > 80 ||
+        names.has(region.name) || !['left', 'top', 'width', 'height'].every(
+          (field) => typeof region[field] === 'number' && Number.isFinite(region[field])
+        ) || region.left < 0 || region.left > 1 || region.top < 0 || region.top > 1 ||
+        region.width <= 0 || region.width > 1 || region.height <= 0 || region.height > 1) {
+      throw new Error('accepted application design evidence has invalid regions');
+    }
+    names.add(region.name);
+  }
+  return evidence.regions;
+}
+
+function applicationRequestPaths(requestUrl, application) {
+  const raw = (requestUrl || '/').split('?', 1)[0];
+  let pathname;
+  try {
+    pathname = decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+  if (!pathname.startsWith('/') || pathname.startsWith('//') || pathname.includes('\\') ||
+      pathname.includes('\0')) return null;
+  if (pathname === '/') return [application.preview];
+  const segments = pathname.split('/');
+  if (segments.slice(1).some((segment) => !segment || segment === '.' || segment === '..')) {
+    return null;
+  }
+  const projectFile = path.join(application.root, ...segments.slice(1));
+  if (!pathname.startsWith('/assets/')) return [projectFile];
+  return [projectFile, path.join(application.dist, 'assets', ...segments.slice(2))];
+}
+
+async function serveApplicationFile(request, response, application) {
+  if (!['GET', 'HEAD'].includes(request.method || '')) {
+    response.writeHead(405, { Allow: 'GET, HEAD' }).end();
+    return;
+  }
+  const candidates = applicationRequestPaths(request.url, application);
+  if (!candidates) {
+    response.writeHead(404).end();
+    return;
+  }
+  let target = null;
+  for (const candidate of candidates) {
+    let candidateStat;
+    try {
+      candidateStat = await fs.promises.lstat(candidate);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (candidateStat.isSymbolicLink() || !candidateStat.isFile()) break;
+    const resolved = await fs.promises.realpath(candidate);
+    if (!contained(application.root, resolved)) break;
+    target = resolved;
+    break;
+  }
+  if (!target) {
+    response.writeHead(404).end();
+    return;
+  }
+  const content = await fs.promises.readFile(target);
+  response.writeHead(200, {
+    'Content-Length': content.length,
+    'Content-Type': MIME_TYPES.get(path.extname(target).toLowerCase()) || 'application/octet-stream',
+  });
+  response.end(request.method === 'HEAD' ? undefined : content);
+}
+
+async function startApplicationServer(application) {
+  const sockets = new Set();
+  const server = http.createServer((request, response) => {
+    void serveApplicationFile(request, response, application).catch(() => {
+      if (!response.headersSent) response.writeHead(500);
+      response.end();
+    });
+  });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string' || address.family !== 'IPv4') {
+    await new Promise((resolve) => server.close(resolve));
+    throw new Error('application audit server did not bind IPv4');
+  }
+  return { server, sockets, url: `http://127.0.0.1:${address.port}/preview.html` };
+}
+
+async function closeApplicationServer(server, sockets) {
+  const closed = new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+  for (const socket of sockets) socket.destroy();
+  await closed;
+}
+
+function trackApplicationResources(page, applicationUrl) {
+  const origin = new URL(applicationUrl).origin;
+  const problems = [];
+  const checkedManifests = new Set();
+  const record = (request, reason) => {
+    let resource;
+    try {
+      resource = new URL(request.url());
+    } catch {
+      return;
+    }
+    if (resource.origin !== origin) return;
+    const type = request.resourceType();
+    if (!APPLICATION_RESOURCE_TYPES.has(type) && type !== 'other') return;
+    problems.push({ type, url: resource.href, reason });
+  };
+  page.on('response', (response) => {
+    if (response.status() >= 400) {
+      record(response.request(), `returned ${response.status()}`);
+    }
+  });
+  page.on('requestfailed', (request) => {
+    record(request, request.failure()?.errorText || 'network error');
+  });
+  return async () => {
+    const references = (await Promise.all(page.frames().map(async (frame) => {
+      try {
+        return await frame.locator('link[href]').evaluateAll((links) => links.map((link) => ({
+          href: link.href,
+          rel: Array.from(link.relList),
+        })));
+      } catch {
+        return [];
+      }
+    }))).flat();
+    const explicitIcons = new Set(references
+      .filter(({ rel }) => rel.some((value) => value.toLowerCase() === 'icon'))
+      .map(({ href }) => href));
+    const explicitManifests = references
+      .filter(({ rel }) => rel.some((value) => value.toLowerCase() === 'manifest'))
+      .map(({ href }) => href);
+    for (const href of explicitManifests) {
+      let resource;
+      try {
+        resource = new URL(href);
+      } catch {
+        continue;
+      }
+      if (resource.origin !== origin || checkedManifests.has(resource.href)) continue;
+      checkedManifests.add(resource.href);
+      try {
+        const response = await page.context().request.get(resource.href);
+        const status = response.status();
+        await response.dispose();
+        if (status >= 400) {
+          problems.push({ type: 'manifest', url: resource.href, reason: `returned ${status}` });
+        }
+      } catch (error) {
+        problems.push({
+          type: 'manifest',
+          url: resource.href,
+          reason: error instanceof Error ? error.message : 'network error',
+        });
+      }
+    }
+    return Array.from(new Map(problems
+      .filter(({ type, url }) => APPLICATION_RESOURCE_TYPES.has(type) || explicitIcons.has(url))
+      .map((problem) => [`${problem.type}|${problem.url}|${problem.reason}`, problem])
+    ).values());
+  };
+}
+
+async function assertApplicationResources(resourceProblems) {
+  const problems = await resourceProblems();
+  if (!problems.length) return;
+  const first = problems[0];
+  throw new Error(`application resource failed: ${first.type} ${first.url} ${first.reason}`);
+}
+
+async function closeApplicationAudit(browser, server, sockets) {
+  try {
+    if (browser) await browser.close();
+  } finally {
+    await closeApplicationServer(server, sockets);
+  }
+}
+
+async function measure(floor) {
   // A computed colour carries whatever syntax the engine chose: a color-mix() token resolves to
   // `color(srgb …)`, which no rgb() pattern reads. The browser paints the value into one pixel and
   // the pixel is the answer. An unpaintable value leaves both probe fills in place, so it reads as
@@ -113,6 +395,71 @@ function measure(floor) {
     }
     return true;
   };
+  const paintHasAlpha = (value) => {
+    if (!value || value.trim().toLowerCase() === 'none') return false;
+    const colour = parse(value);
+    return colour ? colour.a > 0 : true;
+  };
+  const textPaints = (element, style) => {
+    if (element instanceof SVGTextContentElement) {
+      const fill = paintHasAlpha(style.fill) && parseFloat(style.fillOpacity) > 0;
+      const stroke = paintHasAlpha(style.stroke) && parseFloat(style.strokeOpacity) > 0 &&
+        parseFloat(style.strokeWidth) > 0;
+      return fill || stroke;
+    }
+    const clippedBackground = (style.backgroundClip || style.webkitBackgroundClip || '')
+      .split(',').some((clip) => clip.trim() === 'text') &&
+      (paintHasAlpha(style.backgroundColor) ||
+        (style.backgroundImage && style.backgroundImage !== 'none'));
+    const fill = paintHasAlpha(style.webkitTextFillColor || style.color);
+    const stroke = paintHasAlpha(style.webkitTextStrokeColor) &&
+      parseFloat(style.webkitTextStrokeWidth) > 0;
+    return clippedBackground || fill || stroke;
+  };
+  const intersectionRects = (elements, rootMargin) => new Promise((resolve) => {
+    const targets = Array.from(new Set(elements));
+    const intersections = new Map();
+    if (!targets.length) {
+      resolve(intersections);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) intersections.set(entry.target, entry.intersectionRect);
+      if (intersections.size !== targets.length) return;
+      observer.disconnect();
+      resolve(intersections);
+    }, { rootMargin });
+    targets.forEach((element) => observer.observe(element));
+  });
+  const overlaps = (first, second) =>
+    first.width > 0 && first.height > 0 && second.width > 0 && second.height > 0 &&
+    Math.max(first.left, second.left) < Math.min(first.right, second.right) &&
+    Math.max(first.top, second.top) < Math.min(first.bottom, second.bottom);
+  const paintedAtPoint = (node, rect, bounds) => {
+    const left = Math.max(bounds.left, rect.left);
+    const right = Math.min(bounds.right, rect.right);
+    const top = Math.max(bounds.top, rect.top);
+    const bottom = Math.min(bounds.bottom, rect.bottom);
+    if (left >= right || top >= bottom) return false;
+    const parent = node.parentElement;
+    return [0.2, 0.5, 0.8].some((part) => {
+      const x = left + (right - left) * part;
+      const y = top + (bottom - top) / 2;
+      const caret = document.caretRangeFromPoint(x, y);
+      if (caret && (caret.startContainer === node || parent.contains(caret.startContainer))) {
+        return true;
+      }
+      const hits = document.elementsFromPoint(x, y);
+      const parentIndex = hits.findIndex((hit) => hit === parent || parent.contains(hit));
+      if (parentIndex < 0) return false;
+      return hits.slice(0, parentIndex).every((hit) => {
+        const style = getComputedStyle(hit);
+        const background = parse(style.backgroundColor);
+        return parseFloat(style.opacity) < 1 ||
+          ((!background || background.a < 0.999) && style.backgroundImage === 'none');
+      });
+    });
+  };
   // The first opaque backdrop behind the element: every translucent background on the way up is
   // composited, so a label on a tinted chip is measured against what the eye actually sees.
   const backdrop = (element) => {
@@ -141,7 +488,7 @@ function measure(floor) {
     if (!words) continue;
     const box = element.getBoundingClientRect();
     const style = getComputedStyle(element);
-    if (!visible(element, box)) continue;
+    if (!visible(element, box) || !textPaints(element, style)) continue;
     const foreground = parse(style.color);
     if (!foreground) continue;
     const behind = backdrop(element);
@@ -170,61 +517,85 @@ function measure(floor) {
     });
   }
 
-  const paintedAboveFold = (node, rect) => {
-    const left = Math.max(0, rect.left);
-    const right = Math.min(window.innerWidth, rect.right);
-    const top = Math.max(0, rect.top);
-    const bottom = Math.min(window.innerHeight, rect.bottom);
-    if (left >= right || top >= bottom) return false;
-    const points = [0.2, 0.5, 0.8];
-    return points.some((part) => {
-      const x = left + (right - left) * part;
-      const y = top + (bottom - top) / 2;
-      const range = document.caretRangeFromPoint(x, y);
-      return (range && range.startContainer === node) ||
-        document.elementsFromPoint(x, y).some(
-          (element) => element === node.parentElement || node.parentElement.contains(element)
-        );
-    });
+  const textNodes = [];
+  const textBoundary = (element) => {
+    for (let boundary = element; boundary && boundary !== document.body;
+      boundary = boundary.parentElement) {
+      if (!['inline', 'contents'].includes(getComputedStyle(boundary).display)) return boundary;
+    }
+    return document.body;
   };
-
-  const rawRenderedText = document.body.innerText.slice(0, 40000);
-  const renderedText = rawRenderedText.replace(/\s+/g, ' ').trim();
-  const renderedParts = rawRenderedText.split(/\n+/)
-    .map((part) => part.replace(/\s+/g, ' ').trim()).filter(Boolean);
-  const foldedRenderedText = renderedText.toLocaleLowerCase();
-  const visibleRanges = [];
-  let renderedCursor = 0;
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const element = node.parentElement;
     if (!element || ['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(element.tagName)) continue;
-    const words = node.data.replace(/\s+/g, ' ').trim();
-    if (!words) continue;
+    const value = node.data.replace(/\s+/g, ' ');
+    if (!value) continue;
     const range = document.createRange();
     range.selectNodeContents(node);
     const rects = Array.from(range.getClientRects());
     const box = range.getBoundingClientRect();
-    if (!visible(element, box)) continue;
-    const start = foldedRenderedText.indexOf(words.toLocaleLowerCase(), renderedCursor);
-    if (start < 0) continue;
-    const end = start + words.length;
-    renderedCursor = end;
-    if (rects.some((rect) => paintedAboveFold(node, rect))) {
-      visibleRanges.push([start, end]);
-    }
+    const style = getComputedStyle(element);
+    if (!visible(element, box) || !textPaints(element, style)) continue;
+    textNodes.push({ node, element, value, rects, boundary: textBoundary(element) });
   }
-  let aboveFoldText = '';
-  let priorEnd = 0;
-  for (const [start, end] of visibleRanges) {
-    if (aboveFoldText && start > priorEnd) aboveFoldText += ' ';
-    aboveFoldText += renderedText.slice(start, end);
-    priorEnd = end;
-  }
-  aboveFoldText = aboveFoldText.replace(/\s+/g, ' ').trim().slice(0, 40000);
-
   const pageWidth = Math.max(document.documentElement.scrollWidth, window.innerWidth);
   const pageHeight = Math.max(document.documentElement.scrollHeight, window.innerHeight);
+  const documentMargin = [
+    Math.max(0, window.scrollY),
+    Math.max(0, pageWidth - window.scrollX - window.innerWidth),
+    Math.max(0, pageHeight - window.scrollY - window.innerHeight),
+    Math.max(0, window.scrollX),
+  ].map((value) => `${value}px`).join(' ');
+  const elements = textNodes.map(({ element }) => element);
+  const documentIntersections = await intersectionRects(elements, documentMargin);
+  const viewport = {
+    left: 0,
+    right: window.innerWidth,
+    top: 0,
+    bottom: window.innerHeight,
+    width: window.innerWidth,
+    height: window.innerHeight,
+  };
+  const renderedNodes = textNodes.flatMap(({ node, element, value, rects, boundary }) => {
+    const intersection = documentIntersections.get(element);
+    if (!intersection) return [];
+    const paintedRects = rects.filter((rect) =>
+      overlaps(rect, intersection) &&
+      (!overlaps(rect, viewport) || paintedAtPoint(node, rect, viewport))
+    );
+    return paintedRects.length ? [{ node, element, value, rects: paintedRects, boundary }] : [];
+  });
+  const joinPaintedText = (fragments) => {
+    let output = '';
+    let previous = null;
+    for (const fragment of fragments) {
+      if (previous && output && !/\s$/.test(output) && !/^\s/.test(fragment.value)) {
+        const before = previous.rects[previous.rects.length - 1];
+        const after = fragment.rects[0];
+        const sameLine = Math.max(before.top, after.top) < Math.min(before.bottom, after.bottom);
+        const horizontalGap = Math.max(
+          before.left - after.right,
+          after.left - before.right,
+          0
+        );
+        if (previous.boundary !== fragment.boundary || !sameLine ||
+            horizontalGap > TEXT_FRAGMENT_TOUCH_PX) output += ' ';
+      }
+      output += fragment.value;
+      previous = fragment;
+    }
+    return output.replace(/\s+/g, ' ').trim().slice(0, 40000);
+  };
+  const renderedParts = renderedNodes.map(({ value }) => value.trim()).filter(Boolean);
+  const renderedText = joinPaintedText(renderedNodes);
+  const aboveFoldText = joinPaintedText(renderedNodes.flatMap((fragment) => {
+    const paintedRects = fragment.rects.filter(
+      (rect) => paintedAtPoint(fragment.node, rect, viewport)
+    );
+    return paintedRects.length ? [{ ...fragment, rects: paintedRects }] : [];
+  }));
+
   const regions = Array.from(document.querySelectorAll('[data-app-region]')).flatMap((element) => {
     const name = (element.getAttribute('data-app-region') || '').trim().slice(0, 80);
     const box = element.getBoundingClientRect();
@@ -516,6 +887,7 @@ async function renderedDesignRegions(page) {
     presentationProperties,
     propertyMax,
     regionMax,
+    visibleTextMaxChars,
     viewport,
   }) => {
     const root = document.querySelector('svg');
@@ -527,10 +899,172 @@ async function renderedDesignRegions(page) {
       animation.currentTime = 0;
     });
     await document.fonts.ready;
-    const names = Array.from(root.querySelectorAll('[data-app-region]'))
-      .map((element) => (element.getAttribute('data-app-region') || '').trim())
-      .filter(Boolean)
+    async function visibleRegionText(regions, alphaFloor, visibleTextMaxChars) {
+      const paintHasAlpha = (value) => {
+        const paint = (value || '').trim().toLowerCase();
+        if (!paint || paint === 'none' || paint === 'transparent') return false;
+        const slashAlpha = paint.match(
+          /^rgba?\([^/]+\/\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?)\s*\)$/
+        );
+        const commaAlpha = paint.match(
+          /^rgba\(\s*[^,]+,\s*[^,]+,\s*[^,]+,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?)\s*\)$/
+        );
+        const alpha = slashAlpha?.[1] || commaAlpha?.[1];
+        if (!alpha) return true;
+        const normalized = alpha.endsWith('%') ? parseFloat(alpha) / 100 : parseFloat(alpha);
+        return !Number.isFinite(normalized) || normalized > 0;
+      };
+      const textPaints = (element, style) => {
+        if (element instanceof SVGTextContentElement) {
+          const fill = paintHasAlpha(style.fill) && parseFloat(style.fillOpacity) > 0;
+          const stroke = paintHasAlpha(style.stroke) && parseFloat(style.strokeOpacity) > 0 &&
+            parseFloat(style.strokeWidth) > 0;
+          return fill || stroke;
+        }
+        const clippedBackground = (style.backgroundClip || style.webkitBackgroundClip || '')
+          .split(',').some((clip) => clip.trim() === 'text') &&
+          (paintHasAlpha(style.backgroundColor) ||
+            (style.backgroundImage && style.backgroundImage !== 'none'));
+        const fill = paintHasAlpha(style.webkitTextFillColor || style.color);
+        const stroke = paintHasAlpha(style.webkitTextStrokeColor) &&
+          parseFloat(style.webkitTextStrokeWidth) > 0;
+        return clippedBackground || fill || stroke;
+      };
+      const visuallyHidden = (style, box) =>
+        style.position === 'absolute' && style.overflow === 'hidden' &&
+        box.width <= 2 && box.height <= 2 &&
+        (style.clip !== 'auto' || style.clipPath !== 'none');
+      const visible = (element, box) => {
+        if (box.width === 0 || box.height === 0 || element.closest('[aria-hidden="true"]')) {
+          return false;
+        }
+        const closedDetails = element.closest('details:not([open])');
+        if (closedDetails) {
+          const summary = element.closest('summary');
+          if (!summary || summary.parentElement !== closedDetails) return false;
+        }
+        for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          const ancestorBox = ancestor.getBoundingClientRect();
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+          if (style.contentVisibility === 'hidden') return false;
+          if (parseFloat(style.opacity) < alphaFloor) return false;
+          if (visuallyHidden(style, ancestorBox)) return false;
+        }
+        return true;
+      };
+      const nodes = [];
+      for (const region of regions) {
+        const walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const words = node.data.replace(/\s+/g, ' ').trim();
+          const element = node.parentElement;
+          if (!words || !element || ['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(element.tagName)) {
+            continue;
+          }
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const rects = Array.from(range.getClientRects());
+          const box = range.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          if (!visible(element, box) || !textPaints(element, style)) continue;
+          nodes.push({ region, node, element, words, rects });
+        }
+      }
+      if (!nodes.length) return regions.map(() => '');
+      const pageWidth = Math.max(document.documentElement.scrollWidth, window.innerWidth);
+      const pageHeight = Math.max(document.documentElement.scrollHeight, window.innerHeight);
+      const rootMargin = [
+        Math.max(0, window.scrollY),
+        Math.max(0, pageWidth - window.scrollX - window.innerWidth),
+        Math.max(0, pageHeight - window.scrollY - window.innerHeight),
+        Math.max(0, window.scrollX),
+      ].map((value) => `${value}px`).join(' ');
+      const intersections = await new Promise((resolve) => {
+        const targets = Array.from(new Set(nodes.map(({ element }) => element)));
+        const measured = new Map();
+        const observer = new IntersectionObserver((entries) => {
+          for (const entry of entries) measured.set(entry.target, entry.intersectionRect);
+          if (measured.size !== targets.length) return;
+          observer.disconnect();
+          resolve(measured);
+        }, { rootMargin });
+        targets.forEach((element) => observer.observe(element));
+      });
+      const overlaps = (first, second) =>
+        first.width > 0 && first.height > 0 && second.width > 0 && second.height > 0 &&
+        Math.max(first.left, second.left) < Math.min(first.right, second.right) &&
+        Math.max(first.top, second.top) < Math.min(first.bottom, second.bottom);
+      const paintedAtPoint = (node, rect, bounds) => {
+        const left = Math.max(bounds.left, rect.left);
+        const right = Math.min(bounds.right, rect.right);
+        const top = Math.max(bounds.top, rect.top);
+        const bottom = Math.min(bounds.bottom, rect.bottom);
+        if (left >= right || top >= bottom) return false;
+        const parent = node.parentElement;
+        return [0.2, 0.5, 0.8].some((part) => {
+          const x = left + (right - left) * part;
+          const y = top + (bottom - top) / 2;
+          const caret = document.caretRangeFromPoint(x, y);
+          if (caret && (caret.startContainer === node || parent.contains(caret.startContainer))) {
+            return true;
+          }
+          const hits = document.elementsFromPoint(x, y);
+          const parentIndex = hits.findIndex((hit) => hit === parent || parent.contains(hit));
+          if (parentIndex < 0) return false;
+          return hits.slice(0, parentIndex).every((hit) => {
+            const style = getComputedStyle(hit);
+            const background = paintHasAlpha(style.backgroundColor) ? style.backgroundColor : null;
+            const alpha = background?.match(
+              /(?:rgba?\([^/]+\/\s*|rgba\(\s*[^,]+,\s*[^,]+,\s*[^,]+,\s*)([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?)/
+            )?.[1];
+            const backgroundAlpha = alpha
+              ? (alpha.endsWith('%') ? parseFloat(alpha) / 100 : parseFloat(alpha))
+              : (background ? 1 : 0);
+            return parseFloat(style.opacity) < 1 ||
+              (backgroundAlpha < 0.999 && style.backgroundImage === 'none');
+          });
+        });
+      };
+      const viewport = {
+        left: 0,
+        right: window.innerWidth,
+        top: 0,
+        bottom: window.innerHeight,
+        width: window.innerWidth,
+        height: window.innerHeight,
+      };
+      const parts = new Map(regions.map((region) => [region, []]));
+      for (const { region, node, element, words, rects } of nodes) {
+        const intersection = intersections.get(element);
+        if (intersection && rects.some((rect) =>
+          overlaps(rect, intersection) &&
+          (!overlaps(rect, viewport) || paintedAtPoint(node, rect, viewport))
+        )) {
+          parts.get(region).push(words);
+        }
+      }
+      return regions.map((region) =>
+        Array.from(parts.get(region).join(' ').replace(/\s+/g, ' ').trim())
+          .slice(0, visibleTextMaxChars).join('')
+      );
+    }
+    const namedRegions = Array.from(root.querySelectorAll('[data-app-region]'))
+      .map((element) => ({
+        element,
+        name: (element.getAttribute('data-app-region') || '').trim(),
+      }))
+      .filter(({ name }) => Boolean(name))
       .slice(0, regionMax);
+    const names = namedRegions.map(({ name }) => name);
+    const visibleTexts = await visibleRegionText(
+      namedRegions.map(({ element }) => element),
+      alphaFloor,
+      visibleTextMaxChars
+    );
+    const visibleTextByName = new Map(
+      namedRegions.map(({ name }, index) => [name, visibleTexts[index]])
+    );
     const presentation = new Set(presentationProperties);
     const serializer = new XMLSerializer();
     const encoder = new TextEncoder();
@@ -817,6 +1351,7 @@ async function renderedDesignRegions(page) {
         width: (right + 1 - left) / viewport.width,
         height: (bottom + 1 - top) / viewport.height,
         aboveFold: true,
+        visibleText: visibleTextByName.get(name) || '',
       });
     }
     if (root.outerHTML !== source || sourceShape() !== shape) {
@@ -837,31 +1372,9 @@ async function renderedDesignRegions(page) {
     presentationProperties: Array.from(SVG_PRESENTATION_PROPERTIES),
     propertyMax: DESIGN_PROPERTY_MAX,
     regionMax: DESIGN_REGION_MAX,
+    visibleTextMaxChars: DESIGN_VISIBLE_TEXT_MAX_CHARS,
     viewport: DESIGN_VIEWPORT,
   });
-}
-
-async function designRegionAudit(browser, designUrl) {
-  const context = await browser.newContext({
-    viewport: DESIGN_VIEWPORT,
-    deviceScaleFactor: 1,
-    reducedMotion: 'reduce',
-    serviceWorkers: 'block',
-  });
-  await context.route(/^https?:/, async (route) => {
-    if (route.request().url() === designUrl) await route.continue();
-    else await route.abort();
-  });
-  const page = await context.newPage();
-  try {
-    const response = await page.goto(designUrl, {
-      waitUntil: 'load',
-    });
-    if (!response || !response.ok()) return [];
-    return await renderedDesignRegions(page);
-  } finally {
-    await context.close();
-  }
 }
 
 async function designOnly(svgPath) {
@@ -896,9 +1409,13 @@ async function interactionAudit(browser, url) {
     colorScheme: 'light',
   });
   const index = await source.newPage();
+  const indexResourceProblems = trackApplicationResources(index, url);
   await index.goto(url, { waitUntil: 'load' });
+  await assertApplicationResources(indexResourceProblems);
   const indexFrame = await applicationFrame(index);
   await waitForApplicationReady(indexFrame);
+  await indexFrame.evaluate(() => document.fonts.ready);
+  await assertApplicationResources(indexResourceProblems);
   const controls = await indexFrame.evaluate(controlCandidates);
   const initial = JSON.parse(await indexFrame.evaluate(visibleState));
   await source.close();
@@ -920,6 +1437,7 @@ async function interactionAudit(browser, url) {
       colorScheme: 'light',
     });
     const page = await context.newPage();
+    const resourceProblems = trackApplicationResources(page, url);
     page.on('console', (message) => {
       if (message.type() === 'error' && problems.length < 8) {
         problems.push(`console: ${message.text()}`.slice(0, 500));
@@ -930,8 +1448,11 @@ async function interactionAudit(browser, url) {
     });
     try {
       await page.goto(url, { waitUntil: 'load' });
+      await assertApplicationResources(resourceProblems);
       const frame = await applicationFrame(page);
       await waitForApplicationReady(frame);
+      await frame.evaluate(() => document.fonts.ready);
+      await assertApplicationResources(resourceProblems);
       let before = '';
       let after = '';
       for (let index = 0; index < path.length; index += 1) {
@@ -952,6 +1473,8 @@ async function interactionAudit(browser, url) {
         }
         await endApplicationObservation(frame, epoch, APPLICATION_INTERACTION_TIMEOUT_MS);
         const stepAfter = await waitForApplicationInteraction(frame, stepBefore);
+        await frame.evaluate(() => document.fonts.ready);
+        await assertApplicationResources(resourceProblems);
         if (index === path.length - 1) after = stepAfter || stepBefore;
       }
       const controlCalls = await page.evaluate(() => window.__ufoCalls || []);
@@ -976,8 +1499,11 @@ async function interactionAudit(browser, url) {
         call.method === 'POST' && call.path === 'objects/eval_app_action'
       )) {
         await page.reload({ waitUntil: 'load' });
+        await assertApplicationResources(resourceProblems);
         const reloadedFrame = await applicationFrame(page);
         await waitForApplicationReady(reloadedFrame);
+        await reloadedFrame.evaluate(() => document.fonts.ready);
+        await assertApplicationResources(resourceProblems);
         reloadStates.push({ control: control.name, ...JSON.parse(
           await reloadedFrame.evaluate(visibleState)
         ) });
@@ -1068,27 +1594,24 @@ async function main() {
     await designOnly(process.argv[3]);
     return;
   }
-  const [url, reportPath, lightShot, darkShot, interactivePath, staticPath, designUrl] = process.argv.slice(2);
-  if (!url || !reportPath || !lightShot || !darkShot || !interactivePath || !staticPath || !designUrl) {
+  const [
+    root, reportPath, lightShot, darkShot, interactivePath, staticPath,
+    acceptedDesignPath, acceptedEvidencePath,
+  ] = process.argv.slice(2);
+  if (!root || !reportPath || !lightShot || !darkShot || !interactivePath || !staticPath ||
+      !acceptedDesignPath || !acceptedEvidencePath || process.argv.length !== 10) {
     console.error(
-      'usage: node app-audit.cjs <url> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <design-url>'
+      'usage: node app-audit.cjs <application-root> <report.json> <light.png> <dark.png> <interactive.html> <static.html> <accepted-design.svg> <accepted-design-evidence.json>'
     );
     process.exit(2);
   }
-  const applicationUrl = new URL(url);
-  const acceptedDesignUrl = new URL(designUrl);
-  if (
-    acceptedDesignUrl.origin !== applicationUrl.origin ||
-    acceptedDesignUrl.pathname !== '/accepted-design.svg' ||
-    acceptedDesignUrl.search ||
-    acceptedDesignUrl.hash
-  ) {
-    throw new Error('accepted application design URL is invalid');
-  }
+  const application = await validatedApplicationRoot(root);
+  const designRegions = acceptedDesignRegions(acceptedDesignPath, acceptedEvidencePath);
+  const { server, sockets, url } = await startApplicationServer(application);
   const shots = { light: lightShot, dark: darkShot };
-  const browser = await chromium.launch();
+  let browser = null;
   try {
-    const designRegions = await designRegionAudit(browser, acceptedDesignUrl.href);
+    browser = await chromium.launch();
     const views = await Promise.all(VIEWS.map(async (view) => {
       const context = await browser.newContext({
         viewport: { width: view.width, height: view.height },
@@ -1097,6 +1620,7 @@ async function main() {
       try {
     const page = await context.newPage();
     const problems = [];
+    const resourceProblems = trackApplicationResources(page, url);
     page.on('console', (message) => {
       if (message.type() === 'error' && problems.length < 8) {
         problems.push(`console: ${message.text()}`.slice(0, 500));
@@ -1106,7 +1630,11 @@ async function main() {
       if (problems.length < 8) problems.push(`pageerror: ${error.message}`.slice(0, 500));
     });
     await page.goto(url, { waitUntil: 'load' });
+    await assertApplicationResources(resourceProblems);
     const frame = await applicationFrame(page);
+    await waitForApplicationReady(frame);
+    await frame.evaluate(() => document.fonts.ready);
+    await assertApplicationResources(resourceProblems);
     const measured = await measureApplication(frame, AA_FLOOR);
     const shot = view.shoot ? shots[view.scheme] : '';
     if (shot) await page.screenshot({ path: shot });
@@ -1175,7 +1703,7 @@ async function main() {
       `${interaction.successes.length}/${interaction.controls.length} controls changed visible state`
     );
   } finally {
-    await browser.close();
+    await closeApplicationAudit(browser, server, sockets);
   }
 }
 
@@ -1201,10 +1729,16 @@ async function run() {
 module.exports = {
   ApplicationLifecycleError,
   beginApplicationObservation,
+  closeApplicationAudit,
+  closeApplicationServer,
   endApplicationObservation,
   interactionAudit,
   measure,
   measureApplication,
+  assertApplicationResources,
+  startApplicationServer,
+  trackApplicationResources,
+  validatedApplicationRoot,
   waitForApplicationReady,
 };
 

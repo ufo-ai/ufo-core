@@ -1179,6 +1179,7 @@ class _AppBenchProbe:
         paths = (
             directory / f"{self.name}-design.html",
             directory / f"{self.name}-design.svg",
+            directory / f"{self.name}-design-evidence.json",
             directory / f"{self.name}-interactive.html",
             directory / f"{self.name}-static.html",
             directory / f"{self.name}-audit.json",
@@ -1202,7 +1203,6 @@ class _AppBenchProbe:
             output_dir=directory,
             project=APP_WORKSPACE_ROOT,
             design_path=APP_DESIGN_PATH,
-            port=PROBE_PORT,
             compile_source=False,
         )
 

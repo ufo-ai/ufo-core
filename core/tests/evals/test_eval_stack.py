@@ -1,5 +1,6 @@
 import asyncio
 import json
+import signal
 import sys
 import tomllib
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ from evals.stack import (
     Matrix,
     RunSpec,
     _database_name,
+    _docker,
     derived_config,
     materialize_readiness,
     template_config,
@@ -317,6 +319,51 @@ async def test_shutdown_releases_the_docker_sandboxes_this_stack_created(
         ("rm", "-f", f"ufo-sbx-{mine}"),
         ("network", "rm", f"ufo-sandbox-{mine.hex}"),
     ]
+
+
+async def test_shutdown_finishes_its_release_list_after_docker_refuses_a_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(DOCKER_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="release-all", config=template, args=("--only", "basics")),
+        root=tmp_path / "run" / "release-all",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    held = UUID("11111111-2222-3333-4444-555555555555")
+    last = UUID("66666666-7777-8888-9999-aaaaaaaaaaaa")
+    workspaces = stack.config.sandbox.workspace_root
+    for conversation in (held, last):
+        (workspaces / str(conversation)).mkdir(parents=True)
+    calls: list[tuple[str, ...]] = []
+
+    async def refuse(*argv: str) -> None:
+        calls.append(argv)
+        if argv == ("network", "rm", f"ufo-sandbox-{held.hex}"):
+            raise RuntimeError(f"docker {' '.join(argv)} exited 1: network has active endpoints")
+        if argv == ("rm", "-f", f"ufo-sbx-{last}"):
+            raise FileNotFoundError(2, "No such file or directory: 'docker'")
+
+    monkeypatch.setattr(eval_stack, "_docker", refuse)
+
+    await stack._shutdown(_ExitedProcess(), _ExitedProcess())
+    events = [json.loads(line) for line in (stack.root / "process.log").read_text().splitlines()]
+    _close(stack)
+
+    assert calls == [
+        ("rm", "-f", f"ufo-sbx-{held}"),
+        ("network", "rm", f"ufo-sandbox-{held.hex}"),
+        ("rm", "-f", f"ufo-sbx-{last}"),
+        ("network", "rm", f"ufo-sandbox-{last.hex}"),
+    ]
+    assert [(event["action"], event["name"]) for event in events] == [
+        ("release-failed", f"network rm ufo-sandbox-{held.hex}"),
+        ("release-failed", f"rm -f ufo-sbx-{last}"),
+    ]
+    assert "active endpoints" in events[0]["detail"]
 
 
 async def test_shutdown_leaves_sandboxes_alone_on_a_backend_that_owns_no_containers(
@@ -859,6 +906,242 @@ async def test_stack_prepares_the_app_eval_after_seed_and_before_serve(
 
     assert result.passed
     assert events == ["image", "seed", "prepare", "serve"]
+
+
+async def test_cancelled_drive_reaps_eval_before_sandbox_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="cancel", config=template),
+        root=tmp_path / "cancel",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    events: list[str] = []
+    eval_waiting = asyncio.Event()
+    eval_signalled = asyncio.Event()
+    eval_may_exit = asyncio.Event()
+    watcher_started = {"serve": asyncio.Event(), "egress": asyncio.Event()}
+    watcher_cancelled: set[str] = set()
+    session: bool | None = None
+
+    class Service:
+        def __init__(self, name: str, pid: int) -> None:
+            self.name = name
+            self.pid = pid
+            self.returncode: int | None = None
+            self.exited = asyncio.Event()
+
+        async def wait(self) -> int:
+            watcher_started[self.name].set()
+            try:
+                await self.exited.wait()
+            except asyncio.CancelledError:
+                watcher_cancelled.add(self.name)
+                raise
+            return self.returncode or 0
+
+        def terminate(self) -> None:
+            self.returncode = 0
+            self.exited.set()
+
+        def kill(self) -> None:
+            raise AssertionError("service did not need SIGKILL")
+
+    class EvalProcess:
+        pid = 900
+        returncode: int | None = None
+
+        async def wait(self) -> int:
+            eval_waiting.set()
+            await eval_may_exit.wait()
+            self.returncode = -signal.SIGTERM
+            events.append("eval-exited")
+            return self.returncode
+
+    serve = Service("serve", 901)
+    egress = Service("egress", 902)
+    child = EvalProcess()
+
+    async def create(*_argv: str, **kwargs: object) -> EvalProcess:
+        nonlocal session
+        session = bool(kwargs["start_new_session"])
+        return child
+
+    async def nothing(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def done_ufoctl(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    async def seed(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def start_serve(*_args: object, **_kwargs: object) -> Service:
+        return serve
+
+    async def start_egress(*_args: object, **_kwargs: object) -> Service:
+        return egress
+
+    async def release(*_args: object, **_kwargs: object) -> None:
+        events.append("sandboxes-released")
+
+    def kill_group(pid: int, sent: signal.Signals) -> None:
+        assert (pid, sent) == (child.pid, signal.SIGTERM)
+        events.append("eval-terminated")
+        eval_signalled.set()
+
+    monkeypatch.setattr(eval_stack, "_egress_binary", lambda _: tmp_path / "ufo-egress")
+    monkeypatch.setattr(eval_stack.asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(eval_stack.os, "killpg", kill_group)
+    monkeypatch.setattr(EvalStack, "_prepare_sandbox_image", nothing)
+    monkeypatch.setattr(EvalStack, "_create_databases", nothing)
+    monkeypatch.setattr(EvalStack, "_ufoctl", done_ufoctl)
+    monkeypatch.setattr(EvalStack, "_checked", nothing)
+    monkeypatch.setattr(EvalStack, "_preflight", nothing)
+    monkeypatch.setattr(EvalStack, "_seed", seed)
+    monkeypatch.setattr(EvalStack, "_prepare_app_eval", nothing)
+    monkeypatch.setattr(EvalStack, "_start_serve", start_serve)
+    monkeypatch.setattr(EvalStack, "_start_egress", start_egress)
+    monkeypatch.setattr(EvalStack, "_ready", nothing)
+    monkeypatch.setattr(EvalStack, "_egress_ready", nothing)
+    monkeypatch.setattr(EvalStack, "_release_sandboxes", release)
+
+    task = asyncio.create_task(stack.run(asyncio.Lock()))
+    await eval_waiting.wait()
+    await asyncio.gather(*(event.wait() for event in watcher_started.values()))
+    task.cancel()
+    await eval_signalled.wait()
+
+    assert events == ["eval-terminated"]
+
+    eval_may_exit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert session is True
+    assert watcher_cancelled == {"serve", "egress"}
+    assert events.index("eval-terminated") < events.index("eval-exited")
+    assert events.index("eval-exited") < events.index("sandboxes-released")
+
+
+async def test_docker_cleanup_reports_real_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        (
+            (1, b"", b"Error response from daemon: No such container: ufo-sbx-missing"),
+            (1, b"", b"Error response from daemon: network ufo-sandbox-missing not found"),
+            (1, b"", b"Cannot connect to the Docker daemon"),
+            (1, b"", b"network has active endpoints"),
+        )
+    )
+
+    class Process:
+        def __init__(self, response: tuple[int, bytes, bytes]) -> None:
+            self.returncode, self.stdout, self.stderr = response
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return self.stdout, self.stderr
+
+    async def create(*_argv: str, **_kwargs: object) -> Process:
+        return Process(next(responses))
+
+    monkeypatch.setattr(eval_stack.asyncio, "create_subprocess_exec", create)
+
+    assert await _docker("rm", "-f", "ufo-sbx-missing") is None
+    assert await _docker("network", "rm", "ufo-sandbox-missing") is None
+    assert await _docker("rm", "-f", "ufo-sbx-live") == (
+        "docker rm -f ufo-sbx-live exited 1: Cannot connect to the Docker daemon"
+    )
+    assert await _docker("network", "rm", "ufo-sandbox-live") == (
+        "docker network rm ufo-sandbox-live exited 1: network has active endpoints"
+    )
+
+
+async def test_docker_cleanup_reports_an_os_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def create(*_argv: str, **_kwargs: object) -> object:
+        raise OSError("docker is unavailable")
+
+    monkeypatch.setattr(eval_stack.asyncio, "create_subprocess_exec", create)
+
+    assert await _docker("rm", "-f", "ufo-sbx-live") == (
+        "docker rm -f ufo-sbx-live failed: docker is unavailable"
+    )
+
+
+async def test_cleanup_failures_preserve_the_child_outcome_and_release_later_sandboxes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(DOCKER_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(label="cleanup-outcome", config=template),
+        root=tmp_path / "run",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+    first = UUID("11111111-2222-3333-4444-555555555555")
+    second = UUID("66666666-7777-8888-9999-aaaaaaaaaaaa")
+    workspaces = stack.config.sandbox.workspace_root
+    (workspaces / str(first)).mkdir(parents=True)
+    (workspaces / str(second)).mkdir()
+    calls: list[tuple[str, ...]] = []
+
+    async def nothing(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def done_ufoctl(*_args: object, **_kwargs: object) -> _DoneProcess:
+        return _DoneProcess()
+
+    async def start(*_args: object, **_kwargs: object) -> _DoneProcess:
+        return _DoneProcess()
+
+    async def drive(*_args: object, **_kwargs: object) -> int:
+        return 7
+
+    async def docker(*argv: str) -> str | None:
+        calls.append(argv)
+        if len(calls) == 1:
+            raise RuntimeError("docker daemon unavailable")
+        return None
+
+    monkeypatch.setattr(eval_stack, "_egress_binary", lambda _: tmp_path / "ufo-egress")
+    monkeypatch.setattr(eval_stack, "_docker", docker)
+    monkeypatch.setattr(EvalStack, "_prepare_sandbox_image", nothing)
+    monkeypatch.setattr(EvalStack, "_create_databases", nothing)
+    monkeypatch.setattr(EvalStack, "_ufoctl", done_ufoctl)
+    monkeypatch.setattr(EvalStack, "_preflight", nothing)
+    monkeypatch.setattr(EvalStack, "_seed", nothing)
+    monkeypatch.setattr(EvalStack, "_prepare_app_eval", nothing)
+    monkeypatch.setattr(EvalStack, "_start_serve", start)
+    monkeypatch.setattr(EvalStack, "_start_egress", start)
+    monkeypatch.setattr(EvalStack, "_ready", nothing)
+    monkeypatch.setattr(EvalStack, "_egress_ready", nothing)
+    monkeypatch.setattr(EvalStack, "_drive", drive)
+
+    result = await stack.run(asyncio.Lock())
+    events = [json.loads(line) for line in (stack.root / "process.log").read_text().splitlines()]
+
+    assert result.exit_code == 7
+    assert not result.passed
+    assert calls == [
+        ("rm", "-f", f"ufo-sbx-{first}"),
+        ("network", "rm", f"ufo-sandbox-{first.hex}"),
+        ("rm", "-f", f"ufo-sbx-{second}"),
+        ("network", "rm", f"ufo-sandbox-{second.hex}"),
+    ]
+    assert [event for event in events if event["action"] == "release-failed"] == [
+        {
+            "at": events[0]["at"],
+            "action": "release-failed",
+            "name": f"rm -f ufo-sbx-{first}",
+            "detail": "RuntimeError: docker daemon unavailable",
+        }
+    ]
 
 
 async def test_app_stack_rejects_missing_build_products_before_seed(

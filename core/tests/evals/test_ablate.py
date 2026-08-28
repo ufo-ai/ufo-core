@@ -1,10 +1,13 @@
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import tomllib
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import tomli_w
@@ -24,6 +27,7 @@ from evals.ablate import (
     ArmSpec,
     CaseCount,
     ExperimentSpec,
+    StackRun,
     collect_counts,
     ingestion_suites,
     load_experiment,
@@ -31,6 +35,8 @@ from evals.ablate import (
     render_report,
     verdict,
 )
+from evals.harness.harness import EvalCaseResult, EvalReport
+from evals.harness.viewer import EvalRun
 from evals.memory_ingestion.models import (
     IngestionCase,
     IngestionPage,
@@ -577,6 +583,273 @@ def _stack_record(index: int, suites: tuple[str, ...]) -> dict:
     }
 
 
+def test_ablation_writes_one_offline_viewer_for_archived_app_artifacts(tmp_path: Path) -> None:
+    run = EvalRun(
+        id=uuid4(),
+        created_at=datetime.now(UTC),
+        label="ablate-control-0",
+        agent="assistant",
+        ufo_version="test",
+        revision="abc123",
+        reports=(
+            EvalReport(
+                name="New application",
+                suite="new_application",
+                digest="sha256:test",
+                cases=(
+                    EvalCaseResult(
+                        name="A07-named-homepage-journey",
+                        passed=True,
+                        reason="passed",
+                        evidence={
+                            "attempts": [
+                                {
+                                    "artifactContents": [
+                                        {
+                                            "name": "homepage-interactive.html",
+                                            "mediaType": "text/html",
+                                            "dataUri": (
+                                                "data:text/html;base64,PG1haW4+QXBwPC9tYWluPg=="
+                                            ),
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                    ),
+                ),
+            ),
+        ),
+    )
+    archive = tmp_path / "out/runs/control"
+    archive.mkdir(parents=True)
+    (archive / f"{run.id}.json").write_text(run.model_dump_json(by_alias=True, exclude_none=True))
+    ablation = Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")
+
+    viewer = ablation._write_viewer()
+
+    assert viewer == tmp_path / "out/viewer/index.html"
+    page = viewer.read_text()
+    assert "homepage-interactive.html" in page
+    assert "data:text/html;base64,PG1haW4+QXBwPC9tYWluPg==" in page
+    assert "http://" not in page
+
+
+def _viewer_run(label: str) -> EvalRun:
+    return EvalRun(
+        id=uuid4(),
+        created_at=datetime.now(UTC),
+        label=label,
+        agent="assistant",
+        ufo_version="test",
+        revision="abc123",
+        reports=(),
+    )
+
+
+def test_ablation_viewer_keeps_valid_runs_beside_a_truncated_json_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "out/runs"
+    left = _viewer_run("control")
+    right = _viewer_run("treatment")
+    for arm in ("a-control", "b-broken", "c-treatment"):
+        (archive / arm).mkdir(parents=True)
+    (archive / "a-control/run.json").write_text(left.model_dump_json())
+    (archive / "b-broken/run.json").write_text('{"id":')
+    (archive / "c-treatment/run.json").write_text(right.model_dump_json())
+    captured: list[tuple[EvalRun, ...]] = []
+
+    def capture(root: Path, runs: tuple[EvalRun, ...]) -> Path:
+        captured.append(runs)
+        return root / "index.html"
+
+    monkeypatch.setattr(ablate, "write_viewer", capture)
+    experiment = Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")
+
+    experiment._write_viewer()
+    experiment._write_viewer()
+
+    assert [run.label for run in captured[0]] == [
+        "control",
+        "Invalid archive record: b-broken/run.json",
+        "treatment",
+    ]
+    assert captured[0][1] == captured[1][1]
+    error = captured[0][1].reports[0].cases[0]
+    assert error.passed is False
+    assert error.evidence == {
+        "record": "b-broken/run.json",
+        "error": "ValidationError",
+    }
+
+
+def test_ablation_viewer_isolates_one_truncated_jsonl_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "out/runs/control"
+    archive.mkdir(parents=True)
+    first = _viewer_run("first")
+    second = _viewer_run("second")
+    (archive / "runs.jsonl").write_text(
+        "\n".join((first.model_dump_json(), '{"id":', second.model_dump_json())) + "\n"
+    )
+    captured: list[EvalRun] = []
+
+    def capture(root: Path, runs: tuple[EvalRun, ...]) -> Path:
+        captured.extend(runs)
+        return root / "index.html"
+
+    monkeypatch.setattr(ablate, "write_viewer", capture)
+
+    Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")._write_viewer()
+
+    assert [run.label for run in captured] == [
+        "first",
+        "Invalid archive record: control/runs.jsonl:2",
+        "second",
+    ]
+    assert captured[1].reports[0].cases[0].name == "control/runs.jsonl:2"
+
+
+def test_max_stacks_bounds_all_arm_repeats_and_releases_after_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = _spec(
+        repeats=3,
+        max_stacks=2,
+        arm=(ArmSpec(name="left", files={}), ArmSpec(name="right", files={})),
+    )
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+    arms = (ArmSpec.model_construct(name="control", files={}), *spec.arm)
+    active = 0
+    peak = 0
+    calls: list[tuple[str, int]] = []
+    first_pair = asyncio.Event()
+
+    async def stack(self: Ablation, arm: ArmSpec, root: Path, index: int = 0) -> tuple[int, str]:
+        nonlocal active, peak
+        call = (arm.name, index)
+        calls.append(call)
+        active += 1
+        peak = max(peak, active)
+        try:
+            if len(calls) == 2:
+                first_pair.set()
+            if len(calls) <= 2:
+                await first_pair.wait()
+            if call == ("right", 1):
+                raise RuntimeError("stack failed")
+            return 0, f"{arm.name}-{index}"
+        finally:
+            active -= 1
+
+    async def run() -> tuple[tuple[ablate.StackRun, ...], ...]:
+        slots = asyncio.Semaphore(spec.max_stacks)
+        return tuple(
+            await asyncio.gather(
+                *(ablation._run_arm_stacks(arm, tmp_path / arm.name, slots) for arm in arms)
+            )
+        )
+
+    monkeypatch.setattr(Ablation, "_stack", stack)
+    results = asyncio.run(run())
+
+    assert peak == 2
+    assert sorted(calls) == sorted(
+        (arm.name, index) for arm in arms for index in range(spec.repeats)
+    )
+    assert [[item.index for item in result] for result in results] == [[0, 1, 2]] * 3
+    assert [[item.output for item in result] for result in results] == [
+        ["control-0", "control-1", "control-2"],
+        ["left-0", "left-1", "left-2"],
+        ["right-0", "", "right-2"],
+    ]
+    assert results[2][1].error == "repeat 1: RuntimeError: stack failed"
+
+
+@pytest.mark.parametrize(
+    ("ignored", "exit_signal"),
+    (
+        ((signal.SIGINT,), signal.SIGTERM),
+        ((signal.SIGINT, signal.SIGTERM), signal.SIGKILL),
+    ),
+)
+async def test_cancelled_stack_escalates_and_reaps_before_releasing_permit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ignored: tuple[signal.Signals, ...],
+    exit_signal: signal.Signals,
+) -> None:
+    started = asyncio.Event()
+    signalled = asyncio.Event()
+    may_exit = asyncio.Event()
+    first_reaped = asyncio.Event()
+    entered: list[str] = []
+    sessions: list[bool] = []
+    signals: list[signal.Signals] = []
+    processes = 0
+
+    class Process:
+        def __init__(self, index: int) -> None:
+            self.index = index
+            self.pid = 700 + index
+            self.returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            if self.index == 0:
+                started.set()
+                await may_exit.wait()
+                self.returncode = -exit_signal
+                first_reaped.set()
+            else:
+                self.returncode = 0
+            return b"complete", b""
+
+    async def create(*_argv: str, **kwargs: object) -> Process:
+        nonlocal processes
+        sessions.append(bool(kwargs["start_new_session"]))
+        process = Process(processes)
+        processes += 1
+        return process
+
+    def kill_group(pid: int, sent: signal.Signals) -> None:
+        assert pid == 700
+        signals.append(sent)
+        if sent == exit_signal:
+            signalled.set()
+
+    monkeypatch.setattr(ablate.asyncio, "create_subprocess_exec", create)
+    monkeypatch.setattr(ablate.os, "killpg", kill_group)
+    monkeypatch.setattr(ablate, "STACK_CANCEL_SIGINT_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(ablate, "STACK_CANCEL_SIGTERM_WAIT_SECONDS", 0.01)
+    ablation = Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")
+    permit = asyncio.Semaphore(1)
+
+    async def guarded(name: str) -> tuple[int, str]:
+        async with permit:
+            entered.append(name)
+            return await ablation._stack(_spec().arm[0], tmp_path / name)
+
+    first = asyncio.create_task(guarded("first"))
+    await started.wait()
+    second = asyncio.create_task(guarded("second"))
+    first.cancel()
+    await signalled.wait()
+
+    assert entered == ["first"]
+    assert not first_reaped.is_set()
+    assert signals == [*ignored, exit_signal]
+
+    may_exit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert await second == (0, "complete")
+    assert entered == ["first", "second"]
+    assert first_reaped.is_set()
+    assert sessions == [True, True]
+
+
 def test_an_arm_installs_no_dev_group_and_the_failure_names_the_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -639,6 +912,14 @@ def test_a_remote_arm_carries_the_preflighted_client(
     carried = root / REMOTE_CLIENT_BINARY
     assert carried.read_bytes() == client.read_bytes()
     assert carried.stat().st_mode & 0o111
+    matrices = [
+        Matrix.model_validate(tomllib.loads((root / f"ablate-matrix-{index}.toml").read_text()))
+        for index in range(spec.repeats)
+    ]
+    assert [[run.label for run in matrix.run] for matrix in matrices] == [
+        ["ablate-knockout-0"],
+        ["ablate-knockout-1"],
+    ]
 
 
 def test_the_stack_runs_the_arm_environment_without_the_dev_group(
@@ -764,7 +1045,7 @@ def _archived_arm(
             logs.mkdir(parents=True)
             (logs / "serve.log").write_text("serve booted")
 
-    async def stack(self: Ablation, arm: ArmSpec, target: Path) -> tuple[int, str]:
+    async def stack(self: Ablation, arm: ArmSpec, target: Path, index: int = 0) -> tuple[int, str]:
         return 1, "one case failed"
 
     monkeypatch.setattr(Ablation, "_materialize", materialize)
@@ -810,7 +1091,9 @@ def test_a_complete_arm_archives_its_logs_and_gives_the_worktree_back(
     assert result.gaps == ()
     assert result.kept_worktree is None
     assert not root.exists()
-    assert (archive / STACK_LOG).read_text() == "one case failed"
+    assert (archive / STACK_LOG).read_text() == (
+        "[repeat 0]\none case failed\n[repeat 1]\none case failed"
+    )
     assert (archive / LOGS_DIR / "ablate-knockout-1" / "serve.log").read_text() == "serve booted"
     assert sorted(path.name for path in archive.glob("*.json")) == ["0.json", "1.json"]
 
@@ -825,12 +1108,12 @@ def test_an_arm_archive_replaces_the_previous_run(tmp_path: Path) -> None:
     (archive / "stale.json").write_text("{}")
 
     Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")._archive(
-        root, archive, "current stack"
+        root, archive, (StackRun(0, 0, "current stack"),)
     )
 
     assert not (archive / "stale.json").exists()
     assert (archive / "current.json").is_file()
-    assert (archive / STACK_LOG).read_text() == "current stack"
+    assert (archive / STACK_LOG).read_text() == "[repeat 0]\ncurrent stack"
 
 
 def test_an_arm_that_lost_a_suite_keeps_its_worktree_and_says_which(

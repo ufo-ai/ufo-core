@@ -1,13 +1,12 @@
 import asyncio
-import http.client
 import json
 import re
 import shlex
 import subprocess
 import sys
 import threading
-import time
-from base64 import urlsafe_b64decode
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -19,7 +18,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from PIL import Image
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from ufo_ext_repl.manifest import JS_REPL_TOOL, XLSX_REPL_TOOL
 from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_WEB_TOOL
 from ufo_ext_sites import manifest as sites_manifest
@@ -28,9 +27,13 @@ from ufo_ext_sites import tools as sites_tools
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
     APPLICATION_AUDIT_REQUEST_CONTRACT_KEY,
-    APPLICATION_AUDIT_SERVER,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
+    APPLICATION_REGION_MIN_AREA,
+    APPLICATION_REGION_MIN_HEIGHT,
+    APPLICATION_REGION_MIN_WIDTH,
+    DESIGN_VISIBLE_TEXT_MAX_CHARS,
     MAX_PRODUCT_QA_CONTROLS,
+    AcceptedApplicationDesignEvidence,
     ApplicationAuditContract,
     ApplicationAuditFact,
     ApplicationAuditFeedback,
@@ -60,11 +63,13 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_REPAIR_READ_REASON,
     APPLICATION_BUILDER_SKILL,
     APPLICATION_BUILDER_WRITE_TOOL,
-    APPLICATION_DELEGATION_CLAIM,
     APPLICATION_DESIGN_ACCEPT,
+    APPLICATION_DESIGN_AUDIT_MAX_BYTES,
     APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS,
     APPLICATION_DESIGN_PATH,
     APPLICATION_DESIGN_RELEASE_ACCEPTED,
+    APPLICATION_DESIGN_RELEASE_CLAIM,
+    APPLICATION_FIXED_CALL_CLAIM,
     APPLICATION_INDEX,
     APPLICATION_PLACEHOLDER,
     APPLICATION_PREVIEW_FILENAME,
@@ -74,7 +79,6 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_SOURCE_CLAIM,
     APPLICATION_SOURCE_PATH,
     APPLICATION_SOURCE_READ,
-    APPLICATION_SOURCE_RELEASE_CLAIM,
     APPLICATION_SOURCE_REQUIRE_CLAIM,
     ApplicationBuildAcceptance,
     ApplicationBuilderResult,
@@ -90,6 +94,7 @@ from ufo_ext_sites.application_builder import (
     _validate_application_design,
     _validate_application_source,
     application_design_acceptance_relative,
+    application_design_evidence_relative,
     build_ufo_application,
     edit_application_source,
     homepage_design_block,
@@ -163,11 +168,26 @@ from ufo_ext_sites.tools import (
     website,
 )
 
+from ufo.access.connectors import ConnectorRegistry
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ExtensionContext, context_for
-from ufo.ext.loader import skill_registry
+from ufo.ext.loader import HookChain, skill_registry
+from ufo.hub import InProcessHub
+from ufo.loop.compaction import Compaction
+from ufo.loop.engine import TurnEngine
+from ufo.loop.prompts.render import rendered_prompt
 from ufo.loop.subagents import subagent_system_prompt
+from ufo.loop.transcript import Transcript
+from ufo.models.interface import (
+    ModelEvent,
+    ModelRequest,
+    TextDelta,
+    ToolCallDelta,
+    ToolCallStart,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from ufo.object_name import OBJECT_NAME_MAX_LENGTH
 from ufo.sandbox.session import (
     SANDBOX_MODULE_BOOTSTRAP,
@@ -176,7 +196,7 @@ from ufo.sandbox.session import (
     SandboxHandle,
 )
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.manifest import Deny, HookContext, PreToolUse
 from ufo.sdk.sandbox import WORKSPACE_DIR
@@ -184,6 +204,8 @@ from ufo.sdk.tools import TextContent, ToolResult
 from ufo.skills.runtime import install_skill
 from ufo.tools.builtins import BUILTIN_TOOLS
 from ufo.tools.context import SpawnResult, ToolContext
+from ufo.tools.registry import ToolRegistry
+from ufo.turns.activity import ActivitySummarizer
 from ufo.workspace import ws
 
 TOOL_NARRATION = "building the site"
@@ -269,7 +291,7 @@ class FakeSandbox:
     require_application_source_root: bool = False
     track_design_claim: bool = False
     claimed_paths: set[str] = field(default_factory=set)
-    delegation_claims: dict[str, str] = field(default_factory=dict)
+    fixed_call_claims: dict[str, str] = field(default_factory=dict)
     delegation_claim_fault: BaseException | None = None
     design_audit_barrier: asyncio.Barrier | None = None
     program_errors: dict[str, BaseException] = field(default_factory=dict)
@@ -290,7 +312,7 @@ class FakeSandbox:
 
     @property
     def design_claimed(self) -> bool:
-        return bool(self.claimed_paths or self.delegation_claims)
+        return bool(self.claimed_paths or self.fixed_call_claims)
 
     async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
         self.commands.append(command)
@@ -316,11 +338,11 @@ class FakeSandbox:
                 return ExecResult("", "application source escaped the workspace", 1)
         if program in self.program_errors:
             raise self.program_errors[program]
-        if self.track_design_claim and program == APPLICATION_DELEGATION_CLAIM:
+        if self.track_design_claim and program == APPLICATION_FIXED_CALL_CLAIM:
             path, _root, key = args
-            existing = self.delegation_claims.get(path)
+            existing = self.fixed_call_claims.get(path)
             if existing is None:
-                self.delegation_claims[path] = key
+                self.fixed_call_claims[path] = key
                 result = ExecResult("", "", 0)
             else:
                 result = ExecResult("", "", 18 if existing == key else 17)
@@ -334,30 +356,73 @@ class FakeSandbox:
                 return ExecResult("", "", 17)
             self.claimed_paths.add(args[0])
             return ExecResult("", "", 0)
-        if self.track_design_claim and program == APPLICATION_SOURCE_RELEASE_CLAIM:
-            if args[0] not in self.claimed_paths:
-                return ExecResult("", "application claim is absent", 1)
-            self.claimed_paths.remove(args[0])
-            return ExecResult("", "", 0)
         if program == APPLICATION_DESIGN_ACCEPT:
-            source_path, accepted_path, _root, max_chars = args
-            if accepted_path in self.writes:
-                return ExecResult("", "", 17)
+            (
+                source_path,
+                accepted_path,
+                evidence_source_path,
+                evidence_path,
+                claim_path,
+                _root,
+                identity,
+                max_chars,
+                max_evidence_chars,
+            ) = args
+            if self.track_design_claim:
+                existing = self.fixed_call_claims.get(claim_path)
+                if existing is None:
+                    self.fixed_call_claims[claim_path] = identity
+                elif existing != identity:
+                    return ExecResult("", "", 17)
             content = self.writes[source_path]
+            evidence = self.writes[evidence_source_path]
             if len(content) > int(max_chars):
                 return ExecResult("", "application design is too large", 1)
-            self.writes[accepted_path] = content
+            if len(evidence) > int(max_evidence_chars):
+                return ExecResult("", "application design evidence is too large", 1)
+            if (accepted_path in self.writes and self.writes[accepted_path] != content) or (
+                evidence_path in self.writes and self.writes[evidence_path] != evidence
+            ):
+                return ExecResult("", "application design pair differs", 1)
+            self.writes.setdefault(accepted_path, content)
+            self.writes.setdefault(evidence_path, evidence)
             return ExecResult("", "", 0)
         if program == APPLICATION_DESIGN_RELEASE_ACCEPTED:
-            accepted_path, _root, digest, max_chars = args
+            (
+                accepted_path,
+                evidence_path,
+                digest,
+                evidence_digest,
+                max_chars,
+                max_evidence_chars,
+                _root,
+                claim_path,
+                identity,
+            ) = args
             content = self.writes.get(accepted_path)
+            evidence = self.writes.get(evidence_path)
             if (
                 content is None
                 or len(content) > int(max_chars)
                 or sha256(content).hexdigest() != digest
+                or evidence is None
+                or len(evidence) > int(max_evidence_chars)
+                or sha256(evidence).hexdigest() != evidence_digest
+                or self.fixed_call_claims.get(claim_path) != identity
             ):
                 return ExecResult("", "accepted application design is not owned", 1)
             del self.writes[accepted_path]
+            del self.writes[evidence_path]
+            del self.fixed_call_claims[claim_path]
+            return ExecResult("", "", 0)
+        if program == APPLICATION_DESIGN_RELEASE_CLAIM:
+            claim_path, _root, identity = args
+            existing = self.fixed_call_claims.get(claim_path)
+            if existing is None:
+                return ExecResult("", "", 0)
+            if existing != identity:
+                return ExecResult("", "application design claim is not owned", 1)
+            del self.fixed_call_claims[claim_path]
             return ExecResult("", "", 0)
         for needle, result in self.scripted_paths.items():
             if args and needle in args[0]:
@@ -365,7 +430,8 @@ class FakeSandbox:
         for needle, result in self.scripted_programs.items():
             if needle in program:
                 return result
-        if program == APPLICATION_SOURCE_READ and args and args[0] in self.writes:
+        readable = (APPLICATION_SOURCE_READ, sites_tools.APPLICATION_AUDIT_REPORT_READ)
+        if program in readable and args and args[0] in self.writes:
             return ExecResult(self.writes[args[0]].decode(), "", 0)
         return self.claim
 
@@ -486,10 +552,38 @@ def _application_context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
     )
 
 
+def _application_design_context(ctx: ToolContext) -> ToolContext:
+    return replace(
+        ctx,
+        idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-1",
+    )
+
+
 def _seed_application_design(
     sandbox: FakeSandbox, scaffold_path: str = "/workspace/application"
 ) -> None:
     sandbox.writes[f"{scaffold_path}/application-design.svg"] = APPLICATION_DESIGN.encode()
+
+
+def _seed_accepted_application_design(sandbox: FakeSandbox, turn_id: UUID) -> None:
+    design = APPLICATION_DESIGN.encode()
+    accepted = (
+        f"{RUNTIME_ROOT}/{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, turn_id)}"
+    )
+    evidence = (
+        f"{RUNTIME_ROOT}/{application_design_evidence_relative(APPLICATION_DESIGN_PATH, turn_id)}"
+    )
+    sandbox.writes[accepted] = design
+    sandbox.writes[evidence] = (
+        AcceptedApplicationDesignEvidence(
+            design_sha256=sha256(design).hexdigest(),
+            regions=tuple(
+                ApplicationAuditRegion.model_validate(region) for region in AUDIT_DESIGN_REGIONS
+            ),
+        )
+        .model_dump_json(by_alias=True)
+        .encode()
+    )
 
 
 def test_manifest_declares_the_tools_the_profile_and_the_section() -> None:
@@ -711,6 +805,127 @@ def test_application_design_fidelity_rejects_overlapping_regions() -> None:
     }
 
 
+def test_application_design_fidelity_rejects_exact_text_token_regions() -> None:
+    report = ApplicationAuditReport.model_validate(
+        {
+            "designRegions": (
+                {
+                    "name": "queue",
+                    "left": 0,
+                    "top": 0,
+                    "width": 0.002,
+                    "height": 0.021,
+                },
+                {
+                    "name": "detail",
+                    "left": 0.03,
+                    "top": 0,
+                    "width": 0.001,
+                    "height": 0.021,
+                },
+            ),
+            "views": [],
+            "interaction": {"controls": [], "successes": [], "console": []},
+        }
+    )
+
+    assert application_design_fidelity(report) == ApplicationDesignFidelity(
+        passed=0,
+        total=1,
+        failures=("design region queue is too small",),
+    )
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "accepted"),
+    (
+        (APPLICATION_REGION_MIN_WIDTH - 0.001, 0.4, False),
+        (0.4, APPLICATION_REGION_MIN_HEIGHT - 0.001, False),
+        (0.1, APPLICATION_REGION_MIN_AREA / 0.1 - 0.001, False),
+        (APPLICATION_REGION_MIN_WIDTH, 0.4, True),
+        (0.4, APPLICATION_REGION_MIN_HEIGHT, True),
+        (0.1, APPLICATION_REGION_MIN_AREA / 0.1, True),
+    ),
+)
+def test_application_design_fidelity_region_size_boundaries(
+    width: float,
+    height: float,
+    accepted: bool,
+) -> None:
+    design_regions = (
+        {
+            "name": "queue",
+            "left": 0,
+            "top": 0,
+            "width": width,
+            "height": height,
+        },
+        {
+            "name": "detail",
+            "left": 0.6,
+            "top": 0.6,
+            "width": 0.4,
+            "height": 0.4,
+        },
+    )
+    report = ApplicationAuditReport.model_validate(
+        {
+            "designRegions": design_regions,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": 1440,
+                    "textChecked": 1,
+                    "text": [],
+                    "documentWidth": 1440,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Queue",
+                    "regions": design_regions,
+                }
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {"controls": [], "successes": [], "console": []},
+        }
+    )
+
+    fidelity = application_design_fidelity(report)
+
+    assert ("design region queue is too small" not in fidelity.failures) is accepted
+
+
+def test_application_design_fidelity_does_not_size_dom_regions() -> None:
+    application_regions = (
+        {**AUDIT_DESIGN_REGIONS[0], "height": 0.025},
+        {**AUDIT_DESIGN_REGIONS[1], "height": 0.025},
+    )
+    report = ApplicationAuditReport.model_validate(
+        {
+            "designRegions": AUDIT_DESIGN_REGIONS,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": 1440,
+                    "textChecked": 1,
+                    "text": [],
+                    "documentWidth": 1440,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Queue",
+                    "regions": application_regions,
+                }
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {"controls": [], "successes": [], "console": []},
+        }
+    )
+
+    fidelity = application_design_fidelity(report)
+
+    assert fidelity.failures == ()
+    assert fidelity.passed == fidelity.total
+
+
 def test_application_audit_runs_views_in_parallel_in_declared_order() -> None:
     source = APPLICATION_AUDIT_SCRIPT.decode()
 
@@ -727,7 +942,8 @@ def test_application_audit_runs_views_in_parallel_in_declared_order() -> None:
     assert "if (!(error instanceof ApplicationLifecycleError)" in source
     assert "sameLifecycle(probe.before, probe.after)" in source
     assert "finally {\n        await context.close();" in source
-    assert "finally {\n    await browser.close();" in source
+    assert "if (browser) await browser.close();" in source
+    assert "await closeApplicationServer(server, sockets);" in source
 
 
 def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
@@ -785,67 +1001,6 @@ def test_application_audit_returns_one_bounded_diagnostic_batch() -> None:
     }
     assert len(verdict.issues) <= 8
     assert all(len(issue.message) <= 500 for issue in verdict.issues)
-
-
-def test_application_audit_server_maps_root_assets(tmp_path: Path, unused_tcp_port: int) -> None:
-    project = tmp_path / "ufo-app"
-    asset = project / "dist" / "assets" / "app.js"
-    asset.parent.mkdir(parents=True)
-    asset.write_text("built application")
-    server = tmp_path / "application-audit-server.py"
-    server.write_bytes(APPLICATION_AUDIT_SERVER)
-    accepted_design = tmp_path / "accepted-design.svg"
-    accepted_design.write_bytes(APPLICATION_DESIGN.encode())
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            str(server),
-            str(project),
-            str(unused_tcp_port),
-            str(accepted_design),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.monotonic() + 2
-    try:
-        while True:
-            connection = http.client.HTTPConnection("127.0.0.1", unused_tcp_port, timeout=1)
-            try:
-                connection.request("GET", "/assets/app.js")
-                response = connection.getresponse()
-                body = response.read()
-            except OSError:
-                if process.poll() is not None:
-                    raise RuntimeError("application audit server stopped before serving") from None
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("application audit server did not start") from None
-                time.sleep(0.01)
-                continue
-            finally:
-                connection.close()
-            break
-        connection = http.client.HTTPConnection("127.0.0.1", unused_tcp_port, timeout=1)
-        connection.request("GET", "/accepted-design.svg")
-        design_response = connection.getresponse()
-        design_body = design_response.read()
-        connection.close()
-        connection = http.client.HTTPConnection("127.0.0.1", unused_tcp_port, timeout=1)
-        connection.request("GET", "/other-design.svg")
-        other_response = connection.getresponse()
-        other_response.read()
-        connection.close()
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            process.wait(timeout=2)
-
-    assert response.status == 200
-    assert body == b"built application"
-    assert design_response.status == 200
-    assert design_response.getheader("Content-Type") == "image/svg+xml"
-    assert design_body == APPLICATION_DESIGN.encode()
-    assert other_response.status == 404
 
 
 async def test_application_builder_audit_returns_feedback_to_the_same_worker(
@@ -924,6 +1079,7 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
         ),
         ext=cast(ExtensionContext, FakeHookExt(store)),
     )
+    _seed_accepted_application_design(sandbox, ctx.turn.id)
 
     feedback = await _audit_builder_application(ctx, "/workspace/ufo-app")
 
@@ -944,14 +1100,29 @@ async def test_application_builder_audit_returns_feedback_to_the_same_worker(
     sandbox.scripted_paths["/application-audit/"] = ExecResult(_report(False), "", 0)
     report = await _audit_builder_application(ctx, "/workspace/ufo-app")
     assert isinstance(report, ApplicationAuditReport)
-    audits = [script for script, _args, _timeout in sandbox.shells if script.startswith("node ")]
+    audits = [entry for entry in sandbox.shells if entry[0].startswith("node ")]
     assert len(audits) == 2
-    server_path = f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-server.py"
-    assert sandbox.writes[server_path] == APPLICATION_AUDIT_SERVER
-    assert len(sandbox.tasks) == 2
-    assert all(server_path in command for command, _base, _detach, _timeout in sandbox.tasks)
-    port_stops = [program for program, _args in sandbox.programs if program == PORT_STOP_PROG]
-    assert len(port_stops) == 4
+    script_path = f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}.cjs"
+    report_path = f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}.json"
+    assert audits[0] == (
+        'node "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"',
+        (
+            script_path,
+            "/workspace/ufo-app",
+            report_path,
+            f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-light.png",
+            f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-dark.png",
+            f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-interactive.html",
+            f"{RUNTIME_ROOT}/tool-output/application-audit/{ctx.turn.id}-static.html",
+            f"{RUNTIME_ROOT}/"
+            f"{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)}",
+            f"{RUNTIME_ROOT}/"
+            f"{application_design_evidence_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)}",
+        ),
+        sites_tools.APPLICATION_AUDIT_TIMEOUT_SECONDS,
+    )
+    assert sandbox.tasks == []
+    assert all(program != PORT_STOP_PROG for program, _args in sandbox.programs)
 
 
 async def test_application_builder_lifecycle_failure_keeps_audit_feedback_bytes(
@@ -992,6 +1163,7 @@ async def test_application_builder_lifecycle_failure_keeps_audit_feedback_bytes(
         turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
         ext=cast(ExtensionContext, FakeHookExt(store)),
     )
+    _seed_accepted_application_design(sandbox, ctx.turn.id)
 
     feedback = await _audit_builder_application(ctx, "/workspace/ufo-app")
 
@@ -1173,7 +1345,7 @@ def test_application_delegation_claim_publishes_one_safe_complete_key(tmp_path: 
             (
                 sys.executable,
                 "-c",
-                APPLICATION_DELEGATION_CLAIM,
+                APPLICATION_FIXED_CALL_CLAIM,
                 str(target),
                 str(root),
                 key,
@@ -1258,7 +1430,7 @@ async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Pa
         "dedup_key": "turn-1/build_ufo_application/call-2",
     }
     assert sandbox.programs[0] == (
-        APPLICATION_DELEGATION_CLAIM,
+        APPLICATION_FIXED_CALL_CLAIM,
         (
             f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated",
             RUNTIME_ROOT,
@@ -1527,7 +1699,7 @@ async def test_build_ufo_application_same_key_resumes_after_claim_publication_fa
         await build_ufo_application(ctx, BuildUfoApplicationInput())
 
     claim_path = f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated"
-    assert sandbox.delegation_claims == {claim_path: ctx.idempotency_key}
+    assert sandbox.fixed_call_claims == {claim_path: ctx.idempotency_key}
     assert spawns == 0
 
     result = await build_ufo_application(ctx, BuildUfoApplicationInput())
@@ -1626,7 +1798,7 @@ async def test_build_ufo_application_allows_a_new_parent_turn(tmp_path: Path) ->
     await build_ufo_application(next_ctx, BuildUfoApplicationInput())
 
     claims = [
-        args[0] for program, args in sandbox.programs if program == APPLICATION_DELEGATION_CLAIM
+        args[0] for program, args in sandbox.programs if program == APPLICATION_FIXED_CALL_CLAIM
     ]
     assert claims == [
         f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated",
@@ -1675,7 +1847,7 @@ async def test_build_ufo_application_same_key_retries_after_scaffold_setup_fails
 
     assert spawns == 0
     claim_path = f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated"
-    assert sandbox.delegation_claims == {claim_path: ctx.idempotency_key}
+    assert sandbox.fixed_call_claims == {claim_path: ctx.idempotency_key}
     sandbox.workspace_write_error = None
 
     result = await build_ufo_application(ctx, BuildUfoApplicationInput())
@@ -2100,6 +2272,14 @@ def test_the_design_block_names_the_house_style_the_preview_draws() -> None:
 
 
 def test_application_preview_contract_has_bounded_regions() -> None:
+    valid = RenderApplicationPreviewInput(
+        purpose="Review support requests.",
+        first_screen_priority="Overdue queue",
+        regions=("Overdue", "Unassigned", "Recent activity"),
+        layout="queue-detail",
+    )
+
+    assert valid.regions == ("Overdue", "Unassigned", "Recent activity")
     with pytest.raises(ValidationError):
         RenderApplicationPreviewInput(
             purpose="Review support requests.",
@@ -2185,6 +2365,43 @@ def test_application_audit_excludes_hidden_text_from_contrast() -> None:
     assert "visuallyHidden(element, style, box)" not in source
 
 
+def test_six_maximal_design_regions_fit_the_browser_output_boundary() -> None:
+    program = """
+const visibleText = String.fromCodePoint(1).repeat(Number(process.argv[1]));
+const regions = Array.from({ length: 6 }, (_unused, index) => ({
+  name: String.fromCodePoint(97 + index) + 'x'.repeat(79),
+  left: 0.12345678901234568,
+  top: 0.9876543210987654,
+  width: 0.9999999999999999,
+  height: 0.1111111111111111,
+  aboveFold: true,
+  visibleText,
+}));
+process.stdout.write(JSON.stringify(regions));
+"""
+    completed = subprocess.run(
+        ("node", "-e", program, str(DESIGN_VISIBLE_TEXT_MAX_CHARS)),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    regions = TypeAdapter(tuple[ApplicationAuditRegion, ...]).validate_json(completed.stdout)
+    payload = completed.stdout.encode()
+    source = (
+        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
+    ).read_text()
+
+    assert len(payload) == 3_991 < APPLICATION_DESIGN_AUDIT_MAX_BYTES
+    assert len(regions) == 6
+    assert {len(region.visible_text) for region in regions} == {DESIGN_VISIBLE_TEXT_MAX_CHARS}
+    assert (
+        ApplicationAuditRegion.model_json_schema()["properties"]["visibleText"]["maxLength"]
+        == DESIGN_VISIBLE_TEXT_MAX_CHARS
+    )
+    assert f"const DESIGN_OUTPUT_BYTE_MAX = {APPLICATION_DESIGN_AUDIT_MAX_BYTES};" in source
+    assert f"const DESIGN_VISIBLE_TEXT_MAX_CHARS = {DESIGN_VISIBLE_TEXT_MAX_CHARS};" in source
+
+
 def test_application_audit_returns_copy_grader_text() -> None:
     source = (
         Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
@@ -2208,6 +2425,18 @@ def test_application_audit_accepts_framed_and_direct_pages() -> None:
     assert "await page.$" in application_frame
     assert "if (!element) return page;" in application_frame
     assert "await element.contentFrame()" in application_frame
+
+
+def test_application_product_audit_has_no_design_http_pass() -> None:
+    source = (
+        Path(sites_manifest.__file__).parent / "scripts" / "audit_application.cjs"
+    ).read_text()
+
+    assert "designRegionAudit" not in source
+    assert "acceptedDesignUrl" not in source
+    assert "acceptedDesignRegions(acceptedDesignPath, acceptedEvidencePath)" in source
+    assert "design-url" not in source
+    assert "const report = { url, floor: AA_FLOOR, designRegions, views, interaction };" in source
 
 
 def test_application_page_builds_with_relative_asset_urls() -> None:
@@ -2456,6 +2685,7 @@ async def test_application_product_qa_owns_the_fixed_root_and_records_passed_pro
         ),
         ext=cast(ExtensionContext, FakeHookExt(store)),
     )
+    _seed_accepted_application_design(sandbox, ctx.turn.id)
     result = await qa_ufo_application(
         ctx,
         QaUfoApplicationInput(),
@@ -2547,6 +2777,7 @@ async def test_application_product_qa_bounds_dense_control_evidence_before_proof
         ),
         ext=cast(ExtensionContext, FakeHookExt(store)),
     )
+    _seed_accepted_application_design(sandbox, ctx.turn.id)
 
     result = await qa_ufo_application(
         ctx,
@@ -2593,6 +2824,7 @@ async def test_application_product_qa_does_not_record_its_failed_audit(
         ),
         ext=cast(ExtensionContext, FakeHookExt(store)),
     )
+    _seed_accepted_application_design(sandbox, ctx.turn.id)
 
     result = await qa_ufo_application(
         ctx,
@@ -2707,6 +2939,7 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
             }
         ),
     )
+    ctx = _application_design_context(ctx)
 
     result = await write_application_design(
         ctx,
@@ -2720,8 +2953,19 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
         "path": "/workspace/application/application-design.svg",
         "design_digest": sha256(APPLICATION_DESIGN.encode()).hexdigest(),
         "size_bytes": len(APPLICATION_DESIGN.encode()),
+        "rendered_regions": list(AUDIT_DESIGN_REGIONS),
     }
     assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+    accepted_evidence_path = (
+        f"{RUNTIME_ROOT}/{application_design_evidence_relative(payload['path'], ctx.turn.id)}"
+    )
+    accepted_evidence = AcceptedApplicationDesignEvidence.model_validate_json(
+        sandbox.writes[accepted_evidence_path]
+    )
+    assert accepted_evidence.design_sha256 == payload["design_digest"]
+    assert accepted_evidence.regions == tuple(
+        ApplicationAuditRegion.model_validate(region) for region in AUDIT_DESIGN_REGIONS
+    )
     with pytest.raises(ValueError, match="SVG drawing elements only"):
         await write_application_design(
             ctx,
@@ -2754,7 +2998,561 @@ async def test_application_builder_design_is_one_safe_fixed_svg(tmp_path: Path) 
         )
 
 
-async def test_application_builder_releases_its_claim_after_design_write_fails(
+async def test_application_builder_design_dispatch_gets_stable_call_key(
+    db: None, tmp_path: Path
+) -> None:
+    call_id = "design-call-1"
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    workspace_id, agent_id, conversation_id, turn_id, parent_turn_id = (uuid4() for _ in range(5))
+    created_at = datetime(2026, 7, 9, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=APPLICATION_BUILDER_NAME,
+                prompt="p",
+                model=APPLICATION_BUILDER_MODEL,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="queued",
+                inbound=task.model_dump_json(),
+                parent_turn_id=parent_turn_id,
+                subagent_profile=APPLICATION_BUILDER_NAME,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    turn = Turn(
+        id=turn_id,
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        agent_id=agent_id,
+        seq=1,
+        status="queued",
+        inbound=task.model_dump_json(),
+        parent_turn_id=parent_turn_id,
+        subagent_profile=APPLICATION_BUILDER_NAME,
+        created_at=created_at,
+    )
+
+    @dataclass(frozen=True)
+    class DesignModel:
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            if any(
+                isinstance(message.content, tuple)
+                and any(isinstance(block, ToolResultBlock) for block in message.content)
+                for message in request.messages
+            ):
+                yield TextDelta(text="done")
+                yield Usage(input_tokens=1, output_tokens=1)
+                return
+            yield ToolCallStart(id=call_id, name=APPLICATION_BUILDER_DESIGN_TOOL)
+            yield ToolCallDelta(
+                id=call_id,
+                partial_json=json.dumps({"content": APPLICATION_DESIGN}),
+            )
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    @dataclass(frozen=True)
+    class ActivityModel:
+        model = APPLICATION_BUILDER_MODEL
+
+        async def complete(self, request: ModelRequest) -> str:
+            return "Validating design"
+
+    class DispatchSandbox(FakeSandbox):
+        @property
+        def created(self) -> bool:
+            return False
+
+    manifest = sites_manifest.manifest()
+    design_tool = next(
+        tool for tool in manifest.tools if tool.name == APPLICATION_BUILDER_DESIGN_TOOL
+    )
+    audience = conversation_audience(None)
+    sandbox = DispatchSandbox(
+        track_design_claim=True,
+        handle=SandboxHandle(conversation_id=conversation_id, container_id="sites-test"),
+    )
+    blob = FilesystemBlobStore(root=tmp_path)
+    model = DesignModel()
+    engine = TurnEngine(
+        turn=turn,
+        agent=Agent(prompt="p", model=APPLICATION_BUILDER_MODEL),
+        byok=True,
+        system_prompt=rendered_prompt("p"),
+        model=model,
+        activity_summarizer=ActivitySummarizer(ActivityModel()),
+        provider="openrouter",
+        transcript=Transcript(blob=blob, conversation_id=conversation_id),
+        compaction=Compaction(
+            client=model,
+            model=APPLICATION_BUILDER_MODEL,
+            blob=blob,
+            conversation_id=conversation_id,
+        ),
+        hub=InProcessHub(),
+        sandbox=sandbox,
+        cdp_provider=None,
+        search_provider=None,
+        connectors=ConnectorRegistry(entries={}),
+        tools=ToolRegistry((*BUILTIN_TOOLS, design_tool)),
+        tool_ext={design_tool.name: context_for(manifest.name, frozenset(), blob=blob)},
+        hooks=HookChain(audience=audience),
+        blob=blob,
+        spawn=_unavailable_spawn,
+        audience=audience,
+        artifact_token_secret="",
+        grants=None,
+    )
+
+    with ws(workspace_id):
+        frame = await engine.run()
+
+    assert design_tool.side_effecting is True
+    assert frame is not None and frame.status == "done"
+    transcript = await engine.transcript.read()
+    assert transcript is not None
+    tool_use = next(
+        block
+        for message in transcript.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolUseBlock)
+    )
+    tool_result = next(
+        block
+        for message in transcript.messages
+        if isinstance(message.content, tuple)
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+    )
+    expected_key = f"{turn_id}/{APPLICATION_BUILDER_DESIGN_TOOL}/{call_id}"
+    assert tool_use.id == call_id
+    assert tool_result.tool_use_id == call_id
+    assert tool_result.is_error is False
+    assert isinstance(tool_result.content, str)
+    assert json.loads(tool_result.content)["rendered_regions"] == list(AUDIT_DESIGN_REGIONS)
+    (claim_identity,) = sandbox.fixed_call_claims.values()
+    assert json.loads(claim_identity)[:3] == [str(parent_turn_id), str(turn_id), expected_key]
+
+
+@pytest.mark.parametrize("crash_after_link", (1, 2))
+async def test_write_application_design_recovers_each_partial_pair_and_passes_qa(
+    tmp_path: Path, crash_after_link: int
+) -> None:
+    report = json.dumps(
+        {
+            "designRegions": AUDIT_DESIGN_REGIONS,
+            "views": [
+                {
+                    "scheme": scheme,
+                    "width": width,
+                    "textChecked": 2,
+                    "text": [],
+                    "documentWidth": width,
+                    "clipped": [],
+                    "console": [],
+                    "aboveFoldText": "Queue",
+                    "regions": AUDIT_DESIGN_REGIONS,
+                }
+                for width in (1440, 390)
+                for scheme in ("light", "dark")
+            ],
+            "interaction": {
+                "controls": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "successes": [
+                    {"selector": "#first", "name": "First"},
+                    {"selector": "#second", "name": "Second"},
+                ],
+                "states": [["Queue"]],
+                "console": [],
+            },
+        }
+    )
+
+    class CrashDesignAcceptSandbox(FakeSandbox):
+        def __init__(self) -> None:
+            super().__init__(
+                scripted_paths={"/application-audit/": ExecResult(report, "", 0)},
+                track_design_claim=True,
+            )
+            self.root = tmp_path / "runtime"
+            self.root.mkdir()
+            self.acceptance_calls = 0
+
+        async def runtime_path(self, relative: str) -> str:
+            return str(self.root / relative)
+
+        async def file_state(self, path: str) -> tuple[bytes, int] | None:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import base64,json,os,sys\n"
+                "path = sys.argv[1]\n"
+                "if not os.path.exists(path): raise SystemExit(17)\n"
+                "with open(path, 'rb') as handle: data = handle.read()\n"
+                "print(json.dumps((base64.urlsafe_b64encode(data).decode(), "
+                "os.stat(path).st_mode & 0o777)))",
+                path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await process.communicate()
+            if process.returncode == 17:
+                return None
+            encoded, mode = json.loads(stdout)
+            return urlsafe_b64decode(encoded), mode
+
+        async def python(
+            self, program: str, *args: str, timeout_s: int | None = None
+        ) -> ExecResult:
+            if (
+                program == sites_tools.APPLICATION_AUDIT_REPORT_READ
+                and "/application-builder/" in args[0]
+            ):
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-c",
+                    program,
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+                return ExecResult(stdout.decode(), stderr.decode(), process.returncode or 0)
+            if program != APPLICATION_DESIGN_ACCEPT:
+                return await super().python(program, *args, timeout_s=timeout_s)
+            self.programs.append((program, args))
+            materialized = json.dumps(
+                tuple(
+                    (args[index], urlsafe_b64encode(self.writes[args[index]]).decode())
+                    for index in (0, 2)
+                )
+            ).encode()
+            writer = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import base64,json,os,sys\n"
+                "for path, data in json.load(sys.stdin):\n"
+                "    os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+                "    with open(path, 'wb') as handle: "
+                "handle.write(base64.urlsafe_b64decode(data))",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _stdout, stderr = await writer.communicate(materialized)
+            if writer.returncode != 0:
+                return ExecResult("", stderr.decode(), writer.returncode or 1)
+            selected = program
+            if self.acceptance_calls == 0:
+                selected = (
+                    "import os\n"
+                    "real_link = os.link\n"
+                    "published = 0\n"
+                    "def crash_link(*args, **kwargs):\n"
+                    "    global published\n"
+                    "    real_link(*args, **kwargs)\n"
+                    "    target = os.fspath(args[1])\n"
+                    "    if target.endswith(('.accepted.svg', '.accepted-design.json')):\n"
+                    "        published += 1\n"
+                    f"        if published == {crash_after_link}:\n"
+                    "            os._exit(99)\n"
+                    "os.link = crash_link\n"
+                    f"{program}"
+                )
+            self.acceptance_calls += 1
+            containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                selected,
+                *args,
+                cwd=containment_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return ExecResult(stdout.decode(), stderr.decode(), process.returncode or 0)
+
+    sandbox = CrashDesignAcceptSandbox()
+    parent_turn_id = uuid4()
+    store = FakeHookStore(
+        values={
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(
+                turn_id=parent_turn_id
+            ): ApplicationAuditContract().model_dump()
+        }
+    )
+    base = _context(sandbox, tmp_path)
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "inbound": task.model_dump_json(),
+                "parent_turn_id": parent_turn_id,
+                "subagent_profile": APPLICATION_BUILDER_NAME,
+            }
+        ),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    ctx = _application_design_context(ctx)
+
+    with pytest.raises(RuntimeError, match="accepted application design could not be written"):
+        await write_application_design(ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN))
+
+    accepted_design = await sandbox.runtime_path(
+        application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
+    )
+    accepted_evidence = await sandbox.runtime_path(
+        application_design_evidence_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
+    )
+    assert (
+        sum(
+            state is not None
+            for state in await asyncio.gather(
+                sandbox.file_state(accepted_design), sandbox.file_state(accepted_evidence)
+            )
+        )
+        == crash_after_link
+    )
+
+    recovered = await write_application_design(
+        ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN)
+    )
+    with pytest.raises(ValueError, match="already fixed"):
+        await write_application_design(
+            replace(ctx, idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2"),
+            WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+        )
+    idempotent = await write_application_design(
+        ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN)
+    )
+    source = (
+        'import { mountApp } from "ufo/kit";\n'
+        'mountApp(document.getElementById("root")!, () => <main>Queue</main>);'
+    )
+    await write_application_source(ctx, WriteApplicationSourceInput(content=source))
+    qa = await qa_ufo_application(ctx, QaUfoApplicationInput())
+
+    assert recovered == idempotent
+    design_state = await sandbox.file_state(accepted_design)
+    evidence_state = await sandbox.file_state(accepted_evidence)
+    assert design_state == (APPLICATION_DESIGN.encode(), 0o400)
+    assert evidence_state is not None
+    accepted_evidence_value = AcceptedApplicationDesignEvidence.model_validate_json(
+        evidence_state[0]
+    )
+    assert accepted_evidence_value.design_sha256 == sha256(APPLICATION_DESIGN.encode()).hexdigest()
+    assert evidence_state[1] == 0o400
+    assert all(program != APPLICATION_FIXED_CALL_CLAIM for program, _ in sandbox.programs)
+    assert sandbox.acceptance_calls == 4
+    assert json.loads(qa.content[0].text)["status"] == "passed"
+
+
+@pytest.mark.parametrize("partial", ("design", "evidence"))
+async def test_application_design_pair_rejects_mismatched_partial(
+    tmp_path: Path, partial: str
+) -> None:
+    class ContainedMismatchDesignAcceptSandbox(FakeSandbox):
+        def __init__(self) -> None:
+            super().__init__(track_design_claim=True)
+            self.root = tmp_path / "runtime"
+            self.root.mkdir()
+
+        async def runtime_path(self, relative: str) -> str:
+            return str(self.root / relative)
+
+        async def file_state(self, path: str) -> tuple[bytes, int] | None:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import base64,json,os,sys\n"
+                "path = sys.argv[1]\n"
+                "if not os.path.exists(path): raise SystemExit(17)\n"
+                "with open(path, 'rb') as handle: data = handle.read()\n"
+                "print(json.dumps((base64.urlsafe_b64encode(data).decode(), "
+                "os.stat(path).st_mode & 0o777)))",
+                path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _stderr = await process.communicate()
+            if process.returncode == 17:
+                return None
+            encoded, mode = json.loads(stdout)
+            return urlsafe_b64decode(encoded), mode
+
+        async def python(
+            self, program: str, *args: str, timeout_s: int | None = None
+        ) -> ExecResult:
+            if program != APPLICATION_DESIGN_ACCEPT:
+                return await super().python(program, *args, timeout_s=timeout_s)
+            self.programs.append((program, args))
+            materialized = json.dumps(
+                tuple(
+                    (args[index], urlsafe_b64encode(self.writes[args[index]]).decode())
+                    for index in (0, 2)
+                )
+            ).encode()
+            writer = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import base64,json,os,sys\n"
+                "for path, data in json.load(sys.stdin):\n"
+                "    os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+                "    with open(path, 'wb') as handle: "
+                "handle.write(base64.urlsafe_b64decode(data))",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _stdout, stderr = await writer.communicate(materialized)
+            if writer.returncode != 0:
+                return ExecResult("", stderr.decode(), writer.returncode or 1)
+            target_index = 2 if partial == "design" else 4
+            injected = (
+                "import os,sys\n"
+                "from containment import contained_file\n"
+                "from uuid import uuid4\n"
+                f"with contained_file(sys.argv[{target_index}], sys.argv[6], "
+                "create_parent=True) as target:\n"
+                "    staged = f'.ufo-mismatch-{uuid4().hex}'\n"
+                "    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | "
+                "os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=target.parent_fd)\n"
+                "    os.fchmod(descriptor, 0o400)\n"
+                "    with os.fdopen(descriptor, 'wb') as handle:\n"
+                "        handle.write(b'different')\n"
+                "        handle.flush()\n"
+                "        os.fsync(handle.fileno())\n"
+                "    os.link(staged, target.name, src_dir_fd=target.parent_fd, "
+                "dst_dir_fd=target.parent_fd, follow_symlinks=False)\n"
+                "    os.unlink(staged, dir_fd=target.parent_fd)\n"
+                "    os.fsync(target.parent_fd)\n"
+                f"{program}"
+            )
+            containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                injected,
+                *args,
+                cwd=containment_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return ExecResult(stdout.decode(), stderr.decode(), process.returncode or 0)
+
+    sandbox = ContainedMismatchDesignAcceptSandbox()
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    parent_turn_id = uuid4()
+    store = FakeHookStore(
+        values={
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(
+                turn_id=parent_turn_id
+            ): ApplicationAuditContract().model_dump()
+        }
+    )
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "parent_turn_id": parent_turn_id,
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+            ext=cast(ExtensionContext, FakeHookExt(store)),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="differs from this application design call"):
+        await write_application_design(ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN))
+
+    accepted_design = await sandbox.runtime_path(
+        application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
+    )
+    accepted_evidence = await sandbox.runtime_path(
+        application_design_evidence_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
+    )
+    states = {
+        "design": await sandbox.file_state(accepted_design),
+        "evidence": await sandbox.file_state(accepted_evidence),
+    }
+    assert states[partial] == (b"different", 0o400)
+    assert states["evidence" if partial == "design" else "design"] is None
+    assert APPLICATION_DESIGN_PATH not in sandbox.writes
+    accept_calls = [
+        args for program, args in sandbox.programs if program == APPLICATION_DESIGN_ACCEPT
+    ]
+    assert len(accept_calls) == 1
+    assert json.loads(accept_calls[0][6])[2] == ctx.idempotency_key
+
+    source = (
+        'import { mountApp } from "ufo/kit";\n'
+        'mountApp(document.getElementById("root")!, () => <main>Queue</main>);'
+    )
+    with pytest.raises(ValueError, match="write_application_design must complete"):
+        await write_application_source(ctx, WriteApplicationSourceInput(content=source))
+    audit_shells = len(sandbox.shells)
+    with pytest.raises(RuntimeError, match="accepted application design"):
+        await qa_ufo_application(ctx, QaUfoApplicationInput())
+
+    assert APPLICATION_SOURCE_PATH not in sandbox.writes
+    assert states[partial] == await sandbox.file_state(
+        accepted_design if partial == "design" else accepted_evidence
+    )
+    assert len(sandbox.shells) == audit_shells
+    assert sandbox.tasks == []
+
+
+async def test_application_builder_next_call_repairs_after_design_write_fails(
     tmp_path: Path,
 ) -> None:
     task = ApplicationBuilderTask(
@@ -2776,6 +3574,7 @@ async def test_application_builder_releases_its_claim_after_design_write_fails(
             }
         ),
     )
+    ctx = _application_design_context(ctx)
 
     with pytest.raises(OSError, match="write failed"):
         await write_application_design(
@@ -2786,15 +3585,26 @@ async def test_application_builder_releases_its_claim_after_design_write_fails(
     assert not sandbox.design_claimed
     assert sandbox.workspace_writes == []
     assert "/workspace/application/application-design.svg" not in sandbox.writes
-    assert [program for program, _ in sandbox.programs[-3:]] == [
+    design_path = "/workspace/application/application-design.svg"
+    evidence_path = (
+        f"{RUNTIME_ROOT}/{application_design_evidence_relative(design_path, ctx.turn.id)}"
+    )
+    accepted_path = (
+        f"{RUNTIME_ROOT}/{application_design_acceptance_relative(design_path, ctx.turn.id)}"
+    )
+    assert evidence_path not in sandbox.writes
+    assert accepted_path not in sandbox.writes
+    assert [program for program, _ in sandbox.programs[-2:]] == [
         APPLICATION_DESIGN_ACCEPT,
         APPLICATION_DESIGN_RELEASE_ACCEPTED,
-        APPLICATION_SOURCE_RELEASE_CLAIM,
     ]
     sandbox.workspace_write_error = None
 
     result = await write_application_design(
-        ctx,
+        replace(
+            ctx,
+            idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2",
+        ),
         WriteApplicationDesignInput(content=APPLICATION_DESIGN),
     )
 
@@ -2802,13 +3612,151 @@ async def test_application_builder_releases_its_claim_after_design_write_fails(
     assert sandbox.design_claimed
     assert sandbox.workspace_writes == ["/workspace/application/application-design.svg"]
     assert sandbox.writes[payload["path"]] == APPLICATION_DESIGN.encode()
+    assert evidence_path in sandbox.writes
+    assert accepted_path in sandbox.writes
+
+
+async def test_application_builder_next_call_repairs_after_accept_fails_after_claim(
+    tmp_path: Path,
+) -> None:
+    class PostClaimFailureSandbox(FakeSandbox):
+        failed = False
+
+        async def python(
+            self, program: str, *args: str, timeout_s: int | None = None
+        ) -> ExecResult:
+            if program != APPLICATION_DESIGN_ACCEPT or self.failed:
+                return await super().python(program, *args, timeout_s=timeout_s)
+            self.programs.append((program, args))
+            claim_path, identity = args[4], args[6]
+            self.fixed_call_claims[claim_path] = identity
+            self.failed = True
+            return ExecResult("", "accept failed after claim", 1)
+
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path="/workspace/application",
+        source_path="/workspace/application/app.tsx",
+    )
+    sandbox = PostClaimFailureSandbox(track_design_claim=True)
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+        )
+    )
+    design_path = "/workspace/application/application-design.svg"
+    claim_path = (
+        f"{RUNTIME_ROOT}/tool-output/application-builder/"
+        f"{sha256(design_path.encode()).hexdigest()}.{ctx.turn.id}.claimed"
+    )
+    accepted_path = (
+        f"{RUNTIME_ROOT}/{application_design_acceptance_relative(design_path, ctx.turn.id)}"
+    )
+    evidence_path = (
+        f"{RUNTIME_ROOT}/{application_design_evidence_relative(design_path, ctx.turn.id)}"
+    )
+
+    with pytest.raises(RuntimeError, match="accept failed after claim"):
+        await write_application_design(
+            ctx,
+            WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+        )
+
+    assert claim_path not in sandbox.fixed_call_claims
+    assert accepted_path not in sandbox.writes
+    assert evidence_path not in sandbox.writes
+    assert [program for program, _ in sandbox.programs[-2:]] == [
+        APPLICATION_DESIGN_ACCEPT,
+        APPLICATION_DESIGN_RELEASE_CLAIM,
+    ]
+
+    retry = replace(
+        ctx,
+        idempotency_key=f"{ctx.turn.id}/{APPLICATION_BUILDER_DESIGN_TOOL}/call-2",
+    )
+    result = await write_application_design(
+        retry,
+        WriteApplicationDesignInput(content=APPLICATION_DESIGN),
+    )
+
+    assert json.loads(result.content[0].text)["path"] == design_path
+    assert json.loads(sandbox.fixed_call_claims[claim_path])[2] == retry.idempotency_key
+    assert sandbox.writes[accepted_path] == APPLICATION_DESIGN.encode()
+    assert evidence_path in sandbox.writes
+
+
+def test_application_design_release_deletes_the_owned_pair_and_claim(tmp_path: Path) -> None:
+    design = tmp_path / "accepted.svg"
+    evidence = tmp_path / "accepted-design.json"
+    claim = tmp_path / "design.claim"
+    design.write_bytes(b"design")
+    evidence.write_bytes(b"evidence")
+    claim.write_bytes(b"call-1")
+    containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            APPLICATION_DESIGN_RELEASE_ACCEPTED,
+            str(design),
+            str(evidence),
+            sha256(b"design").hexdigest(),
+            sha256(b"evidence").hexdigest(),
+            "100",
+            "100",
+            str(tmp_path),
+            str(claim),
+            "call-1",
+        ),
+        cwd=containment_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not design.exists()
+    assert not evidence.exists()
+    assert not claim.exists()
+
+
+def test_application_design_release_deletes_the_owned_claim(tmp_path: Path) -> None:
+    claim = tmp_path / "design.claim"
+    claim.write_bytes(b"call-1")
+    containment_root = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            APPLICATION_DESIGN_RELEASE_CLAIM,
+            str(claim),
+            str(tmp_path),
+            "call-1",
+        ),
+        cwd=containment_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not claim.exists()
 
 
 @pytest.mark.parametrize(
     "cleanup_error",
     (OSError("cleanup failed"), asyncio.CancelledError("cleanup cancelled")),
 )
-async def test_application_builder_preserves_write_error_and_finishes_claim_cleanup(
+async def test_application_builder_preserves_write_error_and_pair_cleanup_failure(
     tmp_path: Path,
     cleanup_error: BaseException,
 ) -> None:
@@ -2832,6 +3780,7 @@ async def test_application_builder_preserves_write_error_and_finishes_claim_clea
             }
         ),
     )
+    ctx = _application_design_context(ctx)
 
     with pytest.raises(OSError, match="write failed") as raised:
         await write_application_design(
@@ -2839,12 +3788,9 @@ async def test_application_builder_preserves_write_error_and_finishes_claim_clea
             WriteApplicationDesignInput(content=APPLICATION_DESIGN),
         )
 
-    assert not sandbox.design_claimed
+    assert sandbox.design_claimed
     assert str(cleanup_error) in getattr(raised.value, "__notes__", ())
-    assert [program for program, _args in sandbox.programs[-2:]] == [
-        APPLICATION_DESIGN_RELEASE_ACCEPTED,
-        APPLICATION_SOURCE_RELEASE_CLAIM,
-    ]
+    assert sandbox.programs[-1][0] == APPLICATION_DESIGN_RELEASE_ACCEPTED
 
 
 async def test_application_builder_rejects_duplicate_design_ids_before_claim(
@@ -2866,6 +3812,7 @@ async def test_application_builder_rejects_duplicate_design_ids_before_claim(
             }
         ),
     )
+    ctx = _application_design_context(ctx)
     duplicate = APPLICATION_DESIGN.replace(
         '<g data-app-region="queue">',
         '<g id="panel" data-app-region="queue">',
@@ -2909,6 +3856,7 @@ async def test_application_builder_rejects_overlap_before_fixing_design(tmp_path
             }
         ),
     )
+    ctx = _application_design_context(ctx)
     overlap = APPLICATION_DESIGN.replace('x="900"', 'x="800"')
     corrected = APPLICATION_DESIGN
     sandbox.design_audit = ExecResult(
@@ -3000,6 +3948,51 @@ async def test_application_builder_rejects_overlap_before_fixing_design(tmp_path
     assert await require_application_builder_qa(deployment) is None
 
 
+async def test_application_builder_rejects_small_region_before_acceptance(tmp_path: Path) -> None:
+    task = ApplicationBuilderTask(
+        objective="Build the queue",
+        scaffold_path=APPLICATION_SCAFFOLD_PATH,
+        source_path=APPLICATION_SOURCE_PATH,
+    )
+    sandbox = FakeSandbox()
+    base = _context(sandbox, tmp_path)
+    ctx = _application_design_context(
+        replace(
+            base,
+            turn=base.turn.model_copy(
+                update={
+                    "inbound": task.model_dump_json(),
+                    "subagent_profile": APPLICATION_BUILDER_NAME,
+                }
+            ),
+        )
+    )
+    sandbox.design_audit = ExecResult(
+        json.dumps(
+            (
+                {**AUDIT_DESIGN_REGIONS[0], "width": APPLICATION_REGION_MIN_WIDTH - 0.001},
+                AUDIT_DESIGN_REGIONS[1],
+            )
+        ),
+        "",
+        0,
+    )
+
+    with pytest.raises(ValueError, match="design region queue is too small"):
+        await write_application_design(ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN))
+
+    accepted_design = await sandbox.runtime_path(
+        application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
+    )
+    accepted_evidence = await sandbox.runtime_path(
+        application_design_evidence_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
+    )
+    assert accepted_design not in sandbox.writes
+    assert accepted_evidence not in sandbox.writes
+    assert sandbox.workspace_writes == []
+    assert sandbox.programs == []
+
+
 @pytest.mark.parametrize(
     ("failed_audit", "error_type", "message"),
     (
@@ -3043,6 +4036,7 @@ async def test_application_builder_design_audit_failure_leaves_design_repairable
             }
         ),
     )
+    ctx = _application_design_context(ctx)
 
     with pytest.raises(error_type, match=message):
         await write_application_design(ctx, WriteApplicationDesignInput(content=APPLICATION_DESIGN))
@@ -3107,7 +4101,10 @@ async def test_application_builder_design_is_isolated_per_build_turn(tmp_path: P
             }
         ),
     )
-    second = replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
+    first = _application_design_context(first)
+    second = _application_design_context(
+        replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
+    )
 
     await write_application_design(
         first,
@@ -3122,7 +4119,7 @@ async def test_application_builder_design_is_isolated_per_build_turn(tmp_path: P
         ),
     )
 
-    claims = [args[0] for program, args in sandbox.programs if program == APPLICATION_SOURCE_CLAIM]
+    claims = [args[4] for program, args in sandbox.programs if program == APPLICATION_DESIGN_ACCEPT]
     assert len(set(claims)) == 2
     assert b"800" in sandbox.writes["/workspace/application/application-design.svg"]
 
@@ -3151,6 +4148,7 @@ async def test_application_builder_same_turn_accepts_the_candidate_it_audited(
             }
         ),
     )
+    ctx = _application_design_context(ctx)
 
     results = await asyncio.gather(
         write_application_design(
@@ -3183,7 +4181,7 @@ async def test_application_builder_same_turn_accepts_the_candidate_it_audited(
     assert sandbox.writes[accepted_path] == sandbox.writes[design_path]
 
 
-async def test_application_audit_uses_the_turns_accepted_design_after_shared_overwrite(
+async def test_application_audit_uses_durable_turn_evidence_without_requesting_the_svg(
     tmp_path: Path,
 ) -> None:
     task = ApplicationBuilderTask(
@@ -3249,7 +4247,10 @@ async def test_application_audit_uses_the_turns_accepted_design_after_shared_ove
         ),
         ext=cast(ExtensionContext, FakeHookExt(store)),
     )
-    second = replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
+    first = _application_design_context(first)
+    second = _application_design_context(
+        replace(first, turn=first.turn.model_copy(update={"id": uuid4()}))
+    )
 
     await write_application_design(
         first,
@@ -3268,18 +4269,100 @@ async def test_application_audit_uses_the_turns_accepted_design_after_shared_ove
         f"{RUNTIME_ROOT}/"
         f"{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, second.turn.id)}"
     )
+    first_evidence = (
+        f"{RUNTIME_ROOT}/"
+        f"{application_design_evidence_relative(APPLICATION_DESIGN_PATH, first.turn.id)}"
+    )
+    second_evidence = (
+        f"{RUNTIME_ROOT}/"
+        f"{application_design_evidence_relative(APPLICATION_DESIGN_PATH, second.turn.id)}"
+    )
     assert sandbox.writes[first_accepted] == first_design.encode()
     assert sandbox.writes[second_accepted] == second_design.encode()
+    assert (
+        AcceptedApplicationDesignEvidence.model_validate_json(
+            sandbox.writes[first_evidence]
+        ).regions
+        == first_regions
+    )
+    assert (
+        AcceptedApplicationDesignEvidence.model_validate_json(
+            sandbox.writes[second_evidence]
+        ).design_sha256
+        == sha256(second_design.encode()).hexdigest()
+    )
     assert sandbox.writes[APPLICATION_DESIGN_PATH] == second_design.encode()
 
     audited = await _audit_builder_application(first, APPLICATION_SCAFFOLD_PATH)
 
     assert isinstance(audited, ApplicationAuditReport)
     assert audited.design_regions == first_regions
-    launch = sandbox.tasks[-1][0]
-    assert first_accepted in launch
-    assert second_accepted not in launch
-    assert sandbox.shells[-1][1][-1].endswith("/accepted-design.svg")
+    fidelity = application_design_fidelity(audited)
+    assert fidelity.passed == fidelity.total
+    assert sandbox.tasks == []
+    assert len(sandbox.shells[-1][1]) == 9
+    audit_arguments = sandbox.shells[-1][1]
+    assert first_accepted in audit_arguments
+    assert all(second_accepted not in argument for argument in audit_arguments)
+    assert first_evidence in audit_arguments
+    assert all(second_evidence not in argument for argument in audit_arguments)
+
+    reversed_regions = (
+        {**AUDIT_DESIGN_REGIONS[0], "left": 0.6, "width": 0.4},
+        {**AUDIT_DESIGN_REGIONS[1], "left": 0.0, "width": 0.6},
+    )
+    failed_report = json.loads(report)
+    for view in failed_report["views"]:
+        view["regions"] = reversed_regions
+    sandbox.scripted_paths["/application-audit/"] = ExecResult(json.dumps(failed_report), "", 0)
+
+    failed = await _audit_builder_application(first, APPLICATION_SCAFFOLD_PATH)
+
+    assert isinstance(failed, ApplicationAuditFeedback)
+    assert {issue.code for issue in failed.issues} == {"design"}
+
+
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    (
+        ("missing", "accepted application design evidence is absent"),
+        ("corrupt", "accepted application design evidence is invalid"),
+        ("digest", "accepted application design evidence digest does not match the design"),
+    ),
+)
+async def test_application_qa_fails_loud_on_invalid_durable_design_evidence(
+    tmp_path: Path, fault: str, message: str
+) -> None:
+    sandbox = FakeSandbox()
+    store = FakeHookStore()
+    base = _context(sandbox, tmp_path)
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(update={"subagent_profile": APPLICATION_BUILDER_NAME}),
+        ext=cast(ExtensionContext, FakeHookExt(store)),
+    )
+    _seed_accepted_application_design(sandbox, ctx.turn.id)
+    accepted_path = (
+        f"{RUNTIME_ROOT}/"
+        f"{application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)}"
+    )
+    evidence_path = (
+        f"{RUNTIME_ROOT}/"
+        f"{application_design_evidence_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)}"
+    )
+    match fault:
+        case "missing":
+            del sandbox.writes[evidence_path]
+        case "corrupt":
+            sandbox.writes[evidence_path] = b"{"
+        case "digest":
+            sandbox.writes[accepted_path] += b" "
+
+    with pytest.raises(RuntimeError, match=message):
+        await qa_ufo_application(ctx, QaUfoApplicationInput())
+
+    assert sandbox.tasks == []
+    assert sandbox.shells == []
 
 
 async def test_application_source_requires_the_svg_design(tmp_path: Path) -> None:
@@ -3328,6 +4411,7 @@ async def test_application_source_requires_this_build_turns_svg_design(tmp_path:
             }
         ),
     )
+    first = _application_design_context(first)
     await write_application_design(
         first,
         WriteApplicationDesignInput(

@@ -21,6 +21,7 @@ from uuid import UUID
 import sqlalchemy as sa
 
 from evals.harness.capability import (
+    MAX_ARTIFACT_PAYLOAD_BYTES,
     ArtifactProbe,
     ArtifactProbeResult,
     CapabilityCase,
@@ -394,13 +395,64 @@ class InProcessTarget:
         captured = await capture(output, probe)
         if not isinstance(captured, ArtifactProbeResult):
             raise RuntimeError("an artifact probe returned an invalid result")
+        if not 0 < captured.max_payload_bytes <= MAX_ARTIFACT_PAYLOAD_BYTES:
+            raise RuntimeError("an artifact probe returned an invalid payload budget")
         names = [artifact.name for artifact in (*output.artifacts, *captured.artifacts)]
         if len(names) != len(set(names)):
             raise RuntimeError("an artifact probe produced a duplicate artifact name")
-        errors = "; ".join(error for error in (output.artifact_error, captured.error) if error)
+        durable = {
+            (reference.name, reference.digest, reference.size_bytes)
+            for reference in output.artifact_references
+        }
+        artifacts: list[SharedArtifact] = []
+        payload_errors: list[str] = []
+        total = 0
+        for artifact in output.artifacts:
+            size = len(artifact.content)
+            digest = f"sha256:{sha256(artifact.content).hexdigest()}"
+            identity = (artifact.name, digest, size)
+            exceeds_entry = size > MAX_ARTIFACT_PAYLOAD_BYTES
+            exceeds_total = total + size > MAX_ARTIFACT_PAYLOAD_BYTES
+            if exceeds_entry or exceeds_total:
+                if identity in durable:
+                    artifacts.append(artifact)
+                    continue
+                scope = "offline payload" if exceeds_entry else "cumulative offline payload"
+                payload_errors.append(
+                    f"artifact {artifact.name!r} ({digest}, {size} bytes) has no durable "
+                    f"reference and exceeds the {MAX_ARTIFACT_PAYLOAD_BYTES}-byte {scope} limit"
+                )
+                continue
+            total += size
+            artifacts.append(artifact)
+        captured_total = 0
+        for artifact in captured.artifacts:
+            size = len(artifact.content)
+            digest = f"sha256:{sha256(artifact.content).hexdigest()}"
+            exceeds_entry = size > captured.max_payload_bytes
+            exceeds_total = captured_total + size > captured.max_payload_bytes
+            exceeds_offline_total = total + size > MAX_ARTIFACT_PAYLOAD_BYTES
+            if exceeds_entry or exceeds_total or exceeds_offline_total:
+                scope = "offline payload" if exceeds_entry else "cumulative offline payload"
+                limit = (
+                    MAX_ARTIFACT_PAYLOAD_BYTES
+                    if exceeds_offline_total and not (exceeds_entry or exceeds_total)
+                    else captured.max_payload_bytes
+                )
+                payload_errors.append(
+                    f"artifact {artifact.name!r} ({digest}, {size} bytes) has no durable "
+                    f"reference and exceeds the {limit}-byte {scope} limit"
+                )
+                continue
+            total += size
+            captured_total += size
+            artifacts.append(artifact)
+        errors = "; ".join(
+            error for error in (output.artifact_error, captured.error, *payload_errors) if error
+        )
         return replace(
             output,
-            artifacts=(*output.artifacts, *captured.artifacts),
+            artifacts=tuple(artifacts),
             artifact_error=errors,
         )
 

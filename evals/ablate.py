@@ -4,10 +4,10 @@
 set of arms — each arm a map of repo paths to variant files — and measures every arm on the same
 cases. Each arm is materialized as its own git worktree and venv, so an arm is exactly a git
 state and its diff is reviewable; a control arm on the unmodified base always runs beside the
-variants. Repeats become extra `[[run]]` blocks in the arm's `evals.stack` matrix, so each repeat
-is an isolated stack with its own database and serve. Results compare sample-level pass counts
-per case against the control, and the report calls a case moved only when the gap is wide enough
-to survive the suite's own noise.
+variants. Each repeat is one `evals.stack` run with its own database and serve. One shared permit
+pool bounds live repeat stacks across all arms. Results compare sample-level pass counts per case
+against the control, and the report calls a case moved only when the gap is wide enough to survive
+the suite's own noise.
 
 Each arm's records, its stacks' own logs and the orchestrator's whole view of the run are archived
 under `runs/<arm>/` before the worktree goes. An arm that owed a record and never wrote one keeps
@@ -56,16 +56,21 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 
 import tomli_w
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from evals.harness.harness import EvalCaseResult, EvalReport
 from evals.harness.registry import narrowed_tasks
+from evals.harness.viewer import EvalRun, write_viewer
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
 from ufo.billing.accounting import MICRO_USD_PER_USD
@@ -90,6 +95,8 @@ LOGS_DIR = "logs"
 TAIL_CHARS = 1500
 SIGNAL_GAP = 2
 SIGNAL_FLOOR = 3
+STACK_CANCEL_SIGINT_WAIT_SECONDS = 5.0
+STACK_CANCEL_SIGTERM_WAIT_SECONDS = 5.0
 
 
 class ArmReplacement(BaseModel):
@@ -205,6 +212,39 @@ def load_experiment(path: Path) -> ExperimentSpec:
     return spec.model_copy(update={"arm": resolved, "memory_ingestion": snapshot})
 
 
+async def _stack_exited(
+    communication: asyncio.Task[tuple[bytes, bytes]], timeout_seconds: float
+) -> bool:
+    try:
+        await asyncio.wait_for(asyncio.shield(communication), timeout_seconds)
+    except TimeoutError:
+        return False
+    return True
+
+
+async def _cancel_stack_process(
+    process: asyncio.subprocess.Process,
+    communication: asyncio.Task[tuple[bytes, bytes]],
+) -> None:
+    for sent, timeout_seconds in (
+        (signal.SIGINT, STACK_CANCEL_SIGINT_WAIT_SECONDS),
+        (signal.SIGTERM, STACK_CANCEL_SIGTERM_WAIT_SECONDS),
+    ):
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, sent)
+            except ProcessLookupError:
+                pass
+        if await _stack_exited(communication, timeout_seconds):
+            return
+    if process.returncode is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    await asyncio.shield(communication)
+
+
 @dataclass(frozen=True)
 class CaseCount:
     """Sample-level tallies for one case in one arm, summed across repeats."""
@@ -222,6 +262,14 @@ class ArmResult:
     error: str | None = None
     gaps: tuple[str, ...] = ()
     kept_worktree: Path | None = None
+
+
+@dataclass(frozen=True)
+class StackRun:
+    index: int
+    exit_code: int | None
+    output: str
+    error: str | None = None
 
 
 def collect_counts(records: list[dict]) -> tuple[dict[str, CaseCount], float]:
@@ -378,8 +426,8 @@ def render_report(spec: ExperimentSpec, results: tuple[ArmResult, ...]) -> str:
 
 @dataclass(frozen=True)
 class Ablation:
-    """The experiment run: materialize one worktree and venv per arm, drive one `evals.stack`
-    per arm with `repeats` run blocks, collect sample counts, and write the comparison."""
+    """The experiment run: materialize one worktree and venv per arm, drive each repeat through
+    the shared stack limit, collect sample counts, and write the comparison."""
 
     repo: Path
     spec: ExperimentSpec
@@ -396,6 +444,9 @@ class Ablation:
         )
         report = render_report(self.spec, tuple(results))
         self.out.mkdir(parents=True, exist_ok=True)
+        viewer = await asyncio.to_thread(self._write_viewer)
+        if viewer is not None:
+            report += "\n[Open the offline run and app viewer](viewer/index.html).\n"
         (self.out / "report.md").write_text(report)
         (self.out / "experiment.json").write_text(
             json.dumps(self.spec.model_dump(mode="json"), indent=2) + "\n"
@@ -412,6 +463,55 @@ class Ablation:
         if failed:
             print(f"arms failed: {', '.join(failed)}", file=sys.stderr)
         return 1 if failed else 0
+
+    def _write_viewer(self) -> Path | None:
+        archive = self.out / "runs"
+        records = sorted((*archive.glob("*/*.json"), *archive.glob("*/*.jsonl")))
+        if not records:
+            return None
+        runs: list[EvalRun] = []
+        for path in records:
+            relative = path.relative_to(archive).as_posix()
+            try:
+                content = path.read_text()
+            except Exception as error:
+                runs.append(self._archived_record_error(relative, error))
+                continue
+            bodies = content.splitlines() if path.suffix == ".jsonl" else [content]
+            if not bodies:
+                bodies = [""]
+            for line, body in enumerate(bodies, 1):
+                locator = f"{relative}:{line}" if path.suffix == ".jsonl" else relative
+                try:
+                    runs.append(EvalRun.model_validate_json(body))
+                except Exception as error:
+                    runs.append(self._archived_record_error(locator, error))
+        return write_viewer(self.out / "viewer", tuple(runs))
+
+    def _archived_record_error(self, locator: str, error: Exception) -> EvalRun:
+        return EvalRun(
+            id=uuid5(NAMESPACE_URL, f"ufo:ablate:archive:{locator}"),
+            created_at=datetime(1970, 1, 1, tzinfo=UTC),
+            label=f"Invalid archive record: {locator}",
+            agent="ablation",
+            ufo_version="",
+            revision="",
+            reports=(
+                EvalReport(
+                    name="Archive error",
+                    suite="archive_error",
+                    digest="invalid",
+                    cases=(
+                        EvalCaseResult(
+                            name=locator,
+                            passed=False,
+                            reason=f"{type(error).__name__} in archived record {locator}",
+                            evidence={"record": locator, "error": type(error).__name__},
+                        ),
+                    ),
+                ),
+            ),
+        )
 
     def _preflight(self) -> None:
         binary = self.repo / EGRESS_BINARY
@@ -507,60 +607,89 @@ class Ablation:
         stack logs and databases are the only evidence of what the money bought, and the run that
         threw them away could not be diagnosed at all. A materialization that never reached a
         stack spent nothing and keeps no worktree."""
-        async with slots:
-            root = self.repo / WORKTREES_DIR / self.spec.name / arm.name
-            archive = self.out / "runs" / arm.name
-            keep = False
-            print(f"[{arm.name}] materializing", flush=True)
-            try:
-                await asyncio.to_thread(self._materialize, arm, base, root, remote_client)
-                keep = True
-                print(f"[{arm.name}] stack running", flush=True)
-                exit_code, output = await self._stack(arm, root)
-                await asyncio.to_thread(self._archive, root, archive, output)
-                records = [
-                    json.loads(path.read_text())
-                    for path in sorted((root / RUNS_DIR).glob("*.json"))
-                ]
-                gaps = record_gaps(self.spec, arm.name, records)
-                keep = bool(gaps)
-                kept = root if keep else None
-                if not records:
-                    tail = output[-TAIL_CHARS:]
-                    return ArmResult(
-                        arm.name,
-                        {},
-                        0.0,
-                        error=f"stack exited {exit_code}, no record: {tail}",
-                        gaps=gaps,
-                        kept_worktree=kept,
-                    )
-                counts, cost = collect_counts(records)
-                print(f"[{arm.name}] done (${cost:.2f})", flush=True)
-                return ArmResult(arm.name, counts, cost, gaps=gaps, kept_worktree=kept)
-            except Exception as error:
-                print(f"[{arm.name}] FAILED: {type(error).__name__}: {error}", flush=True)
+        root = self.repo / WORKTREES_DIR / self.spec.name / arm.name
+        archive = self.out / "runs" / arm.name
+        keep = False
+        print(f"[{arm.name}] materializing", flush=True)
+        try:
+            await asyncio.to_thread(self._materialize, arm, base, root, remote_client)
+            keep = True
+            print(f"[{arm.name}] stacks running", flush=True)
+            runs = await self._run_arm_stacks(arm, root, slots)
+            await asyncio.to_thread(self._archive, root, archive, runs)
+            records = [
+                json.loads(path.read_text()) for path in sorted((root / RUNS_DIR).glob("*.json"))
+            ]
+            gaps = record_gaps(self.spec, arm.name, records)
+            failures = tuple(run.error for run in runs if run.error is not None)
+            keep = bool(gaps or failures)
+            kept = root if keep else None
+            if not records:
+                last = runs[-1]
+                tail = (last.output or last.error or "")[-TAIL_CHARS:]
                 return ArmResult(
                     arm.name,
                     {},
                     0.0,
-                    error=f"{type(error).__name__}: {error}",
-                    kept_worktree=root if keep else None,
+                    error=f"stack exited {last.exit_code}, no record: {tail}",
+                    gaps=gaps,
+                    kept_worktree=kept,
                 )
-            finally:
-                if keep:
-                    print(f"[{arm.name}] worktree kept at {root}", flush=True)
-                else:
-                    await asyncio.to_thread(self._remove_worktree, root)
+            counts, cost = collect_counts(records)
+            print(f"[{arm.name}] done (${cost:.2f})", flush=True)
+            return ArmResult(
+                arm.name,
+                counts,
+                cost,
+                error="; ".join(failures) if failures else None,
+                gaps=gaps,
+                kept_worktree=kept,
+            )
+        except Exception as error:
+            print(f"[{arm.name}] FAILED: {type(error).__name__}: {error}", flush=True)
+            return ArmResult(
+                arm.name,
+                {},
+                0.0,
+                error=f"{type(error).__name__}: {error}",
+                kept_worktree=root if keep else None,
+            )
+        finally:
+            if keep:
+                print(f"[{arm.name}] worktree kept at {root}", flush=True)
+            else:
+                await asyncio.to_thread(self._remove_worktree, root)
 
-    def _archive(self, root: Path, archive: Path, output: str) -> None:
+    async def _run_arm_stacks(
+        self, arm: ArmSpec, root: Path, slots: asyncio.Semaphore
+    ) -> tuple[StackRun, ...]:
+        runs = []
+        for index in range(self.spec.repeats):
+            try:
+                async with slots:
+                    exit_code, output = await self._stack(arm, root, index)
+                runs.append(StackRun(index, exit_code, output))
+            except Exception as error:
+                runs.append(
+                    StackRun(
+                        index,
+                        None,
+                        "",
+                        f"repeat {index}: {type(error).__name__}: {error}",
+                    )
+                )
+        return tuple(runs)
+
+    def _archive(self, root: Path, archive: Path, runs: tuple[StackRun, ...]) -> None:
         """Everything the arm produced that has to outlive its worktree: its records, this
         orchestrator's whole view of the stack run, and each stack's own `seed`, `serve`, `egress`
         `eval`, and process-lifecycle logs. Written before any verdict is read, because a record
         that never landed is only explainable from the logs of the stack that owed it."""
         shutil.rmtree(archive, ignore_errors=True)
         archive.mkdir(parents=True)
-        (archive / STACK_LOG).write_text(output)
+        (archive / STACK_LOG).write_text(
+            "\n".join(f"[repeat {run.index}]\n{run.output or run.error or ''}" for run in runs)
+        )
         for path in (root / RUNS_DIR).glob("*.json"):
             shutil.copy(path, archive / path.name)
         for path in sorted((root / STACK_RUNS_DIR).glob("*/*/*.log")):
@@ -587,7 +716,8 @@ class Ablation:
             carried_client.chmod(0o755)
         config = root / "ablate-template.toml"
         config.write_text(tomli_w.dumps(self.spec.template))
-        (root / "ablate-matrix.toml").write_text(tomli_w.dumps(self.matrix(arm, config)))
+        for index, run in enumerate(self.matrix(arm, config)["run"]):
+            (root / f"ablate-matrix-{index}.toml").write_text(tomli_w.dumps({"run": [run]}))
 
     def _apply_arm(self, arm: ArmSpec, root: Path) -> None:
         for repo_path, variant in arm.files.items():
@@ -677,7 +807,7 @@ class Ablation:
             )
         return {"run": runs}
 
-    async def _stack(self, arm: ArmSpec, root: Path) -> tuple[int, str]:
+    async def _stack(self, arm: ArmSpec, root: Path, index: int = 0) -> tuple[int, str]:
         environment = None
         if self.spec.remote:
             carried_client = (root / REMOTE_CLIENT_BINARY).resolve()
@@ -694,13 +824,19 @@ class Ablation:
             "python",
             "-m",
             "evals.stack",
-            str(root / "ablate-matrix.toml"),
+            str(root / f"ablate-matrix-{index}.toml"),
             cwd=root,
             env=environment,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
-        output, _ = await process.communicate()
+        communication = asyncio.create_task(process.communicate())
+        try:
+            output, _ = await asyncio.shield(communication)
+        except asyncio.CancelledError:
+            await _cancel_stack_process(process, communication)
+            raise
         return process.returncode or 0, output.decode(errors="replace")
 
     def _remove_worktree(self, root: Path) -> None:

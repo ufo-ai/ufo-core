@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
+from hashlib import sha256
 from json import dumps, loads
 from pathlib import Path
 from tempfile import gettempdir
@@ -67,8 +68,7 @@ from evals.driver import (
     WORKFLOW_WAIT_SECONDS as DEFAULT_WORKFLOW_WAIT_SECONDS,
 )
 from evals.harness.capability import (
-    MAX_LINKED_ARTIFACT_BYTES,
-    MAX_LINKED_TOTAL_BYTES,
+    MAX_ARTIFACT_PAYLOAD_BYTES,
     ArtifactProbe,
     ArtifactProbeResult,
     CapabilityCase,
@@ -77,14 +77,15 @@ from evals.harness.capability import (
     CapabilityVerdict,
     EvalTrajectory,
     SharedArtifact,
+    SharedArtifactReference,
     ToolInvocation,
     TurnLog,
     UndeliveredRound,
     WorkspaceFile,
     WorkspaceProbe,
-    _linked_artifacts,
     _page_images,
     grading_statement,
+    linked_artifacts,
     run_capability_case,
     source_digest,
 )
@@ -177,6 +178,8 @@ from evals.suites.document_visual import WORKFLOW_WAIT_SECONDS as DOCUMENT_VISUA
 from evals.suites.first_run import FIRST_RUN_PACKS, FIRST_RUN_SKILL
 from evals.suites.new_application import (
     _accepted_contract_failure,
+    _accepted_design,
+    _AcceptedApplicationDesign,
     _application_repair_tool_failure,
     _application_worker_tool_failure,
     _built_design_failure,
@@ -664,34 +667,285 @@ def test_application_journey_graders_require_the_fixed_worker_tools() -> None:
 
 
 def test_the_built_design_must_carry_the_regions_the_member_accepted() -> None:
-    def design(*regions: str) -> ToolInvocation:
+    def design(
+        regions: tuple[str, ...],
+        boxes: tuple[tuple[float, float, float, float], ...],
+        *,
+        first_text: str = "Calls today for the next call",
+        visible_texts: tuple[str, ...] | None = None,
+    ) -> ToolInvocation:
+        texts = visible_texts or (first_text, *regions[1:])
         marks = "".join(
-            f'<g data-app-region="{region}"><rect width="8" height="8"/></g>' for region in regions
+            f'<g data-app-region="{region}"><rect width="8" height="8"/>'
+            f"<text>{texts[index]}</text>"
+            "</g>"
+            for index, region in enumerate(regions)
         )
+        rendered = [
+            {
+                "name": region,
+                "left": left,
+                "top": top,
+                "width": width,
+                "height": height,
+                "aboveFold": True,
+                "visibleText": texts[index],
+            }
+            for index, (region, (left, top, width, height)) in enumerate(
+                zip(regions, boxes, strict=True)
+            )
+        ]
         return ToolInvocation(
             APPLICATION_BUILDER_DESIGN_TOOL,
             {"content": f'<svg viewBox="0 0 8 8">{marks}</svg>'},
+            result=dumps({"rendered_regions": rendered}),
             has_result=True,
         )
 
-    accepted = ("Overdue queue", "Invoice detail", "This week")
+    accepted = RenderApplicationPreviewInput(
+        purpose="Prepare for the next customer call.",
+        first_screen_priority="Show urgent customer follow-ups first",
+        regions=("Today's queue", "Action items"),
+        layout="summary-detail",
+        design_direction="House style",
+    )
+
+    def failure(
+        calls: tuple[ToolInvocation, ...], contract: RenderApplicationPreviewInput = accepted
+    ) -> str | None:
+        return _built_design_failure(calls, contract)
+
+    horizontal = ((0.0, 0.0, 0.48, 1.0), (0.52, 0.0, 0.48, 1.0))
     assert (
-        _built_design_failure((design("overdue-queue", "invoice-detail", "this-week"),), accepted)
+        failure(
+            (
+                design(
+                    ("todays-queue", "next-actions"),
+                    horizontal,
+                    first_text="3 calls need an owner",
+                ),
+            )
+        )
         is None
     )
-    assert "accepted no design" in str(_built_design_failure((), accepted))
-    assert "drew 2 regions for the 3" in str(
-        _built_design_failure((design("overdue-queue", "invoice-detail"),), accepted)
+    assert (
+        failure(
+            (
+                design(
+                    ("today-s-queue", "next-actions"),
+                    horizontal,
+                    first_text="3 calls need an owner",
+                ),
+            )
+        )
+        is None
     )
-    # A design of the right size drawn from a different page: the member accepted an invoice queue
-    # and the worker built a chart, so its slugs share no word with the regions it replaced.
-    assert "drops accepted regions: Invoice detail, This week" in str(
-        _built_design_failure((design("overdue-queue", "spend-chart", "vendors"),), accepted)
+    waiting = accepted.model_copy(update={"regions": ("Waiting on you", "Recent activity")})
+    assert (
+        failure(
+            (
+                design(
+                    ("waiting", "recent-activity"),
+                    horizontal,
+                    first_text="3 calls need an owner",
+                ),
+            ),
+            waiting,
+        )
+        is None
     )
-    # The regions are matched in the accepted display order, so a design that draws them all in
-    # another order is a page laid out differently from the one shown.
-    assert "drops accepted regions" in str(
-        _built_design_failure((design("this-week", "invoice-detail", "overdue-queue"),), accepted)
+    assert (
+        failure(
+            (
+                design(
+                    ("region-one", "region-two"),
+                    horizontal,
+                    visible_texts=("Today's queue", "Action items"),
+                ),
+            )
+        )
+        is None
+    )
+    overlapping = accepted.model_copy(update={"regions": ("Open issues", "Issue detail")})
+    assert (
+        failure(
+            (
+                design(
+                    ("open-issues", "issue-detail"),
+                    horizontal,
+                    visible_texts=("Open issues", "Issue detail"),
+                ),
+            ),
+            overlapping,
+        )
+        is None
+    )
+    assert "semantic region order differs" in str(
+        failure(
+            (
+                design(
+                    ("issue-detail", "open-issues"),
+                    horizontal,
+                    visible_texts=("Issue detail", "Open issues"),
+                ),
+            ),
+            overlapping,
+        )
+    )
+    assert "semantically ambiguous" in str(
+        failure(
+            (
+                design(
+                    ("region-one", "region-two"),
+                    horizontal,
+                    visible_texts=("Issue count", "Issue notes"),
+                ),
+            ),
+            overlapping,
+        )
+    )
+    assert "accepted no design" in str(failure(()))
+    assert "rendered 1 regions for the 2" in str(
+        failure((design(("calls-today",), ((0.0, 0.0, 1.0, 1.0),)),))
+    )
+    assert "rendered 3 regions for the 2" in str(
+        failure(
+            (
+                design(
+                    ("calls-today", "action-items", "notes"),
+                    ((0.0, 0.0, 0.3, 1.0), (0.35, 0.0, 0.3, 1.0), (0.7, 0.0, 0.3, 1.0)),
+                ),
+            )
+        )
+    )
+    assert "duplicate region identities" in str(failure((design(("queue", "queue"), horizontal),)))
+    assert "no rendered region measurements" in str(
+        failure((design(("", "next-actions"), horizontal),))
+    )
+    assert "empty region identity" in str(failure((design((" ", "next-actions"), horizontal),)))
+    assert f"does not carry accepted identity {accepted.regions[0]!r}: region-one" in str(
+        failure(
+            (
+                design(
+                    ("region-one", "region-two"),
+                    horizontal,
+                    visible_texts=("Revenue", "Notes"),
+                ),
+            )
+        )
+    )
+    assert f"does not carry accepted identity {accepted.regions[0]!r}: action-items" in str(
+        failure(
+            (
+                design(
+                    ("action-items", "todays-queue"),
+                    horizontal,
+                    visible_texts=("Action items", "Today's queue"),
+                ),
+            )
+        )
+    )
+    assert "does not carry accepted identity 'Action items'" in str(
+        failure(
+            (
+                design(
+                    ("todays-queue", "region-two"),
+                    horizontal,
+                    visible_texts=("Today's queue", "Notes"),
+                ),
+            )
+        )
+    )
+    reversed_horizontal = ((0.52, 0.0, 0.48, 1.0), (0.0, 0.0, 0.48, 1.0))
+    assert "summary-detail layout changes" in str(
+        failure((design(("todays-queue", "next-actions"), reversed_horizontal),))
+    )
+    assert "no material visible content" in str(
+        failure(
+            (
+                design(
+                    ("todays-queue", "next-actions"),
+                    horizontal,
+                    first_text="",
+                ),
+            ),
+        )
+    )
+    assert "no material visible content" in str(
+        failure(
+            (
+                design(
+                    ("todays-queue", "next-actions"),
+                    horizontal,
+                    first_text="—",
+                ),
+            ),
+        )
+    )
+    vertical = ((0.0, 0.0, 1.0, 0.48), (0.0, 0.52, 1.0, 0.48))
+    assert "summary-detail layout changes" in str(
+        failure((design(("todays-queue", "next-actions"), vertical),))
+    )
+
+    queue = accepted.model_copy(
+        update={
+            "first_screen_priority": "Overdue queue",
+            "regions": ("Overdue queue", "Issue detail"),
+            "layout": "queue-detail",
+        }
+    )
+    queue_regions = ("overdue-queue", "issue-detail")
+    queue_boxes = ((0.0, 0.0, 0.6, 1.0), (0.64, 0.0, 0.36, 1.0))
+    assert failure((design(queue_regions, queue_boxes, first_text="Overdue queue"),), queue) is None
+    equal_columns = ((0.0, 0.0, 0.48, 1.0), (0.52, 0.0, 0.48, 1.0))
+    assert "queue-detail first region is not wider" in str(
+        failure((design(queue_regions, equal_columns, first_text="Overdue queue"),), queue)
+    )
+
+    timeline = accepted.model_copy(
+        update={
+            "first_screen_priority": "Latest event",
+            "regions": ("Latest event", "Earlier event"),
+            "layout": "timeline",
+        }
+    )
+    assert (
+        failure(
+            (
+                design(
+                    ("latest-event", "earlier-event"),
+                    ((0.0, 0.0, 1.0, 0.48), (0.0, 0.52, 1.0, 0.48)),
+                    first_text="Latest event",
+                ),
+            ),
+            timeline,
+        )
+        is None
+    )
+
+    metrics = accepted.model_copy(
+        update={
+            "first_screen_priority": "Revenue",
+            "regions": ("Revenue", "Churn", "Runway"),
+            "layout": "metrics",
+        }
+    )
+    assert (
+        failure(
+            (
+                design(
+                    ("revenue", "churn", "runway"),
+                    (
+                        (0.0, 0.0, 0.31, 1.0),
+                        (0.345, 0.0, 0.31, 1.0),
+                        (0.69, 0.0, 0.31, 1.0),
+                    ),
+                    first_text="Revenue",
+                ),
+            ),
+            metrics,
+        )
+        is None
     )
 
 
@@ -707,59 +961,98 @@ def test_the_accepted_design_block_must_reach_the_application_prompt() -> None:
         "design_direction": "House style",
     }
     preview = ToolInvocation("render_application_preview", contract, has_result=True)
-    output = CapabilityOutput("", (preview,))
+    apply = ToolInvocation(
+        "object_apply",
+        {"manifest": "kind: agent\nname: helper\nspec:\n  prompt: p\n"},
+        result=dumps({"kind": "agent", "name": "helper", "result": "created"}),
+        has_result=True,
+    )
+
+    def accepted(calls: tuple[ToolInvocation, ...]) -> _AcceptedApplicationDesign:
+        design, failure = _accepted_design(CapabilityOutput("", calls))
+        assert failure is None
+        assert design is not None
+        return design
+
+    selected = accepted((preview, apply))
     block = homepage_design_block(RenderApplicationPreviewInput.model_validate(contract))
     prompt = f"You answer support requests for the team.\n\n{block}\n\nAsk before replying.\n"
 
-    assert _accepted_contract_failure(output, prompt) is None
-    # A block copied into a YAML scalar is free to wrap where the line ends, and nothing about the
-    # design changes when it does.
+    assert _accepted_contract_failure(selected, prompt) is None
     assert (
         _accepted_contract_failure(
-            output, prompt.replace("Regions in order: Overdue,", "Regions in order:\n  Overdue,")
+            selected,
+            prompt.replace("Regions in order: Overdue,", "Regions in order:\n  Overdue,"),
         )
         is None
     )
     assert "omits the accepted design block" in str(
-        _accepted_contract_failure(output, prompt.replace("Overdue queue", "Summary"))
+        _accepted_contract_failure(selected, prompt.replace("Overdue queue", "Summary"))
     )
     assert "omits the accepted design block" in str(
-        _accepted_contract_failure(output, prompt.replace("Review support requests", "Read mail"))
+        _accepted_contract_failure(selected, prompt.replace("Review support requests", "Read mail"))
     )
     assert "omits the accepted design block" in str(
-        _accepted_contract_failure(output, prompt.replace("Layout: queue-detail", "queue-detail"))
-    )
-    assert "no accepted preview contract" in str(
-        _accepted_contract_failure(CapabilityOutput("", ()), prompt)
+        _accepted_contract_failure(selected, prompt.replace("Layout: queue-detail", "queue-detail"))
     )
 
-    # The revision is the accepted design: the block the last preview composed is the one graded.
     revised = {**contract, "first_screen_priority": "Paid this month"}
     revised_render = ToolInvocation("render_application_preview", revised, has_result=True)
     revised_block = homepage_design_block(RenderApplicationPreviewInput.model_validate(revised))
-    both = CapabilityOutput("", (preview, revised_render))
+    revised_selected = accepted((preview, revised_render, apply))
     assert "omits the accepted design block" in str(
-        _accepted_contract_failure(both, f"You answer support requests.\n\n{block}\n")
+        _accepted_contract_failure(revised_selected, f"You answer support requests.\n\n{block}\n")
     )
     assert (
-        _accepted_contract_failure(both, f"You answer support requests.\n\n{revised_block}\n")
+        _accepted_contract_failure(
+            revised_selected, f"You answer support requests.\n\n{revised_block}\n"
+        )
         is None
     )
 
-    # A render after the create asked the member nothing. The prompt answers to the design that
-    # stood before the choice, so the later one cannot take a run down.
-    apply = ToolInvocation(
-        "object_apply",
-        {"manifest": "kind: agent\nname: helper\nspec:\n  prompt: p\n"},
+    unaccepted = {
+        **contract,
+        "first_screen_priority": "Revenue",
+        "regions": ["Revenue", "Churn", "Runway"],
+        "layout": "metrics",
+    }
+    unaccepted_render = ToolInvocation("render_application_preview", unaccepted, has_result=True)
+    later_design = ToolInvocation(
+        APPLICATION_BUILDER_DESIGN_TOOL,
+        {"content": "<svg/>"},
         has_result=True,
     )
-    assert (
-        _accepted_contract_failure(CapabilityOutput("", (preview, apply, revised_render)), prompt)
-        is None
+    settled = accepted((preview, apply, unaccepted_render, later_design))
+    assert _accepted_contract_failure(settled, prompt) is None
+    rendered_regions = tuple(
+        {
+            "name": name,
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height,
+            "aboveFold": True,
+            "visibleText": name,
+        }
+        for name, (left, top, width, height) in zip(
+            ("overdue", "unassigned", "recent-activity"),
+            ((0.0, 0.0, 0.62, 1.0), (0.64, 0.0, 0.36, 0.48), (0.64, 0.52, 0.36, 0.48)),
+            strict=True,
+        )
     )
-    assert "no accepted preview contract" in str(
-        _accepted_contract_failure(CapabilityOutput("", (apply, revised_render)), prompt)
+    accepted_design = ToolInvocation(
+        APPLICATION_BUILDER_DESIGN_TOOL,
+        {"content": "<svg/>"},
+        result=dumps({"rendered_regions": rendered_regions}),
+        has_result=True,
     )
+    assert _built_design_failure((accepted_design,), settled.contract) is None
+    missing, missing_failure = _accepted_design(CapabilityOutput("", (apply, revised_render)))
+    assert missing is None
+    assert "no valid accepted preview" in str(missing_failure)
+    ambiguous, ambiguous_failure = _accepted_design(CapabilityOutput("", (preview, apply, apply)))
+    assert ambiguous is None
+    assert "more than one application was created" in str(ambiguous_failure)
 
 
 def test_internal_turn_messages_start_at_the_last_matching_inbound() -> None:
@@ -1980,6 +2273,7 @@ class ArtifactTarget:
     artifacts: tuple[SharedArtifact, ...]
     judge: JudgeLeg | None = None
     workspace_dir: Path | None = None
+    artifact_references: tuple[SharedArtifactReference, ...] = ()
 
     async def run(self, case: CapabilityCase) -> TargetResult:
         return TargetResult(
@@ -1987,6 +2281,7 @@ class ArtifactTarget:
                 "ANSWER: shared",
                 (),
                 artifacts=self.artifacts,
+                artifact_references=self.artifact_references,
                 workspace_dir=self.workspace_dir,
             ),
             clean=True,
@@ -2255,7 +2550,15 @@ async def test_in_process_target_runs_an_artifact_probe_after_the_turn(db: None,
     async def capture(output: CapabilityOutput, probe: WorkspaceProbe) -> ArtifactProbeResult:
         result = await probe.run("capture app", 17)
         assert result.stdout == "captured"
-        return ArtifactProbeResult((SharedArtifact("app.html", b"<main>app</main>"),))
+        return ArtifactProbeResult(
+            (
+                SharedArtifact("first.bin", b"123456"),
+                SharedArtifact("overflow.bin", b"7890"),
+                SharedArtifact("last.bin", b"78"),
+            ),
+            error="probe warning",
+            max_payload_bytes=8,
+        )
 
     ctx = context_for(
         EXTENSION,
@@ -2282,7 +2585,17 @@ async def test_in_process_target_runs_an_artifact_probe_after_the_turn(db: None,
         result = await target.run(case)
 
     assert result.clean
-    assert result.output.artifacts == (SharedArtifact("app.html", b"<main>app</main>"),)
+    assert result.output.artifacts == (
+        SharedArtifact("first.bin", b"123456"),
+        SharedArtifact("last.bin", b"78"),
+    )
+    assert result.output.artifact_error.startswith("probe warning; artifact 'overflow.bin'")
+    assert "has no durable reference" in result.output.artifact_error
+    assert "8-byte cumulative offline payload limit" in result.output.artifact_error
+    assert [item["name"] for item in linked_artifacts(result.output.artifacts, ())] == [
+        "first.bin",
+        "last.bin",
+    ]
     assert len(commands) == 1
     assert commands[0][1:] == ("capture app", 17)
 
@@ -6061,11 +6374,25 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
 
     first_call = ToolInvocation("create_object", {}, has_result=True, call_id="create-object-1")
     followup_call = ToolInvocation("apply_object", {}, has_result=True, call_id="apply-object-1")
+    initial_artifact = SharedArtifact("initial.json", b"initial")
+    final_artifact = SharedArtifact("final.json", b"final")
+    initial_reference = SharedArtifactReference(
+        name=initial_artifact.name,
+        blob_key="shared/initial.json",
+        digest=f"sha256:{sha256(initial_artifact.content).hexdigest()}",
+        size_bytes=len(initial_artifact.content),
+    )
+    final_reference = SharedArtifactReference(
+        name=final_artifact.name,
+        blob_key="shared/final.json",
+        digest=f"sha256:{sha256(final_artifact.content).hexdigest()}",
+        size_bytes=len(final_artifact.content),
+    )
 
     async def capture(output: CapabilityOutput, _probe: WorkspaceProbe) -> ArtifactProbeResult:
         assert output.response == "asked"
         return ArtifactProbeResult(
-            artifacts=(SharedArtifact("final.json", b"final"),),
+            artifacts=(final_artifact,),
             error="final probe warning",
         )
 
@@ -6079,7 +6406,8 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
                     "created",
                     (first_call,),
                     tool_errors=("create warning",),
-                    artifacts=(SharedArtifact("initial.json", b"initial"),),
+                    artifacts=(initial_artifact,),
+                    artifact_references=(initial_reference,),
                     artifact_error="initial probe warning",
                     tokens=2,
                     cost_micro_usd=3,
@@ -6108,6 +6436,7 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
             return replace(
                 output,
                 artifacts=(*output.artifacts, *captured.artifacts),
+                artifact_references=(final_reference,),
                 artifact_error=captured.error,
             )
 
@@ -6154,7 +6483,15 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
     assert [call["name"] for call in attempt["calls"]] == ["create_object", "apply_object"]
     assert attempt["toolErrors"] == ["create warning", "apply warning"]
     assert attempt["ownTools"] == ["create_object", "apply_object"]
-    assert attempt["artifacts"] == ["initial.json", "final.json"]
+    assert attempt["artifacts"] == ["final.json"]
+    assert attempt["artifactReferences"] == [
+        {
+            "name": "final.json",
+            "blobKey": "shared/final.json",
+            "digest": final_reference.digest,
+            "sizeBytes": len(final_artifact.content),
+        }
+    ]
     assert attempt["artifactError"] == "initial probe warning; final probe warning"
     assert attempt["timing"] == FIRST_TURN_TIMING.model_dump(mode="json")
     assert attempt["handoffs"] == [
@@ -6163,6 +6500,128 @@ async def test_capability_followup_uses_the_first_conversation_and_grades_the_se
     ]
     assert "followup" in case.payload()
     assert "followupArtifactProbe" in case.payload()
+
+
+async def test_capability_followup_replaces_a_near_cap_initial_artifact_set() -> None:
+    conversation_id = uuid4()
+    initial = SharedArtifact("initial-preview.zip", b"i" * (7 * 1024 * 1024))
+    final = SharedArtifact("final-preview.zip", b"f" * (7 * 1024 * 1024))
+
+    async def followup(_output: CapabilityOutput) -> str:
+        return "repair"
+
+    @dataclass
+    class NearCapTarget:
+        judge: None = None
+
+        async def run(self, _case: CapabilityCase) -> TargetResult:
+            return TargetResult(
+                CapabilityOutput(
+                    "initial",
+                    (),
+                    artifacts=(initial,),
+                ),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content="initial"),),
+                ),
+            )
+
+        async def step(
+            self, continued_conversation_id: UUID, message: str, _idempotency_key: str
+        ) -> TargetResult:
+            assert continued_conversation_id == conversation_id
+            assert message == "repair"
+            return TargetResult(
+                CapabilityOutput(
+                    "final",
+                    (),
+                    artifacts=(final,),
+                ),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content="final"),),
+                ),
+            )
+
+    case = CapabilityCase("near-cap", "build", exact_scorer("final"), followup=followup)
+
+    result = await run_capability_case(case, NearCapTarget())  # type: ignore[arg-type]
+
+    assert result.passed
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["artifacts"] == ["final-preview.zip"]
+    artifact_references = cast(list[dict[str, object]], attempt["artifactReferences"])
+    artifact_contents = cast(list[dict[str, object]], attempt["artifactContents"])
+    assert artifact_references == []
+    assert [item["name"] for item in artifact_contents] == ["final-preview.zip"]
+
+
+async def test_capability_followup_without_artifact_evidence_preserves_the_initial_set() -> None:
+    conversation_id = uuid4()
+    initial = SharedArtifact("initial-audit.json", b"initial")
+    initial_reference = SharedArtifactReference(
+        name=initial.name,
+        blob_key="shared/initial-audit.json",
+        digest=f"sha256:{sha256(initial.content).hexdigest()}",
+        size_bytes=len(initial.content),
+    )
+
+    async def followup(_output: CapabilityOutput) -> str:
+        return "inspect"
+
+    @dataclass
+    class NoFollowupArtifactTarget:
+        judge: None = None
+
+        async def run(self, _case: CapabilityCase) -> TargetResult:
+            return TargetResult(
+                CapabilityOutput(
+                    "initial",
+                    (),
+                    artifacts=(initial,),
+                    artifact_references=(initial_reference,),
+                ),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content="initial"),),
+                ),
+            )
+
+        async def step(
+            self, continued_conversation_id: UUID, message: str, _idempotency_key: str
+        ) -> TargetResult:
+            assert continued_conversation_id == conversation_id
+            assert message == "inspect"
+            return TargetResult(
+                CapabilityOutput("final", ()),
+                clean=True,
+                trajectory=EvalTrajectory(
+                    conversation_id=conversation_id,
+                    turn_id=uuid4(),
+                    status="done",
+                    messages=(Message(role="assistant", content="final"),),
+                ),
+            )
+
+    case = CapabilityCase("preserve", "build", exact_scorer("final"), followup=followup)
+
+    result = await run_capability_case(case, NoFollowupArtifactTarget())  # type: ignore[arg-type]
+
+    assert result.passed
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["artifacts"] == ["initial-audit.json"]
+    artifact_references = cast(list[dict[str, object]], attempt["artifactReferences"])
+    assert [item["name"] for item in artifact_references] == ["initial-audit.json"]
 
 
 async def test_capability_none_followup_grades_the_first_output() -> None:
@@ -6628,14 +7087,13 @@ async def test_artifact_case_fails_before_the_model_without_shared_markdown() ->
 def test_linked_artifacts_embed_bounded_data_uris() -> None:
     png = b"\x89PNG\r\n\x1a\n" + b"x" * 32
     docx = b"PK\x03\x04" + b"y" * 32
-    huge = b"z" * (MAX_LINKED_ARTIFACT_BYTES + 1)
 
-    linked = _linked_artifacts(
+    linked = linked_artifacts(
         (
             SharedArtifact("page-1.png", png),
             SharedArtifact("memo.docx", docx),
-            SharedArtifact("scan.png", huge),
-        )
+        ),
+        (),
     )
 
     by_name = {cast(dict[str, str], item)["name"]: cast(dict[str, str], item) for item in linked}
@@ -6646,25 +7104,82 @@ def test_linked_artifacts_embed_bounded_data_uris() -> None:
     assert by_name["memo.docx"]["dataUri"].startswith("data:application/vnd")
 
 
-def test_linked_artifacts_stop_at_the_cumulative_budget() -> None:
-    each = MAX_LINKED_ARTIFACT_BYTES // 2
-    per_budget = MAX_LINKED_TOTAL_BYTES // each
-    pages = tuple(
-        SharedArtifact(f"page-{index}.png", b"\x89PNG\r\n\x1a\n" + b"x" * each)
-        for index in range(per_budget + 3)
+def test_linked_artifacts_serialize_the_exact_payload_boundary() -> None:
+    artifact = SharedArtifact("boundary.bin", b"x" * MAX_ARTIFACT_PAYLOAD_BYTES)
+
+    linked = linked_artifacts((artifact,), ())
+
+    assert [cast(dict[str, str], item)["name"] for item in linked] == ["boundary.bin"]
+
+
+def test_linked_artifacts_reject_an_oversized_unreferenced_artifact() -> None:
+    artifact = SharedArtifact("unreferenced.bin", b"x" * (MAX_ARTIFACT_PAYLOAD_BYTES + 1))
+
+    with pytest.raises(ValueError, match=r"artifact 'unreferenced.bin'.*has no durable reference"):
+        linked_artifacts((artifact,), ())
+
+
+def test_linked_artifacts_reject_cumulative_unreferenced_overflow() -> None:
+    first = SharedArtifact("first.bin", b"x" * (7 * 1024 * 1024))
+    second = SharedArtifact("second.bin", b"y" * (6 * 1024 * 1024))
+
+    with pytest.raises(
+        ValueError,
+        match=r"artifact 'second.bin'.*has no durable reference.*cumulative offline payload",
+    ):
+        linked_artifacts((first, second), ())
+
+
+def test_linked_artifacts_omit_a_large_reference_and_keep_a_later_small_one() -> None:
+    large = SharedArtifact("large.bin", b"x" * (MAX_ARTIFACT_PAYLOAD_BYTES + 1))
+    small = SharedArtifact("small.bin", b"z")
+    references = tuple(
+        SharedArtifactReference(
+            name=artifact.name,
+            blob_key=f"shared/{artifact.name}",
+            digest=f"sha256:{sha256(artifact.content).hexdigest()}",
+            size_bytes=len(artifact.content),
+        )
+        for artifact in (large, small)
     )
 
-    linked = _linked_artifacts(pages)
+    linked = linked_artifacts((large, small), references)
 
-    assert 0 < len(linked) <= per_budget
-    assert len(linked) < len(pages)
+    assert [cast(dict[str, str], item)["name"] for item in linked] == ["small.bin"]
+
+
+async def test_capability_record_omits_large_content_and_retains_its_reference() -> None:
+    artifact = SharedArtifact("large.bin", b"x" * (MAX_ARTIFACT_PAYLOAD_BYTES + 1))
+    reference = SharedArtifactReference(
+        name=artifact.name,
+        blob_key="shared/large.bin",
+        digest=f"sha256:{sha256(artifact.content).hexdigest()}",
+        size_bytes=len(artifact.content),
+    )
+    case = CapabilityCase("shared", "share", exact_scorer("shared"))
+
+    result = await run_capability_case(
+        case,
+        ArtifactTarget((artifact,), artifact_references=(reference,)),
+    )
+
+    attempt = cast(list[dict[str, object]], result.evidence["attempts"])[0]
+    assert attempt["artifactContents"] == []
+    assert attempt["artifactReferences"] == [
+        {
+            "name": "large.bin",
+            "blobKey": "shared/large.bin",
+            "digest": reference.digest,
+            "sizeBytes": len(artifact.content),
+        }
+    ]
 
 
 def test_linked_artifacts_map_each_document_type_to_its_media_type() -> None:
     names = ["a.pdf", "b.pptx", "c.xlsx", "d.gif", "e.webp", "f.svg", "g.html", "h.bin"]
     linked = [
         cast(dict[str, str], item)
-        for item in _linked_artifacts(tuple(SharedArtifact(name, b"x") for name in names))
+        for item in linked_artifacts(tuple(SharedArtifact(name, b"x") for name in names), ())
     ]
     media = {item["name"]: item["mediaType"] for item in linked}
 

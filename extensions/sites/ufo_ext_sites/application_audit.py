@@ -20,7 +20,11 @@ MIN_CONTROLS = 2
 MIN_INTERACTIONS = 2
 DESIGN_REGION_MIN = 2
 DESIGN_REGION_MAX = 6
+DESIGN_VISIBLE_TEXT_MAX_CHARS = 72
 DESIGN_REGION_SEPARATION_SLOP = 0.02
+APPLICATION_REGION_MIN_WIDTH = 0.04
+APPLICATION_REGION_MIN_HEIGHT = 0.03
+APPLICATION_REGION_MIN_AREA = 0.008
 MAX_ISSUES = 8
 MAX_MESSAGE_CHARS = 500
 MAX_PRODUCT_QA_CONTROLS = 100
@@ -29,35 +33,6 @@ APPLICATION_AUDIT_REQUEST_CONTRACT_KEY = (
 )
 APPLICATION_AUDIT_TURN_CONTRACT_KEY = "application-builder/audit-contract/turn/{turn_id}"
 APPLICATION_AUDIT_ATTEMPT_KEY = "application-builder/audit-attempt/{turn_id}"
-APPLICATION_AUDIT_SERVER = b"""from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-import os
-from pathlib import Path
-import sys
-
-os.chdir(Path(sys.argv[1]).resolve())
-accepted_design = Path(sys.argv[3]).resolve(strict=True)
-if not accepted_design.is_file():
-    raise SystemExit("accepted application design is not a file")
-
-class Handler(SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.partition("?")[0] == "/accepted-design.svg":
-            data = accepted_design.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "image/svg+xml")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        super().do_GET()
-
-    def translate_path(self, path):
-        if path == "/assets" or path.startswith("/assets/"):
-            path = "/dist" + path
-        return super().translate_path(path)
-
-ThreadingHTTPServer(("0.0.0.0", int(sys.argv[2])), Handler).serve_forever()
-"""
 AuditTerm = Annotated[str, Field(min_length=1, max_length=200)]
 AuditIssueCode = Literal[
     "audit_run",
@@ -117,6 +92,28 @@ class ApplicationAuditRegion(BaseModel):
     width: float = Field(gt=0, le=1)
     height: float = Field(gt=0, le=1)
     above_fold: bool = Field(default=True, alias="aboveFold")
+    visible_text: str = Field(
+        default="", max_length=DESIGN_VISIBLE_TEXT_MAX_CHARS, alias="visibleText"
+    )
+
+
+class AcceptedApplicationDesignEvidence(BaseModel):
+    """The accepted design digest and its validated rendered regions."""
+
+    model_config = ConfigDict(frozen=True)
+
+    version: Literal[1] = 1
+    design_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    regions: tuple[ApplicationAuditRegion, ...] = Field(
+        min_length=DESIGN_REGION_MIN, max_length=DESIGN_REGION_MAX
+    )
+
+    @model_validator(mode="after")
+    def regions_are_unique(self) -> "AcceptedApplicationDesignEvidence":
+        names = tuple(region.name for region in self.regions)
+        if len(names) != len(set(names)):
+            raise ValueError("accepted application design regions must be unique")
+        return self
 
 
 class ApplicationAuditView(BaseModel):
@@ -277,6 +274,21 @@ def application_region_relation(
     return None
 
 
+def application_design_region_size_failure(
+    regions: tuple[ApplicationAuditRegion, ...],
+) -> str | None:
+    """Return the first accepted design region that is too small to be a useful screen region."""
+
+    for region in regions:
+        if (
+            region.width < APPLICATION_REGION_MIN_WIDTH
+            or region.height < APPLICATION_REGION_MIN_HEIGHT
+            or region.width * region.height < APPLICATION_REGION_MIN_AREA
+        ):
+            return f"design region {region.name} is too small"
+    return None
+
+
 def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity:
     """Measure named region identity, first-screen visibility, and relative desktop order."""
 
@@ -295,6 +307,8 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
     total = 1
     failures = []
     design_by_name = {region.name: region for region in design}
+    if size_failure := application_design_region_size_failure(design):
+        return ApplicationDesignFidelity(passed=0, total=1, failures=(size_failure,))
     for first_index, first_name in enumerate(design_names):
         for second_name in design_names[first_index + 1 :]:
             if (

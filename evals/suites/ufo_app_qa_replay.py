@@ -50,7 +50,6 @@ APP_ROOT = "/workspace/ufo-app"
 SOURCE_PATH = f"{APP_ROOT}/app.tsx"
 PREVIEW_PATH = f"{APP_ROOT}/preview.svg"
 OUTPUT_ROOT = "/workspace/.eval-output/ufo-app-qa-replay"
-PROBE_PORT = 8139
 PROBE_TIMEOUT_SECONDS = APPLICATION_BUILD_TIMEOUT_SECONDS + APPLICATION_AUDIT_TIMEOUT_SECONDS
 PROBE_ERROR_DETAIL_CHARS = 500
 WORKFLOW_WAIT_SECONDS = 300.0
@@ -161,7 +160,6 @@ class AppQaReplayProbe:
                 output_dir=f"{OUTPUT_ROOT}/{self.fixture.name}/{self.phase}",
                 project=APP_ROOT,
                 design_path=PREVIEW_PATH,
-                port=PROBE_PORT,
                 compile_source=True,
             ),
             PROBE_TIMEOUT_SECONDS,
@@ -178,6 +176,7 @@ class AppQaReplayProbe:
             directory / f"{name}-audit.json",
             *(directory / f"{name}-{scheme}.png" for scheme in SCHEMES),
             directory / f"{name}-design.svg",
+            directory / f"{name}-design-evidence.json",
             directory / "timing.json",
         )
         missing = tuple(path.name for path in paths if not path.is_file())
@@ -206,6 +205,18 @@ class AppQaReplayProbe:
             agentResponse=output.response,
             agentCalls=len(output.calls),
         )
+        evidence_bytes = evidence.model_dump_json(by_alias=True).encode()
+        evidence_path = directory / f"{name}-evidence.json"
+        await asyncio.to_thread(evidence_path.write_bytes, evidence_bytes)
+        prior_evidence: tuple[SharedArtifact, ...] = ()
+        if self.phase == "final":
+            initial_name = f"{self.fixture.name}-initial-evidence.json"
+            initial_path = output.workspace_dir / relative.parent / "initial" / initial_name
+            try:
+                initial_bytes = await asyncio.to_thread(initial_path.read_bytes)
+            except FileNotFoundError:
+                return ArtifactProbeResult(error=f"app QA replay probe produced no {initial_name}")
+            prior_evidence = (SharedArtifact(initial_name, initial_bytes),)
         artifacts = tuple(
             SharedArtifact(
                 f"{name}-timing.json" if path == timing_path else path.name,
@@ -215,11 +226,9 @@ class AppQaReplayProbe:
         )
         return ArtifactProbeResult(
             artifacts=(
+                *prior_evidence,
                 *artifacts,
-                SharedArtifact(
-                    f"{name}-evidence.json",
-                    evidence.model_dump_json(by_alias=True).encode(),
-                ),
+                SharedArtifact(evidence_path.name, evidence_bytes),
             )
         )
 

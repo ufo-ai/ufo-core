@@ -59,9 +59,9 @@ from ufo.sdk.sandbox import WORKSPACE_DIR, serve_port, shell_path, workspace_pat
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_ATTEMPT_KEY,
-    APPLICATION_AUDIT_SERVER,
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
     MAX_PRODUCT_QA_CONTROLS,
+    AcceptedApplicationDesignEvidence,
     ApplicationAuditContract,
     ApplicationAuditFeedback,
     ApplicationAuditIssue,
@@ -79,11 +79,14 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_QA_PROOF_KEY,
     APPLICATION_BUILDER_QA_TOOL,
     APPLICATION_BUILDER_REDEPLOY_KEY,
+    APPLICATION_DESIGN_EVIDENCE_MAX_CHARS,
+    APPLICATION_DESIGN_MAX_CHARS,
     APPLICATION_DESIGN_PATH,
     APPLICATION_SCAFFOLD_PATH,
     APPLICATION_SOURCE_PATH,
     APPLICATION_SOURCE_READ,
     application_design_acceptance_relative,
+    application_design_evidence_relative,
 )
 from ufo_ext_sites.objects import effective_visibility, site_object_name
 from ufo_ext_sites.share_card import draw_from_page
@@ -114,8 +117,6 @@ PUBLISH_WEBSITE_TOOL = "publish_website"
 SET_HOMEPAGE_TOOL = "set_homepage"
 
 START_SERVER_PORT = 5000
-APPLICATION_AUDIT_PORT_FLOOR = 40000
-APPLICATION_AUDIT_PORT_SPAN = 20000
 APPLICATION_AUDIT_TIMEOUT_SECONDS = 120
 APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS = 15
 APPLICATION_AUDIT_REPORT_MAX_BYTES = 1024 * 1024
@@ -885,114 +886,135 @@ async def _audit_builder_application(
     dark_path = f"{root}-dark.png"
     interactive_path = f"{root}-interactive.html"
     static_path = f"{root}-static.html"
-    server_path = f"{root}-server.py"
     accepted_design_path = await ctx.sandbox.runtime_path(
         application_design_acceptance_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
     )
-    await ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
-    await ctx.sandbox.write_runtime_file(f"{relative_root}-server.py", APPLICATION_AUDIT_SERVER)
-    port = (
-        APPLICATION_AUDIT_PORT_FLOOR + ctx.sandbox.conversation_id.int % APPLICATION_AUDIT_PORT_SPAN
+    accepted_evidence_path = await ctx.sandbox.runtime_path(
+        application_design_evidence_relative(APPLICATION_DESIGN_PATH, ctx.turn.id)
     )
-    command = (
-        f"python3 {shell_path(server_path)} {shlex.quote(project)} {port} "
-        f"{shell_path(accepted_design_path)}"
+    evidence_read = await ctx.sandbox.python(
+        APPLICATION_AUDIT_REPORT_READ,
+        accepted_evidence_path,
+        str(APPLICATION_DESIGN_EVIDENCE_MAX_CHARS),
     )
-    await _serve(ctx, command, project, port, f"{root}.log")
+    if evidence_read.exit_code != 0 or not evidence_read.stdout:
+        raise RuntimeError(
+            evidence_read.stderr
+            or evidence_read.stdout
+            or "accepted application design evidence is absent"
+        )
     try:
-        run = await ctx.sandbox.sh(
-            'node "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"',
-            script_path,
-            f"http://localhost:{port}/preview.html",
-            report_path,
-            light_path,
-            dark_path,
-            interactive_path,
-            static_path,
-            f"http://localhost:{port}/accepted-design.svg",
-            timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
+        design_evidence = AcceptedApplicationDesignEvidence.model_validate_json(
+            evidence_read.stdout
         )
-        if run.exit_code != 0:
-            detail = (run.stderr or run.stdout).strip()[:400]
-            if run.exit_code == 3:
-                diagnostic_read = await ctx.sandbox.python(
-                    APPLICATION_AUDIT_REPORT_READ,
-                    f"{report_path}.lifecycle.json",
-                    str(APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES),
-                )
-                if diagnostic_read.exit_code != 0:
-                    detail = (
-                        diagnostic_read.stderr
-                        or diagnostic_read.stdout
-                        or "application lifecycle diagnostic is absent"
-                    ).strip()[:400]
+    except ValueError as error:
+        raise RuntimeError("accepted application design evidence is invalid") from error
+    design_read = await ctx.sandbox.python(
+        APPLICATION_AUDIT_REPORT_READ,
+        accepted_design_path,
+        str(APPLICATION_DESIGN_MAX_CHARS),
+    )
+    if design_read.exit_code != 0 or not design_read.stdout:
+        raise RuntimeError(
+            design_read.stderr or design_read.stdout or "accepted application design is absent"
+        )
+    if sha256(design_read.stdout.encode()).hexdigest() != design_evidence.design_sha256:
+        raise RuntimeError("accepted application design evidence digest does not match the design")
+    await ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
+    run = await ctx.sandbox.sh(
+        'node "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"',
+        script_path,
+        project,
+        report_path,
+        light_path,
+        dark_path,
+        interactive_path,
+        static_path,
+        accepted_design_path,
+        accepted_evidence_path,
+        timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
+    )
+    if run.exit_code != 0:
+        detail = (run.stderr or run.stdout).strip()[:400]
+        if run.exit_code == 3:
+            diagnostic_read = await ctx.sandbox.python(
+                APPLICATION_AUDIT_REPORT_READ,
+                f"{report_path}.lifecycle.json",
+                str(APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES),
+            )
+            if diagnostic_read.exit_code != 0:
+                detail = (
+                    diagnostic_read.stderr
+                    or diagnostic_read.stdout
+                    or "application lifecycle diagnostic is absent"
+                ).strip()[:400]
+            else:
+                try:
+                    diagnostic = _ApplicationLifecycleDiagnostic.model_validate_json(
+                        diagnostic_read.stdout
+                    )
+                except ValueError:
+                    detail = "application lifecycle diagnostic is invalid"
                 else:
-                    try:
-                        diagnostic = _ApplicationLifecycleDiagnostic.model_validate_json(
-                            diagnostic_read.stdout
-                        )
-                    except ValueError:
-                        detail = "application lifecycle diagnostic is invalid"
-                    else:
-                        detail = diagnostic.reason
-            if not detail:
-                detail = "audit returned no error"
-            return await _application_audit_feedback(
-                ctx,
-                (
-                    ApplicationAuditIssue(
-                        code="audit_run",
-                        message=f"Run the browser audit successfully: {detail}",
-                    ),
+                    detail = diagnostic.reason
+        if not detail:
+            detail = "audit returned no error"
+        return await _application_audit_feedback(
+            ctx,
+            (
+                ApplicationAuditIssue(
+                    code="audit_run",
+                    message=f"Run the browser audit successfully: {detail}",
                 ),
-                attempts,
-            )
-        report_read = await ctx.sandbox.python(
-            APPLICATION_AUDIT_REPORT_READ,
-            report_path,
-            str(APPLICATION_AUDIT_REPORT_MAX_BYTES),
+            ),
+            attempts,
         )
-        if report_read.exit_code != 0:
-            detail = (report_read.stderr or report_read.stdout or "audit report is absent").strip()[
-                :400
-            ]
-            return await _application_audit_feedback(
-                ctx,
-                (
-                    ApplicationAuditIssue(
-                        code="audit_run",
-                        message=f"Produce a readable browser audit report: {detail}",
-                    ),
+    report_read = await ctx.sandbox.python(
+        APPLICATION_AUDIT_REPORT_READ,
+        report_path,
+        str(APPLICATION_AUDIT_REPORT_MAX_BYTES),
+    )
+    if report_read.exit_code != 0:
+        detail = (report_read.stderr or report_read.stdout or "audit report is absent").strip()[
+            :400
+        ]
+        return await _application_audit_feedback(
+            ctx,
+            (
+                ApplicationAuditIssue(
+                    code="audit_run",
+                    message=f"Produce a readable browser audit report: {detail}",
                 ),
-                attempts,
-            )
-        try:
-            report = ApplicationAuditReport.model_validate_json(report_read.stdout)
-            if ctx.ext is None:
-                raise RuntimeError("the application audit dispatched without its extension context")
-            if ctx.turn.parent_turn_id is None:
-                raise RuntimeError("the application audit dispatched without its parent turn")
-            stored_contract = await ctx.ext.store.get(
-                APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=ctx.turn.parent_turn_id)
-            )
-            contract = ApplicationAuditContract.model_validate(stored_contract or {})
-        except ValueError as error:
-            return await _application_audit_feedback(
-                ctx,
-                (
-                    ApplicationAuditIssue(
-                        code="audit_run",
-                        message=f"Produce a valid browser audit report: {str(error)[:400]}",
-                    ),
+            ),
+            attempts,
+        )
+    try:
+        report = ApplicationAuditReport.model_validate_json(report_read.stdout)
+        if report.design_regions != design_evidence.regions:
+            raise ValueError("browser audit design evidence does not match the accepted design")
+        if ctx.ext is None:
+            raise RuntimeError("the application audit dispatched without its extension context")
+        if ctx.turn.parent_turn_id is None:
+            raise RuntimeError("the application audit dispatched without its parent turn")
+        stored_contract = await ctx.ext.store.get(
+            APPLICATION_AUDIT_TURN_CONTRACT_KEY.format(turn_id=ctx.turn.parent_turn_id)
+        )
+        contract = ApplicationAuditContract.model_validate(stored_contract or {})
+    except ValueError as error:
+        return await _application_audit_feedback(
+            ctx,
+            (
+                ApplicationAuditIssue(
+                    code="audit_run",
+                    message=f"Produce a valid browser audit report: {str(error)[:400]}",
                 ),
-                attempts,
-            )
-        verdict = audit_application(report, contract)
-        if not verdict.passed:
-            return await _application_audit_feedback(ctx, verdict.issues, attempts)
-        return report
-    finally:
-        await _stop_server(ctx, port)
+            ),
+            attempts,
+        )
+    verdict = audit_application(report, contract)
+    if not verdict.passed:
+        return await _application_audit_feedback(ctx, verdict.issues, attempts)
+    return report
 
 
 async def _application_source_sha256(ctx: ToolContext) -> str:

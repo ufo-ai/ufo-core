@@ -1,11 +1,22 @@
 import asyncio
+import io
+import json
 import time
+import zipfile
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 
+from evals.harness.capability import (
+    CapabilityOutput,
+    ProbeCommandResult,
+    ToolInvocation,
+    linked_artifacts,
+)
 from evals.suites import new_application
 from ufo.db import workspace_tx
 from ufo.models.interface import AUTO_MODEL
@@ -16,6 +27,200 @@ MEMBER_EMAIL = "owner@evalco.test"
 LEFTOVER_APPLICATION = "support-desk"
 REWRITTEN_PROMPT = "You do whatever a previous trial asked for."
 HOMEPAGE_SURFACE = "web"
+
+
+@dataclass
+class _ArtifactProbe:
+    workspace: Path
+    exit_code: int = 0
+    command: str = ""
+
+    async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
+        self.command = command
+        if self.exit_code == 0:
+            output = self.workspace / new_application.APPLICATION_ARTIFACT_OUTPUT
+            output.mkdir(parents=True)
+            for name, content in (
+                ("homepage-interactive.html", b"<main>interactive</main>"),
+                ("homepage-audit.json", b"{}"),
+                ("homepage-light.png", b"light"),
+                ("homepage-dark.png", b"dark"),
+                ("homepage-static.html", b"<main>static</main>"),
+            ):
+                (output / name).write_bytes(content)
+        return ProbeCommandResult(self.exit_code, "", "audit failed" if self.exit_code else "")
+
+
+def _preview_workspace(root: Path) -> Path:
+    application = root / "ufo-app"
+    (application / "dist/assets").mkdir(parents=True)
+    (application / "preview.html").write_text("<iframe src='./dist/index.html'></iframe>")
+    (application / "app.tsx").write_text("const app = true;")
+    (application / "application-design.svg").write_text("<svg></svg>")
+    (application / "dist/index.html").write_text("<script src='./assets/app.js'></script>")
+    (application / "dist/assets/app.js").write_text("document.body.textContent = 'ready';")
+    return application
+
+
+def test_application_preview_bundle_is_safe_ordered_and_deterministic(tmp_path: Path) -> None:
+    _preview_workspace(tmp_path)
+
+    first = new_application.APPLICATION_HOMEPAGE_ARTIFACTS.preview_bundle(tmp_path)
+    second = new_application.APPLICATION_HOMEPAGE_ARTIFACTS.preview_bundle(tmp_path)
+
+    assert first == second
+    with zipfile.ZipFile(io.BytesIO(first)) as archive:
+        assert archive.namelist() == [
+            "preview.html",
+            "dist/assets/app.js",
+            "dist/index.html",
+        ]
+
+
+def test_application_preview_bundle_rejects_missing_and_escaping_files(tmp_path: Path) -> None:
+    workspace = tmp_path / "missing"
+    application = workspace / "ufo-app"
+    application.mkdir(parents=True)
+    (application / "preview.html").write_text("preview")
+    with pytest.raises(ValueError, match="no runnable preview bundle"):
+        new_application.APPLICATION_HOMEPAGE_ARTIFACTS.preview_bundle(workspace)
+
+    workspace = tmp_path / "unsafe"
+    application = _preview_workspace(workspace)
+    outside = tmp_path / "outside.js"
+    outside.write_text("outside")
+    (application / "dist/assets/app.js").unlink()
+    (application / "dist/assets/app.js").symlink_to(outside)
+    with pytest.raises(ValueError, match="unsafe file"):
+        new_application.APPLICATION_HOMEPAGE_ARTIFACTS.preview_bundle(workspace)
+
+
+def test_application_preview_bundle_rejects_symlinked_root_and_empty_dist(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    application = _preview_workspace(outside)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "ufo-app").symlink_to(application, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="ufo-app contains a symlink"):
+        new_application.APPLICATION_HOMEPAGE_ARTIFACTS.preview_bundle(workspace)
+
+    empty = tmp_path / "empty"
+    root = empty / "ufo-app"
+    (root / "dist").mkdir(parents=True)
+    (root / "preview.html").write_text("preview")
+    with pytest.raises(ValueError, match="no runnable preview bundle"):
+        new_application.APPLICATION_HOMEPAGE_ARTIFACTS.preview_bundle(empty)
+
+
+async def test_homepage_artifacts_capture_portable_app_and_audit(tmp_path: Path) -> None:
+    _preview_workspace(tmp_path)
+    probe = _ArtifactProbe(tmp_path)
+
+    result = await new_application.APPLICATION_HOMEPAGE_ARTIFACTS(
+        CapabilityOutput("", (), workspace_dir=tmp_path), probe
+    )
+
+    assert result.error == ""
+    assert [artifact.name for artifact in result.artifacts] == [
+        "homepage-interactive.html",
+        "homepage-audit.json",
+        "homepage-light.png",
+        "homepage-dark.png",
+        "homepage-static.html",
+        "homepage-app.tsx",
+        "homepage-design.svg",
+        "homepage-preview.zip",
+    ]
+    assert result.max_payload_bytes == new_application.APPLICATION_ARTIFACT_MAX_BYTES
+    assert "start_server" not in probe.command
+    assert "http://" not in probe.command
+    assert "compile_started=0" in probe.command
+    assert [item["name"] for item in linked_artifacts(result.artifacts, ())] == [
+        artifact.name for artifact in result.artifacts
+    ]
+
+
+async def test_homepage_artifacts_degrade_an_oversized_preview_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _preview_workspace(tmp_path)
+    monkeypatch.setattr(new_application, "APPLICATION_BUNDLE_MAX_BYTES", 16)
+    probe = _ArtifactProbe(tmp_path)
+
+    result = await new_application.APPLICATION_HOMEPAGE_ARTIFACTS(
+        CapabilityOutput("", (), workspace_dir=tmp_path), probe
+    )
+
+    assert "application preview bundle is too large" in result.error
+    assert "homepage-preview.zip" not in {artifact.name for artifact in result.artifacts}
+    assert {artifact.name for artifact in result.artifacts} >= {
+        "homepage-app.tsx",
+        "homepage-design.svg",
+        "homepage-audit.json",
+        "homepage-light.png",
+        "homepage-dark.png",
+    }
+    assert [item["name"] for item in linked_artifacts(result.artifacts, ())] == [
+        artifact.name for artifact in result.artifacts
+    ]
+
+
+async def test_homepage_artifacts_report_a_missing_application(tmp_path: Path) -> None:
+    probe = _ArtifactProbe(tmp_path)
+
+    result = await new_application.APPLICATION_HOMEPAGE_ARTIFACTS(
+        CapabilityOutput("", (), workspace_dir=tmp_path), probe
+    )
+
+    assert result.artifacts == ()
+    assert result.error == "application artifact root ufo-app does not exist"
+    assert probe.command == ""
+
+
+async def test_homepage_artifacts_reject_symlinked_capture_parent(tmp_path: Path) -> None:
+    _preview_workspace(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / ".eval-output").symlink_to(outside, target_is_directory=True)
+    probe = _ArtifactProbe(tmp_path)
+
+    with pytest.raises(ValueError, match=r"\.eval-output/homepage contains a symlink"):
+        await new_application.APPLICATION_HOMEPAGE_ARTIFACTS(
+            CapabilityOutput("", (), workspace_dir=tmp_path), probe
+        )
+
+    assert probe.command == ""
+
+
+async def test_homepage_artifacts_keep_partial_source_when_audit_fails(tmp_path: Path) -> None:
+    application = tmp_path / "ufo-app"
+    application.mkdir()
+    (application / "app.tsx").write_text("const partial = true;")
+    probe = _ArtifactProbe(tmp_path, exit_code=1)
+
+    result = await new_application.APPLICATION_HOMEPAGE_ARTIFACTS(
+        CapabilityOutput("", (), workspace_dir=tmp_path), probe
+    )
+
+    assert [artifact.name for artifact in result.artifacts] == ["homepage-app.tsx"]
+    assert "no runnable preview bundle" in result.error
+    assert "audit artifact capture failed" in result.error
+
+
+async def test_homepage_artifacts_mark_missing_source_without_audit(tmp_path: Path) -> None:
+    (tmp_path / "ufo-app").mkdir()
+    probe = _ArtifactProbe(tmp_path)
+
+    result = await new_application.APPLICATION_HOMEPAGE_ARTIFACTS(
+        CapabilityOutput("", (), workspace_dir=tmp_path), probe
+    )
+
+    assert result.artifacts == ()
+    assert result.error == "application artifact capture found no generated app.tsx"
+    assert probe.command == ""
 
 
 async def _workspace() -> tuple[UUID, UUID, UUID]:
@@ -53,7 +258,13 @@ async def _workspace() -> tuple[UUID, UUID, UUID]:
     return workspace_id, agent_id, member_id
 
 
-async def _application(workspace_id: UUID, name: str, member_id: UUID | None) -> UUID:
+async def _application(
+    workspace_id: UUID,
+    name: str,
+    member_id: UUID | None,
+    *,
+    prompt: str = REWRITTEN_PROMPT,
+) -> UUID:
     application_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -61,7 +272,7 @@ async def _application(workspace_id: UUID, name: str, member_id: UUID | None) ->
                 id=application_id,
                 workspace_id=workspace_id,
                 name=name,
-                prompt=REWRITTEN_PROMPT,
+                prompt=prompt,
                 model="claude-opus-4-8",
                 reasoning="high",
                 is_main=False,
@@ -228,3 +439,107 @@ async def test_the_fixture_seed_clears_an_untalked_leftover_and_seeds_its_own(db
     assert rows[0].prompt == new_application.EXISTING_PROMPT
     assert rows[0].owner_member_id == member_id
     assert rows[1].id == provisioned_id
+
+
+def _object_apply(
+    name: str,
+    result: str,
+    *,
+    kind: str = "agent",
+    raw_result: str | None = None,
+    failed: bool = False,
+    agent: str | None = None,
+) -> ToolInvocation:
+    manifest = f"kind: {kind}\nname: {name}\nspec:\n  prompt: p\n"
+    return ToolInvocation(
+        name="object_apply",
+        input={"manifest": manifest},
+        result=(
+            raw_result
+            if raw_result is not None
+            else json.dumps(
+                {
+                    "kind": kind,
+                    "name": name,
+                    "result": result,
+                    **({"agent": agent} if agent is not None else {}),
+                }
+            )
+        ),
+        has_result=True,
+        is_error=failed,
+    )
+
+
+async def test_created_application_resolves_one_durable_identity(db: None) -> None:
+    workspace_id, _agent_id, member_id = await _workspace()
+    name = "call-brief"
+    final_prompt = "Prepare the brief with the accepted Homepage design."
+    await _application(workspace_id, name, member_id, prompt=final_prompt)
+
+    with ws(workspace_id):
+        created, failure = await new_application._created_application(
+            CapabilityOutput("", (_object_apply(name, "created"),))
+        )
+        assert failure is None
+        assert created is not None
+        assert created.application.name == name
+        assert created.application.prompt == final_prompt
+        assert created.identity.create_index == 0
+        assert created.identity.final_apply_index == 0
+
+        updated, failure = await new_application._created_application(
+            CapabilityOutput("", (_object_apply(name, "created"), _object_apply(name, "updated")))
+        )
+        assert failure is None
+        assert updated is not None
+        assert updated.application.prompt == final_prompt
+        assert updated.identity.create_index == 0
+        assert updated.identity.final_apply_index == 1
+
+        accepted = (
+            CapabilityOutput(
+                "",
+                (
+                    _object_apply(name, "created", failed=True),
+                    _object_apply(name, "created"),
+                ),
+            ),
+            CapabilityOutput(
+                "",
+                (
+                    _object_apply(name, "created"),
+                    _object_apply("github", "created", kind="connector_grant"),
+                ),
+            ),
+            CapabilityOutput("", (_object_apply(name, "created", agent="application-builder"),)),
+        )
+        for output in accepted:
+            resolved, failure = await new_application._created_application(output)
+            assert failure is None
+            assert resolved is not None
+            assert resolved.application.name == name
+
+        invalid = (
+            CapabilityOutput(
+                "",
+                (_object_apply(name, "created"), _object_apply("other", "updated")),
+            ),
+            CapabilityOutput(
+                "", (_object_apply(name, "created"), _object_apply("other", "created"))
+            ),
+            CapabilityOutput("", (_object_apply(name, "updated"),)),
+            CapabilityOutput("", (_object_apply(name, "created", raw_result="{"),)),
+            CapabilityOutput("", (_object_apply(name, "created", failed=True),)),
+            CapabilityOutput("", (_object_apply(name, "created", kind="source"),)),
+        )
+        for output in invalid:
+            rejected, reason = await new_application._created_application(output)
+            assert rejected is None
+            assert reason
+
+        missing, reason = await new_application._created_application(
+            CapabilityOutput("", (_object_apply("missing", "created"),))
+        )
+        assert missing is None
+        assert reason == "created 'missing' but found 0 durable application rows"

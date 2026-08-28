@@ -37,8 +37,10 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_AUDIT_TURN_CONTRACT_KEY,
     DESIGN_REGION_MAX,
     DESIGN_REGION_MIN,
+    AcceptedApplicationDesignEvidence,
     ApplicationAuditRegion,
     ApplicationQaProof,
+    application_design_region_size_failure,
     application_region_relation,
 )
 from ufo_ext_sites.source import (
@@ -95,7 +97,8 @@ APPLICATION_BUILDER_PROMPT = (
 APPLICATION_BUILD_TIMEOUT_SECONDS = 600
 APPLICATION_BUILD_ERROR_MAX_CHARS = 2_000
 APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS = 15
-APPLICATION_DESIGN_AUDIT_MAX_CHARS = 4_000
+APPLICATION_DESIGN_AUDIT_MAX_BYTES = 4_096
+APPLICATION_DESIGN_EVIDENCE_MAX_CHARS = 8_192
 APPLICATION_DESIGN_MAX_CHARS = 128_000
 APPLICATION_SOURCE_MAX_CHARS = 256_000
 APPLICATION_SOURCE_EXCERPT_MAX_CHARS = 5_000
@@ -220,14 +223,14 @@ except FileExistsError:
     raise SystemExit(17)
 except (ContainmentError, OSError) as error:
     raise SystemExit(str(error))"""
-APPLICATION_DELEGATION_CLAIM = """import os
+APPLICATION_FIXED_CALL_CLAIM = """import os
 from containment import ContainmentError, contained_file
 import sys
 from uuid import uuid4
 
 data = sys.argv[3].encode()
 if not data:
-    raise SystemExit("application delegation idempotency key is empty")
+    raise SystemExit("application idempotency key is empty")
 staged = f".ufo-staged-{uuid4().hex}"
 descriptor = -1
 try:
@@ -267,33 +270,72 @@ try:
             os.fsync(target.parent_fd)
 except (ContainmentError, OSError) as error:
     raise SystemExit(str(error))"""
-APPLICATION_SOURCE_RELEASE_CLAIM = """import os
+APPLICATION_DESIGN_ACCEPT = """import hashlib
+import json
+import os
 import stat
 from containment import ContainmentError, contained_file
 import sys
+from uuid import uuid4
 
-try:
-    with contained_file(sys.argv[1], sys.argv[2]) as target:
-        status = target.lstat()
-        if status is None or not stat.S_ISREG(status.st_mode) or status.st_size != 0:
-            raise SystemExit("application claim is not owned")
-        os.unlink(target.name, dir_fd=target.parent_fd)
-except (ContainmentError, OSError) as error:
-    raise SystemExit(str(error))"""
-APPLICATION_DESIGN_ACCEPT = """import os
-from containment import ContainmentError, contained_file
-import sys
-
-staged = None
-try:
-    with contained_file(sys.argv[1], sys.argv[3]) as source:
-        data = source.read_bytes(int(sys.argv[4]) + 1)
-    if len(data) > int(sys.argv[4]):
-        raise SystemExit("application design is too large")
-    with contained_file(sys.argv[2], sys.argv[3], create_parent=True) as target:
-        staged = f".{target.name}.{os.getpid()}.accepted"
+def claim_call(identity):
+    staged_name = f".ufo-staged-{uuid4().hex}"
+    descriptor = -1
+    with contained_file(sys.argv[5], sys.argv[6], create_parent=True) as target:
+        if target.lstat() is not None:
+            if target.read_bytes(len(identity) + 1) != identity:
+                raise SystemExit(17)
+            return
         descriptor = os.open(
-            staged,
+            staged_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=target.parent_fd,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(identity)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(
+                    staged_name,
+                    target.name,
+                    src_dir_fd=target.parent_fd,
+                    dst_dir_fd=target.parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                if target.read_bytes(len(identity) + 1) != identity:
+                    raise SystemExit(17)
+            os.fsync(target.parent_fd)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(staged_name, dir_fd=target.parent_fd)
+            except FileNotFoundError:
+                pass
+            os.fsync(target.parent_fd)
+
+def target_matches(path, data, maximum, label):
+    with contained_file(path, sys.argv[6], create_parent=True) as target:
+        status = target.lstat()
+        if status is None:
+            return False
+        if stat.S_IMODE(status.st_mode) != 0o400:
+            raise SystemExit(f"{label} is not read-only")
+        current = target.read_bytes(maximum + 1)
+        if len(current) > maximum or current != data:
+            raise SystemExit(f"{label} differs from this application design call")
+        return True
+
+def publish(path, data, maximum, label):
+    with contained_file(path, sys.argv[6], create_parent=True) as target:
+        staged_name = f".{target.name}.{uuid4().hex}.accepted"
+        descriptor = os.open(
+            staged_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
             dir_fd=target.parent_fd,
@@ -303,22 +345,60 @@ try:
             with os.fdopen(descriptor, "wb") as handle:
                 descriptor = -1
                 handle.write(data)
-            os.link(
-                staged,
-                target.name,
-                src_dir_fd=target.parent_fd,
-                dst_dir_fd=target.parent_fd,
-                follow_symlinks=False,
-            )
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(
+                    staged_name,
+                    target.name,
+                    src_dir_fd=target.parent_fd,
+                    dst_dir_fd=target.parent_fd,
+                    follow_symlinks=False,
+                )
+                os.fsync(target.parent_fd)
+            except FileExistsError:
+                if not target_matches(path, data, maximum, label):
+                    raise SystemExit(f"{label} was not published")
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
             try:
-                os.unlink(staged, dir_fd=target.parent_fd)
+                os.unlink(staged_name, dir_fd=target.parent_fd)
             except FileNotFoundError:
                 pass
-except FileExistsError:
-    raise SystemExit(17)
+
+try:
+    identity = sys.argv[7].encode()
+    if not identity:
+        raise SystemExit("application idempotency key is empty")
+    pairs = (
+        (sys.argv[1], sys.argv[2], int(sys.argv[8]), "application design"),
+        (sys.argv[3], sys.argv[4], int(sys.argv[9]), "application design evidence"),
+    )
+    proposed = []
+    for source_path, target_path, maximum, label in pairs:
+        with contained_file(source_path, sys.argv[6]) as source:
+            data = source.read_bytes(maximum + 1)
+        if len(data) > maximum:
+            raise SystemExit(f"{label} is too large")
+        proposed.append((target_path, data, maximum, label))
+    try:
+        evidence = json.loads(proposed[1][1])
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit("application design evidence is invalid") from error
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("design_sha256") != hashlib.sha256(proposed[0][1]).hexdigest()
+    ):
+        raise SystemExit("application design evidence does not match the design")
+    claim_call(identity)
+    present = [target_matches(*item) for item in proposed]
+    for (target_path, data, maximum, label), exists in zip(proposed, present, strict=True):
+        if not exists:
+            publish(target_path, data, maximum, label)
+    for target_path, data, maximum, label in proposed:
+        if not target_matches(target_path, data, maximum, label):
+            raise SystemExit(f"{label} was not published")
 except (ContainmentError, OSError) as error:
     raise SystemExit(str(error))"""
 APPLICATION_DESIGN_RELEASE_ACCEPTED = """import hashlib
@@ -326,11 +406,37 @@ from containment import ContainmentError, contained_file
 import sys
 
 try:
-    with contained_file(sys.argv[1], sys.argv[2]) as target:
-        data = target.read_bytes(int(sys.argv[4]) + 1)
-        if len(data) > int(sys.argv[4]) or hashlib.sha256(data).hexdigest() != sys.argv[3]:
-            raise SystemExit("accepted application design is not owned")
-        target.unlink()
+    identity = sys.argv[9].encode()
+    owned = []
+    pairs = (
+        (sys.argv[1], sys.argv[3], int(sys.argv[5]), "accepted application design"),
+        (sys.argv[2], sys.argv[4], int(sys.argv[6]), "accepted application design evidence"),
+    )
+    for path, digest, maximum, label in pairs:
+        with contained_file(path, sys.argv[7]) as target:
+            data = target.read_bytes(maximum + 1)
+            if len(data) > maximum or hashlib.sha256(data).hexdigest() != digest:
+                raise SystemExit(f"{label} is not owned")
+            owned.append(path)
+    with contained_file(sys.argv[8], sys.argv[7]) as claim:
+        if claim.read_bytes(len(identity) + 1) != identity:
+            raise SystemExit("application design claim is not owned")
+        owned.append(sys.argv[8])
+    for path in owned:
+        with contained_file(path, sys.argv[7]) as target:
+            target.unlink()
+except (ContainmentError, OSError) as error:
+    raise SystemExit(str(error))"""
+APPLICATION_DESIGN_RELEASE_CLAIM = """from containment import ContainmentError, contained_file
+import sys
+
+try:
+    identity = sys.argv[3].encode()
+    with contained_file(sys.argv[1], sys.argv[2]) as claim:
+        if claim.lstat() is not None:
+            if claim.read_bytes(len(identity) + 1) != identity:
+                raise SystemExit("application design claim is not owned")
+            claim.unlink()
 except (ContainmentError, OSError) as error:
     raise SystemExit(str(error))"""
 APPLICATION_SOURCE_REQUIRE_CLAIM = """import stat
@@ -807,6 +913,15 @@ def application_design_acceptance_relative(design_path: str, turn_id: UUID) -> s
     )
 
 
+def application_design_evidence_relative(design_path: str, turn_id: UUID) -> str:
+    """Return the runtime-owned accepted design evidence path for one builder turn."""
+
+    return (
+        "tool-output/application-builder/"
+        f"{sha256(design_path.encode()).hexdigest()}.{turn_id}.accepted-design.json"
+    )
+
+
 async def _source_candidate_path(
     ctx: ToolContext, task: ApplicationBuilderTask, turn_id: UUID
 ) -> str:
@@ -833,7 +948,7 @@ async def _render_application_design(
         if "application design must not contain active or external content" in detail:
             raise ValueError("application design must not contain active or external content")
         raise RuntimeError(f"Run the browser audit successfully: {detail}")
-    if len(rendered.stdout) > APPLICATION_DESIGN_AUDIT_MAX_CHARS:
+    if len(rendered.stdout.encode()) > APPLICATION_DESIGN_AUDIT_MAX_BYTES:
         raise RuntimeError("application design audit returned malformed output")
     try:
         regions = APPLICATION_DESIGN_REGIONS.validate_json(rendered.stdout)
@@ -895,6 +1010,8 @@ async def write_application_design(
 ) -> ToolResult:
     """Write one SVG visual contract before application source work starts."""
 
+    if ctx.idempotency_key is None:
+        raise RuntimeError("write_application_design requires an idempotency key")
     task = ApplicationBuilderTask.model_validate_json(ctx.turn.inbound)
     names = _validate_application_design(args.content)
     design_path = _design_path(task)
@@ -909,27 +1026,52 @@ async def write_application_design(
         application_design_acceptance_relative(design_path, ctx.turn.id)
     )
     await ctx.sandbox.write_runtime_path(candidate_path, content)
-    await _render_application_design(ctx, candidate_path, names)
+    rendered_regions = await _render_application_design(ctx, candidate_path, names)
+    if size_failure := application_design_region_size_failure(rendered_regions):
+        raise ValueError(size_failure)
+    evidence = AcceptedApplicationDesignEvidence(
+        design_sha256=content_sha256,
+        regions=rendered_regions,
+    )
+    evidence_content = evidence.model_dump_json(by_alias=True).encode()
+    evidence_sha256 = sha256(evidence_content).hexdigest()
+    evidence_candidate_path = await ctx.sandbox.runtime_path(
+        "tool-output/application-builder/"
+        f"{sha256(design_path.encode()).hexdigest()}.{ctx.turn.id}."
+        f"{evidence_sha256}.candidate-design.json"
+    )
+    evidence_path = await ctx.sandbox.runtime_path(
+        application_design_evidence_relative(design_path, ctx.turn.id)
+    )
+    await ctx.sandbox.write_runtime_path(evidence_candidate_path, evidence_content)
     claim_path = await _design_claim_path(ctx, task, ctx.turn.id)
     runtime_root = await _runtime_root(ctx)
-    claim = await ctx.sandbox.python(
-        APPLICATION_SOURCE_CLAIM,
-        claim_path,
-        runtime_root,
+    claim_identity = json.dumps(
+        (
+            str(ctx.turn.parent_turn_id or ""),
+            str(ctx.turn.id),
+            ctx.idempotency_key,
+            content_sha256,
+            evidence_sha256,
+        ),
+        separators=(",", ":"),
     )
-    if claim.exit_code == 17:
-        raise ValueError("the application design is already fixed for this build")
-    if claim.exit_code != 0:
-        raise RuntimeError(claim.stderr or "application design ownership could not be claimed")
     accepted = False
     try:
         acceptance = await ctx.sandbox.python(
             APPLICATION_DESIGN_ACCEPT,
             candidate_path,
             accepted_path,
+            evidence_candidate_path,
+            evidence_path,
+            claim_path,
             runtime_root,
+            claim_identity,
             str(APPLICATION_DESIGN_MAX_CHARS),
+            str(APPLICATION_DESIGN_EVIDENCE_MAX_CHARS),
         )
+        if acceptance.exit_code == 17:
+            raise ValueError("the application design is already fixed for this build")
         if acceptance.exit_code != 0:
             raise RuntimeError(
                 acceptance.stderr
@@ -945,9 +1087,14 @@ async def write_application_design(
                 ctx,
                 APPLICATION_DESIGN_RELEASE_ACCEPTED,
                 accepted_path,
-                runtime_root,
+                evidence_path,
                 content_sha256,
+                evidence_sha256,
                 str(APPLICATION_DESIGN_MAX_CHARS),
+                str(APPLICATION_DESIGN_EVIDENCE_MAX_CHARS),
+                runtime_root,
+                claim_path,
+                claim_identity,
             )
             cleanup_failures.extend(failures)
             if released_design is not None and released_design.exit_code != 0:
@@ -956,17 +1103,21 @@ async def write_application_design(
                     or released_design.stdout
                     or "accepted application design could not be released"
                 )
-        released, failures = await _complete_application_design_cleanup(
-            ctx,
-            APPLICATION_SOURCE_RELEASE_CLAIM,
-            claim_path,
-            runtime_root,
-        )
-        cleanup_failures.extend(failures)
-        if released is not None and released.exit_code != 0:
-            cleanup_failures.append(
-                released.stderr or "application design ownership could not be released"
+        else:
+            released_claim, failures = await _complete_application_design_cleanup(
+                ctx,
+                APPLICATION_DESIGN_RELEASE_CLAIM,
+                claim_path,
+                runtime_root,
+                claim_identity,
             )
+            cleanup_failures.extend(failures)
+            if released_claim is not None and released_claim.exit_code != 0:
+                cleanup_failures.append(
+                    released_claim.stderr
+                    or released_claim.stdout
+                    or "application design claim could not be released"
+                )
         for failure in cleanup_failures:
             error.add_note(failure)
         raise
@@ -978,6 +1129,16 @@ async def write_application_design(
                         "path": design_path,
                         "design_digest": sha256(content).hexdigest(),
                         "size_bytes": len(content),
+                        "rendered_regions": [
+                            {
+                                key: value
+                                for key, value in region.model_dump(
+                                    mode="json", by_alias=True
+                                ).items()
+                                if key != "visibleText" or value
+                            }
+                            for region in rendered_regions
+                        ],
                     }
                 )
             ),
@@ -1386,7 +1547,7 @@ async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInpu
     )
     runtime_root = await _runtime_root(ctx)
     claim = await ctx.sandbox.python(
-        APPLICATION_DELEGATION_CLAIM,
+        APPLICATION_FIXED_CALL_CLAIM,
         claim_path,
         runtime_root,
         ctx.idempotency_key,
@@ -1535,6 +1696,7 @@ APPLICATION_BUILDER_DESIGN = ToolDef(
     ),
     input_model=WriteApplicationDesignInput,
     handler=write_application_design,
+    side_effecting=True,
     profile_only=True,
 )
 
