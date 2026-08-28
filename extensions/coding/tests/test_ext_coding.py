@@ -268,18 +268,19 @@ def test_the_escalation_profile_reuses_the_coding_contract_and_raises_only_the_m
     assert escalation.input_model is coding_profile.input_model
     assert escalation.output_model is coding_profile.output_model
     assert escalation.max_rounds == coding_profile.max_rounds
-    assert coding_profile.model is None
+    assert coding_profile.model == coding.CODING_MODEL == "anthropic.claude-opus-5"
     assert escalation.model == coding.FABLE_ESCALATION_MODEL == "anthropic/claude-fable-5"
     assert escalation.prompt == coding.FABLE_ESCALATION_PROMPT != coding_profile.prompt
 
 
-def test_the_escalation_model_is_registered_by_an_installed_manifest() -> None:
+def test_the_coding_profile_models_are_registered() -> None:
     """Nothing checks a pinned id at boot, so an id no `ModelSpec` describes first fails inside the
     child's own dispatch. Core's catalog alone is not that check: this rung runs on a provider an
     extension registers, and asserting against the core table would pass only by adding the id to a
     table core does not serve it from. The union every turn resolves through is the check."""
     served = {spec.id for spec in CORE_MODEL_SPECS}
     served |= {spec.id for manifest in load_manifests() for spec in manifest.models}
+    assert coding.CODING_MODEL in served
     assert coding.FABLE_ESCALATION_MODEL in served
 
 

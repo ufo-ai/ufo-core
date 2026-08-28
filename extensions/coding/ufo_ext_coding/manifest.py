@@ -10,11 +10,11 @@ parent decides what reaches the member. Core wraps the prompt with the shared ci
 discipline and fills its skill index. The `coding` skill teaches the main agent to route repo work
 to that child.
 
-`spawn("fable_escalation", ...)` is the last rung on one pull-request blocker: the same tools and
-the same input contract on a stronger pinned model, with its own prompt for a worker that two
-`coding` children already failed in front of. It reads wider than the diff, makes one attempt, and
-reports. The model is pinned on the profile because the answer is always "this rung wants that
-model", and the caller escalates by naming the target.
+`coding` runs on Opus. `spawn("fable_escalation", ...)` is the last rung on one pull-request
+blocker: the same tools and the same input contract on a stronger pinned model, with its own prompt
+for a worker that two `coding` children already failed in front of. It reads wider than the diff,
+makes one attempt, and reports. Each model is pinned on its profile because the caller chooses the
+rung by naming the target.
 
 The pack ships no agent. It is the machinery a durable one runs on — the child profiles, the
 skill, the credentials — and a durable agent with work of its own is an application: it ships as
@@ -67,6 +67,7 @@ CODING_TOOL_NAMES = (
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 100
+CODING_MODEL = "anthropic.claude-opus-5"
 FABLE_ESCALATION_PROFILE_NAME = "fable_escalation"
 FABLE_ESCALATION_MODEL = "anthropic/claude-fable-5"
 FABLE_ESCALATION_PROMPT = (
@@ -168,6 +169,7 @@ CODING_PROFILE = SubagentProfile(
     input_model=CodingInput,
     output_model=CodingOutput,
     max_rounds=CODING_ROUND_LIMIT,
+    model=CODING_MODEL,
 )
 
 FABLE_ESCALATION_PROFILE = SubagentProfile(
