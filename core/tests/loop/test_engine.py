@@ -1912,6 +1912,7 @@ async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
     points = _exported_metrics(reader)
     assert {
         (
+            point.attributes["model"],
             point.attributes["round"],
             point.attributes["gap"],
             point.attributes["conversation_ttl"],
@@ -1920,15 +1921,21 @@ async def test_cache_metrics_split_first_and_later_rounds_by_idle_gap(
         )
         for point in points["ufo.model_cache_round_total"]
     } == {
-        ("first", "5m_1h", "1h", "miss", 1),
-        ("later", "within_turn", "1h", "miss", 1),
+        ("claude-opus-4-8", "first", "5m_1h", "1h", "miss", 1),
+        ("claude-opus-4-8", "later", "within_turn", "1h", "miss", 1),
     }
     assert {
-        (point.attributes["round"], point.attributes["gap"], point.attributes["kind"], point.value)
+        (
+            point.attributes["model"],
+            point.attributes["round"],
+            point.attributes["gap"],
+            point.attributes["kind"],
+            point.value,
+        )
         for point in points["ufo.model_cache_tokens_total"]
     } == {
-        ("first", "5m_1h", "input", 2),
-        ("later", "within_turn", "input", 1),
+        ("claude-opus-4-8", "first", "5m_1h", "input", 2),
+        ("claude-opus-4-8", "later", "within_turn", "input", 1),
     }
     assert {
         (point.attributes["round"], point.attributes["gap"], point.attributes["result"])

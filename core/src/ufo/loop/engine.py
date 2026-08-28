@@ -2253,6 +2253,7 @@ class TurnEngine:
             else:
                 gap = "gt_1h"
         cache_dimensions = {
+            "model": request.model,
             "provider": self.provider,
             "profile": self.profile,
             "conversation_ttl": request.conversation_cache_ttl,
@@ -2368,7 +2369,6 @@ class TurnEngine:
             emit_histogram(
                 "model_provider_start_ms",
                 provider_start_ms,
-                model=request.model,
                 **cache_dimensions,
                 result=cache_result,
             )
@@ -2376,7 +2376,6 @@ class TurnEngine:
             emit_histogram(
                 "model_first_visible_event_ms",
                 first_visible_event_ms,
-                model=request.model,
                 **cache_dimensions,
                 result=cache_result,
             )
