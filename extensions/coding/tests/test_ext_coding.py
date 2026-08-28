@@ -126,13 +126,12 @@ def test_coding_tools_are_core_builtins_plus_the_repl_and_exclude_the_forbidden_
     for name in ("bash", "read", "write", "edit", "glob", "grep"):
         assert name in profile.tool_names and name in builtin_names
     assert "js_repl" in profile.tool_names
-    assert {"ask_user", "spawn", "cancel_spawn", "search_web", "fetch_url"}.isdisjoint(
-        profile.tool_names
-    )
+    assert {"ask_user", "spawn", "cancel_spawn"}.isdisjoint(profile.tool_names)
+    assert {"search_web", "fetch_url"} <= set(profile.tool_names)
 
 
 @pytest.mark.parametrize("profile", (coding.CODING_PROFILE, coding.FABLE_ESCALATION_PROFILE))
-def test_coding_profiles_exclude_research_tools_from_the_live_tool_set(
+def test_coding_profiles_include_research_tools_in_the_live_tool_set(
     profile: SubagentProfile,
 ) -> None:
     all_tools = (
@@ -143,7 +142,6 @@ def test_coding_profiles_exclude_research_tools_from_the_live_tool_set(
         READ_OBJECTIVE_TOOL,
     )
     selected = {tool.name for tool in _subagent_tools(all_tools, profile, frozenset())}
-    assert {"search_web", "fetch_url"}.isdisjoint(selected)
     assert {
         "bash",
         "read",
@@ -154,6 +152,8 @@ def test_coding_profiles_exclude_research_tools_from_the_live_tool_set(
         "plan_objective",
         "record_step",
         "read_objective",
+        "search_web",
+        "fetch_url",
     } <= selected
 
 

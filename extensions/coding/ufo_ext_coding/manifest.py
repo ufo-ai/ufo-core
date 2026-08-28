@@ -2,13 +2,13 @@
 skill that routes work to it, and the GitHub credentials its checkouts and API calls ride.
 
 `spawn("coding", {"objective": ...})` runs a child that explores a repo, edits code, runs
-tests, and reports a result. The profile names only tool names — bash/read/write/
-edit/glob/grep to work the code, load_skill to pull a workflow, and js_repl to exercise Node
-code — so the pack is self-contained and carries no cross-extension import. Nothing in it delivers
-a file to the member: the child leaves work in the workspace it shares with the parent, and the
-parent decides what reaches the member. Core wraps the prompt with the shared citation/formatting
-discipline and fills its skill index. The `coding` skill teaches the main agent to route repo work
-to that child.
+ tests, and reports a result. The profile names only tool names — bash/read/write/
+ edit/glob/grep to work the code, load_skill to pull a workflow, js_repl to exercise Node code, and
+ search_web/fetch_url for external sources — so the pack is self-contained and carries no
+ cross-extension import. Nothing in it delivers a file to the member: the child leaves work in the
+ workspace it shares with the parent, and the parent decides what reaches the member. Core wraps
+ the prompt with the shared citation/formatting discipline and fills its skill index. The `coding`
+ skill teaches the main agent to route repo work to that child.
 
 `coding` runs on Opus. `spawn("fable_escalation", ...)` is the last rung on one pull-request
 blocker: the same tools and the same input contract on a stronger pinned model, with its own prompt
@@ -17,7 +17,7 @@ makes one attempt, and reports. Each model is pinned on its profile because the 
 rung by naming the target.
 
 The pack ships no agent. It is the machinery a durable one runs on — the child profiles, the
-skill, the credentials — and a durable agent with work of its own is an application: it ships as
+ skill, the credentials — and a durable agent with work of its own is an application: it ships as
 its own extension, under the slug its page is served at.
 
 The pack declares sandbox internet because repository builds install dependencies and download
@@ -64,6 +64,8 @@ CODING_TOOL_NAMES = (
     "grep",
     "load_skill",
     "js_repl",
+    "search_web",
+    "fetch_url",
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
 CODING_ROUND_LIMIT = 100

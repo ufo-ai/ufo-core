@@ -12,18 +12,17 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from evals.terminal_bench.models import SelectedTask, UpstreamMetadata
+from evals.terminal_bench.models import UpstreamMetadata
 from evals.terminal_bench.setup import UPSTREAM_FILE, load_upstream
 
 CUSTOM_AGENT = "evals.terminal_bench.agent:UfoAgent"
-TASK_MANIFEST = "task.toml"
 CLIENT = "bin/x86_64/ufo"
 BENCH_ENVIRONMENT = (
     "UFO_BENCH_CLIENT",
     "UFO_BENCH_TOKEN",
     "UFO_BENCH_WORKSPACE_URL",
 )
-REWARD_FILES = ("reward.txt", "reward.json")
+REWARD_FILE = "reward.txt"
 JOB_STAMP = "%Y%m%dT%H%M%SZ"
 
 
@@ -70,29 +69,26 @@ class TrialOutputs:
     exception: str | None
 
 
-def select_cases(
-    upstream: UpstreamMetadata, requested: tuple[str, ...]
-) -> tuple[SelectedTask, ...]:
+def select_cases(upstream: UpstreamMetadata, requested: tuple[str, ...]) -> tuple[str, ...]:
     """Resolve requested names into pinned manifest order; empty selects all."""
-    pinned = tuple(task.name for task in upstream.tasks)
     if not requested:
         return upstream.tasks
     duplicates = sorted({name for name in requested if requested.count(name) > 1})
     if duplicates:
         raise ValueError(f"duplicate selected cases: {', '.join(duplicates)}")
-    unknown = sorted(set(requested) - set(pinned))
+    unknown = sorted(set(requested) - set(upstream.tasks))
     if unknown:
         raise ValueError(f"unknown selected cases: {', '.join(unknown)}")
-    return tuple(task for task in upstream.tasks if task.name in set(requested))
+    return tuple(task for task in upstream.tasks if task in set(requested))
 
 
 def harbor_command(
-    tasks_dir: Path,
-    cases: tuple[SelectedTask, ...],
+    dataset: str,
+    digest: str,
+    cases: tuple[str, ...],
     jobs_dir: Path,
     job_name: str,
     concurrency: int,
-    workspace_host: str,
     harbor_version: str,
     backend: HarborBackend = DAYTONA_BACKEND,
 ) -> tuple[str, ...]:
@@ -104,15 +100,17 @@ def harbor_command(
         f"harbor[{backend.extra}]=={harbor_version}",
         "harbor",
         "run",
-        "--path",
-        str(tasks_dir),
-        *(part for case in cases for part in ("--include-task-name", case.name)),
+        "--dataset",
+        f"{dataset}@{digest}",
+        *(
+            part
+            for case in cases
+            for part in ("--include-task-name", f"{dataset.partition('/')[0]}/{case}")
+        ),
         "--agent",
         CUSTOM_AGENT,
         "--env",
         backend.environment,
-        "--allow-agent-host",
-        workspace_host,
         "--jobs-dir",
         str(jobs_dir),
         "--job-name",
@@ -149,14 +147,9 @@ def official_outputs(job_dir: Path) -> tuple[TrialOutputs, ...]:
         if not result.is_file():
             raise FileNotFoundError(f"Harbor trial result is missing: {result}")
         verifier = trial / "verifier"
-        reward = next(
-            (verifier / name for name in REWARD_FILES if (verifier / name).is_file()), None
-        )
-        if reward is None:
-            raise FileNotFoundError(
-                f"Harbor wrote no reward file under {verifier}: "
-                f"expected one of {', '.join(REWARD_FILES)}"
-            )
+        reward = verifier / REWARD_FILE
+        if not reward.is_file():
+            raise FileNotFoundError(f"Harbor reward is missing: {reward}")
         record = TrialRecord.model_validate(json.loads(result.read_bytes()))
         outputs.append(
             TrialOutputs(
@@ -187,19 +180,16 @@ class TerminalBenchRun:
         """Run one concurrent Harbor job and return its exit status."""
         upstream = load_upstream(self.upstream_file)
         selected = select_cases(upstream, self.cases)
-        self._validate_inputs(selected)
-        workspace_host = urlsplit(self.credentials.workspace_url).hostname
-        if workspace_host is None:
-            raise ValueError("Terminal-Bench workspace URL has no host")
+        self._validate_inputs()
         jobs_dir = self.root / "jobs"
         job_name = f"ufo-{datetime.now(UTC).strftime(JOB_STAMP)}-{uuid4().hex[:8]}"
         command = harbor_command(
-            self.root / "tasks",
+            upstream.dataset,
+            upstream.digest,
             selected,
             jobs_dir,
             job_name,
             self.concurrency,
-            workspace_host,
             upstream.harbor_version,
             self.backend,
         )
@@ -224,19 +214,12 @@ class TerminalBenchRun:
             return 1
         return 0
 
-    def _validate_inputs(self, selected: tuple[SelectedTask, ...]) -> None:
+    def _validate_inputs(self) -> None:
         if self.concurrency < 1:
             raise ValueError("Terminal-Bench concurrency must be at least 1")
         parsed = urlsplit(self.credentials.workspace_url)
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError("Terminal-Bench remote runs require a public HTTPS serve URL")
-        for task in selected:
-            manifest = self.root / "tasks" / task.name / TASK_MANIFEST
-            if not manifest.is_file():
-                raise FileNotFoundError(
-                    f"Terminal-Bench task {task.name} is missing: {manifest}. "
-                    "Run python -m evals.terminal_bench.setup"
-                )
         if not self.credentials.client.is_file():
             raise FileNotFoundError(
                 f"Terminal-Bench client is missing: {self.credentials.client}. "

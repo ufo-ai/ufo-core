@@ -47,7 +47,7 @@ not type the token. The token is not part of a URL.
 | `docs/handbook/` | A generated reference to the harness. Start at `overview.md`. |
 | `evals/README.md` | The eval suites, stacks, ablations, and GEPA. |
 | `evals/swebench/README.md` | SWE-bench Verified: local generation and official grading. |
-| `evals/terminal_bench/README.md` | Terminal-Bench 3: pinned tasks through the native client in Harbor. |
+| `evals/terminal_bench/README.md` | Terminal-Bench 2.1: the pinned official roster through the native client in Harbor. |
 | `core/` | The base unit. |
 | `extensions/` | First-party extensions. |
 | `packs/` | Skill packs. |
@@ -127,5 +127,5 @@ uv run python -m evals --share <current-run> <baseline-run>
 (`evals.stack`), prompt-change ablations (`evals.ablate`), and prompt search (`evals.gepa`).
 
 Public benchmarks retain their official harness output. `python -m evals --terminal-bench --remote`
-runs three pinned Terminal-Bench 3 tasks concurrently in Harbor's remote graded environments;
-`evals/terminal_bench/README.md` covers setup and results.
+runs the pinned Terminal-Bench 2.1 roster concurrently in Harbor's remote graded environments;
+`evals/terminal_bench/README.md` covers setup, case selection, and results.

@@ -28,22 +28,25 @@ from ufo.db import workspace_tx
 from ufo.schema import tables
 
 TOKEN = "ufo-bearer-4d0f2c8a1b6e"
-CASES = ("interleaved-vigenere", "html-js-filter", "kv-live-surgery")
+DATASET = "terminal-bench/terminal-bench-2-1"
+DATASET_DIGEST = "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"
+CASES = ("openssl-selfsigned-cert", "regex-log", "cancel-async-tasks")
 
 
 def test_default_and_named_cases_resolve_in_manifest_order() -> None:
     upstream = load_upstream(UPSTREAM_FILE)
 
-    assert tuple(task.name for task in select_cases(upstream, ())) == CASES
-    assert tuple(
-        task.name for task in select_cases(upstream, ("kv-live-surgery", "html-js-filter"))
-    ) == ("html-js-filter", "kv-live-surgery")
+    assert len(select_cases(upstream, ())) == 89
+    assert select_cases(upstream, ("cancel-async-tasks", "regex-log")) == (
+        "regex-log",
+        "cancel-async-tasks",
+    )
 
 
 @pytest.mark.parametrize(
     ("requested", "message"),
     (
-        (("html-js-filter", "html-js-filter"), "duplicate"),
+        (("regex-log", "regex-log"), "duplicate"),
         (("unknown",), "unknown"),
     ),
 )
@@ -55,12 +58,12 @@ def test_invalid_case_selections_fail(requested: tuple[str, ...], message: str) 
 def test_harbor_command_runs_one_remote_job_at_bounded_concurrency(tmp_path: Path) -> None:
     selected = select_cases(load_upstream(UPSTREAM_FILE), ())
     command = harbor_command(
-        tmp_path / "tasks",
+        DATASET,
+        DATASET_DIGEST,
         selected,
         tmp_path / "jobs",
         "ufo-full",
         24,
-        "eval.ufo.test",
         "0.21.0",
     )
 
@@ -76,20 +79,21 @@ def test_harbor_command_runs_one_remote_job_at_bounded_concurrency(tmp_path: Pat
     assert DAYTONA_BACKEND == HarborBackend(environment="daytona", extra="daytona")
     assert command[command.index("--env") + 1] == "daytona"
     assert command[command.index("--n-concurrent") + 1] == "24"
-    assert command[command.index("--allow-agent-host") + 1] == "eval.ufo.test"
-    assert command.count("--include-task-name") == 3
-    assert all(case in command for case in CASES)
+    assert "--allow-agent-host" not in command
+    assert command[command.index("--dataset") + 1] == f"{DATASET}@{DATASET_DIGEST}"
+    assert command.count("--include-task-name") == 89
+    assert all(f"terminal-bench/{case}" in command for case in CASES)
     assert command[-3:] == ("--max-retries", "0", "--yes")
 
 
 def test_harbor_command_accepts_an_environment_and_its_extra(tmp_path: Path) -> None:
     command = harbor_command(
-        tmp_path / "tasks",
-        select_cases(load_upstream(UPSTREAM_FILE), ("html-js-filter",)),
+        DATASET,
+        DATASET_DIGEST,
+        select_cases(load_upstream(UPSTREAM_FILE), ("regex-log",)),
         tmp_path / "jobs",
         "ufo-one",
         1,
-        "eval.ufo.test",
         "0.21.0",
         HarborBackend(environment="e2b", extra="e2b"),
     )
@@ -105,12 +109,12 @@ def test_token_reaches_harbor_only_through_the_environment(tmp_path: Path) -> No
         workspace_url="https://eval.ufo.test",
     )
     command = harbor_command(
-        tmp_path / "tasks",
-        select_cases(load_upstream(UPSTREAM_FILE), ("html-js-filter",)),
+        DATASET,
+        DATASET_DIGEST,
+        select_cases(load_upstream(UPSTREAM_FILE), ("regex-log",)),
         tmp_path / "jobs",
         "ufo-one",
         1,
-        "eval.ufo.test",
         "0.21.0",
     )
     environment = harbor_environment({"PATH": "/usr/bin"}, credentials)
@@ -136,11 +140,11 @@ async def test_terminal_bench_agent_closes_json_stdin(
     environment = SimpleNamespace(context_id=uuid4())
     agent = UfoAgent(tmp_path)
     agent._workspace_url = "https://eval.ufo.test"
-    agent._workspace_host = "eval.ufo.test"
     execute = AsyncMock()
+    context = AgentContext()
     monkeypatch.setattr(agent, "exec_as_agent", execute)
 
-    await agent.run("repair 'quoted' input", environment, AgentContext())
+    await agent.run("repair 'quoted' input", environment, context)
 
     execute.assert_awaited_once_with(
         environment,
@@ -151,9 +155,13 @@ async def test_terminal_bench_agent_closes_json_stdin(
             "UFO_CHANNEL": execute.await_args.kwargs["env"]["UFO_CHANNEL"],
         },
     )
+    assert context.metadata == {
+        "channel": execute.await_args.kwargs["env"]["UFO_CHANNEL"],
+        "client_target": "/installed-agent/ufo",
+    }
 
 
-def test_full_run_keeps_harbor_grading_and_one_concurrent_job(
+def test_selected_run_keeps_harbor_grading_and_one_concurrent_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, credentials = _prepared_root(tmp_path)
@@ -171,18 +179,13 @@ def test_full_run_keeps_harbor_grading_and_one_concurrent_job(
 
     monkeypatch.setattr(subprocess, "run", complete)
 
-    assert TerminalBenchRun(root, (), 12, credentials).run() == 0
+    assert TerminalBenchRun(root, CASES, 12, credentials).run() == 0
     assert len(seen) == 1
     command, environment = seen[0]
     assert command[command.index("--n-concurrent") + 1] == "12"
-    assert (
-        tuple(
-            command[index + 1]
-            for index, value in enumerate(command)
-            if value == "--include-task-name"
-        )
-        == CASES
-    )
+    assert tuple(
+        command[index + 1] for index, value in enumerate(command) if value == "--include-task-name"
+    ) == tuple(f"terminal-bench/{case}" for case in CASES)
     assert environment["UFO_BENCH_TOKEN"] == TOKEN
     assert TOKEN not in " ".join(command)
 
@@ -206,13 +209,8 @@ def test_invalid_remote_configuration_fails_before_harbor(
     assert not (root / "jobs").exists()
 
 
-def test_missing_task_or_client_fails_before_harbor(tmp_path: Path) -> None:
+def test_missing_client_fails_before_harbor(tmp_path: Path) -> None:
     root, credentials = _prepared_root(tmp_path)
-    (root / "tasks" / "html-js-filter" / "task.toml").unlink()
-    with pytest.raises(FileNotFoundError, match="html-js-filter"):
-        TerminalBenchRun(root, (), 1, credentials).run()
-
-    (root / "tasks" / "html-js-filter" / "task.toml").write_text("[task]\n")
     credentials.client.unlink()
     with pytest.raises(FileNotFoundError, match="client"):
         TerminalBenchRun(root, (), 1, credentials).run()
@@ -220,7 +218,7 @@ def test_missing_task_or_client_fails_before_harbor(tmp_path: Path) -> None:
 
 def test_official_outputs_require_results_and_rewards(tmp_path: Path) -> None:
     job_dir = tmp_path / "job"
-    _job(job_dir, ("html-js-filter",))
+    _job(job_dir, ("regex-log",))
 
     (output,) = official_outputs(job_dir)
     assert output.result.name == "result.json"
@@ -242,12 +240,12 @@ def test_recorded_trial_exception_fails_the_run(
             Path(command[command.index("--jobs-dir") + 1])
             / command[command.index("--job-name") + 1]
         )
-        _job(job_dir, ("html-js-filter",), exception="NonZeroAgentExitCodeError")
+        _job(job_dir, ("regex-log",), exception="NonZeroAgentExitCodeError")
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(subprocess, "run", complete)
 
-    assert TerminalBenchRun(root, ("html-js-filter",), 1, credentials).run() == 1
+    assert TerminalBenchRun(root, ("regex-log",), 1, credentials).run() == 1
 
 
 def test_eval_runner_routes_remote_scale_into_one_harbor_run(
@@ -292,7 +290,7 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
         [
             "--terminal-bench",
             "--terminal-bench-case",
-            "html-js-filter",
+            "regex-log",
             "--terminal-bench-root",
             str(root),
             "--terminal-bench-environment",
@@ -310,7 +308,7 @@ def test_eval_runner_routes_remote_scale_into_one_harbor_run(
     assert captured == [
         (
             root,
-            ("html-js-filter",),
+            ("regex-log",),
             18,
             credentials,
             HarborBackend(environment="e2b", extra="e2b"),
@@ -392,10 +390,6 @@ def _prepared_root(
     tmp_path: Path, workspace_url: str = "https://eval.ufo.test"
 ) -> tuple[Path, BenchCredentials]:
     root = tmp_path / "terminal-bench"
-    for case in CASES:
-        manifest = root / "tasks" / case / "task.toml"
-        manifest.parent.mkdir(parents=True)
-        manifest.write_text("[task]\n")
     client = root / "bin" / "x86_64" / "ufo"
     client.parent.mkdir(parents=True)
     client.write_text("#!/bin/sh\n")

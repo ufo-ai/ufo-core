@@ -371,7 +371,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--terminal-bench",
         action="store_true",
-        help="run the pinned Terminal-Bench 3 roster through remote Harbor environments",
+        help="run the pinned Terminal-Bench 2.1 roster through remote Harbor environments",
     )
     parser.add_argument("--terminal-bench-case", action="append", default=[], metavar="CASE")
     parser.add_argument(

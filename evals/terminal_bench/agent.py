@@ -27,7 +27,6 @@ class UfoAgent(BaseInstalledAgent):
     """Install the native client and run one turn inside Harbor's graded environment."""
 
     _workspace_url: str
-    _workspace_host: str
 
     @staticmethod
     @override
@@ -47,7 +46,6 @@ class UfoAgent(BaseInstalledAgent):
         if not await asyncio.to_thread(os.access, client, os.X_OK):
             raise PermissionError(f"Terminal-Bench client is not executable: {client}")
         self._workspace_url = workspace_url
-        self._workspace_host = parsed.hostname
 
         await environment.upload_file(client, CLIENT_TARGET)
         await self.exec_as_root(environment, command=f"mkdir -p {shlex.quote(HOME_TARGET)}")
@@ -92,7 +90,6 @@ class UfoAgent(BaseInstalledAgent):
         context.metadata = {
             "channel": channel,
             "client_target": CLIENT_TARGET,
-            "workspace_host": self._workspace_host,
         }
         await self.exec_as_agent(
             environment,
