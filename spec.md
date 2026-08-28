@@ -371,6 +371,18 @@ named and never valued — and whose status carries what it asks of the deploy (
 `requires`). Instances are declarations rather than rows, so their envelope timestamps are null,
 and every mutation refuses: installing and removing an extension is a lockfile act (`ufoctl ext`).
 
+The registered chat surfaces read back as the core-registered `surface` kind: one object per
+`SurfaceSpec` the active manifests declare, named by the surface name, installed or not — the
+terminal and subagent transports declare none and get no row. Its spec is the declaration (the
+declaring extension, addressed vs installation-routed, durable vs live delivery, the home surface);
+its status is the workspace's `surface_installation` binding — bound or not, the bound agent, whether
+the installation identity routes ingress — never an installation id or a provider secret. Foreign
+audiences read no rows and the portal answers admins alone; apply and delete refuse, because setup is
+the surface's own connect flow. No extension can express it: none sees the whole manifest set or owns
+the shared routing table, so the loader builds it and binds it with no extension context. Slack and
+iMessage attach their setup tools to it as instance actions (`action:surface:slack_connect`,
+`action:surface:imessage_connect`, …), so connecting a surface starts from a read of its object.
+
 Manifest registers (each optional):
 
 | Point | Contract |
@@ -920,7 +932,8 @@ constant naming us, never a tenant-level role — an internal channel's block al
 accounting, model metadata, and a debugger link.
 
 Slack installs by either of two paths in chat, both landing the same per-workspace bot token and
-identity. **Preferred — OAuth on the deploy's own app**: its client id, client secret, and signing
+identity; the setup tools are instance actions on the core `surface/slack` object, so an agent
+reaches them through a read of that object. **Preferred — OAuth on the deploy's own app**: its client id, client secret, and signing
 secret are read from the deploy's env (never the sandbox), `slack_connect` (default) returns an
 **"Add to Slack" link** whose sealed state names the speaking admin and workspace, and the state-verified
 OAuth callback exchanges the code for that workspace's `xoxb` bot token, binds the team, and records
@@ -929,7 +942,8 @@ the identity. **Alternative — bring-your-own app** (`slack_connect method="man
 `slack_bot_token` and `slack_signing_secret` slots privately, and `slack_connect` derives the
 identity with `auth.test`.
 
-iMessage setup is one chat tool. An admin binds the deploy's Spectrum project to the workspace;
+iMessage setup is one action on `surface/imessage`. An admin binds the deploy's Spectrum project to
+the workspace;
 each signed-in member claims a 10-digit US phone number, stored in E.164 form. The tool registers
 the phone with Spectrum,
 records the claim, and returns the assigned line with the claim's random six-character `UFO <code>`,

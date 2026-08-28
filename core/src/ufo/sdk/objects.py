@@ -16,6 +16,9 @@ from ufo.kinds.conversations import (
 from ufo.kinds.credential_kind import (
     CREDENTIAL_KIND as CREDENTIAL_KIND,
 )
+from ufo.kinds.surface_kind import (
+    SURFACE_KIND as SURFACE_KIND,
+)
 from ufo.object_name import (
     ObjectRef as ObjectRef,
 )

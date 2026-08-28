@@ -10956,26 +10956,40 @@ def test_every_catalog_tile_is_served_by_a_broker() -> None:
     assert FIRST_RUN_PROVIDER_NAMES & set(BANNED) <= set(PIPEDREAM_CONNECTORS)
 
 
-def test_the_first_run_connect_steps_prepare_the_install_tools_verbatim() -> None:
-    """Each connect step names the chat verb that installs its connector and nothing else: the
-    panel carries no install rule of its own, so the tool's own admin gate decides who may, and
-    `ToolIntent`'s whitelist is what admits the verb at all — a tool it does not name cannot be
-    prepared here."""
-    for verb, tool in (("connect_slack", "slack_connect"), ("connect_github", "connect_github")):
-        submitted = PanelIntent.model_validate({"submitted": {"verb": verb}}).submitted
-        prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
-        assert prepared.tool == tool
-        assert prepared.input == {}
+def test_the_first_run_connect_steps_prepare_the_install_calls_verbatim() -> None:
+    """Each connect step names the call that installs its connector and nothing else: the panel
+    carries no install rule of its own, so the handler's own admin gate decides who may. Slack's
+    install is the `slack_connect` action on `surface/slack`, so the step prepares an
+    `object_action` envelope naming the surface — the action's declared presentation is what admits
+    it through the speaking lane; GitHub's is still its global tool."""
+    slack = PanelIntent.model_validate({"submitted": {"verb": "connect_slack"}}).submitted
+    prepared = _tool_intent(slack, None, MEMORY_BODY_MAX_CHARS)
+    assert prepared.tool == "object_action"
+    assert prepared.input == {
+        "kind": "surface",
+        "name": "slack",
+        "action": "slack_connect",
+        "input": {},
+    }
+    github = PanelIntent.model_validate({"submitted": {"verb": "connect_github"}}).submitted
+    prepared = _tool_intent(github, None, MEMORY_BODY_MAX_CHARS)
+    assert prepared.tool == "connect_github"
+    assert prepared.input == {}
 
 
-def test_the_first_run_imessage_offer_prepares_the_phone_tool_verbatim() -> None:
+def test_the_first_run_imessage_offer_prepares_the_phone_action_verbatim() -> None:
     submitted = PanelIntent.model_validate(
         {"submitted": {"verb": "connect_imessage", "phone_number": "+1 415 555 0123"}}
     ).submitted
     assert isinstance(submitted, ConnectImessageIntent)
     prepared = _tool_intent(submitted, None, MEMORY_BODY_MAX_CHARS)
-    assert prepared.tool == "imessage_connect"
-    assert prepared.input == {"phone_number": "+1 415 555 0123"}
+    assert prepared.tool == "object_action"
+    assert prepared.input == {
+        "kind": "surface",
+        "name": "imessage",
+        "action": "imessage_connect",
+        "input": {"phone_number": "+1 415 555 0123"},
+    }
 
 
 def test_the_rebuild_intents_prepare_their_own_extensions_tools_verbatim() -> None:
@@ -11038,7 +11052,7 @@ def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "slack_connect",
+                    "action:surface:slack_connect",
                     json.dumps(
                         {
                             "state": "not_installed",
@@ -11064,7 +11078,7 @@ def test_a_connect_outcome_carries_the_link_its_own_tool_minted() -> None:
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "slack_connect",
+                    "action:surface:slack_connect",
                     json.dumps(
                         {
                             "state": "not_installed",
@@ -11122,7 +11136,7 @@ def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> 
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "imessage_connect",
+                    "action:surface:imessage_connect",
                     json.dumps(
                         {
                             "state": "pending",
@@ -11146,7 +11160,7 @@ def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> 
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "imessage_connect",
+                    "action:surface:imessage_connect",
                     json.dumps(
                         {
                             "state": "connected",
@@ -11169,7 +11183,7 @@ def test_the_imessage_outcome_carries_the_phone_claim_instruction_and_link() -> 
             TerminalFrame(
                 status="done",
                 text=wall(
-                    "imessage_connect",
+                    "action:surface:imessage_connect",
                     json.dumps(
                         {
                             "state": "not_connected",
@@ -11194,11 +11208,11 @@ async def test_the_slack_step_mints_an_install_link_for_an_admin_and_no_one_else
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first run's Slack step end to end: the intent dispatches `slack_connect` on the member's
-    own lane, and that tool's own admin gate is the whole gate — a member is told who installs it
-    and gets no link, the admin gets the deploy's Add to Slack URL sealed to this workspace. No
-    message is spoken and no chat conversation exists to speak it in: the link comes back on the
-    submit."""
+    """The first run's Slack step end to end: the intent dispatches the `slack_connect` action on
+    `surface/slack` on the member's own lane, and that action's own admin gate is the whole gate —
+    a member is told who installs it and gets no link, the admin gets the deploy's Add to Slack URL
+    sealed to this workspace. No message is spoken and no chat conversation exists to speak it in:
+    the link comes back on the submit."""
     client, workspace_id, agent_id = web
     config, _hub, _blob, _sandboxes = dbos_runtime
     monkeypatch.setenv(SLACK_CLIENT_ID_ENV, "slack-client")

@@ -75,6 +75,14 @@ from ufo.kinds.credential_kind import (
     CredentialSpec,
 )
 from ufo.kinds.members import MEMBER_OBJECT
+from ufo.kinds.surface_kind import (
+    SURFACE_DESCRIPTION,
+    SURFACE_GUIDANCE,
+    SURFACE_KIND,
+    SurfaceObjects,
+    SurfaceObjectSpec,
+    registered_surfaces,
+)
 from ufo.kinds.workspace_kind import WORKSPACE_OBJECT
 from ufo.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.o11y import log, log_error
@@ -596,8 +604,10 @@ def core_object_kinds(
     context — their handlers read the ambient workspace directly. `credential` projects every
     manifest's declared slots, and reads a keyed slot's live host through the store so a read
     reports the host the wire uses; `extension` projects the manifests themselves, so two rendering
-    one object name fail loud here at boot; `artifact` takes the deploy's public base and artifact
-    secret so its listing rows publish signed links."""
+    one object name fail loud here at boot; `surface` projects every manifest's registered
+    surfaces beside the workspace's installation bindings, refusing a duplicate surface name the
+    same way; `artifact` takes the deploy's public base and artifact secret so its listing rows
+    publish signed links."""
     credential = ObjectKind(
         name=CREDENTIAL_KIND,
         description=CREDENTIAL_DESCRIPTION,
@@ -614,6 +624,14 @@ def core_object_kinds(
         store=ExtensionObjects(extensions=named_extensions(manifests)),
         list_fields=frozenset({"version", "tool_count", "credential_slot_count"}),
     )
+    surface = ObjectKind(
+        name=SURFACE_KIND,
+        description=SURFACE_DESCRIPTION,
+        guidance=SURFACE_GUIDANCE,
+        spec_model=SurfaceObjectSpec,
+        store=SurfaceObjects(surfaces=registered_surfaces(manifests)),
+        list_fields=frozenset({"extension", "addressed", "durable", "home", "bound"}),
+    )
     artifact = artifact_object(
         public_base_url=public_base_url, artifact_token_secret=artifact_token_secret
     )
@@ -621,6 +639,7 @@ def core_object_kinds(
         BoundKind(kind=artifact, extension=None, context=None),
         BoundKind(kind=credential, extension=None, context=None),
         BoundKind(kind=extension, extension=None, context=None),
+        BoundKind(kind=surface, extension=None, context=None),
     )
 
 

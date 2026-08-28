@@ -8,12 +8,14 @@ description: Load when the user wants to create a Slack app, make a Slack bot, o
 `slack_connect` (default `method="oauth"`) returns an "Add to Slack" link an admin clicks — no app
 to build, no secrets to paste. This skill is the **bring-your-own-app** alternative: use it when the
 admin wants their own Slack app, or when `slack_connect` reports OAuth is not configured on this
-deploy. Reach it explicitly with `slack_connect(method="manifest")`.
+deploy. Reach it explicitly with `slack_connect` and `method: manifest`.
 
 Stand up a Slack bot and wire it into the slack surface this deploy already runs. There is no new
-server to build: the surface is mounted and listening, and you drive every step with three tools —
-`slack_connect`, `slack_app_manifest`, `request_credentials`. The member only clicks through
-Slack's own pages and enters two values privately in their terminal.
+server to build: the surface is mounted and listening, and you drive every step with three calls —
+the `slack_connect` and `slack_app_manifest` actions on the `surface/slack` object (`object_action`
+with `kind: surface`, `name: slack`, `action: <name>`, and the action's own fields under `input`;
+`object_get` on `surface/slack` lists them), and `request_credentials`. The member only clicks
+through Slack's own pages and enters two values privately in their terminal.
 
 ## Ground rules — read before you reply
 
@@ -52,8 +54,8 @@ can all land here (skip to Step 5); `not_configured` starts at Step 2.
 
 ## Step 2 — create the app from the manifest
 
-Ask for the bot's display name if you don't have one, call `slack_app_manifest` with it, and show
-the returned YAML verbatim in a code block. Send the member to <https://api.slack.com/apps> →
+Ask for the bot's display name if you don't have one, call `slack_app_manifest` with it as
+`bot_name`, and show the returned YAML verbatim in a code block. Send the member to <https://api.slack.com/apps> →
 **Create New App → From a manifest**, pick the workspace, and paste it exactly — Slack rejects a
 manifest with extra fields. The tool renders this shape, filled in for this deploy:
 
@@ -106,7 +108,7 @@ settings:
 
 Why each piece: `app_mentions:read` + the `message.*` events and matching `*:history` scopes let
 the surface see the messages it's added to and the mentions it must answer; the `*:read` scopes
-(`channels:read`, `groups:read`, `im:read`, `mpim:read`) back the `slack_channels` tool, which pages
+(`channels:read`, `groups:read`, `im:read`, `mpim:read`) back the `slack_channels` action, which pages
 `conversations.list` on the bot token so the agent can find a public or private channel by name, or
 a DM/group DM by the people in it, instead of only acting on an id it was handed; `chat:write` posts
 the reply in-thread; the `agent_view` block enables Slack's Agents & AI Apps experience and
@@ -159,7 +161,7 @@ every declared slot from its upper-cased env var. `slack_connect` still derives 
 ## Discovering channels
 
 The `channels:read`/`groups:read` scopes (channels) and `im:read`/`mpim:read` scopes (DMs and group
-DMs) back the `slack_channels` tool: it pages `conversations.list` on the app's own bot token
+DMs) back the `slack_channels` action: it pages `conversations.list` on the app's own bot token
 host-side and returns the conversations matching a query — a channel by its `name`/`purpose`/`topic`,
 or a DM by the people in it. A DM has no name, so the tool resolves each DM's members to their
 display name/email (using the same `users:read` the surface already relies on) and matches on those.

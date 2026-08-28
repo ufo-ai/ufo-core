@@ -18,11 +18,15 @@ from uuid import UUID
 
 import yaml
 from pydantic import BaseModel, Field, JsonValue, ValidationError, model_validator
+from ufo_ext_imessage.surface import SURFACE_IMESSAGE
+from ufo_ext_imessage.tools import IMESSAGE_CONNECT_ACTION
+from ufo_ext_slack.surface import SURFACE_SLACK
+from ufo_ext_slack.tools import SLACK_CONNECT_ACTION
 
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, Terminal
-from ufo.sdk.objects import AGENT_ICONS, AgentSpec, TablerIcon
+from ufo.sdk.objects import AGENT_ICONS, SURFACE_KIND, AgentSpec, TablerIcon
 from ufo.sdk.surfaces import CredentialSlotView, SurfaceContext, TerminalFrame, ToolIntent
 from ufo_ext_web.audience import granted_emails, web_extension
 
@@ -615,12 +619,12 @@ class ToolingIntent(BaseModel):
 
 
 class ConnectSlackIntent(BaseModel):
-    """The first run's Slack step: the `slack_connect` chat verb, dispatched verbatim so the tool's
-    own admin gate answers and nothing about who may install a workspace-wide bot is decided
-    twice. The tool seals the install link inside the turn and states it in its answer, so the
-    outcome carries that link back to the member who asked — `connect_account`'s per-member consent
-    URL is the one minted at stream time instead, because it authorizes a member's own account
-    rather than the workspace's."""
+    """The first run's Slack step: the `slack_connect` action on `surface/slack`, dispatched
+    verbatim so the action's own admin gate answers and nothing about who may install a
+    workspace-wide bot is decided twice. The action seals the install link inside the turn and
+    states it in its answer, so the outcome carries that link back to the member who asked —
+    `connect_account`'s per-member consent URL is the one minted at stream time instead, because it
+    authorizes a member's own account rather than the workspace's."""
 
     verb: Literal["connect_slack"]
 
@@ -635,7 +639,8 @@ class ConnectGitHubIntent(BaseModel):
 
 class ConnectImessageIntent(BaseModel):
     """The first run's iMessage offer: the member's stated phone number dispatched verbatim to
-    the surface tool that binds the provider and proves the address."""
+    the `imessage_connect` action on `surface/imessage`, which binds the provider and proves the
+    address."""
 
     verb: Literal["connect_imessage"]
     phone_number: str
@@ -776,8 +781,13 @@ def _tool_intent(
             )
         case ConnectSlackIntent():
             return ToolIntent(
-                tool="slack_connect",
-                input={},
+                tool="object_action",
+                input={
+                    "kind": SURFACE_KIND,
+                    "name": SURFACE_SLACK,
+                    "action": SLACK_CONNECT_ACTION,
+                    "input": {},
+                },
             )
         case ConnectGitHubIntent():
             return ToolIntent(
@@ -786,8 +796,13 @@ def _tool_intent(
             )
         case ConnectImessageIntent():
             return ToolIntent(
-                tool="imessage_connect",
-                input={"phone_number": submitted.phone_number},
+                tool="object_action",
+                input={
+                    "kind": SURFACE_KIND,
+                    "name": SURFACE_IMESSAGE,
+                    "action": IMESSAGE_CONNECT_ACTION,
+                    "input": {"phone_number": submitted.phone_number},
+                },
             )
         case AddMemberIntent():
             return ToolIntent(

@@ -9,7 +9,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import segno
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ufo.sdk.surfaces import AddressClaimState
 from ufo.sdk.tools import TextContent, ToolContext, ToolResult
@@ -52,6 +52,9 @@ def opt_in_qr(assigned_phone_number: str, opt_in_code: str) -> bytes:
     return image.getvalue()
 
 
+IMESSAGE_CONNECT_ACTION = "imessage_connect"
+
+
 def _display_phone(phone_number: str) -> str:
     us = US_E164_PATTERN.fullmatch(phone_number)
     if us is None:
@@ -60,6 +63,7 @@ def _display_phone(phone_number: str) -> str:
 
 
 class ImessageConnectInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     phone_number: str = Field(
         description="The member's iMessage phone number in E.164 form, such as +14155550123."
     )

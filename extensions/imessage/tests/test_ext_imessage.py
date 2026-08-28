@@ -17,7 +17,9 @@ import segno
 import sqlalchemy as sa
 import ufo_ext_imessage.cloud as cloud
 import ufo_ext_imessage.surface as surface_module
+import yaml
 from cryptography.fernet import Fernet
+from pydantic import ValidationError
 from ufo_ext_imessage.cloud import (
     SpectrumCloudError,
     SpectrumProject,
@@ -74,6 +76,7 @@ from ufo.access.credentials import CredentialStore
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.ext.context import ScopedStore, context_for
+from ufo.ext.loader import turn_tools
 from ufo.ext.surface import (
     SurfaceAuth,
     SurfaceContext,
@@ -82,12 +85,15 @@ from ufo.ext.surface import (
     member_message_text,
 )
 from ufo.hub import InProcessHub
+from ufo.kinds.surface_kind import SURFACE_KIND
+from ufo.loop.queue import _agent_actions
 from ufo.models.interface import ModelRequest
 from ufo.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.sandbox.local import LocalCarrier
 from ufo.sandbox.session import ProxyEndpoint
 from ufo.schema import tables
 from ufo.schema.records import (
+    MEMBER_ADMISSION,
     Agent,
     AskQuestion,
     AskUserInput,
@@ -99,6 +105,7 @@ from ufo.schema.records import (
 from ufo.surfaces.admission import Admission, MemberAdmission
 from ufo.surfaces.hub_tail import HubTailer
 from ufo.tools.context import ToolContext
+from ufo.tools.registry import ObjectBinding
 from ufo.turns.ambient_reply import AmbientReplyClassifier
 from ufo.turns.audience import conversation_audience
 from ufo.workspace import ws
@@ -460,6 +467,12 @@ def test_manifest_declares_complete_durable_surface() -> None:
     loaded = manifest()
     assert loaded.deploy_keys == ("SPECTRUM_PROJECT_ID", "SPECTRUM_PROJECT_SECRET")
     assert tuple(tool.name for tool in loaded.tools) == ("imessage_connect",)
+    connect = loaded.tools[0]
+    assert connect.bound == ObjectBinding(kind=SURFACE_KIND, binding="instance")
+    assert connect.canonical_id == f"action:{SURFACE_KIND}:imessage_connect"
+    assert connect.side_effecting is True
+    assert connect.untrusted is True
+    assert connect.presentation is not None and connect.presentation.label == "Connect iMessage"
     surface = loaded.surfaces[0]
     assert surface.addressed
     assert surface.listen is not None
@@ -493,6 +506,11 @@ def test_phone_and_queue_boundaries() -> None:
 
 def test_phone_display_uses_us_format() -> None:
     assert _display_phone("+14085550123") == "(408) 555-0123"
+
+
+def test_connect_input_refuses_an_extra_key() -> None:
+    with pytest.raises(ValidationError, match="surprise"):
+        ImessageConnectInput.model_validate({"phone_number": "5594259991", "surprise": "x"})
 
 
 def test_a_phone_that_states_no_readable_number_is_refused_not_rewritten() -> None:
@@ -1616,3 +1634,35 @@ async def test_inbound_message_from_an_unclaimed_phone_is_ignored(db: None, tmp_
         assert dbos.enqueued == []
     finally:
         await project.client.aclose()
+
+
+async def test_reading_the_imessage_surface_lists_the_connect_action_before_binding(
+    db: None, tmp_path: Path
+) -> None:
+    """The action rides the action registry, never the wire tool set, and a granted agent reading
+    `surface/imessage` on a workspace with no provider binding sees it with its call template bound
+    to the surface — discovery works before anyone has connected."""
+    workspace_id, member_id = await _seed()
+    tools, _, verbs = turn_tools((manifest(),), None, audience=conversation_audience(None))
+    assert "imessage_connect" not in {tool.name for tool in tools}
+    get = next(tool for tool in tools if tool.name == "object_get")
+    ctx = dataclass_replace(
+        await _tool_context(workspace_id, member_id, tmp_path),
+        granted_actions=_agent_actions(verbs.actions, None, MEMBER_ADMISSION),
+    )
+    with ws(workspace_id):
+        result = await get.handler(
+            ctx, get.input_model.model_validate({"kind": SURFACE_KIND, "name": SURFACE_IMESSAGE})
+        )
+    read = yaml.safe_load(result.content[0].text)
+    assert read["spec"]["addressed"] is True
+    assert read["status"] == {"bound": False}
+    [view] = read["actions"]
+    assert view["name"] == "imessage_connect"
+    assert view["call"] == {
+        "kind": SURFACE_KIND,
+        "action": "imessage_connect",
+        "name": SURFACE_IMESSAGE,
+        "input": {},
+    }
+    assert set(view["input_schema"]["properties"]) == {"phone_number"}

@@ -219,8 +219,8 @@ SECTION_BODY = (
     "The sample pack contributes this capability section to the agent's system prompt.\n"
     "</sample_capability>"
 )
-SURFACE_NAME = "sample_surface"
-SURFACE_LIVE_NAME = "sample_live"
+SURFACE_NAME = "sample-surface"
+SURFACE_LIVE_NAME = "sample-live"
 SURFACE_INBOX_REL = "sample-inbox/note.txt"
 SURFACE_DELIVERED_PREFIX = "sample-delivered"
 SURFACE_POST_REF = "sample-posted-ref"

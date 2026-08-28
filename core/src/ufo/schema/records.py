@@ -217,9 +217,7 @@ class ToolIntent(BaseModel):
         "request_credentials",
         "read_private_transcript",
         "manage_billing",
-        "slack_connect",
         "connect_github",
-        "imessage_connect",
         "rebuild_report_digest",
         "rebuild_page_facts",
     ]
