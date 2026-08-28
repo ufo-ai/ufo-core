@@ -37,6 +37,12 @@ def output_for(result: str) -> CapabilityOutput:
             True,
         ),
         (
+            "The entry sum loses the shaped type.\n"
+            "ROOT_LAYER: scalar Add entry summation in _eval_matrix_mul\n"
+            "REJECTED_LAYER: BlockMatrix.colblocksizes",
+            True,
+        ),
+        (
             "Repair the first caller.\n"
             "ROOT_LAYER: BlockMatrix._blockmul\n"
             "REJECTED_LAYER: MatAdd postprocessor",

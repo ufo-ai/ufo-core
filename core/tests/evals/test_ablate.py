@@ -815,6 +815,24 @@ def test_a_complete_arm_archives_its_logs_and_gives_the_worktree_back(
     assert sorted(path.name for path in archive.glob("*.json")) == ["0.json", "1.json"]
 
 
+def test_an_arm_archive_replaces_the_previous_run(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    records = root / RUNS_DIR
+    records.mkdir(parents=True)
+    (records / "current.json").write_text("{}")
+    archive = tmp_path / "out" / "runs" / "knockout"
+    archive.mkdir(parents=True)
+    (archive / "stale.json").write_text("{}")
+
+    Ablation(repo=tmp_path, spec=_spec(), out=tmp_path / "out")._archive(
+        root, archive, "current stack"
+    )
+
+    assert not (archive / "stale.json").exists()
+    assert (archive / "current.json").is_file()
+    assert (archive / STACK_LOG).read_text() == "current stack"
+
+
 def test_an_arm_that_lost_a_suite_keeps_its_worktree_and_says_which(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

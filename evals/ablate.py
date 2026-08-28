@@ -554,7 +554,8 @@ class Ablation:
         orchestrator's whole view of the stack run, and each stack's own `seed`, `serve`, `egress`
         `eval`, and process-lifecycle logs. Written before any verdict is read, because a record
         that never landed is only explainable from the logs of the stack that owed it."""
-        archive.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(archive, ignore_errors=True)
+        archive.mkdir(parents=True)
         (archive / STACK_LOG).write_text(output)
         for path in (root / RUNS_DIR).glob("*.json"):
             shutil.copy(path, archive / path.name)

@@ -1,11 +1,20 @@
 import pytest
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
-from evals.suites.coding_subagent import implementation_inventory_scorer
+from evals.suites.coding_subagent import (
+    IMPLEMENTATION_INVENTORY_OBJECTIVE,
+    implementation_inventory_scorer,
+)
 
 
 def output_for(result: str) -> CapabilityOutput:
     return CapabilityOutput(result, ())
+
+
+def test_repository_wide_inventory_names_the_authoritative_sources() -> None:
+    assert "sympy/core/assumptions.py" in IMPLEMENTATION_INVENTORY_OBJECTIVE
+    assert "sympy/assumptions/ask.py" in IMPLEMENTATION_INVENTORY_OBJECTIVE
+    assert "sympy/assumptions/ask_generated.py" in IMPLEMENTATION_INVENTORY_OBJECTIVE
 
 
 @pytest.mark.parametrize(

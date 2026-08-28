@@ -3623,6 +3623,19 @@ async def test_cross_layer_error_emitter_scorer_requires_the_active_public_path(
     tool = ToolInvocation("grep", {"pattern": "DecimalField"}, "match", True)
 
     assert (await grader(CapabilityOutput(response, ()))).passed
+    assert (
+        await grader(
+            CapabilityOutput(
+                response.replace(
+                    "DecimalField.validate() before DecimalValidator, and that override directly "
+                    "raises for NaN without params, bypassing the changed validator.",
+                    "DecimalField.validate() raises for NaN, so run_validators never runs and "
+                    "DecimalValidator is unreachable.",
+                ),
+                (),
+            )
+        )
+    ).passed
     assert not (await grader(CapabilityOutput(response, (tool,)))).passed
     assert not (
         await grader(
@@ -3677,6 +3690,13 @@ async def test_direct_error_emitter_scorer_rejects_cross_layer_scope_inflation()
     grader = coding_subagent.direct_error_emitter_scorer()
 
     assert (await grader(CapabilityOutput(response, ()))).passed
+    assert (
+        await grader(
+            CapabilityOutput(
+                response + " Do not touch DecimalField, Field.clean, or model fields.", ()
+            )
+        )
+    ).passed
     assert not (
         await grader(
             CapabilityOutput(response.replace("URLValidator.__call__", "RegexValidator"), ())
@@ -3685,6 +3705,14 @@ async def test_direct_error_emitter_scorer_rejects_cross_layer_scope_inflation()
     assert not (
         await grader(CapabilityOutput(response + " Also change Field.clean for consistency.", ()))
     ).passed
+    for expansion in (
+        "Also update Field.clean to pass value.",
+        "Also modify Field.clean to pass value.",
+        "Also patch DecimalField for consistency.",
+        "Also add params to DecimalField.to_python.",
+    ):
+        assert not (await grader(CapabilityOutput(f"{response} {expansion}", ()))).passed
+    assert (await grader(CapabilityOutput(response + " Do not update Field.clean.", ()))).passed
     assert not (
         await grader(
             CapabilityOutput(
@@ -3737,6 +3765,17 @@ async def test_composite_modulus_boundary_scorer_requires_the_full_decomposition
     tool = ToolInvocation("grep", {"pattern": "nthroot_mod"}, "match", True)
 
     assert (await grader(CapabilityOutput(response, ()))).passed
+    assert (
+        await grader(
+            CapabilityOutput(
+                "The prime-only patch does not complete the request. Use factorint for each "
+                "prime power, lift unit roots, and include a singular lift when f'(x) == 0. "
+                "Take the Cartesian product and combine every tuple with CRT. Test 29, 31, 74 "
+                "and 0, 7, 100.",
+                (),
+            )
+        )
+    ).passed
     assert not (await grader(CapabilityOutput(response, (tool,)))).passed
     assert not (
         await grader(

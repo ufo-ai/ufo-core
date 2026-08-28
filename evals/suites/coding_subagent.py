@@ -46,9 +46,18 @@ TIMEOUT_ACTION_NEGATION = re.compile(
     r"\b(?:don't|won't|wouldn't|shouldn't|mustn't|can't|never|avoid|without)\b|"
     r"\bno need to\b)[^.;\n]{0,64}$"
 )
+SCOPE_INFLATION_ACTION = re.compile(
+    r"\b(?:change|edit|update|modify|patch|alter)\b|\badd\b[^.;\n]{0,48}\bto\b"
+)
+SCOPE_INFLATION_NEGATION = re.compile(
+    r"(?:\b(?:do|will|would|should|must|can)\s+not\b|"
+    r"\b(?:don't|won't|wouldn't|shouldn't|mustn't|can't|never|avoid|without)\b)"
+    r"[^.;\n]{0,64}$"
+)
 GENERIC_ADD_LAYERS = (
     "matadd",
     "matexpr",
+    "_eval_matrix_mul",
     "matrixbase._eval_matrix_mul",
     "matrix-expression add",
     "matrix expression add",
@@ -529,7 +538,7 @@ def _response_evidence_scorer(
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         if output.calls:
             return CapabilityVerdict(False, "used tools at the isolated decision step")
-        text = output.response.casefold().replace("`", "").replace("()", "")
+        text = output.response.casefold().replace("`", "").replace("**", "").replace("()", "")
         missing = [label for label, choices in required if not any(x in text for x in choices)]
         expanded = [symbol for symbol in forbidden if symbol in text]
         if missing or expanded:
@@ -540,6 +549,14 @@ def _response_evidence_scorer(
         return CapabilityVerdict(True, "all decision evidence present")
 
     return DescribedGrader(statement, grade)
+
+
+def _rejects_validation(text: str, targets: tuple[str, ...]) -> bool:
+    rejection = ("skip", "do not run", "not to run", "do not widen", "out of scope", "not the")
+    return any(
+        any(term in clause for term in rejection) and any(target in clause for target in targets)
+        for clause in re.split(r"[.\n]", text)
+    )
 
 
 def cross_layer_error_emitter_scorer() -> Grader:
@@ -556,6 +573,8 @@ def cross_layer_error_emitter_scorer() -> Grader:
                     "decimalfield.validate bypass",
                     "short-circuit",
                     "short circuit",
+                    "run_validators never runs",
+                    "decimalvalidator is unreachable",
                 ),
             ),
             (
@@ -582,7 +601,7 @@ def cross_layer_error_emitter_scorer() -> Grader:
 
 def direct_error_emitter_scorer() -> Grader:
     """The bad-scheme neighbor stays at its direct emitter instead of expanding across layers."""
-    return _response_evidence_scorer(
+    evidence = _response_evidence_scorer(
         "the answer fixes the direct URLValidator bad-scheme emitter without field or model edits",
         (
             ("URLValidator.__call__", ("urlvalidator.__call__",)),
@@ -606,7 +625,26 @@ def direct_error_emitter_scorer() -> Grader:
             ),
             ("the failing URL", ("ftp://example.com",)),
         ),
-        ("decimalfield", "field.clean", "run_validators", "to_python", "model field"),
+    )
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        verdict = await evidence(output)
+        if not verdict.passed:
+            return verdict
+        text = output.response.casefold().replace("`", "").replace("**", "")
+        targets = ("decimalfield", "field.clean", "run_validators", "to_python", "model field")
+        for clause in re.split(r"\.(?:\s|$)|[;\n]", text):
+            if not any(target in clause for target in targets):
+                continue
+            for action in SCOPE_INFLATION_ACTION.finditer(clause):
+                prefix = clause[max(0, action.start() - 64) : action.start()]
+                if SCOPE_INFLATION_NEGATION.search(prefix) is None:
+                    return CapabilityVerdict(False, "expanded beyond URLValidator.__call__")
+        return verdict
+
+    return DescribedGrader(
+        "the answer fixes the direct URLValidator bad-scheme emitter without field or model edits",
+        grade,
     )
 
 
@@ -624,6 +662,7 @@ def composite_modulus_boundary_scorer() -> Grader:
                 "singular-root handling",
                 (
                     "singular root",
+                    "singular lift",
                     "derivative is zero",
                     "non-invertible derivative",
                     "noninvertible derivative",
@@ -713,7 +752,13 @@ def middleware_override_scorer(*, repository_wide: bool) -> Grader:
                 ),
                 (
                     "the bypassed async classification",
-                    ("_async_check", "async classification", "coroutine classification"),
+                    (
+                        "_async_check",
+                        "async classification",
+                        "coroutine classification",
+                        "never marked as a coroutine",
+                        "classification never runs",
+                    ),
                 ),
                 (
                     "delegation from every override",
@@ -724,6 +769,7 @@ def middleware_override_scorer(*, repository_wide: bool) -> Grader:
                         "all built-in",
                         "every subclass",
                         "any middlewaremixin subclass",
+                        "remaining middlewaremixin subclasses",
                     ),
                 ),
                 ("super constructor calls", ("super.__init__", "call super")),
@@ -733,7 +779,13 @@ def middleware_override_scorer(*, repository_wide: bool) -> Grader:
                 ),
                 (
                     "sync and async constructor coverage",
-                    ("sync and async", "sync/async", "both sync and async", "both directions"),
+                    (
+                        "sync and async",
+                        "sync/async",
+                        "both sync and async",
+                        "both directions",
+                        "sync get_response",
+                    ),
                 ),
                 (
                     "rejection of the handler patch",
@@ -796,7 +848,13 @@ def annotation_state_scorer(*, referenced: bool) -> Grader:
             ),
             (
                 "the direct count shape",
-                ("one select", "single select", "no subquery", "without a subquery"),
+                (
+                    "one select",
+                    "single select",
+                    "one statement",
+                    "no subquery",
+                    "without a subquery",
+                ),
             ),
         ),
     )
@@ -811,7 +869,7 @@ def pyreverse_consumer_scorer(*, public_output: bool) -> Grader:
                 ("the Linker producer", ("linker", "inspector")),
                 ("the DOT writer consumer", ("writer", "dot")),
                 ("parameter annotations", ("parameter", "argument")),
-                ("return annotations", ("return annotation", "return type")),
+                ("return annotations", ("return annotation", "return type", "node.returns")),
                 (
                     "output-level regression coverage",
                     (
@@ -838,12 +896,19 @@ def pyreverse_consumer_scorer(*, public_output: bool) -> Grader:
         (
             ("the local implementation", ("inspector.py",)),
             ("the private Linker branch", ("linker",)),
-            ("a direct regression", ("direct test", "inspector test", "unit test")),
+            (
+                "a direct regression",
+                ("direct test", "direct regression test", "inspector test", "unit test"),
+            ),
             (
                 "the unchanged writer boundary",
                 (
                     "writer unchanged",
                     "writer output is unchanged",
+                    "writer output stays unchanged",
+                    "writer output stays identical",
+                    "leave writer",
+                    "no change to writer",
                     "no writer",
                     "do not alter writer",
                 ),
@@ -854,6 +919,8 @@ def pyreverse_consumer_scorer(*, public_output: bool) -> Grader:
                     "no public helper",
                     "no public utility helper",
                     "no new helper",
+                    "no new module-level helper",
+                    "add no helper",
                     "do not create a public helper",
                 ),
             ),
@@ -870,7 +937,10 @@ def discovery_boundary_scorer(*, public_discovery: bool) -> Grader:
                 ("the metadata producer", ("getdoc",)),
                 ("the owning class", ("self.object",)),
                 ("the current member", ("membername", "member name")),
-                ("descriptor lookup", ("getmro", "class mro", "__dict__")),
+                (
+                    "descriptor lookup",
+                    ("getmro", "class mro", "walks the mro", "through the mro", "__dict__"),
+                ),
                 ("descriptor unwrapping", ("__func__", "unwrap")),
                 ("the render consumer", ("propertydocumenter",)),
                 (
@@ -1015,7 +1085,15 @@ def transform_state_scorer(*, stateful: bool) -> Grader:
         "the answer keeps a proven stateless transform local",
         (
             ("the local conversions", ("pixel", "normalized")),
-            ("the stateless contract", ("stateless", "no state", "no frame attributes")),
+            (
+                "the stateless contract",
+                (
+                    "stateless",
+                    "no state",
+                    "no frame attributes",
+                    "no value needs an owner",
+                ),
+            ),
             ("round-trip coverage", ("round trip", "round-trip")),
         ),
         ("add location", "add obstime", "earthlocationattribute", "edit every transform"),
@@ -1028,17 +1106,33 @@ def derived_state_scorer(*, surviving_owner: bool) -> Grader:
             "the answer derives dimensions from surviving variables and retains live owners",
             (
                 ("the surviving value variable", ("value variable", "data variable")),
-                ("the retained dimension", ("retain x", "keep x", "keeps x", "x remains")),
+                (
+                    "the retained dimension",
+                    ("retain x", "keep x", "keeps x", "x remains", "x survives"),
+                ),
                 (
                     "canonical reconstruction",
                     ("surviving variables", "remaining variables", "rederive", "recompute"),
                 ),
                 (
                     "the last-owner neighbor",
-                    ("no variable", "no surviving variable", "last owner", "unreferenced"),
+                    (
+                        "no variable",
+                        "no surviving variable",
+                        "last owner",
+                        "last-owner",
+                        "unreferenced",
+                    ),
                 ),
             ),
-            ("always delete x", "unconditionally delete", "length clamp"),
+            (
+                "always delete x",
+                "unconditionally delete",
+                "add a length clamp",
+                "use a length clamp",
+                "length-clamp fix",
+                "clamp the length",
+            ),
         )
     return _response_evidence_scorer(
         "the answer reconstructs derived dimensions after the last canonical owner is removed",
@@ -1058,7 +1152,9 @@ def derived_state_scorer(*, surviving_owner: bool) -> Grader:
                     "no dimensions",
                     "empty dims",
                     "sizes are empty",
+                    "_dims = {}",
                     "_dims == {}",
+                    "empty _variables",
                     "identical(dataset",
                     "remove x",
                     "drops x",
@@ -1066,7 +1162,13 @@ def derived_state_scorer(*, surviving_owner: bool) -> Grader:
             ),
             ("the last-owner regression", ("last owner", "only coordinate", "sole coordinate")),
         ),
-        ("add an assertion", "length clamp", "clamp the length"),
+        (
+            "add an assertion",
+            "add a length clamp",
+            "use a length clamp",
+            "length-clamp fix",
+            "clamp the length",
+        ),
     )
 
 
@@ -1082,6 +1184,7 @@ def validation_scope_scorer(*, cross_cutting: bool) -> Grader:
                         "shared protocol",
                         "public contract",
                         "public and serialized",
+                        "serialized and public",
                         "serialized field",
                     ),
                 ),
@@ -1091,6 +1194,7 @@ def validation_scope_scorer(*, cross_cutting: bool) -> Grader:
                         "cross-cutting",
                         "cross package",
                         "cross-package",
+                        "crosses package lines",
                         "whole repository",
                         "indirect consumers",
                     ),
@@ -1105,20 +1209,39 @@ def validation_scope_scorer(*, cross_cutting: bool) -> Grader:
                         "every direct consumer",
                         "all direct consumers",
                         "all adapters",
+                        "each analyzer adapter",
+                        "every public writer",
+                        "each public writer",
+                        "each direct consumer",
+                        "direct callers",
                         "every test file next to a changed direct consumer",
                     ),
                 ),
                 (
                     "broad validation",
-                    ("full project-wide suite", "full suite", "all affected integration"),
+                    (
+                        "full project-wide suite",
+                        "full repository suite",
+                        "full suite",
+                        "all affected integration",
+                    ),
                 ),
             ),
+            (
+                "do not run the full",
+                "do not run full",
+                "full suite out of scope",
+                "full repository suite out of scope",
+            ),
         )
-    return _response_evidence_scorer(
+    evidence = _response_evidence_scorer(
         "the answer stops validation at the changed rule and nearest public regression",
         (
             ("the changed inference rule", ("inference rule", "infer_node", "typealias")),
-            ("a direct focused test", ("direct test", "focused test")),
+            (
+                "a direct focused test",
+                ("direct test", "direct inference test", "focused test"),
+            ),
             (
                 "the nearest public regression",
                 ("nearest writer", "nearest public consumer", "nearest consumer"),
@@ -1127,27 +1250,28 @@ def validation_scope_scorer(*, cross_cutting: bool) -> Grader:
                 "a stop condition",
                 ("stop there", "once both pass", "when both pass", "stop condition"),
             ),
-            (
-                "rejection of the full suite",
-                (
-                    "skip the full",
-                    "no full",
-                    "do not run the full",
-                    "avoid the full",
-                    "tests not to run: the full",
-                ),
-            ),
-            (
-                "rejection of the broad file sweep",
-                (
-                    "skip the ten-file",
-                    "no ten-file",
-                    "do not run the ten-file",
-                    "avoid the ten-file",
-                    "sweep crosses unrelated packages",
-                ),
-            ),
         ),
+    )
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        verdict = await evidence(output)
+        if not verdict.passed:
+            return verdict
+        text = output.response.casefold().replace("`", "").replace("**", "")
+        rejects_both = "skip both wide runs" in text or "skip both broad runs" in text
+        missing = []
+        if not rejects_both and not _rejects_validation(text, ("full suite", "core suite")):
+            missing.append("rejection of the full suite")
+        if not rejects_both and not _rejects_validation(
+            text, ("ten-file", "inference sweep", "file sweep")
+        ):
+            missing.append("rejection of the broad file sweep")
+        if missing:
+            return CapabilityVerdict(False, "; ".join(f"missing {item}" for item in missing))
+        return verdict
+
+    return DescribedGrader(
+        "the answer stops validation at the changed rule and nearest public regression", grade
     )
 
 
@@ -1429,8 +1553,9 @@ IMPLEMENTATION_INVENTORY_OBJECTIVE = (
     "rational, irrational, algebraic, and transcendental values imply finite in every "
     "assumptions API. The first literal match is the legacy `_assume_rules` table in "
     "`sympy/core/assumptions.py`. Architecture notes say this release also has a `Q.*` predicate "
-    "assumptions engine and commits a generated known-facts module. Inventory the authoritative "
-    "implementation files and the generated artifact/action before editing. Do not list tests, "
+    "assumptions engine whose facts are authored in `sympy/assumptions/ask.py`, and commits "
+    "`sympy/assumptions/ask_generated.py` from it. Inventory the authoritative implementation "
+    "files and the generated artifact/action before editing. Do not list tests, "
     "consumers, or unrelated follow-on fixes. End with `SOURCE_FILES: <comma-separated paths>`, "
     "`GENERATED_FILES: <comma-separated paths or NONE>`, and `REGENERATE_WITH: <command or "
     "NONE>`."
@@ -1721,7 +1846,7 @@ PROFILE_CASES = (
             IMPLEMENTATION_INVENTORY_OBJECTIVE,
             implementation_inventory_scorer(repository_wide=True),
         ),
-        digest_tag="coding-profile:implementation-inventory:assumptions-engines-v1",
+        digest_tag="coding-profile:implementation-inventory:assumptions-engines-v2",
     ),
     CapabilityCase(
         "coding-subagent-implementation-inventory-proven-local",

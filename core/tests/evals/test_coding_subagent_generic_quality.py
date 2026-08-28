@@ -155,6 +155,11 @@ async def test_pyreverse_boundary_requires_the_output_consumer(result: str, pass
             True,
         ),
         (
+            "Keep the private Linker branch in inspector.py and add a direct regression test. "
+            "Writer output stays unchanged. Add no new module-level helper.",
+            True,
+        ),
+        (
             "Create a public helper in pyreverse.utils and update writer DOT rendering.",
             False,
         ),
@@ -189,6 +194,13 @@ async def test_pyreverse_boundary_neighbor_stays_private(result: str, passed: bo
             "do_autodoc(..., 'class', ...) and assert prop2 output. Pass self.object and "
             "membername to getdoc, search each class __dict__ through getmro, unwrap __func__, "
             "and keep PropertyDocumenter as the render consumer.",
+            True,
+        ),
+        (
+            "Autoclass member discovery is the public collection boundary. Pass self.object and "
+            "membername to getdoc, which walks the MRO and unwraps __func__. Keep "
+            "PropertyDocumenter as the renderer and reject its direct-only patch. Add focused "
+            "public regression coverage that autoclass includes the property.",
             True,
         ),
     ),
@@ -386,6 +398,12 @@ async def test_derived_state_recomputes_after_the_last_owner(result: str, passed
             "carries it.",
             True,
         ),
+        (
+            "Recompute dimensions from surviving variables. The value data variable keeps x, "
+            "while the last-owner neighbor removes x. A length clamp invents state and is not "
+            "the repair.",
+            True,
+        ),
         ("Always delete x when reset_index drops its coordinate.", False),
     ),
 )
@@ -432,6 +450,31 @@ async def test_derived_state_neighbor_retains_a_surviving_owner(result: str, pas
             "the dependency, record the blocker in the result, and finish.",
             True,
         ),
+        (
+            "Validation boundary: focused only. Run the direct inference test for `infer_node()` "
+            "on a `TypeAlias`, the nearest inference test file, and the nearest public consumer "
+            "writer test. Stop condition: those tests pass. The full core suite and ten-file "
+            "inference sweep are both out of scope. Do not widen to the core suite.",
+            True,
+        ),
+        (
+            "Run the direct inference test for `infer_node()` on a `TypeAlias` and the nearest "
+            "public consumer. Stop condition: both pass. Do not run the full core suite or the "
+            "ten-file inference sweep; both cross unrelated packages.",
+            True,
+        ),
+        (
+            "Run the direct inference test for `infer_node()` on a `TypeAlias` and the nearest "
+            "public consumer. Stop condition: both pass. Skip both wide runs. The 600-second core "
+            "suite and 900-second ten-file inference sweep add no coverage.",
+            True,
+        ),
+        (
+            "Run the direct inference test for `infer_node()` on a `TypeAlias` and the nearest "
+            "public consumer. Stop condition: both pass. Skip the 900-second ten-file inference "
+            "sweep and the 600-second core suite.",
+            True,
+        ),
     ),
 )
 async def test_local_validation_scope_stops_at_the_nearest_regression(
@@ -457,6 +500,23 @@ async def test_local_validation_scope_stops_at_the_nearest_regression(
             False,
         ),
         (
+            "The shared protocol is public and serialized. Add a focused contract test and test "
+            "every public writer, but do not run the full repository suite.",
+            False,
+        ),
+        (
+            "The shared protocol is a cross-package public and serialized contract. Add a "
+            "focused contract test, cover every adapter and all direct callers, then run the "
+            "full repository suite for indirect consumers.",
+            True,
+        ),
+        (
+            "The changed field is serialized and public across packages. Add a focused contract "
+            "test, the test file for each analyzer adapter and each public writer, and the full "
+            "repository suite for indirect consumers.",
+            True,
+        ),
+        (
             "Validation boundary: the whole repository suite plus a repository-wide type check — "
             "not per-package focused runs. The changed field is public and serialized, so "
             "consumers can reach it through string keys, fixtures, and golden files that no "
@@ -480,6 +540,14 @@ async def test_local_validation_scope_stops_at_the_nearest_regression(
             "and stop.",
             True,
         ),
+        (
+            "Validation boundary: the full repository suite. The changed serialized field on a "
+            "shared protocol crosses package lines, so indirect readers can break on its wire "
+            "shape. Run the focused contract test, the test file nearest each analyzer adapter, "
+            "and the test file nearest each public writer and each direct consumer touched by "
+            "the patch, then the full repository suite. Stop when all pass.",
+            True,
+        ),
     ),
 )
 async def test_cross_cutting_validation_scope_covers_every_consumer(
@@ -488,6 +556,92 @@ async def test_cross_cutting_validation_scope_covers_every_consumer(
     verdict = await validation_scope_scorer(cross_cutting=True)(output_for(result))
 
     assert verdict.passed is passed
+
+
+async def test_generic_quality_scorers_accept_observed_semantic_evidence() -> None:
+    middleware = await middleware_override_scorer(repository_wide=True)(
+        output_for(
+            "MiddlewareMixin.__init__ owns _async_check. Sweep the remaining MiddlewareMixin "
+            "subclasses, including CacheMiddleware, FetchFromCacheMiddleware, and "
+            "SecurityMiddleware, so each calls super.__init__. The async cases must classify as "
+            "coroutines and sync get_response must remain sync. BaseHandler is not the fix."
+        )
+    )
+    delegated_middleware = await middleware_override_scorer(repository_wide=True)(
+        output_for(
+            "MiddlewareMixin.__init__ owns classification. Every override, including "
+            "CacheMiddleware, FetchFromCacheMiddleware, and SecurityMiddleware, must call "
+            "super.__init__. Without delegation, the instance is never marked as a coroutine. "
+            "Test sync and async constructors. BaseHandler is not the fix."
+        )
+    )
+    annotation = await annotation_state_scorer(referenced=False)(
+        output_for(
+            "Use annotation_select. self.annotations is the registered registry, so "
+            "chapter_count does not force wrapping. The expected result is one statement."
+        )
+    )
+    public_pyreverse = await pyreverse_consumer_scorer(public_output=True)(
+        output_for(
+            "Move the helpers to pylint.pyreverse.utils and keep Linker in inspector as the "
+            "producer. The DOT writer renders each parameter and appends node.returns. Add a "
+            "writer test. An inspector-only patch is incomplete."
+        )
+    )
+    local_pyreverse = await pyreverse_consumer_scorer(public_output=False)(
+        output_for(
+            "Keep the private Linker branch in inspector.py. Add no helper and leave writer "
+            "output unchanged. Add a direct regression test."
+        )
+    )
+    last_owner = await derived_state_scorer(surviving_owner=False)(
+        output_for(
+            "_replace is wrong. Recompute dimensions from surviving variables. Test the last "
+            "owner path and assert _dims = {}."
+        )
+    )
+    surviving_owner = await derived_state_scorer(surviving_owner=True)(
+        output_for(
+            "The value variable is among the surviving variables, so x survives. With no "
+            "surviving variable, x disappears."
+        )
+    )
+    validation = await validation_scope_scorer(cross_cutting=False)(
+        output_for(
+            "Run a direct inference test for infer_node TypeAlias and the nearest writer "
+            "consumer. Stop condition: both pass. Skip the 600-second core suite because the "
+            "ten-file sweep crosses unrelated packages."
+        )
+    )
+    direct_validation = await validation_scope_scorer(cross_cutting=False)(
+        output_for(
+            "Run a direct test for the infer_node TypeAlias inference rule and the nearest "
+            "public consumer. Stop there when both pass. Do **not** run the 600-second core suite "
+            "because it is unrelated. Do **not** run the 900-second ten-file inference sweep."
+        )
+    )
+    stateless = await transform_state_scorer(stateful=False)(
+        output_for(
+            "Keep Pixel and Normalized local. No value needs an owner between calls. Add a "
+            "focused round-trip test."
+        )
+    )
+
+    assert all(
+        verdict.passed
+        for verdict in (
+            middleware,
+            delegated_middleware,
+            annotation,
+            public_pyreverse,
+            local_pyreverse,
+            last_owner,
+            surviving_owner,
+            validation,
+            direct_validation,
+            stateless,
+        )
+    )
 
 
 async def test_generic_quality_scorers_reject_tool_use() -> None:
