@@ -11,6 +11,7 @@ from ufo_ext_sites.source import KIT_DIR
 
 AUDIT_SCRIPT = Path(__file__).parents[2] / "ufo_ext_sites" / "scripts" / "audit_application.cjs"
 DRAW_TIMEOUT_SECONDS = 30
+CONTAINER_FIXTURE_MODE = 0o755
 
 pytestmark = pytest.mark.docker
 
@@ -437,6 +438,7 @@ server.listen(0, '127.0.0.1', async () => {
 });
 """
     )
+    tmp_path.chmod(CONTAINER_FIXTURE_MODE)
     drawn = subprocess.run(
         [
             "docker",
@@ -524,6 +526,7 @@ server.listen(0, '127.0.0.1', async () => {
 });
 """
     )
+    tmp_path.chmod(CONTAINER_FIXTURE_MODE)
     drawn = subprocess.run(
         [
             "docker",
@@ -703,6 +706,7 @@ server.listen(0, '127.0.0.1', async () => {
 });
 """
     )
+    tmp_path.chmod(CONTAINER_FIXTURE_MODE)
     drawn = subprocess.run(
         [
             "docker",

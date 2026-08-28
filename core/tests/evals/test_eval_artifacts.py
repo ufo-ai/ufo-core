@@ -148,6 +148,48 @@ from ufo.sdk.context import ScopedStore
 from ufo.workspace import ws
 
 REVENUE = (120, 135, 142, 160)
+STABLE_APPLICATION_LIFECYCLE = b"""<script>
+let lifecycleEpoch = 0;
+const lifecycleSnapshot = () => Object.freeze({
+  version: 1,
+  generation: 1,
+  epoch: lifecycleEpoch,
+  mounted: true,
+  state: 'idle',
+  revision: 0,
+  blockingWork: 0,
+});
+window.__ufoApplicationLifecycle = Object.freeze({
+  snapshot: lifecycleSnapshot,
+  afterPaint: () => new Promise((resolve) => requestAnimationFrame(() =>
+    requestAnimationFrame(resolve))),
+  beginObservation: () => ++lifecycleEpoch,
+  endObservation: () => Promise.resolve(),
+});
+</script>"""
+AUDIT_SERVER_CONTENT = b"""import http.server
+import os
+import subprocess
+import sys
+import threading
+
+os.chdir(sys.argv[1])
+server = http.server.ThreadingHTTPServer(
+    ("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler
+)
+thread = threading.Thread(target=server.serve_forever)
+thread.start()
+origin = f"http://127.0.0.1:{server.server_port}"
+try:
+    result = subprocess.run(
+        [argument.replace("{origin}", origin) for argument in sys.argv[2:]], check=False
+    )
+finally:
+    server.shutdown()
+    thread.join()
+    server.server_close()
+raise SystemExit(result.returncode)
+"""
 AUDIT_DESIGN_REGIONS = (
     {
         "name": "queue",
@@ -654,12 +696,49 @@ def test_app_copy_capture_renders_one_static_dom_without_screenshots() -> None:
     assert "interactionAudit" not in source
 
 
+def _run_application_audit(
+    container: str, report_stem: str, artifact_stem: str
+) -> subprocess.CompletedProcess[str]:
+    subprocess.run(
+        ("docker", "exec", "-i", container, "tee", "/workspace/audit-server.py"),
+        input=AUDIT_SERVER_CONTENT,
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    return subprocess.run(
+        (
+            "docker",
+            "exec",
+            container,
+            "python3",
+            "/workspace/audit-server.py",
+            "/workspace",
+            "node",
+            "/workspace/app-audit.cjs",
+            "{origin}/fixture.html",
+            f"/workspace/{report_stem}.json",
+            f"/workspace/{artifact_stem}light.png",
+            f"/workspace/{artifact_stem}dark.png",
+            f"/workspace/{artifact_stem}interactive.html",
+            f"/workspace/{artifact_stem}static.html",
+            "{origin}/accepted-design.svg",
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
 @pytest.mark.docker
 def test_app_bench_audit_reads_the_page_chromium_paints(
     sandbox_container: tuple[str, Path],
 ) -> None:
     container, workspace = sandbox_container
-    fixture_html = b"""
+    fixture_html = (
+        STABLE_APPLICATION_LIFECYCLE
+        + b"""
         <style>
           body { overflow-x: hidden }
           .flex { display: flex }
@@ -681,9 +760,11 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
           <details><summary>More</summary><p>closed fact</p></details>
           <p class="below">below-fold fact</p>
         </main>
-        """ + b"".join(
-        f'<section data-app-region="region-{index}">Region {index}</section>'.encode()
-        for index in range(21)
+        """
+        + b"".join(
+            f'<section data-app-region="region-{index}">Region {index}</section>'.encode()
+            for index in range(21)
+        )
     )
     subprocess.run(
         ("docker", "exec", "-i", container, "tee", "/workspace/app-audit.cjs"),
@@ -711,26 +792,8 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
         capture_output=True,
         timeout=120,
     )
-    command = """
-python3 -m http.server 8765 --bind 127.0.0.1 --directory /workspace >/tmp/audit-http.log 2>&1 &
-server=$!
-trap 'kill "$server"' EXIT
-for attempt in $(seq 1 50); do
-  curl -fsS http://127.0.0.1:8765/fixture.html >/dev/null && break
-done
-node /workspace/app-audit.cjs http://127.0.0.1:8765/fixture.html \
-  /workspace/report.json /workspace/light.png /workspace/dark.png \
-  /workspace/interactive.html /workspace/static.html \
-  http://127.0.0.1:8765/accepted-design.svg
-"""
-
-    subprocess.run(
-        ("docker", "exec", container, "bash", "-lc", command),
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    audited = _run_application_audit(container, "report", "")
+    assert audited.returncode == 0, audited.stderr or audited.stdout
     report = loads((workspace / "report.json").read_bytes())
     validated = ApplicationAuditReport.model_validate(report)
     assert all(len(view.regions) == 20 for view in validated.views)
@@ -1063,31 +1126,28 @@ def test_app_bench_design_measurement_uses_painted_pixels(
 
     subprocess.run(
         ("docker", "exec", "-i", container, "tee", "/workspace/fixture.html"),
-        input=b"<style>main{display:block}</style><main>Rendered app</main>",
+        input=(
+            STABLE_APPLICATION_LIFECYCLE
+            + b"<style>main{display:block}</style><main>Rendered app</main>"
+        ),
         check=True,
         capture_output=True,
         timeout=120,
     )
-    command = """
-cp /workspace/application-design.svg /workspace/accepted-design.svg
-python3 -m http.server 8766 --bind 127.0.0.1 --directory /workspace >/tmp/design-http.log 2>&1 &
-server=$!
-trap 'kill "$server"' EXIT
-for attempt in $(seq 1 50); do
-  curl -fsS http://127.0.0.1:8766/fixture.html >/dev/null && break
-done
-node /workspace/app-audit.cjs http://127.0.0.1:8766/fixture.html \
-  /workspace/design-report.json /workspace/design-light.png /workspace/design-dark.png \
-  /workspace/design-interactive.html /workspace/design-static.html \
-  http://127.0.0.1:8766/accepted-design.svg
-"""
-    audit = subprocess.run(
-        ("docker", "exec", container, "bash", "-lc", command),
-        check=False,
+    subprocess.run(
+        (
+            "docker",
+            "exec",
+            container,
+            "cp",
+            "/workspace/application-design.svg",
+            "/workspace/accepted-design.svg",
+        ),
+        check=True,
         capture_output=True,
-        text=True,
         timeout=120,
     )
+    audit = _run_application_audit(container, "design-report", "design-")
     assert audit.returncode == 0, audit.stderr
     report = loads((workspace / "design-report.json").read_bytes())
     assert report["designRegions"] == definitions
