@@ -7,7 +7,17 @@ inputs:
 runs:
   using: composite
   steps:
+    # The payload is a pure function of the three constants build-gh.sh pins — the Go toolchain, the
+    # cli release, and the target — so that script's hash is the whole key. A hit skips the toolchain
+    # install and the cross-compile both; bumping either pin edits the script, so the key moves with
+    # it. The restored archive still meets `gzip -t` below, which a hit and a build share.
+    - id: payload
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/ufo-gh-${{ inputs.target }}.gz
+        key: ufo-gh-${{ inputs.target }}-${{ hashFiles('client/scripts/build-gh.sh') }}
     - uses: actions/setup-go@v6
+      if: steps.payload.outputs.cache-hit != 'true'
       with:
         go-version: 1.27.0
         cache: false
@@ -20,7 +30,10 @@ runs:
           root=$(cygpath -u "$root")
         fi
         archive="$root/ufo-gh-${{ inputs.target }}.gz"
-        client/scripts/build-gh.sh "${{ inputs.target }}" "$archive"
+        if [ "${{ steps.payload.outputs.cache-hit }}" != true ]; then
+          client/scripts/build-gh.sh "${{ inputs.target }}" "$archive"
+        fi
+        gzip -t "$archive"
         value="$archive"
         if [ "$RUNNER_OS" = Windows ]; then
           value=$(cygpath -w "$value")

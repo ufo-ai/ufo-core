@@ -80,17 +80,36 @@ def test_every_release_job_builds_the_gh_payload_first() -> None:
 
 
 def test_gh_payload_is_pinned_to_the_runtime_that_reads_the_bundle() -> None:
-    action = yaml.safe_load(ACTION.read_text())
-    setup = action["runs"]["steps"][0]
-    assert setup["uses"] == "actions/setup-go@v6"
+    steps = yaml.safe_load(ACTION.read_text())["runs"]["steps"]
+    (setup,) = [step for step in steps if step.get("uses") == "actions/setup-go@v6"]
     assert setup["with"]["go-version"] == "1.27.0"
     script = GH_SCRIPT.read_text()
     assert "github.com/cli/cli/v2/cmd/gh@v2.97.0" in script
     assert "GOTOOLCHAIN=local" in script
     assert "gzip -9" in script
     assert "cargo:rerun-if-changed=" in BUILD_SCRIPT.read_text()
-    assert action["runs"]["steps"][1]["shell"] == "bash"
-    assert "cygpath -w" in action["runs"]["steps"][1]["run"]
+    (build,) = [step for step in steps if step.get("shell") == "bash"]
+    assert "cygpath -w" in build["run"]
+
+
+def test_gh_payload_is_cached_on_the_pins_that_determine_it() -> None:
+    """Every pin the payload has — the toolchain, the cli release, the target — is spelled in
+    build-gh.sh, so its hash is the key: bumping one moves the key, and a hit skips the toolchain
+    install with the cross-compile. A restored archive answers to the same `gzip -t` a built one
+    does, so a truncated entry fails here rather than inside the binary that embeds it."""
+    steps = yaml.safe_load(ACTION.read_text())["runs"]["steps"]
+    (cache,) = [step for step in steps if str(step.get("uses", "")).startswith("actions/cache@")]
+    assert cache["with"]["path"] == "${{ runner.temp }}/ufo-gh-${{ inputs.target }}.gz"
+    assert cache["with"]["key"] == (
+        "ufo-gh-${{ inputs.target }}-${{ hashFiles('client/scripts/build-gh.sh') }}"
+    )
+    hit = f"steps.{cache['id']}.outputs.cache-hit"
+    (setup,) = [step for step in steps if step.get("uses") == "actions/setup-go@v6"]
+    assert setup["if"] == f"{hit} != 'true'"
+    (build,) = [step for step in steps if step.get("shell") == "bash"]
+    assert f'if [ "${{{{ {hit} }}}}" != true ]; then' in build["run"]
+    assert 'gzip -t "$archive"' in build["run"]
+    assert steps.index(cache) < steps.index(setup) < steps.index(build)
 
 
 def test_integration_puts_the_client_it_builds_on_path() -> None:

@@ -12,7 +12,8 @@ CHECKS_ONLY_ROOTS = frozenset({"docs"})
 GATED_JOBS = {
     "checks": "checks",
     "sandbox-client": "checks",
-    "web": "checks",
+    "web-build": "checks",
+    "web-test": "checks",
     "test-shard": "checks",
     "wheel": "wheel",
     "control-test": "control",
@@ -174,3 +175,23 @@ def test_test_shards_do_not_build_the_workflow_linter() -> None:
     assert any(
         step.get("run") == 'UV_NO_SYNC=1 make test SHARD="${{ matrix.shard }}"' for step in steps
     )
+
+
+def test_the_portal_suite_stays_off_the_shard_critical_path() -> None:
+    """The shards wait on the portal's build, never on its suite. `web-build` publishes the three
+    trees and stops; `web-test` reads those same bytes back and runs vitest beside the shards, so a
+    suite that grows never delays them, and the gate names it because nothing else consumes it."""
+    jobs = _jobs()
+    trees = {"portal-static", "portal-apps", "sites-page-kit"}
+    build = jobs["web-build"]["steps"]
+    suite = jobs["web-test"]["steps"]
+    assert {
+        step["with"]["name"] for step in build if step.get("uses") == "actions/upload-artifact@v4"
+    } == trees
+    assert not any("frontend test" in step.get("run", "") for step in build)
+    assert {
+        step["with"]["name"] for step in suite if step.get("uses") == "actions/download-artifact@v4"
+    } == trees
+    assert any(step.get("run") == "pnpm -C extensions/web/frontend test" for step in suite)
+    assert jobs["test-shard"]["needs"] == ["triage", "web-build", "sandbox-client"]
+    assert "web-test" in jobs["test"]["needs"]

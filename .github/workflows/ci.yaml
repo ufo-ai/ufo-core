@@ -176,15 +176,16 @@ jobs:
                   entry.load()()
           PY
 
-  # The portal is a built app. This job is the only one that installs its pnpm tree for testing: it
-  # builds, proves the bundle and every view, and publishes the three trees the pytest shards read
-  # — the portal's own, the app pages, and the kit a page is built against — so no shard installs
-  # pnpm. The shards still need the runner's own node — two repl tests drive a real `LocalCarrier`
-  # through it — which `ubuntu-latest` ships. `wheel` builds its own copy because the wheel gate
-  # has to see the production shape assembled from a clean tree. Gated on the same docs-markdown
-  # flag as the shards that read its artifacts, so the pair skips together or runs together and the
-  # artifact contract between them cannot break.
-  web:
+  # The portal is a built app, and its three built trees — the portal's own, the app pages, and the
+  # kit a page is built against — are what the pytest shards read, so no shard installs pnpm. This
+  # job builds them and stops: the shards wait on a build, never on a suite. `web-test` below runs
+  # the portal's vitest against these same artifacts, off the shard critical path. The shards still
+  # need the runner's own node — two repl tests drive a real `LocalCarrier` through it — which
+  # `ubuntu-latest` ships. `wheel` builds its own copy because the wheel gate has to see the
+  # production shape assembled from a clean tree. Gated on the same docs-markdown flag as the shards
+  # that read its artifacts, so the pair skips together or runs together and the artifact contract
+  # between them cannot break.
+  web-build:
     needs: triage
     if: needs.triage.outputs.checks == 'true'
     runs-on: ubuntu-latest
@@ -201,7 +202,6 @@ jobs:
           cache-dependency-path: extensions/web/frontend/pnpm-lock.yaml
       - run: pnpm -C extensions/web/frontend install --frozen-lockfile
       - run: pnpm -C extensions/web/frontend run build
-      - run: pnpm -C extensions/web/frontend test
       - uses: actions/upload-artifact@v4
         with:
           name: portal-static
@@ -220,6 +220,40 @@ jobs:
           path: extensions/sites/ufo_ext_sites/page/kit
           if-no-files-found: error
           retention-days: 1
+
+  # The portal's suite proves the bundle and every view. Three of its files read the built trees, so
+  # it takes them from `web-build` rather than building a second copy: it then asserts against the
+  # exact bytes the shards and the wheel ship. Nothing consumes this job's result, so the `test`
+  # gate names it directly.
+  web-test:
+    needs: [triage, web-build]
+    if: needs.triage.outputs.checks == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: extensions/web/frontend/pnpm-lock.yaml
+      - run: pnpm -C extensions/web/frontend install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: portal-static
+          path: extensions/web/ufo_ext_web/static
+      - uses: actions/download-artifact@v4
+        with:
+          name: portal-apps
+          path: extensions/web/ufo_ext_web/apps
+      - uses: actions/download-artifact@v4
+        with:
+          name: sites-page-kit
+          path: extensions/sites/ufo_ext_sites/page/kit
+      - run: pnpm -C extensions/web/frontend test
 
   sandbox-client:
     needs: triage
@@ -255,7 +289,7 @@ jobs:
 
   test-shard:
     name: test shard ${{ matrix.shard }}
-    needs: [triage, web, sandbox-client]
+    needs: [triage, web-build, sandbox-client]
     if: needs.triage.outputs.checks == 'true'
     strategy:
       fail-fast: false
@@ -372,7 +406,7 @@ jobs:
   # A cancelled gate passes only when GitHub names a newer head; cancelling the current head fails.
   test:
     if: always()
-    needs: [triage, test-shard, control-test, integration, wheel, client]
+    needs: [triage, test-shard, web-test, control-test, integration, wheel, client]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -395,6 +429,8 @@ jobs:
         run: test "${{ needs.triage.result }}" = success
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
         run: test "${{ needs.test-shard.result }}" = "${{ needs.triage.outputs.checks == 'true' && 'success' || 'skipped' }}"
+      - if: ${{ !contains(needs.*.result, 'cancelled') }}
+        run: test "${{ needs.web-test.result }}" = "${{ needs.triage.outputs.checks == 'true' && 'success' || 'skipped' }}"
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
         run: test "${{ needs.control-test.result }}" = "${{ needs.triage.outputs.control == 'true' && 'success' || 'skipped' }}"
       - if: ${{ !contains(needs.*.result, 'cancelled') }}
