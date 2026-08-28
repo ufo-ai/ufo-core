@@ -3,15 +3,16 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 
 import { Button } from "@/components/ui/button";
 import { PressRow } from "@/components/ui/pressrow";
-import { Empty, Panel, Waiting, usePanelRead } from "@/kernel/panel";
+import { Empty, Waiting } from "@/kernel/panel";
 import { SlotTrack, useSlot } from "@/kernel/slots";
-import { isPortalChat, surfaceWord, useViewer } from "@/lib/audience";
+import { isPortalChat, surfaceWord } from "@/lib/audience";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
 import { clearChat, useChat } from "@/lib/chatStore";
 import { CHAT_SURFACE } from "@/lib/mainAgent";
 import { day } from "@/lib/moments";
+import type { ChatRow } from "@/lib/rail";
 import { seekChat, useRail } from "@/lib/railStore";
 import { placeHome } from "@/lib/router";
 import {
@@ -25,14 +26,17 @@ import {
 } from "@/lib/route";
 import { AgentSetup } from "@/views/AgentSetup";
 import { Chat } from "@/views/Chat";
-import { subject } from "@/views/Conversations";
 import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
-import type { Agent, Conversation, Member } from "@/lib/types";
+import type { Agent, Member } from "@/lib/types";
 
 const NEW_TAB = "New tab";
 const HISTORY = "History";
 const NO_HISTORY = "No conversations yet.";
-const HISTORY_BOUND = "The newest few. Search finds an older one.";
+
+/** The heading the readable conversations a member's colleagues are in stand under, here and on the
+ *  chat app's own screen: they are listed rather than hidden, and never mixed in with the member's
+ *  own. */
+const OTHER_MEMBERS = "Other members";
 const NO_APP = "No such app";
 const NO_APPS = "This workspace has no apps to open.";
 const NO_CHATS = "No conversations to open.";
@@ -326,8 +330,15 @@ function HistoryAct({
   );
 }
 
-/** The conversations a chat-shaped lane's history lists, read the way the app's own screen reads
- *  them. A row takes the lane over as that conversation's lane. */
+/** The conversations a chat-shaped lane's history lists: this app's rows off the rail — the
+ *  member's own conversations and the ones their audience grants make readable, which is the one
+ *  member-scoped listing every screen reads them from. The app's own conversation index is not that
+ *  listing: it answers every conversation the app holds, another member's private one among them
+ *  for an admin, so a history drawn from it named colleagues the member never spoke with.
+ *
+ *  A colleague's row follows the member's own under one heading rather than standing among them, the
+ *  way the chat app's own screen groups them. A row takes the lane over as that conversation's
+ *  lane. */
 function PastList({
   agent,
   lane,
@@ -339,35 +350,35 @@ function PastList({
   opens: string[];
   onOpens: (opens: string[]) => void;
 }) {
-  const viewer = useViewer();
-  const listed = usePanelRead<{ conversations: Conversation[]; more: boolean }>(
-    "/agents/" + agent.id + "/conversations",
-    0,
+  const rail = useRail();
+  const rows = rail.rows.filter((row) => row.agent_id === agent.id);
+  const theirs = rows.filter((row) => !row.mine);
+  const drawn = (row: ChatRow) => (
+    <PressRow
+      key={row.conversation_id}
+      line={row.title || agentName(row.agent_name)}
+      note={isPortalChat(row.surface) ? undefined : surfaceWord(row.surface)}
+      when={day(row.last_at) ?? undefined}
+      onPress={() => onOpens(taken(opens, lane, homeConversationLane(row.conversation_id)))}
+    />
   );
   return (
     <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable py-md">
-      <Panel
-        state={listed}
-        shape="table"
-        empty={(payload) => ((payload.conversations ?? []).length ? null : NO_HISTORY)}
-      >
-        {(payload) => (
-          <div className="flex flex-col">
-            {(payload.conversations ?? []).map((row) => (
-              <PressRow
-                key={row.id}
-                line={subject(row, viewer)}
-                note={isPortalChat(row.surface) ? undefined : surfaceWord(row.surface)}
-                when={day(row.last_turn_at) ?? undefined}
-                onPress={() => onOpens(taken(opens, lane, homeConversationLane(row.id)))}
-              />
-            ))}
-            {payload.more ? (
-              <p className="m-0 px-lg py-lg text-label text-ink-soft">{HISTORY_BOUND}</p>
-            ) : null}
-          </div>
-        )}
-      </Panel>
+      {rows.length ? (
+        <div className="flex flex-col">
+          {rows.filter((row) => row.mine).map(drawn)}
+          {theirs.length ? (
+            <>
+              <h3 className={PICK_LABEL}>{OTHER_MEMBERS}</h3>
+              {theirs.map(drawn)}
+            </>
+          ) : null}
+        </div>
+      ) : rail.phase === "loading" ? (
+        <Waiting />
+      ) : (
+        <Empty>{NO_HISTORY}</Empty>
+      )}
     </div>
   );
 }

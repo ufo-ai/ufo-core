@@ -27,6 +27,9 @@ import {
   wire,
 } from "./harness";
 
+const OTHER_CONVO_ID = "66666666-6666-4666-8666-666666666666";
+const PRIVATE_CONVO_ID = "77777777-7777-4777-8777-777777777777";
+
 const AGENT_INSTANCE = mintHomeLane(AGENT_ID, [AGENT_ID]);
 const SECOND_INSTANCE = mintHomeLane(SECOND_ID, [SECOND_ID]);
 const CONVERSATION_LANE = homeConversationLane(CONVO_ID);
@@ -171,6 +174,57 @@ test("the picker lane offers the workspace's apps and the member's history under
       .getAllByRole("button")
       .map((row) => row.textContent),
   ).toEqual([CHAT_ROW.title]);
+});
+
+test("a chat lane's history lists the member's own conversations and groups colleagues' under one heading", async () => {
+  const colleague = {
+    ...CHAT_ROW,
+    conversation_id: OTHER_CONVO_ID,
+    title: "Ship the ledger",
+    mine: false,
+    speaker: "alex@metalcraft.ai",
+  };
+  const { calls } = wire({
+    ...chatsOnWire([CHAT_ROW, colleague]),
+    "/conversations$": () =>
+      json({
+        conversations: [
+          {
+            id: PRIVATE_CONVO_ID,
+            agent: null,
+            surface: "slack",
+            surface_label: "#ops",
+            audience: "member:justin",
+            member_email: "justin@simplecasual.com",
+            description: "",
+            source: null,
+            speakers: [],
+            turn_count: 3,
+            created_at: "2026-08-01T09:00:00",
+            last_turn_at: "2026-08-01T09:00:00",
+            readable: false,
+            disclosable: true,
+            commentable: false,
+          },
+        ],
+        more: false,
+      }),
+  });
+  drawHome([AGENT_ID]);
+
+  await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
+  const lane = await screen.findByRole("region", { name: "History" });
+
+  const rows = within(lane)
+    .getAllByRole("button")
+    .map((row) => row.textContent ?? "")
+    .filter(Boolean);
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toContain(CHAT_ROW.title);
+  expect(rows[1]).toContain(colleague.title);
+  expect(within(lane).getByRole("heading", { name: "Other members", level: 3 })).toBeTruthy();
+  expect(within(lane).queryByText(/justin@simplecasual.com/)).toBeNull();
+  expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(false);
 });
 
 test("picking an app not yet standing takes the picker lane's place in the address", async () => {
