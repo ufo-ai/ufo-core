@@ -209,6 +209,53 @@ except FileExistsError:
     raise SystemExit(17)
 except (ContainmentError, OSError) as error:
     raise SystemExit(str(error))"""
+APPLICATION_DELEGATION_CLAIM = """import os
+from containment import ContainmentError, contained_file
+import sys
+from uuid import uuid4
+
+data = sys.argv[3].encode()
+if not data:
+    raise SystemExit("application delegation idempotency key is empty")
+staged = f".ufo-staged-{uuid4().hex}"
+descriptor = -1
+try:
+    with contained_file(sys.argv[1], sys.argv[2], create_parent=True) as target:
+        if target.lstat() is not None:
+            raise SystemExit(18 if target.read_bytes(len(data) + 1) == data else 17)
+        descriptor = os.open(
+            staged,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=target.parent_fd,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(
+                    staged,
+                    target.name,
+                    src_dir_fd=target.parent_fd,
+                    dst_dir_fd=target.parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                raise SystemExit(18 if target.read_bytes(len(data) + 1) == data else 17)
+            os.fsync(target.parent_fd)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(staged, dir_fd=target.parent_fd)
+            except FileNotFoundError:
+                pass
+            os.fsync(target.parent_fd)
+except (ContainmentError, OSError) as error:
+    raise SystemExit(str(error))"""
 APPLICATION_SOURCE_RELEASE_CLAIM = """import os
 import stat
 from containment import ContainmentError, contained_file
@@ -1300,6 +1347,22 @@ async def build_ufo_application(ctx: ToolContext, _args: BuildUfoApplicationInpu
 
     if ctx.ext is None:
         raise RuntimeError("the application builder dispatched without its extension context")
+    if ctx.idempotency_key is None:
+        raise RuntimeError("build_ufo_application requires an idempotency key")
+    claim_path = await ctx.sandbox.runtime_path(
+        f"tool-output/application-builder/{ctx.turn.id}.delegated"
+    )
+    runtime_root = await _runtime_root(ctx)
+    claim = await ctx.sandbox.python(
+        APPLICATION_DELEGATION_CLAIM,
+        claim_path,
+        runtime_root,
+        ctx.idempotency_key,
+    )
+    if claim.exit_code == 17:
+        raise ValueError("build_ufo_application already ran for this parent turn")
+    if claim.exit_code not in (0, 18):
+        raise RuntimeError(claim.stderr or "application delegation could not be claimed")
     if ctx.speaker_member_id is not None:
         await ctx.ext.store.put(
             APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=ctx.turn.id),

@@ -68,6 +68,8 @@ MAX_PROVIDER_RETRIES = 6
 INITIAL_RETRY_DELAY_SECONDS = 2.0
 MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_EMPTY_PROVIDER_RETRIES = 3
+GEMINI_ABORT_RETRY_MODEL = "google/gemini-3.7-flash"
+GEMINI_ABORT_ERROR = "The operation was aborted"
 JSON_REFERENCE_KEYS = frozenset({"$ref", "$dynamicRef"})
 GENERATION_PATH = "/generation"
 GENERATION_TIMEOUT_SECONDS = 10.0
@@ -377,10 +379,11 @@ class OpenRouterModelClient:
     output yields; finish_reason=length raises ModelResponseTruncated. A normal completion that
     returned no text and no tool calls is a dead upstream — the client re-issues excluding that
     provider up to MAX_EMPTY_PROVIDER_RETRIES, then degrades to the empty result for the turn loop's
-    nudge. The request's `reasoning` effort rides `extra_body` as the thinking budget OpenRouter
-    derives from max_tokens when the model's spec supports it; `off` rides there too, as
-    `enabled: false`, because an omitted parameter leaves the upstream model reasoning at its own
-    default effort through a reasoning-inclusive budget."""
+    nudge. Gemini 3.7 Flash's exact no-output abort retries once immediately. The request's
+    `reasoning` effort rides `extra_body` as the thinking budget OpenRouter derives from max_tokens
+    when the model's spec supports it; `off` rides there too, as `enabled: false`, because an
+    omitted parameter leaves the upstream model reasoning at its own default effort through a
+    reasoning-inclusive budget."""
 
     client: openai.AsyncOpenAI
     spec: ModelSpec
@@ -391,6 +394,7 @@ class OpenRouterModelClient:
         delay = INITIAL_RETRY_DELAY_SECONDS
         attempt = 0
         empty_attempt = 0
+        abort_retried = False
         ignore_providers: set[str] = set()
         while True:
             yielded = False
@@ -470,6 +474,31 @@ class OpenRouterModelClient:
                 )
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, MAX_RETRY_DELAY_SECONDS)
+                continue
+            except openai.APIError as error:
+                is_gemini_abort = (
+                    type(error) is openai.APIError
+                    and str(error) == GEMINI_ABORT_ERROR
+                    and request.model == GEMINI_ABORT_RETRY_MODEL
+                )
+                if is_gemini_abort and usage is not None:
+                    yield usage
+                retryable = is_gemini_abort and not yielded and not abort_retried
+                if not retryable:
+                    raise
+                abort_retried = True
+                log(
+                    "model.provider_abort_retry",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    attempt=1,
+                )
+                emit_metric(
+                    "model_provider_retry_total",
+                    provider=self.spec.provider,
+                    model=request.model,
+                    kind="abort",
+                )
                 continue
             if finish_reason == "length":
                 if usage is not None:

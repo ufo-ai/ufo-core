@@ -60,6 +60,7 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_BUILDER_REPAIR_READ_REASON,
     APPLICATION_BUILDER_SKILL,
     APPLICATION_BUILDER_WRITE_TOOL,
+    APPLICATION_DELEGATION_CLAIM,
     APPLICATION_DESIGN_ACCEPT,
     APPLICATION_DESIGN_AUDIT_TIMEOUT_SECONDS,
     APPLICATION_DESIGN_PATH,
@@ -71,6 +72,7 @@ from ufo_ext_sites.application_builder import (
     APPLICATION_PREVIEW_TOOL,
     APPLICATION_SCAFFOLD_PATH,
     APPLICATION_SOURCE_CLAIM,
+    APPLICATION_SOURCE_PATH,
     APPLICATION_SOURCE_READ,
     APPLICATION_SOURCE_RELEASE_CLAIM,
     APPLICATION_SOURCE_REQUIRE_CLAIM,
@@ -264,7 +266,9 @@ class FakeSandbox:
     workspace_write_error: OSError | None = None
     require_application_source_root: bool = False
     track_design_claim: bool = False
-    design_claimed: bool = False
+    claimed_paths: set[str] = field(default_factory=set)
+    delegation_claims: dict[str, str] = field(default_factory=dict)
+    delegation_claim_fault: BaseException | None = None
     design_audit_barrier: asyncio.Barrier | None = None
     program_errors: dict[str, BaseException] = field(default_factory=dict)
     claim: ExecResult = field(default_factory=lambda: ExecResult(stdout="", stderr="", exit_code=0))
@@ -281,6 +285,10 @@ class FakeSandbox:
     @property
     def conversation_id(self) -> UUID:
         return self.handle.conversation_id
+
+    @property
+    def design_claimed(self) -> bool:
+        return bool(self.claimed_paths or self.delegation_claims)
 
     async def bash(self, command: str, timeout_s: int | None = None) -> ExecResult:
         self.commands.append(command)
@@ -306,15 +314,28 @@ class FakeSandbox:
                 return ExecResult("", "application source escaped the workspace", 1)
         if program in self.program_errors:
             raise self.program_errors[program]
+        if self.track_design_claim and program == APPLICATION_DELEGATION_CLAIM:
+            path, _root, key = args
+            existing = self.delegation_claims.get(path)
+            if existing is None:
+                self.delegation_claims[path] = key
+                result = ExecResult("", "", 0)
+            else:
+                result = ExecResult("", "", 18 if existing == key else 17)
+            if self.delegation_claim_fault is not None:
+                error = self.delegation_claim_fault
+                self.delegation_claim_fault = None
+                raise error
+            return result
         if self.track_design_claim and program == APPLICATION_SOURCE_CLAIM:
-            if self.design_claimed:
+            if args[0] in self.claimed_paths:
                 return ExecResult("", "", 17)
-            self.design_claimed = True
+            self.claimed_paths.add(args[0])
             return ExecResult("", "", 0)
         if self.track_design_claim and program == APPLICATION_SOURCE_RELEASE_CLAIM:
-            if not self.design_claimed:
+            if args[0] not in self.claimed_paths:
                 return ExecResult("", "application claim is absent", 1)
-            self.design_claimed = False
+            self.claimed_paths.remove(args[0])
             return ExecResult("", "", 0)
         if program == APPLICATION_DESIGN_ACCEPT:
             source_path, accepted_path, _root, max_chars = args
@@ -449,6 +470,14 @@ def _context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
         speaker_member_id=None,
         audience=conversation_audience(None),
         artifact_token_secret="",
+    )
+
+
+def _application_context(sandbox: FakeSandbox, tmp_path: Path) -> ToolContext:
+    ctx = _context(sandbox, tmp_path)
+    return replace(
+        ctx,
+        idempotency_key=f"{ctx.turn.id}/build_ufo_application/call-1",
     )
 
 
@@ -1067,6 +1096,49 @@ async def test_build_website_omits_the_unset_knobs(tmp_path: Path) -> None:
     assert captured["payload"] == {"objective": "minimal"}
 
 
+def test_application_delegation_claim_publishes_one_safe_complete_key(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    target = root / "tool-output" / "application-builder" / "turn.delegated"
+    containment_dir = Path(__file__).parents[3] / "core" / "src" / "ufo" / "sandbox"
+
+    def claim(key: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            (
+                sys.executable,
+                "-c",
+                APPLICATION_DELEGATION_CLAIM,
+                str(target),
+                str(root),
+                key,
+            ),
+            cwd=containment_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    first = claim("turn-1/build_ufo_application/call-1")
+    same = claim("turn-1/build_ufo_application/call-1")
+    different = claim("turn-1/build_ufo_application/call-2")
+
+    assert first.returncode == 0
+    assert same.returncode == 18
+    assert different.returncode == 17
+    assert target.read_text() == "turn-1/build_ufo_application/call-1"
+    assert not tuple(target.parent.glob(".ufo-staged-*"))
+
+    target.unlink()
+    outside = tmp_path / "outside"
+    outside.write_text("outside")
+    target.symlink_to(outside)
+
+    linked = claim("turn-1/build_ufo_application/call-1")
+
+    assert linked.returncode not in (0, 17, 18)
+    assert outside.read_text() == "outside"
+
+
 async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
     spawns = 0
@@ -1093,8 +1165,9 @@ async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Pa
             ),
         )
 
+    sandbox = FakeSandbox(track_design_claim=True)
     ctx = replace(
-        _context(FakeSandbox(), tmp_path),
+        _application_context(sandbox, tmp_path),
         spawn=_capture,
         idempotency_key="turn-1/build_ufo_application/call-2",
         ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
@@ -1104,7 +1177,6 @@ async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Pa
         ctx,
         BuildUfoApplicationInput(),
     )
-    repeated = await build_ufo_application(ctx, BuildUfoApplicationInput())
 
     assert captured == {
         "profile": "profile:ufo_application_builder",
@@ -1119,9 +1191,16 @@ async def test_build_ufo_application_uses_the_fixed_worker_contract(tmp_path: Pa
         },
         "dedup_key": "turn-1/build_ufo_application/call-2",
     }
+    assert sandbox.programs[0] == (
+        APPLICATION_DELEGATION_CLAIM,
+        (
+            f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated",
+            RUNTIME_ROOT,
+            "turn-1/build_ufo_application/call-2",
+        ),
+    )
     returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
-    assert repeated.content == result.content
-    assert spawns == 2
+    assert spawns == 1
     assert returned.status == "blocked"
     assert returned.blocker == "The connector is unavailable."
 
@@ -1144,9 +1223,11 @@ async def test_build_ufo_application_creates_the_product_scaffold(tmp_path: Path
             ),
         )
 
-    sandbox = FakeSandbox(claim=ExecResult("", "not found", 1))
+    sandbox = FakeSandbox(
+        scripted_programs={APPLICATION_SOURCE_READ: ExecResult("", "not found", 1)}
+    )
     ctx = replace(
-        _context(sandbox, tmp_path),
+        _application_context(sandbox, tmp_path),
         spawn=_capture,
         ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
     )
@@ -1180,8 +1261,8 @@ async def test_concurrent_application_requests_bind_their_own_audit_contracts(
             ),
         )
 
-    first = _context(FakeSandbox(), tmp_path)
-    second = _context(FakeSandbox(), tmp_path)
+    first = _application_context(FakeSandbox(), tmp_path)
+    second = _application_context(FakeSandbox(), tmp_path)
     store = FakeHookStore()
     first = replace(
         first,
@@ -1233,7 +1314,7 @@ async def test_build_ufo_application_returns_one_blocked_result_when_the_worker_
     member_id = uuid4()
     store = FakeHookStore()
     ctx = replace(
-        _context(FakeSandbox(), tmp_path),
+        _application_context(FakeSandbox(), tmp_path),
         spawn=_fail,
         speaker_member_id=member_id,
         ext=cast(ExtensionContext, FakeHookExt(store)),
@@ -1249,6 +1330,370 @@ async def test_build_ufo_application_returns_one_blocked_result_when_the_worker_
     assert store.values[APPLICATION_BUILDER_REDEPLOY_KEY.format(turn_id=ctx.turn.id)] == str(
         member_id
     )
+
+
+async def test_build_ufo_application_rejects_a_different_key_after_deployment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spawns = 0
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        nonlocal spawns
+        spawns += 1
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="deployed",
+                source_path=APPLICATION_SOURCE_PATH,
+                site_name="tasks-homepage",
+                site_url="https://ufo.example.test/tasks-homepage",
+                browser_batches=2,
+            ),
+        )
+
+    async def _accept(
+        _acceptance: ApplicationBuildAcceptance, result: ApplicationBuilderResult
+    ) -> ApplicationBuilderResult:
+        return result
+
+    monkeypatch.setattr(ApplicationBuildAcceptance, "accept", _accept)
+    ctx = replace(
+        _application_context(FakeSandbox(track_design_claim=True), tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+
+    result = await build_ufo_application(ctx, BuildUfoApplicationInput())
+    with pytest.raises(ValueError, match="already ran for this parent turn"):
+        await build_ufo_application(
+            replace(ctx, idempotency_key=f"{ctx.idempotency_key}:different"),
+            BuildUfoApplicationInput(),
+        )
+
+    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
+    assert returned.status == "deployed"
+    assert spawns == 1
+
+
+async def test_build_ufo_application_rejects_a_different_key_after_a_blocked_result(
+    tmp_path: Path,
+) -> None:
+    spawns = 0
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        nonlocal spawns
+        spawns += 1
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path=APPLICATION_SOURCE_PATH,
+                browser_batches=0,
+                blocker="The connector is unavailable.",
+            ),
+        )
+
+    ctx = replace(
+        _application_context(FakeSandbox(track_design_claim=True), tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+
+    result = await build_ufo_application(ctx, BuildUfoApplicationInput())
+    with pytest.raises(ValueError, match="already ran for this parent turn"):
+        await build_ufo_application(
+            replace(ctx, idempotency_key=f"{ctx.idempotency_key}:different"),
+            BuildUfoApplicationInput(),
+        )
+
+    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
+    assert returned.status == "blocked"
+    assert spawns == 1
+
+
+async def test_build_ufo_application_same_key_resumes_after_claim_publication_fault(
+    tmp_path: Path,
+) -> None:
+    spawns = 0
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        nonlocal spawns
+        spawns += 1
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path=APPLICATION_SOURCE_PATH,
+                browser_batches=0,
+                blocker="The connector is unavailable.",
+            ),
+        )
+
+    sandbox = FakeSandbox(
+        track_design_claim=True,
+        delegation_claim_fault=SystemExit("process fault"),
+    )
+    ctx = replace(
+        _application_context(sandbox, tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+
+    with pytest.raises(SystemExit, match="process fault"):
+        await build_ufo_application(ctx, BuildUfoApplicationInput())
+
+    claim_path = f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated"
+    assert sandbox.delegation_claims == {claim_path: ctx.idempotency_key}
+    assert spawns == 0
+
+    result = await build_ufo_application(ctx, BuildUfoApplicationInput())
+
+    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
+    assert returned.status == "blocked"
+    assert spawns == 1
+
+
+async def test_build_ufo_application_concurrent_same_key_uses_spawn_dedup(tmp_path: Path) -> None:
+    both_spawns = asyncio.Event()
+    release = asyncio.Event()
+    spawn_calls = 0
+    worker_starts = 0
+    worker: asyncio.Task[SpawnResult] | None = None
+
+    async def _worker() -> SpawnResult:
+        nonlocal worker_starts
+        worker_starts += 1
+        await release.wait()
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path=APPLICATION_SOURCE_PATH,
+                browser_batches=0,
+                blocker="The connector is unavailable.",
+            ),
+        )
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        nonlocal spawn_calls, worker
+        spawn_calls += 1
+        if worker is None:
+            worker = asyncio.create_task(_worker())
+        if spawn_calls == 2:
+            both_spawns.set()
+        return await asyncio.shield(worker)
+
+    ctx = replace(
+        _application_context(FakeSandbox(track_design_claim=True), tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+
+    calls = tuple(
+        asyncio.create_task(build_ufo_application(ctx, BuildUfoApplicationInput()))
+        for _ in range(2)
+    )
+    await both_spawns.wait()
+    release.set()
+    results = await asyncio.gather(*calls)
+
+    assert results[0].content == results[1].content
+    assert spawn_calls == 2
+    assert worker_starts == 1
+
+
+async def test_build_ufo_application_allows_a_new_parent_turn(tmp_path: Path) -> None:
+    spawns = 0
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        nonlocal spawns
+        spawns += 1
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path=APPLICATION_SOURCE_PATH,
+                browser_batches=0,
+                blocker="The connector is unavailable.",
+            ),
+        )
+
+    sandbox = FakeSandbox(track_design_claim=True)
+    ctx = replace(
+        _application_context(sandbox, tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+
+    await build_ufo_application(ctx, BuildUfoApplicationInput())
+    next_ctx = replace(ctx, turn=ctx.turn.model_copy(update={"id": uuid4()}))
+    await build_ufo_application(next_ctx, BuildUfoApplicationInput())
+
+    claims = [
+        args[0] for program, args in sandbox.programs if program == APPLICATION_DELEGATION_CLAIM
+    ]
+    assert claims == [
+        f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated",
+        f"{RUNTIME_ROOT}/tool-output/application-builder/{next_ctx.turn.id}.delegated",
+    ]
+    assert spawns == 2
+
+
+async def test_build_ufo_application_same_key_retries_after_scaffold_setup_fails(
+    tmp_path: Path,
+) -> None:
+    spawns = 0
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        nonlocal spawns
+        spawns += 1
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path=APPLICATION_SOURCE_PATH,
+                browser_batches=0,
+                blocker="The connector is unavailable.",
+            ),
+        )
+
+    sandbox = FakeSandbox(
+        scripted_programs={APPLICATION_SOURCE_READ: ExecResult("", "not found", 1)},
+        workspace_write_error=OSError("scaffold write failed"),
+        track_design_claim=True,
+    )
+    ctx = replace(
+        _application_context(sandbox, tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+
+    with pytest.raises(OSError, match="scaffold write failed"):
+        await build_ufo_application(ctx, BuildUfoApplicationInput())
+
+    assert spawns == 0
+    claim_path = f"{RUNTIME_ROOT}/tool-output/application-builder/{ctx.turn.id}.delegated"
+    assert sandbox.delegation_claims == {claim_path: ctx.idempotency_key}
+    sandbox.workspace_write_error = None
+
+    result = await build_ufo_application(ctx, BuildUfoApplicationInput())
+
+    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
+    assert returned.status == "blocked"
+    assert spawns == 1
+
+
+async def test_build_ufo_application_permanent_claim_closes_the_three_call_setup_race(
+    tmp_path: Path,
+) -> None:
+    @dataclass
+    class _SetupRaceSandbox(FakeSandbox):
+        first_write_started: asyncio.Event = field(default_factory=asyncio.Event)
+        finish_first_write: asyncio.Event = field(default_factory=asyncio.Event)
+        write_calls: int = 0
+
+        async def write_file(self, path: str, content: bytes) -> None:
+            self.write_calls += 1
+            if self.write_calls == 1:
+                self.first_write_started.set()
+                await self.finish_first_write.wait()
+                raise OSError("A setup failed")
+            await super().write_file(path, content)
+
+    worker_started = asyncio.Event()
+    finish_worker = asyncio.Event()
+    spawn_calls = 0
+
+    async def _capture(
+        profile: str,
+        payload: dict,
+        background: bool = False,
+        dedup_key: str | None = None,
+    ) -> SpawnResult:
+        nonlocal spawn_calls
+        spawn_calls += 1
+        worker_started.set()
+        await finish_worker.wait()
+        return SpawnResult(
+            turn_id=uuid4(),
+            conversation_id=uuid4(),
+            output=ApplicationBuilderResult(
+                status="blocked",
+                source_path=APPLICATION_SOURCE_PATH,
+                browser_batches=0,
+                blocker="The connector is unavailable.",
+            ),
+        )
+
+    sandbox = _SetupRaceSandbox(
+        scripted_programs={APPLICATION_SOURCE_READ: ExecResult("", "not found", 1)},
+        track_design_claim=True,
+    )
+    ctx = replace(
+        _application_context(sandbox, tmp_path),
+        spawn=_capture,
+        ext=cast(ExtensionContext, FakeHookExt(FakeHookStore())),
+    )
+
+    first = asyncio.create_task(build_ufo_application(ctx, BuildUfoApplicationInput()))
+    await sandbox.first_write_started.wait()
+    second = asyncio.create_task(build_ufo_application(ctx, BuildUfoApplicationInput()))
+    await worker_started.wait()
+    sandbox.finish_first_write.set()
+
+    with pytest.raises(OSError, match="A setup failed") as raised:
+        await first
+
+    with pytest.raises(ValueError, match="already ran for this parent turn"):
+        await build_ufo_application(
+            replace(ctx, idempotency_key=f"{ctx.idempotency_key}:different"),
+            BuildUfoApplicationInput(),
+        )
+
+    finish_worker.set()
+    result = await second
+
+    returned = ApplicationBuilderResult.model_validate_json(result.content[0].text)
+    assert str(raised.value) == "A setup failed"
+    assert not getattr(raised.value, "__notes__", ())
+    assert returned.status == "blocked"
+    assert spawn_calls == 1
 
 
 async def test_application_worker_redeploy_uses_the_exact_parent_speaker(
@@ -1434,11 +1879,16 @@ async def test_application_build_acceptance_binds_only_verified_worker_output(
             artifact_token_secret="",
             ext=ext,
             public_base_url="https://ufo.example.test",
+            idempotency_key="application-build:first",
         )
         rejected = await build_ufo_application(ctx, BuildUfoApplicationInput())
         bound_before_source = await HostedSites(workspace_id, workspace_tx).homepage(agent_id)
         sandbox.scripted_paths[f".{child_turn_id}.accepted"] = ExecResult("a" * 64, "", 0)
-        ctx = replace(ctx, turn=ctx.turn.model_copy(update={"id": uuid4()}))
+        ctx = replace(
+            ctx,
+            turn=ctx.turn.model_copy(update={"id": uuid4()}),
+            idempotency_key="application-build:second",
+        )
         result = await build_ufo_application(ctx, BuildUfoApplicationInput())
         bound = await HostedSites(workspace_id, workspace_tx).homepage(agent_id)
 

@@ -1758,6 +1758,23 @@ async def test_ufo_app_bench_requires_one_end_to_end_worker() -> None:
     assert "certify its own homepage" in certified.reason
 
 
+async def test_ufo_app_bench_rejects_parent_user_input() -> None:
+    base = _built_screen({})
+    asked = ToolInvocation(
+        "ask_user",
+        {"question": "Should I continue?"},
+        "waiting",
+        has_result=True,
+    )
+
+    verdict = await _application_builder_scorer()(
+        replace(base, calls=(*base.calls, asked), own_calls=(*base.own_calls, asked))
+    )
+
+    assert not verdict.passed
+    assert verdict.reason == "the parent asked the member for input during the application build"
+
+
 async def test_ufo_app_bench_accepts_the_worker_preloaded_skill() -> None:
     base = _built_screen({})
     without_parent_load = replace(

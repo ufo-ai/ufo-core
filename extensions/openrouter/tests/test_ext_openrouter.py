@@ -8,9 +8,11 @@ canned provider JSON — no live key or network — while the key comes from the
 and the charge lands in the REAL ledger, so the host-side key read and the `images` and `videos`
 metering seams are exercised end to end."""
 
+import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,12 +21,18 @@ from typing import get_args
 from uuid import UUID, uuid4
 
 import httpx
+import openai
 import pytest
 import sqlalchemy as sa
 import ufo_ext_openrouter as openrouter
 from cryptography.fernet import Fernet
 from openai.types.chat import ChatCompletionChunk
-from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
+from openai.types.chat.chat_completion_chunk import (
+    Choice,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
 from ufo_ext_openrouter import GenerateImageInput, GenerateVideoInput
@@ -72,6 +80,8 @@ REQUEST = ModelRequest(
     conversation_cache_ttl="5m",
 )
 
+GEMINI_FLASH_REQUEST = REQUEST.model_copy(update={"model": "google/gemini-3.7-flash"})
+
 
 def _chunk(
     content: str | None = None,
@@ -112,18 +122,47 @@ def _usage(prompt: int, completion: int, cached: int = 0, cache_write: int = 0) 
 class ScriptedCreate:
     """Plays the SDK stream factory: one scripted chunk list per call, recording the kwargs sent."""
 
-    def __init__(self, *streams: list[ChatCompletionChunk]) -> None:
+    def __init__(
+        self, *streams: BaseException | Sequence[BaseException | ChatCompletionChunk]
+    ) -> None:
         self.streams = list(streams)
         self.calls: list[dict[str, object]] = []
 
     async def __call__(self, **kwargs: object) -> AsyncIterator[ChatCompletionChunk]:
         self.calls.append(kwargs)
-        return _aiter(self.streams[len(self.calls) - 1])
+        stream = self.streams[len(self.calls) - 1]
+        if isinstance(stream, BaseException):
+            raise stream
+        return _aiter(stream)
 
 
-async def _aiter(chunks: list[ChatCompletionChunk]) -> AsyncIterator[ChatCompletionChunk]:
+async def _aiter(
+    chunks: Sequence[BaseException | ChatCompletionChunk],
+) -> AsyncIterator[ChatCompletionChunk]:
     for chunk in chunks:
+        if isinstance(chunk, BaseException):
+            raise chunk
         yield chunk
+
+
+def _api_error(message: str = "The operation was aborted") -> openai.APIError:
+    return openai.APIError(
+        message,
+        request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
+        body=None,
+    )
+
+
+def _status_error(status: int, message: str = "provider error") -> openai.APIStatusError:
+    return openai.APIStatusError(
+        message,
+        response=httpx.Response(
+            status,
+            headers={"retry-after": "0"},
+            request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
+        ),
+        body=None,
+    )
 
 
 def _client(
@@ -152,6 +191,212 @@ async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget
     assert kwargs["model"] == "google/gemini-2.5-pro"
     assert kwargs["extra_body"] == {}
     assert kwargs["stream_options"] == {"include_usage": True}
+
+
+async def test_gemini_flash_abort_retries_immediately_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    emitted: list[tuple[str, dict[str, str]]] = []
+
+    async def unexpected_sleep(_: float) -> None:
+        raise AssertionError("abort retry slept")
+
+    def meter(name: str, **dimensions: str) -> None:
+        emitted.append((name, dimensions))
+
+    monkeypatch.setattr(openrouter.asyncio, "sleep", unexpected_sleep)
+    monkeypatch.setattr(openrouter, "emit_metric", meter)
+    create = ScriptedCreate(
+        _api_error(),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(2, 1))],
+    )
+
+    with caplog.at_level(logging.INFO):
+        events = [event async for event in _client(create).complete(GEMINI_FLASH_REQUEST)]
+
+    assert events == [
+        ModelStreamStart(),
+        TextDelta(text="ok"),
+        Usage(input_tokens=2, output_tokens=1),
+    ]
+    assert create.calls[0] == create.calls[1]
+    assert emitted == [
+        (
+            "model_provider_retry_total",
+            {"provider": "openrouter", "model": "google/gemini-3.7-flash", "kind": "abort"},
+        )
+    ]
+    retry = next(
+        record for record in caplog.records if record.getMessage() == "model.provider_abort_retry"
+    )
+    assert retry.ufo == {
+        "provider": "openrouter",
+        "model": "google/gemini-3.7-flash",
+        "attempt": 1,
+    }
+
+
+async def test_second_gemini_flash_abort_reraises() -> None:
+    second = _api_error()
+    create = ScriptedCreate(_api_error(), second)
+
+    with pytest.raises(openai.APIError) as raised:
+        async for _ in _client(create).complete(GEMINI_FLASH_REQUEST):
+            pass
+
+    assert raised.value is second
+    assert len(create.calls) == 2
+
+
+async def test_gemini_flash_abort_after_text_does_not_retry() -> None:
+    error = _api_error()
+    create = ScriptedCreate(
+        [_chunk(content="partial"), error],
+        [_chunk(content="wrong"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    events = []
+
+    with pytest.raises(openai.APIError) as raised:
+        async for event in _client(create).complete(GEMINI_FLASH_REQUEST):
+            events.append(event)
+
+    assert raised.value is error
+    assert events == [ModelStreamStart(), TextDelta(text="partial")]
+    assert len(create.calls) == 1
+
+
+async def test_gemini_flash_abort_after_tool_call_start_does_not_retry() -> None:
+    error = _api_error()
+    create = ScriptedCreate(
+        [
+            ChatCompletionChunk(
+                id="c",
+                object="chat.completion.chunk",
+                created=0,
+                model="x",
+                choices=[
+                    Choice(
+                        index=0,
+                        finish_reason=None,
+                        delta=ChoiceDelta(
+                            tool_calls=[
+                                ChoiceDeltaToolCall(
+                                    index=0,
+                                    id="call-1",
+                                    function=ChoiceDeltaToolCallFunction(
+                                        name="inspect", arguments=""
+                                    ),
+                                    type="function",
+                                )
+                            ]
+                        ),
+                    )
+                ],
+            ),
+            error,
+        ],
+        [_chunk(content="wrong"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+    events = []
+
+    with pytest.raises(openai.APIError) as raised:
+        async for event in _client(create).complete(GEMINI_FLASH_REQUEST):
+            events.append(event)
+
+    assert raised.value is error
+    assert events == [ModelStreamStart(), openrouter.ToolCallStart(id="call-1", name="inspect")]
+    assert len(create.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("model_request", "error"),
+    [
+        pytest.param(REQUEST, _api_error(), id="other-model"),
+        pytest.param(
+            GEMINI_FLASH_REQUEST, _api_error("The operation was aborted."), id="near-message"
+        ),
+        pytest.param(
+            GEMINI_FLASH_REQUEST,
+            _status_error(400, "The operation was aborted"),
+            id="status-subclass",
+        ),
+        pytest.param(
+            GEMINI_FLASH_REQUEST,
+            openai.APITimeoutError(
+                request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions")
+            ),
+            id="timeout-subclass",
+        ),
+        pytest.param(
+            GEMINI_FLASH_REQUEST,
+            openai.APIConnectionError(
+                message="The operation was aborted",
+                request=httpx.Request("POST", "https://openrouter.invalid/v1/chat/completions"),
+            ),
+            id="connection-subclass",
+        ),
+    ],
+)
+async def test_abort_retry_excludes_other_failures(
+    model_request: ModelRequest, error: openai.APIError
+) -> None:
+    create = ScriptedCreate(
+        error,
+        [_chunk(content="wrong"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    with pytest.raises(type(error)) as raised:
+        async for _ in _client(create).complete(model_request):
+            pass
+
+    assert raised.value is error
+    assert len(create.calls) == 1
+
+
+async def test_cancelled_gemini_flash_stream_does_not_retry() -> None:
+    error = asyncio.CancelledError()
+    create = ScriptedCreate(
+        error,
+        [_chunk(content="wrong"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        async for _ in _client(create).complete(GEMINI_FLASH_REQUEST):
+            pass
+
+    assert raised.value is error
+    assert len(create.calls) == 1
+
+
+async def test_gemini_flash_abort_preserves_attempt_usage_in_order() -> None:
+    create = ScriptedCreate(
+        [_chunk(usage=_usage(7, 0)), _api_error()],
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(11, 3))],
+    )
+
+    events = [event async for event in _client(create).complete(GEMINI_FLASH_REQUEST)]
+
+    assert [event for event in events if isinstance(event, Usage)] == [
+        Usage(input_tokens=7, output_tokens=0),
+        Usage(input_tokens=11, output_tokens=3),
+    ]
+
+
+async def test_status_retry_keeps_its_existing_path() -> None:
+    create = ScriptedCreate(
+        _status_error(500),
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(2, 1))],
+    )
+
+    events = [event async for event in _client(create).complete(GEMINI_FLASH_REQUEST)]
+
+    assert len(create.calls) == 2
+    assert events == [
+        ModelStreamStart(),
+        TextDelta(text="ok"),
+        Usage(input_tokens=2, output_tokens=1),
+    ]
 
 
 async def test_complete_recovers_missing_final_usage_from_the_generation() -> None:

@@ -1737,6 +1737,12 @@ def _application_builder_scorer() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         failed = _score_evidence("processBuilder", 0, 1)
         own = output.own_calls
+        if any(call.name == "ask_user" for call in own):
+            return CapabilityVerdict(
+                False,
+                "the parent asked the member for input during the application build",
+                failed,
+            )
         delegations = tuple(
             call for call in own if call.name == APPLICATION_BUILDER_DELEGATION_TOOL
         )
