@@ -14,6 +14,7 @@ authoritative snapshot, an incremental stream advances a watermark and names its
 shapes are internal value objects: they never cross a wire, so they are frozen dataclasses, not
 `BaseModel`."""
 
+import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
@@ -30,6 +31,33 @@ TITLE_KEYS = ("title", "name", "full_name", "login", "subject")
 MAIL_BACKFILL_WINDOW_DAYS = 30
 CHAT_BACKFILL_WINDOW_DAYS = 30
 REPO_BACKFILL_WINDOW_DAYS = 30
+
+
+def get_path(data: Mapping[str, Any], path: str, default: Any = None) -> Any:
+    """Read a dotted path from a nested mapping."""
+    value: Any = data
+    for part in path.split("."):
+        if not isinstance(value, Mapping):
+            return default
+        value = value.get(part)
+        if value is None:
+            return default
+    return value
+
+
+def record_key(record: Mapping[str, Any], primary_key: str) -> str | None:
+    """The immutable provider id a record is addressed by: its stream's declared `primary_key`, read
+    as a flat field first and then as a dotted path (`author.id`), so a provider that carries its id
+    one level down is declarable. One producer, so the page ref and the default title agree.
+
+    None when the record carries no such value, which drops the record. Keying on the record's
+    content instead — a hash of every field — would move the ref whenever any provider field moved,
+    minting a new page that derives from scratch and leaving the old page behind on every stream
+    that is not a `delete_missing` snapshot."""
+    value = record[primary_key] if primary_key in record else get_path(record, primary_key)
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    return str(value) or None
 
 
 class PaginationStrategy(StrEnum):
@@ -427,13 +455,27 @@ class Connector(ABC):
             None,
         )
         if title is None:
-            ref = record.get(stream.primary_key)
-            if not isinstance(ref, (str, int)) or str(ref) == "":
+            identity = self.record_identity(record, stream)
+            if identity is None:
                 raise ValueError(
                     f"record must supply a non-empty title or {stream.primary_key!r} identity"
                 )
+            ref = self.record_ref(record, stream) or identity
             title = f"{stream.name}/{ref}"
         return (
             title,
             f"# {self.name} {stream.name}: {title}\n\n{json.dumps(record, sort_keys=True)}",
         )
+
+    def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        """The provider-stable identity for one record, unique within the source."""
+        return record_key(record, stream.primary_key)
+
+    def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        """The source-side reference used when a page row is first created."""
+        value = record.get(stream.primary_key)
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (str, int)):
+            return str(value)
+        return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()

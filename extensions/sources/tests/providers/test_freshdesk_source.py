@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.freshdesk import FreshdeskConnector
+from ufo_ext_sources.providers.freshdesk import SETTINGS_PAGE_KEY, FreshdeskConnector
 
 from ufo.access.connectors import Credential
 from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
@@ -62,6 +62,18 @@ async def test_groups_follow_the_link_header_default() -> None:
 
     result = await _fetch("groups", handle)
     assert _refs(result) == {"groups/2"}
+
+
+async def test_the_settings_singleton_uses_a_constant_identity() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v2/settings/helpdesk"
+        return httpx.Response(200, json={"primary_language": "en", "name": "Acme"})
+
+    result = await _fetch("settings", handle)
+
+    assert _refs(result) == {"settings/en"}
+    assert {page.source_identity for page in result.pages} == {f"settings/{SETTINGS_PAGE_KEY}"}
+    assert '"id"' not in result.pages[0].body
 
 
 async def test_basic_auth_built_from_a_direct_key() -> None:

@@ -19,9 +19,7 @@ a skip rather than a failure. The credential is resolved through the auth proxy 
 this connector holds no token. The write path is intentionally absent — the source seam only reads.
 """
 
-import hashlib
-import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
@@ -672,7 +670,7 @@ class HubSpotConnector(RestConnector):
         both shapes into the flat record."""
         flat = dict(record)
         object_id = flat.get("objectId")
-        if object_id is not None and not flat.get("id"):
+        if stream.name != "event_occurrences" and object_id is not None and not flat.get("id"):
             flat["id"] = str(object_id)
         props = flat.get("properties")
         if isinstance(props, dict):
@@ -699,6 +697,21 @@ class HubSpotConnector(RestConnector):
         if stream.name in _PASSTHROUGH_STREAMS:
             return self._flatten_product_api(record, stream)
         return self._flatten(record)
+
+    def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name != _CONSENT_STATES_STREAM:
+            return super().record_identity(record, stream)
+        contact_id = record.get("contact_id")
+        subscription_id = record.get("subscriptionId")
+        status_kind = record.get("wideStatusType")
+        if status_kind is None and record.get("purpose") == "unsubscribe_all":
+            status_kind = "unsubscribe_all"
+        suffix = subscription_id if subscription_id is not None else status_kind
+        business_unit_id = record.get("businessUnitId")
+        business_unit = business_unit_id if business_unit_id is not None else "default"
+        if contact_id is None or suffix is None:
+            return None
+        return f"{contact_id}:{suffix}:{business_unit}"
 
     async def _list_properties(self, client: httpx.AsyncClient, source_object: str) -> list[str]:
         """Every property HubSpot exposes for an object type. The names go straight into the search
@@ -1518,17 +1531,11 @@ class HubSpotConnector(RestConnector):
         data = await self._get(client, "/events/v3/events/event-types")
         raw_rows = data if isinstance(data, list) else data.get("results", [])
         rows: list[dict[str, Any]] = []
-        for idx, row in enumerate(raw_rows or []):
+        for row in raw_rows or []:
             if not isinstance(row, dict):
                 continue
-            row_id = (
-                row.get("id")
-                or row.get("fullyQualifiedName")
-                or row.get("name")
-                or row.get("eventType")
-                or idx
-            )
-            rows.append({**row, "id": str(row_id)})
+            row_id = row.get("id") or row.get("fullyQualifiedName")
+            rows.append(row if row_id is None else {**row, "id": str(row_id)})
         if rows:
             yield rows
 
@@ -1547,27 +1554,9 @@ class HubSpotConnector(RestConnector):
             if e.response.status_code == 404:
                 return
             raise
-        rows: list[dict[str, Any]] = []
-        for idx, row in enumerate(data.get("results", []) or []):
-            if not isinstance(row, dict):
-                continue
-            row_id = row.get("id") or self._synthetic_event_id(row, idx)
-            rows.append({**row, "id": str(row_id)})
+        rows = [row for row in data.get("results", []) or [] if isinstance(row, dict)]
         if rows:
             yield rows
-
-    @staticmethod
-    def _synthetic_event_id(row: dict[str, Any], idx: int) -> str:
-        return ":".join(
-            str(part).replace(":", "_")
-            for part in (
-                row.get("eventType") or "event",
-                row.get("objectType") or "object",
-                row.get("objectId") or "unknown",
-                row.get("occurredAt") or idx,
-                HubSpotConnector._stable_payload_hash(row),
-            )
-        )
 
     async def _paginate_email_events(
         self,
@@ -1584,12 +1573,7 @@ class HubSpotConnector(RestConnector):
             if offset:
                 params["offset"] = offset
             data = await self._get(client, "/email/public/v1/events", params=params)
-            rows: list[dict[str, Any]] = []
-            for idx, row in enumerate(data.get("events", []) or []):
-                if not isinstance(row, dict):
-                    continue
-                row_id = row.get("id") or self._synthetic_email_event_id(row, idx)
-                rows.append({**row, "id": str(row_id)})
+            rows = [row for row in data.get("events", []) or [] if isinstance(row, dict)]
             if rows:
                 yield rows
             if not data.get("hasMore"):
@@ -1610,24 +1594,6 @@ class HubSpotConnector(RestConnector):
         except ValueError:
             return None
         return int(parsed.timestamp() * 1000)
-
-    @staticmethod
-    def _synthetic_email_event_id(row: dict[str, Any], idx: int) -> str:
-        return ":".join(
-            str(part).replace(":", "_")
-            for part in (
-                row.get("created") or idx,
-                row.get("recipient") or "recipient",
-                row.get("type") or "email_event",
-                row.get("emailCampaignId") or row.get("campaignId") or "campaign",
-                HubSpotConnector._stable_payload_hash(row),
-            )
-        )
-
-    @staticmethod
-    def _stable_payload_hash(row: dict[str, Any]) -> str:
-        encoded = json.dumps(row, sort_keys=True, default=str, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
     async def _paginate_association_labels(
         self,
@@ -2067,6 +2033,7 @@ class HubSpotConnector(RestConnector):
         business_unit_id = row.get("businessUnitId")
         suffix = subscription_id if subscription_id is not None else status_kind
         business_unit_part = business_unit_id if business_unit_id is not None else "default"
+        contact_id = str(contact["id"]) if contact.get("id") is not None else None
         subscription_name = row.get("subscriptionName")
         purpose = row.get("purpose") or (
             "unsubscribe_all" if status_kind == "unsubscribe_all" else subscription_name
@@ -2075,7 +2042,7 @@ class HubSpotConnector(RestConnector):
         return {
             **row,
             "id": f"{email}:{suffix}:{business_unit_part}",
-            "contact_id": str(contact.get("id")) if contact.get("id") is not None else None,
+            "contact_id": contact_id,
             "subject_email": email,
             "purpose": purpose,
             "subscription_type": subscription_name

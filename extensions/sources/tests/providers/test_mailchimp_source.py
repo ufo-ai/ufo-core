@@ -85,6 +85,58 @@ async def test_list_members_fan_out_stamps_the_parent_list_id() -> None:
     assert '"list_id": "l1"' in result.pages[0].body
 
 
+async def test_unsubscribes_key_on_the_campaign_and_subscriber_hash() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/3.0/reports":
+            return httpx.Response(
+                200, json={"reports": [{"id": "camp1"}, {"id": "camp2"}], "total_items": 2}
+            )
+        assert request.url.path in {
+            "/3.0/reports/camp1/unsubscribed",
+            "/3.0/reports/camp2/unsubscribed",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "unsubscribes": [
+                    {
+                        "email_id": "md5-of-ada",
+                        "contact_id": "ct1",
+                        "email_address": "ada@example.com",
+                        "timestamp": "2026-01-01T00:00:00Z",
+                    }
+                ]
+            },
+        )
+
+    result = await _fetch("unsubscribes", handle)
+    assert _refs(result) == {"unsubscribes/md5-of-ada"}
+    assert {page.source_identity for page in result.pages} == {
+        "unsubscribes/camp1:md5-of-ada",
+        "unsubscribes/camp2:md5-of-ada",
+    }
+
+
+async def test_an_unsubscribe_without_a_subscriber_hash_is_dropped() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/3.0/reports":
+            return httpx.Response(200, json={"reports": [{"id": "camp1"}], "total_items": 1})
+        return httpx.Response(
+            200,
+            json={
+                "unsubscribes": [
+                    {"email_id": "md5-of-ada", "timestamp": "2026-01-01T00:00:00Z"},
+                    {"timestamp": "2026-01-02T00:00:00Z"},
+                ]
+            },
+        )
+
+    result = await _fetch("unsubscribes", handle)
+    assert _refs(result) == {"unsubscribes/md5-of-ada"}
+    assert {page.source_identity for page in result.pages} == {"unsubscribes/camp1:md5-of-ada"}
+    assert result.dropped == 1
+
+
 async def test_stream_skipped_on_refusal() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "unauthorized"})

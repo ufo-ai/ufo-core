@@ -10,7 +10,7 @@ refusal (401/403) raises `StreamSkipped`; an unimplemented stream raises it too.
 resolved through the auth proxy the runner threads; this connector holds no token. The write path is
 intentionally absent — the source seam only reads."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import httpx
@@ -40,7 +40,7 @@ TYPEFORM_STREAMS: list[StreamSpec] = [
     StreamSpec(name="workspaces", source_object="workspaces", primary_key="id"),
     StreamSpec(name="images", source_object="images", primary_key="id", canonical=False),
     StreamSpec(name="themes", source_object="themes", primary_key="id", canonical=False),
-    StreamSpec(name="webhooks", source_object="webhooks", primary_key="tag", canonical=False),
+    StreamSpec(name="webhooks", source_object="webhooks", primary_key="id", canonical=False),
 ]
 
 
@@ -48,6 +48,12 @@ class TypeformConnector(RestConnector):
     name = "typeform"
     base_url = "https://api.typeform.com"
     streams_list = TYPEFORM_STREAMS
+
+    def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name != "webhooks":
+            return super().record_ref(record, stream)
+        value = record.get("tag")
+        return str(value) if isinstance(value, (str, int)) else None
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

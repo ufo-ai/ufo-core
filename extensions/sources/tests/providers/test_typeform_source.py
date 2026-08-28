@@ -77,6 +77,34 @@ async def test_responses_fan_out_per_form() -> None:
     assert result.pages[0].updated_at is None
 
 
+async def test_webhooks_key_on_the_webhook_id_not_the_caller_chosen_tag() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/forms":
+            return httpx.Response(
+                200, json={"items": [{"id": "f1", "title": "Survey"}], "page_count": 1}
+            )
+        if request.url.path == "/forms/f1/webhooks":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "wh1",
+                            "tag": "renamed-hook",
+                            "form_id": "f1",
+                            "url": "https://example.test/hook",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("webhooks", handle)
+    assert _refs(result) == {"webhooks/renamed-hook"}
+    assert {page.source_identity for page in result.pages} == {"webhooks/wh1"}
+    assert "renamed-hook" in result.pages[0].body
+
+
 async def test_stream_skipped_on_refusal() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"code": "AUTHORIZATION_ERROR"})

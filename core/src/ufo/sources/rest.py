@@ -28,6 +28,7 @@ from ufo.sources.connector import (
     PaginationStrategy,
     StreamPage,
     StreamSpec,
+    get_path,
 )
 
 MAX_ATTEMPTS = 8
@@ -44,18 +45,6 @@ ERROR_BODY_CAP = 800
 MAX_PAGES = 10_000
 
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?', re.IGNORECASE)
-
-
-def get_path(data: Mapping[str, Any], path: str, default: Any = None) -> Any:
-    """Read a dotted path from a nested mapping."""
-    value: Any = data
-    for part in path.split("."):
-        if not isinstance(value, Mapping):
-            return default
-        value = value.get(part)
-        if value is None:
-            return default
-    return value
 
 
 def list_or_empty(value: Any) -> list[dict[str, Any]]:

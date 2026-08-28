@@ -13,7 +13,7 @@ URL is per-tenant (`https://<domain>.freshdesk.com`), so the class default is em
 without a resolved host fails loud. A refusal (401/403) raises `StreamSkipped`. The write path is
 intentionally absent — the source seam only reads."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import httpx
@@ -25,6 +25,7 @@ PAGE_LIMIT = 100
 TIMEOUT_CONNECT_SECONDS = 30.0
 TIMEOUT_READ_SECONDS = 60.0
 TICKET_PAGE_CEILING = 300
+SETTINGS_PAGE_KEY = "helpdesk"
 _REFUSAL_STATUS = frozenset({401, 403})
 
 # Stream-name → REST resource path. Substreams / nested trees are dispatched separately.
@@ -81,7 +82,7 @@ FRESHDESK_STREAMS: list[StreamSpec] = [
     _stream("business_hours"),
     _stream("sla_policies"),
     _stream("scenario_automations"),
-    _stream("settings", source_object="settings/helpdesk", primary_key="primary_language"),
+    _stream("settings", source_object="settings/helpdesk"),
     _stream("ticket_fields"),
     _stream("products"),
     _stream("email_configs"),
@@ -105,6 +106,17 @@ class FreshdeskConnector(RestConnector):
     name = "freshdesk"
     base_url = ""
     streams_list = FRESHDESK_STREAMS
+
+    def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name == "settings":
+            return SETTINGS_PAGE_KEY
+        return super().record_identity(record, stream)
+
+    def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name != "settings":
+            return super().record_ref(record, stream)
+        value = record.get("primary_language")
+        return str(value) if isinstance(value, (str, int)) else None
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         timeout = httpx.Timeout(TIMEOUT_CONNECT_SECONDS, read=TIMEOUT_READ_SECONDS)
@@ -202,6 +214,11 @@ class FreshdeskConnector(RestConnector):
                 raise NotImplementedError(
                     f"freshdesk: stream {stream.name!r} has no paginate dispatch"
                 )
+            if stream.name == "settings":
+                data = await self._get(client, path)
+                if isinstance(data, dict):
+                    yield [data]
+                return
             async for page in self._paginate_link_header(client, path):
                 yield page
         except httpx.HTTPStatusError as error:

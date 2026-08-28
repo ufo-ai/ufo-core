@@ -15,7 +15,7 @@ search filter parses back with `int(...)`), leaving the record otherwise untouch
 (HTTP 401/403) raises `StreamSkipped` so the run records a skip. The write path is intentionally
 absent — the source seam only reads."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import httpx
@@ -73,20 +73,18 @@ INTERCOM_STREAMS: list[StreamSpec] = [
     _stream("companies", source_object="company"),
     _stream("admins", cursor_field=None),
     _stream("activity_logs", cursor_field="created_at", canonical=False),
-    _stream("tags", primary_key="name", cursor_field=None, canonical=False),
-    _stream("teams", primary_key="name", cursor_field=None, canonical=False),
+    _stream("tags", cursor_field=None, canonical=False),
+    _stream("teams", cursor_field=None, canonical=False),
     _stream("segments", canonical=False),
     _stream(
         "company_attributes",
         source_object="company",
-        primary_key="name",
         cursor_field=None,
         canonical=False,
     ),
     _stream(
         "contact_attributes",
         source_object="contact",
-        primary_key="name",
         cursor_field=None,
         canonical=False,
     ),
@@ -99,6 +97,18 @@ class IntercomConnector(RestConnector):
     name = "intercom"
     base_url = "https://api.intercom.io"
     streams_list = INTERCOM_STREAMS
+
+    def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name not in _ATTRIBUTE_MODELS:
+            return super().record_identity(record, stream)
+        value = record.get("id") or record.get("full_name")
+        return str(value) if isinstance(value, (str, int)) else None
+
+    def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name not in {"tags", "teams", *_ATTRIBUTE_MODELS}:
+            return super().record_ref(record, stream)
+        value = record.get("name")
+        return str(value) if isinstance(value, (str, int)) else None
 
     def _make_client(self, base_url: str, credential: Credential) -> httpx.AsyncClient:
         client = super()._make_client(base_url, credential)
@@ -310,7 +320,7 @@ class IntercomConnector(RestConnector):
     ) -> AsyncIterator[list[dict[str, Any]]]:
         model = _ATTRIBUTE_MODELS[stream.name]
         data = await self._get(client, "/data_attributes", params={"model": model})
-        recs = data.get("data") or []
+        recs = [rec for rec in data.get("data") or [] if isinstance(rec, dict)]
         if recs:
             yield recs
 

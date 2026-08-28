@@ -777,6 +777,7 @@ page = sa.Table(
     sa.Column("id", sa.Uuid, primary_key=True),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("source_id", sa.Uuid, sa.ForeignKey("source.id"), nullable=False),
+    sa.Column("source_identity", sa.Text, nullable=True),
     sa.Column("digest", sa.Text, nullable=False),
     sa.Column("body_ref", sa.Text, nullable=False),
     sa.Column("stream", sa.Text, nullable=False),
@@ -791,6 +792,14 @@ page = sa.Table(
     sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="page_subject"),
     sa.Index("page_feed", "workspace_id", "revision", "id"),
     sa.Index("page_source", "source_id"),
+    sa.Index(
+        "page_source_identity",
+        "source_id",
+        "source_identity",
+        unique=True,
+        postgresql_where=sa.text("source_identity is not null"),
+        sqlite_where=sa.text("source_identity is not null"),
+    ),
 )
 
 conversation_change = sa.Table(

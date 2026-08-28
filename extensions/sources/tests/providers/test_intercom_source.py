@@ -191,6 +191,49 @@ async def test_contacts_flatten_lifts_org_id() -> None:
     assert record["updated_at"] == "1700000000"
 
 
+@pytest.mark.parametrize(("stream", "path"), [("tags", "/tags"), ("teams", "/teams")])
+async def test_tags_and_teams_key_on_their_id_so_a_rename_keeps_the_page(
+    stream: str, path: str
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == path:
+            return httpx.Response(
+                200, json={"data": [{"id": "7", "name": "Renamed", "type": stream[:-1]}]}
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch(stream, handle)
+    assert [page.source_ref for page in result.pages] == [f"{stream}/Renamed"]
+    assert [page.source_identity for page in result.pages] == [f"{stream}/7"]
+    assert result.pages[0].title == "Renamed"
+
+
+async def test_data_attributes_key_on_the_id_and_a_standard_one_on_its_full_name() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/data_attributes":
+            assert request.url.params.get("model") == "contact"
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"id": 91, "name": "renamed_field", "full_name": "custom_attributes.paid"},
+                        {"name": "email", "full_name": "email"},
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("contact_attributes", handle)
+    assert {page.source_ref for page in result.pages} == {
+        "contact_attributes/renamed_field",
+        "contact_attributes/email",
+    }
+    assert {page.source_identity for page in result.pages} == {
+        "contact_attributes/91",
+        "contact_attributes/email",
+    }
+
+
 async def test_stream_skipped_on_refusal() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"errors": [{"code": "forbidden"}]})

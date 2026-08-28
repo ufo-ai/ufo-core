@@ -2117,6 +2117,125 @@ async def test_page_feed_reads_one_immutable_page_version_during_a_sync(
     assert body_ref.endswith(new.digest.removeprefix("sha256:"))
 
 
+async def test_source_identity_attaches_without_replaying_and_survives_a_ref_change(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, None)
+    legacy_ref = "organizations/acme"
+    identity = "organizations/42"
+    body = "# sentry organization: Acme\n\n{}"
+    page = Page(
+        source_ref=legacy_ref,
+        source_identity=identity,
+        body=body,
+        stream="organizations",
+        title="Acme",
+    )
+    page_id = page_id_for(source_id, legacy_ref)
+    body_ref = f"sources/{source_id}/{page_id}/{page.digest.removeprefix('sha256:')}"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.page).values(
+                id=page_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                source_identity=None,
+                digest=page.digest,
+                body_ref=body_ref,
+                stream=page.stream,
+                title=page.title,
+                subject=SHARED_SUBJECT,
+                tombstone=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+            )
+        ).scalar_one()
+    moved = page.model_copy(update={"source_ref": "organizations/acme-renamed"})
+    driver, _ = _scripted_driver(
+        [SyncResult(pages=(page,), snapshot=True), SyncResult(pages=(moved,), snapshot=True)],
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    await _sync(driver)
+    await _make_due()
+    await _sync(driver)
+
+    async with workspace_tx() as connection:
+        rows = (
+            (
+                await connection.execute(
+                    sa.select(
+                        tables.page.c.id,
+                        tables.page.c.source_identity,
+                        tables.page.c.digest,
+                        tables.page.c.body_ref,
+                        tables.page.c.revision,
+                        tables.page.c.tombstone,
+                    ).where(tables.page.c.source_id == source_id)
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert rows == [
+        {
+            "id": page_id,
+            "source_identity": identity,
+            "digest": page.digest,
+            "body_ref": body_ref,
+            "revision": revision,
+            "tombstone": False,
+        }
+    ]
+
+    split_identity = legacy_ref
+    split = page.model_copy(
+        update={
+            "source_identity": split_identity,
+            "body": "# sentry organization: Other\n\n{}",
+            "title": "Other",
+        }
+    )
+    collision_driver, _ = _scripted_driver(
+        [SyncResult(pages=(page, split), snapshot=True)],
+        database_url,
+        tmp_path / "collision-blobs",
+    )
+    await _make_due()
+    await _sync(collision_driver)
+
+    async with workspace_tx() as connection:
+        identities = dict(
+            (
+                await connection.execute(
+                    sa.select(tables.page.c.source_identity, tables.page.c.id).where(
+                        tables.page.c.source_id == source_id
+                    )
+                )
+            ).all()
+        )
+        retained_revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+            )
+        ).scalar_one()
+    assert identities == {
+        identity: page_id,
+        split_identity: uuid5(
+            NAMESPACE_URL,
+            f"{source_id}/page-identity/{split_identity}",
+        ),
+    }
+    assert retained_revision == revision
+
+
 async def test_database_revision_orders_an_old_writer_after_a_new_cursor(
     db: None, tmp_path: Path
 ) -> None:

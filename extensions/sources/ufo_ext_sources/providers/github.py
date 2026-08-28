@@ -34,7 +34,7 @@ so the walk raises `StreamSkipped` and the run records a skip, not a failure. Th
 intentionally absent — the source seam only reads."""
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -116,7 +116,7 @@ ALL_STREAMS: list[StreamSpec] = [
         ordering=Ordering.newest_first,
         backfill_window_days=REPO_BACKFILL_WINDOW_DAYS,
     ),
-    _stream("contributor_activity", cursor_field=None),
+    _stream("contributor_activity", primary_key="author.id", cursor_field=None),
     _stream("deployments", cursor_field="updated_at"),
     _stream(
         "events",
@@ -211,10 +211,13 @@ class GitHubConnector(RestConnector):
         page ref and its title carry the repo or org — a key unique only inside one partition (a
         branch or tag `name`, a commit `sha`, a starrer's user id) can no longer collide across
         repos onto one page. A record the fan-out failed to stamp raises. A record carrying no
-        primary key at all is returned unscoped and keyed by the adapter's content hash instead:
-        that hash covers the whole record, and the stamped partition field is part of it, so two
-        partitions serving the identical keyless record still separate — by the stamp's presence in
-        the hashed body, not by anything this scoping does."""
+        primary key at all is returned unscoped, and the adapter drops it — `contributor_activity`
+        reads its key off `author.id`, so an anonymous `/stats/contributors` row with no author is
+        the one record of the connector that has no immutable id to be keyed by.
+
+        The key is read as a flat field first and then as a dotted path, so a nested id scopes the
+        same way a flat one does; the scoped value is written back under the declared path's own
+        name, which is where the adapter reads it."""
         match stream.name:
             case "stargazers":
                 user = record.get("user")
@@ -242,10 +245,25 @@ class GitHubConnector(RestConnector):
                 f"github: stream {stream.name!r} fans out over {partition_field!r} but a record "
                 "carries no such value"
             )
-        key = shaped.get(stream.primary_key)
+        if stream.name == "contributor_activity":
+            return shaped
+        key = (
+            shaped[stream.primary_key]
+            if stream.primary_key in shaped
+            else get_path(shaped, stream.primary_key)
+        )
         if key is None:
             return shaped
         return {**shaped, stream.primary_key: f"{partition}/{key}"}
+
+    def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name != "contributor_activity":
+            return super().record_identity(record, stream)
+        partition = record.get(REPO_PARTITION_FIELD)
+        author_id = get_path(record, "author.id")
+        if not isinstance(partition, str) or not partition or author_id is None:
+            return None
+        return f"{partition}/{author_id}"
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
         """Keep a pull request's update cursor as page metadata, not page content."""

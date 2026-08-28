@@ -11,7 +11,7 @@ credential is resolved through the auth proxy the runner threads; this connector
 write path is intentionally absent — the source seam only reads."""
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import httpx
@@ -25,7 +25,7 @@ SENTRY_STREAMS: list[StreamSpec] = [
     StreamSpec(
         name="organizations",
         source_object="organizations",
-        primary_key="slug",
+        primary_key="id",
         created_at_field="dateCreated",
         updated_at_field=None,
     ),
@@ -85,6 +85,12 @@ class SentryConnector(RestConnector):
     name = "sentry"
     base_url = "https://sentry.io/api/0"
     streams_list = SENTRY_STREAMS
+
+    def record_ref(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name != "organizations":
+            return super().record_ref(record, stream)
+        value = record.get("slug")
+        return str(value) if isinstance(value, (str, int)) else None
 
     async def paginate(
         self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None

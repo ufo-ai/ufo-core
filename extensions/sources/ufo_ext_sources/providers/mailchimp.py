@@ -13,7 +13,7 @@ the base client. The base URL is the per-tenant data-center host (`https://<dc>.
 a resolved host fails loud. A refusal (401/403) raises `StreamSkipped`. The write path is
 intentionally absent — the source seam only reads."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 from urllib.parse import quote
 
@@ -132,10 +132,10 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
     ),
     _stream(
         "unsubscribes",
+        primary_key="email_id",
         cursor_field="timestamp",
         created_at_field="timestamp",
         updated_at_field=None,
-        primary_key="email_id",
     ),
 ]
 
@@ -144,6 +144,15 @@ class MailchimpConnector(RestConnector):
     name = "mailchimp"
     base_url = ""
     streams_list = MAILCHIMP_STREAMS
+
+    def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
+        if stream.name != "unsubscribes":
+            return super().record_identity(record, stream)
+        campaign_id = record.get("campaign_id")
+        email_id = record.get("email_id")
+        if campaign_id is None or email_id is None:
+            return None
+        return f"{campaign_id}:{email_id}"
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
         if stream.name in {"list_members", "segment_members"}:

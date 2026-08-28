@@ -12,6 +12,7 @@ via `?until`, and a grant that cannot enumerate orgs at all (`/user/orgs` → 40
 `StreamSkipped` so the run records a skip, not a failure."""
 
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -623,26 +624,70 @@ async def test_an_identical_record_in_two_repos_lands_as_two_pages(
     }
 
 
-async def test_a_record_with_no_primary_key_still_separates_per_repo() -> None:
-    """`flatten` writes no prefix when the record carries no `primary_key` — `contributor_activity`
-    is a runnable stream whose `/stats/contributors` records have no `id`, so the branch fires on
-    every sync of it. Separation then rests entirely on the stamped `repo_full_name` being part of
-    the record the adapter content-hashes: two repos serving the identical keyless record still land
-    two pages, neither carrying a repo prefix."""
+def _contributor(total: int, commits: int) -> dict[str, object]:
+    return {
+        "author": {"id": 42, "login": "ada"},
+        "total": total,
+        "weeks": [{"w": 1767225600, "a": 10, "d": 2, "c": commits}],
+    }
+
+
+async def test_contributor_activity_keys_on_the_author_id_not_the_commit_counts() -> None:
     repo2 = {**REPO, "id": 101, "name": "repo2", "full_name": "acme/repo2"}
+    counts = iter((3, 9))
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/user/orgs":
             return httpx.Response(200, json=[ORG])
         if request.url.path == "/orgs/acme/repos":
             return httpx.Response(200, json=[REPO, repo2])
-        if request.url.path in {"/repos/acme/repo1/assignees", "/repos/acme/repo2/assignees"}:
-            return httpx.Response(200, json=[{"login": "ada"}])
+        if request.url.path in {
+            "/repos/acme/repo1/stats/contributors",
+            "/repos/acme/repo2/stats/contributors",
+        }:
+            total = next(counts)
+            return httpx.Response(200, json=[_contributor(total, total)])
         return httpx.Response(404, json={"path": request.url.path})
 
-    refs = _refs(await _fetch("assignees", handle))
-    assert len(refs) == 2
-    assert all(ref.startswith("assignees/") and "acme/repo" not in ref for ref in refs)
+    result = await _fetch("contributor_activity", handle)
+    assert {page.source_identity for page in result.pages} == {
+        "contributor_activity/acme/repo1/42",
+        "contributor_activity/acme/repo2/42",
+    }
+    refs = _refs(result)
+    counts = iter((4, 10))
+    rerun = await _fetch("contributor_activity", handle)
+    assert {page.source_identity for page in rerun.pages} == {
+        "contributor_activity/acme/repo1/42",
+        "contributor_activity/acme/repo2/42",
+    }
+    assert _refs(rerun).isdisjoint(refs)
+
+
+async def test_a_contributor_with_no_author_is_dropped_and_named(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/stats/contributors":
+            return httpx.Response(
+                200, json=[{"author": None, "total": 1, "weeks": []}, _contributor(2, 2)]
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        result = await _fetch("contributor_activity", handle)
+
+    assert {page.source_identity for page in result.pages} == {"contributor_activity/acme/repo1/42"}
+    assert result.dropped == 1
+    assert [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "source_sync.unkeyed_record"
+    ] == [{"connector": "github", "stream": "contributor_activity", "primary_key": "author.id"}]
 
 
 def test_flatten_raises_when_a_fanned_out_record_carries_no_partition() -> None:

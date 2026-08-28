@@ -3,8 +3,9 @@
 A connector speaks in streams and async page generators; the source seam speaks in one `SyncResult`
 per run. `ConnectorBackend` bridges them: one `source` row is one (account, stream), so `fetch`
 resolves the account's `Credential` through the runner's auth proxy, drives the connector's one
-stream, and renders each record into a recallable `Page` — one record the page model rejects is
-dropped, warned, and counted onto the result's `dropped` rather than failing the run (`_page`).
+stream, and renders each record into a recallable `Page` — one record the page model rejects, or one
+that carries no value for its stream's declared `primary_key`, is dropped, warned, and counted onto
+the result's `dropped` rather than failing the run (`_page`).
 A full-collection stream (`delete_missing`) returns as an authoritative `snapshot` so the driver
 tombstones records that vanished; an incremental stream returns `snapshot=False`, advances a
 watermark over its `cursor_field`, and names any provider-reported removals in `deletes`. A row
@@ -65,8 +66,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.access.connectors import GrantUnusable
 from ufo.o11y import warn
-from ufo.sources.connector import Connector, StreamPage, StreamSpec
-from ufo.sources.rest import get_path
+from ufo.sources.connector import Connector, StreamPage, StreamSpec, get_path
 from ufo.sources.sync import (
     Page,
     SourceAuth,
@@ -286,13 +286,23 @@ class ConnectorBackend:
         `stream.name/<primary key>` so a re-fetch of an unchanged record, an upsert, and a `deletes`
         entry all settle on the same page.
 
-        None when the page model rejects what the connector rendered for that one record. It is
-        dropped, named by `source_ref` and the field the model rejected, counted onto the result's
-        `dropped` so the run's own success event carries the loss, and the run lands the rest: a run
-        that raises commits no page and advances no cursor, so a single unrepresentable record would
-        hold every later record of the stream behind it for as long as the provider keeps returning
-        it."""
-        ref = _record_ref(stream, record)
+        None when the record carries no primary key, or when the page model rejects what the
+        connector rendered for that one record. It is dropped, named by the stream and the key that
+        resolved nothing or by `source_ref` and the field the model rejected, counted onto the
+        result's `dropped` so the run's own success event carries the loss, and the run lands the
+        rest: a run that raises commits no page and advances no cursor, so a single unrepresentable
+        record would hold every later record of the stream behind it for as long as the provider
+        keeps returning it."""
+        identity = self.connector.record_identity(record, stream)
+        if identity is None:
+            warn(
+                "source_sync.unkeyed_record",
+                connector=self.connector.name,
+                stream=stream.name,
+                primary_key=stream.primary_key,
+            )
+            return None
+        ref = self.connector.record_ref(record, stream) or identity
         title, body = self.connector.render(record, stream)
         created_at = _record_timestamp(
             record,
@@ -309,6 +319,7 @@ class ConnectorBackend:
         try:
             return Page(
                 source_ref=f"{stream.name}/{ref}",
+                source_identity=f"{stream.name}/{identity}",
                 body=body,
                 stream=stream.name,
                 title=title,
@@ -358,13 +369,6 @@ def _record_timestamp(
         field=field,
     )
     return None
-
-
-def _record_ref(stream: StreamSpec, record: dict[str, Any]) -> str:
-    value = record.get(stream.primary_key)
-    if isinstance(value, (str, int)):
-        return str(value)
-    return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
 
 
 def _max_str(current: str | None, value: Any) -> str | None:

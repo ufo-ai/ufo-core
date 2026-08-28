@@ -302,10 +302,43 @@ async def test_large_numeric_cursor_field_does_not_supply_updated_at() -> None:
     assert result.pages[0].updated_at is None
 
 
-async def test_default_render_rejects_record_without_title_or_identity() -> None:
+def test_default_render_rejects_record_without_title_or_identity() -> None:
     stream = StreamSpec(name="items", source_object="items")
     with pytest.raises(ValueError, match="non-empty title or 'id' identity"):
-        await _fetch(stream, [[{"body": "untitled"}]])
+        _FeedConnector(stream, []).render({"body": "untitled"}, stream)
+
+
+async def test_a_record_with_no_declared_key_is_dropped_and_named_not_content_keyed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
+    feed: Feed = [[{"name": "keyless", "updated_at": "2026-01-03T00:00:00Z"}, *_records(1)]]
+
+    with caplog.at_level(logging.WARNING, logger="ufo"):
+        result = await _fetch(stream, feed)
+
+    assert [page.source_ref for page in result.pages] == ["items/1"]
+    assert result.dropped == 1
+    assert result.next_cursor == "2026-01-03T00:00:00Z"
+    unkeyed = [
+        record for record in caplog.records if record.getMessage() == "source_sync.unkeyed_record"
+    ]
+    assert [record.ufo for record in unkeyed] == [
+        {"connector": "probe", "stream": "items", "primary_key": "id"}
+    ]
+
+
+async def test_an_empty_key_is_no_key_so_the_record_is_dropped() -> None:
+    stream = StreamSpec(name="items", source_object="items")
+    result = await _fetch(stream, [[{"id": "", "name": "blank"}, *_records(1)]])
+    assert [page.source_ref for page in result.pages] == ["items/1"]
+    assert result.dropped == 1
+
+
+async def test_a_declared_key_resolves_a_nested_provider_id() -> None:
+    stream = StreamSpec(name="items", source_object="items", primary_key="author.id")
+    result = await _fetch(stream, [[{"author": {"id": 7, "login": "ada"}, "total": 3}]])
+    assert [page.source_identity for page in result.pages] == ["items/7"]
 
 
 async def test_connector_normalizes_integer_timestamps() -> None:

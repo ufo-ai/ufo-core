@@ -121,11 +121,12 @@ def normalize_page_timestamp(value: str) -> str:
 
 
 class Page(BaseModel):
-    """One fetched document: its stable key within the source, body, and browse metadata."""
+    """One fetched document: its source reference, provider identity, body, and browse metadata."""
 
     model_config = ConfigDict(extra="forbid")
 
     source_ref: str
+    source_identity: str | None = None
     body: str
     stream: str = Field(min_length=1)
     title: str = Field(min_length=1)
@@ -477,6 +478,7 @@ def _config_value(source: ClaimedSource, key: str) -> str:
 @dataclass(frozen=True)
 class PageBrowse:
     id: UUID
+    source_identity: str | None
     stream: str
     title: str
     record_created_at: str | None
@@ -657,16 +659,43 @@ class SyncDriver:
         return await backend.fetch(config, source.cursor, auth)
 
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
-        prior = await self._prior_pages(source.source_id)
+        prior, prior_by_identity = await self._prior_pages(source.source_id)
+        resolved: dict[str, UUID] = {
+            identity: value[2].id for identity, value in prior_by_identity.items()
+        }
+        claimed: dict[UUID, str] = {
+            page_id: identity
+            for page_id, value in prior.items()
+            if (identity := value[2].source_identity) is not None
+        }
         fetched: list[UUID] = []
         changed: list[ChangedPage] = []
         metadata: list[PageBrowse] = []
         for page in result.pages:
-            page_id = page_id_for(source.source_id, page.source_ref)
+            source_identity = page.source_identity or page.source_ref
+            fallback_id = page_id_for(source.source_id, page.source_ref)
+            existing = prior_by_identity.get(source_identity)
+            page_id = resolved.get(source_identity)
+            if page_id is None:
+                fallback = prior.get(fallback_id)
+                owner = claimed.get(fallback_id)
+                if fallback is not None and owner is None:
+                    existing = fallback
+                    page_id = fallback_id
+                elif fallback is None and owner is None:
+                    page_id = fallback_id
+                else:
+                    page_id = uuid5(
+                        NAMESPACE_URL,
+                        f"{source.source_id}/page-identity/{source_identity}",
+                    )
+                    existing = prior.get(page_id)
+                resolved[source_identity] = page_id
+                claimed[page_id] = source_identity
             fetched.append(page_id)
-            existing = prior.get(page_id)
             browse = PageBrowse(
                 id=page_id,
+                source_identity=source_identity,
                 stream=page.stream,
                 title=page.title,
                 record_created_at=page.created_at,
@@ -687,7 +716,12 @@ class SyncDriver:
                 )
             elif existing[2] != browse:
                 metadata.append(browse)
-        deleted = [page_id_for(source.source_id, ref) for ref in result.deletes]
+        deleted = [
+            existing[2].id
+            if (existing := prior_by_identity.get(ref)) is not None
+            else page_id_for(source.source_id, ref)
+            for ref in result.deletes
+        ]
         tombstoned = await self._write(
             source,
             result.next_cursor,
@@ -705,13 +739,19 @@ class SyncDriver:
             result.dropped,
         )
 
-    async def _prior_pages(self, source_id: UUID) -> dict[UUID, tuple[str, bool, PageBrowse]]:
+    async def _prior_pages(
+        self, source_id: UUID
+    ) -> tuple[
+        dict[UUID, tuple[str, bool, PageBrowse]],
+        dict[str, tuple[str, bool, PageBrowse]],
+    ]:
         async with workspace_tx() as connection:
             rows = (
                 (
                     await connection.execute(
                         sa.select(
                             tables.page.c.id,
+                            tables.page.c.source_identity,
                             tables.page.c.digest,
                             tables.page.c.tombstone,
                             tables.page.c.stream,
@@ -724,12 +764,13 @@ class SyncDriver:
                 .mappings()
                 .all()
             )
-        return {
+        by_id = {
             row["id"]: (
                 row["digest"],
                 bool(row["tombstone"]),
                 PageBrowse(
                     id=row["id"],
+                    source_identity=row["source_identity"],
                     stream=row["stream"],
                     title=row["title"],
                     record_created_at=row["record_created_at"],
@@ -737,6 +778,11 @@ class SyncDriver:
                 ),
             )
             for row in rows
+        }
+        return by_id, {
+            page.source_identity: prior
+            for prior in by_id.values()
+            if (page := prior[2]).source_identity is not None
         }
 
     async def _write(
@@ -770,6 +816,7 @@ class SyncDriver:
                 updated = await connection.execute(
                     sa.update(tables.page)
                     .values(
+                        source_identity=changed_page.browse.source_identity,
                         digest=changed_page.digest,
                         body_ref=changed_page.body_ref,
                         stream=changed_page.browse.stream,
@@ -786,6 +833,7 @@ class SyncDriver:
                     await connection.execute(
                         sa.insert(tables.page).values(
                             id=changed_page.browse.id,
+                            source_identity=changed_page.browse.source_identity,
                             workspace_id=workspace_id,
                             source_id=source.source_id,
                             digest=changed_page.digest,
@@ -804,6 +852,7 @@ class SyncDriver:
                 await connection.execute(
                     sa.update(tables.page)
                     .values(
+                        source_identity=browse_page.source_identity,
                         stream=browse_page.stream,
                         title=browse_page.title,
                         record_created_at=browse_page.record_created_at,

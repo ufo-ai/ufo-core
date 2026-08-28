@@ -339,6 +339,100 @@ async def test_consent_states_project_capture_time_as_creation() -> None:
     assert result.pages[0].updated_at is None
 
 
+async def test_consent_states_key_on_the_contact_id_not_the_contact_email() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/crm/v3/objects/contacts":
+            return httpx.Response(
+                200,
+                json={"results": [{"id": "c1", "properties": {"email": "ada.new@example.com"}}]},
+            )
+        if request.url.path.endswith("/statuses/ada.new@example.com"):
+            return httpx.Response(
+                200, json={"results": [{"subscriptionId": "news", "businessUnitId": "bu1"}]}
+            )
+        if request.url.path.endswith("/unsubscribe-all"):
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("consent_states", handle)
+    assert [page.source_ref for page in result.pages] == [
+        "consent_states/ada.new@example.com:news:bu1"
+    ]
+    assert [page.source_identity for page in result.pages] == ["consent_states/c1:news:bu1"]
+    assert "ada.new@example.com" in result.pages[0].body
+
+
+async def test_event_types_end_their_key_chain_at_the_fully_qualified_name() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/events/v3/events/event-types"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"fullyQualifiedName": "pe1_signed_up", "name": "Signed up (renamed)"},
+                    {"eventType": "nameless"},
+                ]
+            },
+        )
+
+    result = await _fetch("event_types", handle)
+    assert [page.source_ref for page in result.pages] == ["event_types/pe1_signed_up"]
+    assert result.dropped == 1
+
+
+async def test_event_occurrences_require_the_provider_id() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/events/v3/events"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": "evt1",
+                        "eventType": "pe1_signed_up",
+                        "objectType": "contact",
+                        "objectId": "c1",
+                        "occurredAt": "2026-01-01T00:00:00Z",
+                        "properties": {"page": "/pricing"},
+                    },
+                    {"eventType": "pe1_signed_up", "properties": {"page": "/pricing"}},
+                ]
+            },
+        )
+
+    result = await _fetch("event_occurrences", handle)
+    assert [page.source_ref for page in result.pages] == ["event_occurrences/evt1"]
+    assert [page.source_identity for page in result.pages] == ["event_occurrences/evt1"]
+    assert result.dropped == 1
+
+
+async def test_email_events_require_the_provider_id() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/email/public/v1/events"
+        return httpx.Response(
+            200,
+            json={
+                "events": [
+                    {
+                        "id": "email-event-1",
+                        "created": 1767225600000,
+                        "recipient": "ada@example.com",
+                        "type": "OPEN",
+                        "emailCampaignId": 55,
+                        "userAgent": "an agent that changes",
+                    },
+                    {"type": "OPEN", "emailCampaignId": 55},
+                ],
+                "hasMore": False,
+            },
+        )
+
+    result = await _fetch("email_events", handle)
+    assert [page.source_ref for page in result.pages] == ["email_events/email-event-1"]
+    assert [page.source_identity for page in result.pages] == ["email_events/email-event-1"]
+    assert result.dropped == 1
+
+
 async def test_custom_objects_project_record_creation_and_property_update_time() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/crm/v3/schemas":
