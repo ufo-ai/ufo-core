@@ -261,7 +261,11 @@ class EvalConversations(Protocol):
 
 class TurnOutcome(Protocol):
     @property
-    def workflow_wait_seconds(self) -> float: ...
+    def workflow_wait_seconds(self) -> float | None:
+        """Seconds a logical workflow may take to settle before the harness cancels it and records
+        WAIT_EXPIRED; None never expires, so an outcome asserting any other path cannot depend on
+        wall time."""
+        ...
 
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None: ...
 

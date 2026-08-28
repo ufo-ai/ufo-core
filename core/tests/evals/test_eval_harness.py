@@ -285,6 +285,7 @@ from ufo.turns.transcript import (
 )
 from ufo.workspace import init_workspace_credentials, ws
 
+CHILD_SETTLE_SECONDS = 0.02
 MODEL = "claude-opus-4-8"
 JUDGE_JOB = "evals:judge"
 AGENT_REASONING = "high"
@@ -9743,7 +9744,7 @@ async def test_capability_workflow_waits_for_child_delivery_resumed_turn_and_art
 
     @dataclass
     class WorkflowOutcome:
-        workflow_wait_seconds = 1.0
+        workflow_wait_seconds = None
 
         async def cancel(self, turn_id: UUID) -> bool:
             raise AssertionError("settled workflow must not be cancelled")
@@ -9850,9 +9851,16 @@ async def test_capability_workflow_waits_for_child_delivery_resumed_turn_and_art
     }
 
 
+@pytest.mark.parametrize(
+    ("wait_budget", "expected_reason"),
+    [(None, "background child did not finish"), (0.0001, WAIT_EXPIRED)],
+)
 async def test_failed_capability_workflow_keeps_an_earlier_root_artifact(
-    db: None, tmp_path
+    db: None, tmp_path, wait_budget: float | None, expected_reason: str
 ) -> None:
+    """The child-not-finished path is decided by the child, never by the clock: the outcome's
+    settle takes longer than any small budget, so a finite one expires into WAIT_EXPIRED while
+    a fixture passing None reaches the child verdict and keeps the earlier root artifact."""
     workspace_id = await _workspace()
     agent_id = await _seed_agent(workspace_id)
     blob = FilesystemBlobStore(root=tmp_path)
@@ -9990,10 +9998,11 @@ async def test_failed_capability_workflow_keeps_an_earlier_root_artifact(
 
     @dataclass(frozen=True)
     class WorkflowOutcome:
-        workflow_wait_seconds = 1.0
+        workflow_wait_seconds = wait_budget
 
         async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
             if turn_id == child_turn_id:
+                await asyncio.sleep(CHILD_SETTLE_SECONDS)
                 return None
             return Trajectory(
                 conversation_id=conversation_id,
@@ -10050,11 +10059,12 @@ async def test_failed_capability_workflow_keeps_an_earlier_root_artifact(
             )
 
     assert result.clean is False
-    assert result.failure_reason == "background child did not finish"
-    assert result.output.response == "Done."
-    assert [(item.name, item.content) for item in result.output.artifacts] == [
-        ("results.jsonl", artifact)
-    ]
+    assert result.failure_reason == expected_reason
+    if wait_budget is None:
+        assert result.output.response == "Done."
+        assert [(item.name, item.content) for item in result.output.artifacts] == [
+            ("results.jsonl", artifact)
+        ]
     assert statuses == {
         root_turn_id: "done",
         artifact_turn_id: "done",
@@ -10111,7 +10121,7 @@ async def test_capability_workflow_reads_only_the_latest_resumed_turn_transcript
 
     @dataclass(frozen=True)
     class ResumedOutcome:
-        workflow_wait_seconds = 1.0
+        workflow_wait_seconds = None
 
         async def cancel(self, turn_id: UUID) -> bool:
             raise AssertionError("settled workflow must not be cancelled")
@@ -10252,7 +10262,7 @@ async def test_capability_workflow_cancels_live_graph_after_immediate_missing_ou
 
     @dataclass(frozen=True)
     class MissingOutcome:
-        workflow_wait_seconds = 1.0
+        workflow_wait_seconds = None
 
         async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
             if turn_id != root_turn_id or not root_finishes:
@@ -10373,7 +10383,7 @@ async def test_capability_workflow_failed_turn_keeps_its_transcript_and_tool_err
 
     @dataclass(frozen=True)
     class FailedOutcome:
-        workflow_wait_seconds = 1.0
+        workflow_wait_seconds = None
 
         async def cancel(self, turn_id: UUID) -> bool:
             raise AssertionError("a terminal workflow must not be cancelled")
@@ -10659,7 +10669,7 @@ async def test_capability_workflow_cancellation_settles_deferred_delivery_before
 
     @dataclass(frozen=True)
     class DeferredOutcome:
-        workflow_wait_seconds = 1.0
+        workflow_wait_seconds = None
 
         async def settle(self, conversation_id: UUID, turn_id: UUID) -> None:
             assert turn_id == child_turn_id
