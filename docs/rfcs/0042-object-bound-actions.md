@@ -10,9 +10,9 @@ date: 2026-08-27
 > Keep the five generic workspace-object verbs, add one `object_action` dispatcher, and let an
 > extension attach typed collection or instance actions to any registered object kind. A capability
 > lives where its subject lives: `object_list` and `object_get` return the relevant actions only
-> after the model chooses a domain. Twenty-four named tools become object actions while one new
+> after the model chooses a domain. Twenty-six named tools become object actions while one new
 > kind, `surface`, gives Slack and iMessage their existing installation object. The hosted pack's
-> member-facing schema registry falls from 67 to 45 before runtime connector expansion, the lazy
+> member-facing schema registry falls from 67 to 43 before runtime connector expansion, the lazy
 > tool catalog is deleted once the inventory lands — object discovery becomes the one deferral
 > mechanism — and authority, audit, idempotency, hooks, and final-act behavior do not change.
 
@@ -21,7 +21,7 @@ date: 2026-08-27
 | Question | Decision |
 |---|---|
 | What stays globally listed? | Cross-cutting execution, conversation control, research, connector discovery, and the six object verbs in [Retained global tools](#retained-global-tools). |
-| What moves? | The 24 names in [Action inventory](#action-inventory) — a starting assignment: a family that fails its eval gate returns to the global set, updating the inventory tables in that change. |
+| What moves? | The 26 names in [Action inventory](#action-inventory) — a starting assignment: a family that fails its eval gate returns to the global set, updating the inventory tables in that change. |
 | What happens to the lazy tool catalog? | Deleted in the final unit. Object discovery is the one deferral mechanism; retained global tools are always on the wire. |
 | How are moved capabilities found? | Collection actions on `object_list(kind)`; instance actions on `object_get(kind, name)`. `object_explain(kind)` returns both sets. |
 | How are they called? | One generic `object_action` tool with a structured target and an action-specific `input` mapping. |
@@ -81,9 +81,9 @@ one member ask two discovery grammars. This RFC's final unit deletes it; until t
 keeps running unchanged, the counts here are registry counts, and the billed comparison is
 measured against production with the catalog live.
 
-Twenty-three names in the hosted set are object-local. `monitor` is the same shape in the separate
-monitors extension, making 24 repository-wide. Moving the hosted 23 and adding `object_action`
-changes the static member-facing registry from 67 to 45, a net reduction of 22 schemas. This count
+Twenty-five names in the hosted set are object-local. `monitor` is the same shape in the separate
+monitors extension, making 26 repository-wide. Moving the hosted 25 and adding `object_action`
+changes the static member-facing registry from 67 to 43, a net reduction of 24 schemas. This count
 does not claim a token saving: descriptions and JSON Schemas differ in size, a static schema rides
 the cached prompt prefix while a discovered one is per-conversation transcript tokens, and a moved
 action is still read when its object is explored. The measurement gate uses serialized bytes,
@@ -181,10 +181,10 @@ key; a global call carries none. The target never enters `input_model`, so a mem
 `kind`, `name`, `agent`, or `generation` through action input, and a portal does not need RFC
 0022's `compose` callback to strip server-owned fields. The existing registry gate that refuses an
 input model reserving `requested_by` covers actions for free. `agent_targetable` has three
-declared consumers — `grant_web_access`, `read_private_transcript`, and `set_homepage` — and
+declared consumers — `grant_web_access`, `revoke_web_access`, and `read_private_transcript` — and
 dispatch resolves their target under the same gate the object verbs use for cross-agent reads. An
-empty `agent` means the current turn's agent, which is these handlers' whole behavior today — so
-web's speakerless homepage seed keeps working, and cross-agent targeting is strictly additive.
+empty `agent` means the current turn's agent, which is these handlers' whole behavior today, so
+cross-agent targeting is strictly additive.
 
 Collection binding is used when an action creates or searches instances or spans the collection.
 Instance binding is used only when one existing visible `kind/name` is the target. This is the
@@ -216,6 +216,8 @@ fail. This is required for:
 - metronome attaching `manage_billing` to core's `workspace`;
 - Slack and iMessage attaching to core's `surface`;
 - web attaching `read_private_transcript` to core's `conversation`;
+- sites attaching `set_homepage` to core's `agent`;
+- OpenRouter attaching generation to core's `artifact`;
 - memory attaching `rebuild_page_facts` to sources' `page` — extension-to-extension, so the loader
   supports every direction, not only extension-to-core.
 
@@ -446,8 +448,10 @@ class ActionPresentation:
 ```
 
 Absence means chat/model only. Presence admits the action through the prepared-intent lane and lets
-a portal render a schema-derived control. It is not an authority grant: the turn carries the
-submitting member and the handler decides.
+a portal render a schema-derived control. The fence is enforced at the one dispatch point: the
+intent path refuses a dispatcher intent whose resolved action declares no presentation, so no
+route can widen the lane the closed set used to curate. It is not an authority grant: the turn
+carries the submitting member and the handler decides.
 
 The submitted body contains only the action-specific `input_model`. The route supplies `kind`,
 `name`, path agent, generation, and action id from its own projection, prepares one
@@ -484,9 +488,13 @@ follows the same flow:
 2. read the action schema and invocation template;
 3. call `object_action`.
 
-A speakerless bridge intent remains inside the executing agent's canonical action allowlist. An
-admin or granting action still refuses without a live speaker. `ufo tool --describe` therefore
-does not become an authority bypass or a hidden global action catalog.
+The bridge's own name gate treats `object_action` as available exactly when the executing agent's
+effective action set is non-empty — the dispatcher can never appear in an allowlist, so a literal
+name check would lock every allowlisted agent and subagent profile out of actions entirely.
+Per-action enforcement stays in the child turn's granted set: a speakerless bridge intent remains
+inside the executing agent's canonical action allowlist, and an admin or granting action still
+refuses without a live speaker. `ufo tool --describe` therefore does not become an authority
+bypass or a hidden global action catalog.
 
 ## The `surface` kind
 
@@ -522,11 +530,11 @@ the locality; renaming is not needed to achieve it.
 | Object anchor | Binding | Actions removed from the global listing | Why this anchor |
 |---|---|---|---|
 | `member` | collection | `add_member` | Creates a member; role/seat updates already use the member kind. |
-| `member/<id>` | instance | `grant_web_access`, `revoke_web_access` | The grant subject is the member. The action may target a visible agent through the existing cross-agent gate. |
+| `member/<id>` | instance | `grant_web_access`, `revoke_web_access` | The grant subject is the member. The action may target a visible agent through the existing cross-agent gate. The member kind's list/get widen to a speaking admin on any internal audience (today the whole roster shows only on the main agent) — the grant means something only on child agents, so discovery and the instance recheck must work exactly there. |
 | `agent/<archived-id>` | instance | `restore_application` | An archived agent becomes a gettable row (AIP-164), addressed by its durable archived row name with the original exposed as a field; restore is its undelete, and its input shrinks to the new live name — the target supplies the identity `app_id` carries today. |
 | `credential` | collection | `request_credentials` | One handoff may request several slots. |
 | `credential/github_app_installation` | instance | `connect_github` | The action authorizes the exact non-member-filled slot the callback fills. |
-| `conversation/<id>` | instance | `read_private_transcript` | The conversation kind widens for a speaking admin only: get serves another member's private row as metadata, and list accepts an explicit private filter. The transcript itself stays behind acknowledgement, which is this action, and its handler records the access. |
+| `conversation/<id>` | instance | `read_private_transcript` | The conversation kind widens for a speaking admin on internal audiences only — never a foreign audience: get serves another member's private row as metadata (no status, no transcript read), and list accepts an explicit private filter. The transcript itself stays behind acknowledgement, which is this action, and its handler records the access. |
 | `skill` | collection | `skill_search` | Searches the complete loadable catalog, beyond CRUD listing of member-authored skill objects. The declaration moves into the kind's owner (skill_create) — core cannot bind to an optional extension's kind without failing deploys that lack it — and the allowlist pairing that grants search alongside `load_skill` re-expresses over the canonical id. |
 | `surface/slack` | instance | `slack_connect`, `slack_app_manifest`, `slack_channels` | Install state, manifest, credentials, and remote channels belong to the Slack surface. |
 | `surface/imessage` | instance | `imessage_connect` | Provider binding and phone proof configure the iMessage surface. |
@@ -536,10 +544,11 @@ the locality; renaming is not needed to achieve it.
 | `memory` | collection | `memory_search`, `memory_update` | Searches and records memory; neither is an authored replacement of an existing row. |
 | `monitor` | collection | `monitor` | Arms a monitor after probing; the existing monitor kind lists and deletes armed rows. |
 | `site` | collection | `deploy_website`, `publish_website`, `build_website`, `build_ufo_application`, `render_application_preview` | These create, publish, build, or preview site/application output rather than update an existing site spec. |
-| `site/<name>` | instance | `set_homepage` | Binds one hosted site to the selected agent's homepage. |
+| `agent/<name>` | instance | `set_homepage` | The homepage is the agent's property; the site is plain input. The speakerless seed turn targets its own agent row, and the handler's deployed-this-turn carve-out is unchanged. |
+| `artifact` | collection | `generate_image`, `generate_video` | Generation writes media into the workspace for `share_file` to turn into an artifact; the artifact collection is the durable destination without inventing a media-job kind. |
 
-Count: 24 named tools, 16 anchor/binding rows, 11 existing kinds plus the one new `surface` kind.
-The hosted pack contains 23 because it does not activate the monitors extension.
+Count: 26 named tools, 17 anchor/binding rows, 12 existing kinds plus the one new `surface` kind.
+The hosted pack contains 25 because it does not activate the monitors extension.
 
 ### Authority-sensitive actions
 
@@ -563,7 +572,7 @@ fail a granting or admin action even if its agent allowlist contains the canonic
 
 ## Retained global tools
 
-These 45 schemas remain in the hosted member-facing set after `object_action` lands and the lazy
+These 43 schemas remain in the hosted member-facing set after `object_action` lands and the lazy
 tool catalog is deleted. Connector/MCP provider expansion remains separate.
 
 | Domain | Global tools | Reason |
@@ -575,7 +584,6 @@ tool catalog is deleted. Connector/MCP provider expansion remains separate.
 | Conversation work | `cancel_spawn`, `message_spawn`, `update_todo_list`, `update_todo_status`, `plan_objective`, `run_independent_steps`, `record_step`, `read_objective`, `report_problem` | Their target is the executing turn's own work — the current-interaction criterion that keeps `ask_user` and `pause_and_wait` global — and the spawn lifecycle stays on one transport. The conversation collection would anchor them to rows they never touch. |
 | Skills | `load_skill` | Executes a known skill. Tail discovery moves to `skill_search` on the skill collection. |
 | Artifacts | `share_file` | Delivers an existing workspace path; it is the bridge from sandbox bytes to a durable artifact. |
-| Media generation | `generate_image`, `generate_video` | Generation writes a workspace path for `share_file` to deliver; the target is a path and a provider, not a durable object. |
 | Ephemeral site runtime | `website`, `start_server` | Starts or inspects the current sandbox server; durable site lifecycle moves to site actions. |
 | Research | `search_web`, `fetch_url`, `search_vertical`, `wide_research` | Stateless, high-frequency information access without a workspace-object target. |
 | Computation | `js_repl`, `xlsx_repl` | Stateful scratch execution scoped to the current conversation workspace. |
@@ -697,7 +705,7 @@ Family suites at minimum:
 | Credentials/surfaces | `credential_handoff`, `connector_connections`, `slack_*` | fill slot, GitHub App, Slack OAuth/manifest/status/channels, iMessage phone | `connect_account` vs credential/surface action |
 | Memory/skills/monitor | `tool_calling`, `skill_routing` | durable recall, explicit record, tail skill search, monitor arm | `object_list` lexical query vs semantic search; `load_skill` vs search; `pause_and_wait` vs monitor |
 | Derived rebuilds | `report_digest` | page facts and report digest | one-row correction vs collection rebuild |
-| Sites | `site_build`, `new_application`, `app_home_change` | build, preview, deploy, publish, homepage | ephemeral `website`/`start_server` vs durable site action |
+| Sites/media | `site_build`, `new_application`, `app_home_change` | build, preview, deploy, publish, homepage, image/video | ephemeral `website`/`start_server` vs durable site action; `share_file` vs generation |
 
 Acceptance requires:
 
@@ -790,9 +798,10 @@ unit deletes it.
 
 Seven candidate kinds were `web_access`, `billing`, `todo`, `objective`, `spawn`, `media`, and
 `surface`. Rejected except `surface`: `web_access` and `billing` already have their durable
-subject in `member` and `workspace`; `todo`, `objective`, `spawn`, and `media` have no durable
-subject at all — their tools stay global — and a kind for them would create fake objects.
-`surface` alone has real manifest and installation identity with no object projection.
+subject in `member` and `workspace`; `todo`, `objective`, and `spawn` have no durable subject at
+all — their tools stay global — and a kind for them would create fake objects; media's durable
+subject is the `artifact` collection. `surface` alone has real manifest and installation identity
+with no object projection.
 
 ### Put setup actions on `extension`
 
@@ -857,9 +866,19 @@ Each unit is independently reviewable and removes every global registration it r
 unit also prunes its names from the live catalog's eager set (unit 1 adds `object_action` there so
 dispatch needs no search round while the catalog survives), ships a migration rewriting stored
 `agent.tools` allowlist entries to canonical ids, and corrects a moved tool's mis-declared
-execution flags deliberately — `deploy_website`, `publish_website`, `set_homepage`,
-`slack_connect`, `request_credentials`, and `connect_github` gain `side_effecting`;
-`memory_search` gains `parallel_safe` — each named in its unit.
+execution flags deliberately — `deploy_website`, `publish_website`, `set_homepage`, and
+`slack_connect` gain `side_effecting` (each a durable write); `memory_search` gains
+`parallel_safe`; `request_credentials` and `connect_github` deliberately keep `side_effecting`
+false, since a handoff seal is not an external write and the flip would only forfeit guidance
+preemption — each named in its unit.
+
+A `ToolIntent` is persisted in the turn it admits and re-parsed at execution, and a parked intent
+can outlive a deploy. A family unit therefore keeps its moved names in the `ToolIntent` closed set
+(routes stop producing them) and fills a legacy mapping the intent dispatch uses to run an
+old-named intent as its canonical action; the entries and mapping drop in a follow-up change after
+a deploy separates — the same stop-writing-then-drop rule migrations follow. An in-flight turn
+whose un-executed dispatch names a moved wire tool recovers on the new image as one visible
+invalid-call refusal; the turn terminates and the model retries through discovery.
 
 1. **Registry and dispatch.** `ObjectBinding` on the one declaration, boot validation, canonical
    ids, `EffectiveCall`, `object_action`, object projections, SDK export, bridge exposure, and
@@ -872,8 +891,8 @@ execution flags deliberately — `deploy_website`, `publish_website`, `set_homep
    admin and speaker gates remain handler tests.
 4. **Knowledge actions.** Skill search, memory search/update, and monitor arm. Retrieval and monitor
    evals prove the discovery round and neighboring-tool choice.
-5. **Site actions.** Build, preview, deploy, publish, and homepage actions; application-builder
-   profile grants and hooks use canonical action ids.
+5. **Site and media actions.** Build, preview, deploy, publish, homepage on the agent, and
+   image/video generation; application-builder profile grants and hooks use canonical action ids.
 6. **Portal generation.** `ActionPresentation`, schema-derived controls, generic prepared-intent
    envelope, and removal of the moved hand-written action maps. Retained global tools with portal
    controls declare `presentation` on their own definitions.
