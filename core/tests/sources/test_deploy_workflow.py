@@ -4380,6 +4380,7 @@ def test_the_rds_widgets_switch_fleet_on_the_instance_identifier() -> None:
         '"sweep", "smoke"',
         '"claude-opus-5", "z-ai/glm-5.3", "z-ai/glm-5.3-flash"',
         '"testing", "prod"',
+        '"prod", "testing"',
     ]
 
 
@@ -4419,19 +4420,61 @@ def test_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> None
     """One census tick counts every workspace once, so a workspace count is right only where the
     bucket is the census period: a rate scaled by that period reads a narrower bucket as a whole
     period, and a bucket Datadog sizes for itself holds as many ticks as it is wide. Every query on
-    this board therefore pins the rollup to the census period, and every toplist ranks by the same
-    `max` the big numbers take, so the funnel and the number above it cannot disagree."""
+    this board therefore pins the rollup to the census period, every toplist ranks by the same `max`
+    the big numbers take, and every named query reduces by that `max` as well, so the funnel and the
+    number above it cannot disagree. A query with no aggregator reduces by the Datadog default over
+    the whole board window, which reads the filling edge bucket and understates a growing count."""
     dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
-    census = re.findall(r'q\s+=\s+"([^"]*ufo\.product_(?:stage|attach)_total[^"]*)"', dashboard)
+    census = re.findall(
+        r'(?:q|query)\s+=\s+"([^"]*ufo\.product_(?:stage|attach)_total[^"]*)"', dashboard
+    )
 
     assert f"product_census_seconds = {PRODUCT_CENSUS_SECONDS}" in dashboard
-    assert len(census) == 12
+    assert len(census) == 13
     assert "as_rate()" not in dashboard
     for query in census:
         assert ".as_count().rollup(sum, ${local.product_census_seconds})" in query
         assert "${local.product_census_seconds} *" not in query
-        assert ("'max', 'desc')" in query) == ("by {" in query)
-    assert dashboard.count('aggregator = "max"') == 6
+    ranked = [query for query in census if query.startswith("top(")]
+    assert len(ranked) == 5
+    assert all("'max', 'desc')" in query for query in ranked)
+    reduced = dashboard.split("metric_query {")[1:]
+    assert len(reduced) == 8
+    assert all(block.splitlines()[3].strip() == 'aggregator = "max"' for block in reduced)
+
+
+def test_every_product_card_carries_its_movement_beside_the_count() -> None:
+    """A count alone says where the funnel stands and nothing about where it is going, so each card
+    reads as a number and the change against the week before it. `show_present` is what keeps the
+    count on the card: without it the widget reports the movement alone, and the board would lose
+    the figure it exists to report. Each card reads its count through a named query rather than a
+    bare `q`, because that is the form the aggregator hangs off: the card and the funnel row for one
+    stage read the same number only where both reduce their buckets by `max`."""
+    dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+
+    assert dashboard.count("change_definition {") == 6
+    assert dashboard.count("show_present  = true") == 6
+    assert dashboard.count('compare_to    = "week_before"') == 6
+    assert dashboard.count('change_type   = "relative"') == 6
+    for stage in ("seated", "connector", "invited", "chatted", "active_7d", "paid"):
+        assert f'name       = "{stage}"' in dashboard
+        assert f'formula_expression = "{stage}"' in dashboard
+
+
+def test_the_product_funnel_reads_its_share_against_seated_workspaces() -> None:
+    """A step is worth what it keeps, so the funnel carries the share beside the count. The
+    denominator is `seated` rather than every workspace: one nobody sits in has nobody to move
+    through the funnel, and counting it would dilute every step below. Neither formula name may be
+    `stage` — Datadog refuses a formula name that collides with a group-by tag."""
+    dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+
+    assert 'formula_expression = "100 * reached / denom"' in dashboard
+    assert 'alias              = "share of workspaces"' in dashboard
+    assert 'name       = "denom"' in dashboard
+    assert '"denom"\n            query      = "sum:ufo.product_stage_total{$env,stage:seated}' in (
+        dashboard
+    )
+    assert re.search(r'formula_expression = "(stage|kind|name)"', dashboard) is None
 
 
 @pytest.mark.parametrize(

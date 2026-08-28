@@ -1444,8 +1444,10 @@ resource "datadog_dashboard" "sandbox_health" {
 # count therefore counts with `.as_count()` like the rest of this file and pins the rollup to that
 # period, so one bucket holds exactly one tick and reads as the count the census recorded; a bucket
 # Datadog sizes for itself holds as many ticks as it is wide, which multiplies the number. `max`
-# then picks a whole bucket over the one still filling at the right-hand edge, and the toplists rank
-# by the same `max` so a stage reads the same in the big number and in the funnel.
+# then picks a whole bucket over the one still filling at the right-hand edge, and every card, the
+# funnel and the toplists take that same `max` so a stage reads the same in the big number and in the
+# funnel. Each card therefore reads through a named query rather than a bare `q`: a request with no
+# aggregator reduces by the Datadog default over the whole board window, the edge bucket included.
 #
 # One board for both fleets, in the root the deploy pipeline applies.
 
@@ -1461,10 +1463,13 @@ resource "datadog_dashboard" "product" {
   title       = "ufo product"
   layout_type = "ordered"
 
+  # Opens on prod: this is the board somebody reads to know how the product is doing, and that
+  # question is about customers rather than about the fleet we test on. Testing is a click away.
   template_variable {
-    name     = "env"
-    prefix   = "env"
-    defaults = ["testing"]
+    name             = "env"
+    prefix           = "env"
+    defaults         = ["prod"]
+    available_values = ["prod", "testing"]
   }
 
   widget {
@@ -1477,6 +1482,13 @@ resource "datadog_dashboard" "product" {
         apps a pack ships reach every workspace, and are counted apart from the funnel below. Chats
         and dollars are the other kind of number — events counted as they happen — so a range shows
         their volume over it rather than a standing count.
+
+        Each card carries the count and how it moved against the same hour a week earlier, and the
+        funnel below carries the count and the share of seated workspaces that reached it. The
+        movement reads empty until the series is a week old — this metric started 2026-08-28, so
+        every card shows a bare number until 2026-09-04. The share is against seated rather than
+        against every workspace: a workspace nobody sits in has nobody to move through the funnel,
+        and counting it would dilute every step below.
 
         What this board cannot say, because the rows are not ours to read:
 
@@ -1501,84 +1513,183 @@ resource "datadog_dashboard" "product" {
   }
 
   widget {
-    query_value_definition {
-      title     = "workspaces"
-      autoscale = false
-      precision = 0
+    change_definition {
+      title = "workspaces"
       request {
-        q          = "sum:ufo.product_stage_total{$env,stage:seated}.as_count().rollup(sum, ${local.product_census_seconds})"
-        aggregator = "max"
+        formula {
+          formula_expression = "seated"
+        }
+        query {
+          metric_query {
+            name       = "seated"
+            query      = "sum:ufo.product_stage_total{$env,stage:seated}.as_count().rollup(sum, ${local.product_census_seconds})"
+            aggregator = "max"
+          }
+        }
+        change_type   = "relative"
+        compare_to    = "week_before"
+        increase_good = true
+        order_by      = "change"
+        order_dir     = "desc"
+        show_present  = true
       }
     }
   }
 
   widget {
-    query_value_definition {
-      title     = "attached a connector"
-      autoscale = false
-      precision = 0
+    change_definition {
+      title = "attached a connector"
       request {
-        q          = "sum:ufo.product_stage_total{$env,stage:connector}.as_count().rollup(sum, ${local.product_census_seconds})"
-        aggregator = "max"
+        formula {
+          formula_expression = "connector"
+        }
+        query {
+          metric_query {
+            name       = "connector"
+            query      = "sum:ufo.product_stage_total{$env,stage:connector}.as_count().rollup(sum, ${local.product_census_seconds})"
+            aggregator = "max"
+          }
+        }
+        change_type   = "relative"
+        compare_to    = "week_before"
+        increase_good = true
+        order_by      = "change"
+        order_dir     = "desc"
+        show_present  = true
       }
     }
   }
 
   widget {
-    query_value_definition {
-      title     = "invited a teammate"
-      autoscale = false
-      precision = 0
+    change_definition {
+      title = "invited a teammate"
       request {
-        q          = "sum:ufo.product_stage_total{$env,stage:invited}.as_count().rollup(sum, ${local.product_census_seconds})"
-        aggregator = "max"
+        formula {
+          formula_expression = "invited"
+        }
+        query {
+          metric_query {
+            name       = "invited"
+            query      = "sum:ufo.product_stage_total{$env,stage:invited}.as_count().rollup(sum, ${local.product_census_seconds})"
+            aggregator = "max"
+          }
+        }
+        change_type   = "relative"
+        compare_to    = "week_before"
+        increase_good = true
+        order_by      = "change"
+        order_dir     = "desc"
+        show_present  = true
       }
     }
   }
 
   widget {
-    query_value_definition {
-      title     = "chatted at least once"
-      autoscale = false
-      precision = 0
+    change_definition {
+      title = "chatted at least once"
       request {
-        q          = "sum:ufo.product_stage_total{$env,stage:chatted}.as_count().rollup(sum, ${local.product_census_seconds})"
-        aggregator = "max"
+        formula {
+          formula_expression = "chatted"
+        }
+        query {
+          metric_query {
+            name       = "chatted"
+            query      = "sum:ufo.product_stage_total{$env,stage:chatted}.as_count().rollup(sum, ${local.product_census_seconds})"
+            aggregator = "max"
+          }
+        }
+        change_type   = "relative"
+        compare_to    = "week_before"
+        increase_good = true
+        order_by      = "change"
+        order_dir     = "desc"
+        show_present  = true
       }
     }
   }
 
   widget {
-    query_value_definition {
-      title     = "chatted in the last 7 days"
-      autoscale = false
-      precision = 0
+    change_definition {
+      title = "chatted in the last 7 days"
       request {
-        q          = "sum:ufo.product_stage_total{$env,stage:active_7d}.as_count().rollup(sum, ${local.product_census_seconds})"
-        aggregator = "max"
+        formula {
+          formula_expression = "active_7d"
+        }
+        query {
+          metric_query {
+            name       = "active_7d"
+            query      = "sum:ufo.product_stage_total{$env,stage:active_7d}.as_count().rollup(sum, ${local.product_census_seconds})"
+            aggregator = "max"
+          }
+        }
+        change_type   = "relative"
+        compare_to    = "week_before"
+        increase_good = true
+        order_by      = "change"
+        order_dir     = "desc"
+        show_present  = true
       }
     }
   }
 
   widget {
-    query_value_definition {
-      title     = "paid"
-      autoscale = false
-      precision = 0
+    change_definition {
+      title = "paid"
       request {
-        q          = "sum:ufo.product_stage_total{$env,stage:paid}.as_count().rollup(sum, ${local.product_census_seconds})"
-        aggregator = "max"
+        formula {
+          formula_expression = "paid"
+        }
+        query {
+          metric_query {
+            name       = "paid"
+            query      = "sum:ufo.product_stage_total{$env,stage:paid}.as_count().rollup(sum, ${local.product_census_seconds})"
+            aggregator = "max"
+          }
+        }
+        change_type   = "relative"
+        compare_to    = "week_before"
+        increase_good = true
+        order_by      = "change"
+        order_dir     = "desc"
+        show_present  = true
       }
     }
   }
 
-  # The funnel itself. Read downward: each step is a subset of the one above it, so the gap between
-  # two rows is where workspaces are stopping.
+  # The funnel itself, as a count and the share of workspaces that reached it. Read downward: each
+  # step is a subset of the one above it, so the gap between two rows is where workspaces are
+  # stopping, and the share is what says whether that gap matters.
+  #
+  # `seated` is the denominator rather than a workspace count, because a workspace with no seated
+  # member has nobody to move through the funnel and would only dilute every share below.
+  # The two queries carry names that are not `stage`: Datadog refuses a formula name that collides
+  # with a group-by tag.
   widget {
-    toplist_definition {
+    query_table_definition {
       title = "workspaces by funnel stage"
       request {
-        q = "top(sum:ufo.product_stage_total{$env} by {stage}.as_count().rollup(sum, ${local.product_census_seconds}), 8, 'max', 'desc')"
+        formula {
+          formula_expression = "reached"
+          alias              = "workspaces"
+        }
+        formula {
+          formula_expression = "100 * reached / denom"
+          alias              = "share of workspaces"
+        }
+        query {
+          metric_query {
+            name       = "reached"
+            query      = "sum:ufo.product_stage_total{$env} by {stage}.as_count().rollup(sum, ${local.product_census_seconds})"
+            aggregator = "max"
+          }
+        }
+        query {
+          metric_query {
+            name       = "denom"
+            query      = "sum:ufo.product_stage_total{$env,stage:seated}.as_count().rollup(sum, ${local.product_census_seconds})"
+            aggregator = "max"
+          }
+        }
       }
     }
   }
