@@ -4,6 +4,8 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -11,13 +13,17 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from ufo import o11y
 from ufo.db import workspace_tx
 from ufo.ext.context import AgentArchived
-from ufo.ext.surface import Admitted, fence_member_message, mint_marker
+from ufo.ext.surface import Admitted, conversation_name, fence_member_message, mint_marker
 from ufo.hub import ArrivalQueued, InProcessHub, Reply
 from ufo.loop.engine import _claim_turn
 from ufo.schema import tables
 from ufo.schema.records import SURFACE_COMMENT_ROUND_INDEX, TerminalFrame, TurnContext
 from ufo.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
-from ufo.surfaces.admission import ARCHIVED_REFUSAL_MESSAGE, Admission
+from ufo.surfaces.admission import (
+    ADMITTED_TURN_METRIC,
+    ARCHIVED_REFUSAL_MESSAGE,
+    Admission,
+)
 
 
 @dataclass
@@ -1575,3 +1581,80 @@ async def test_a_message_to_an_archived_app_is_refused_beside_a_live_turn_rather
     assert await _turn_row(second.turn_id) == ("cancelled", ARCHIVED_REFUSAL_MESSAGE)
     assert await _turn_row(live.turn_id) == ("queued", None)
     assert dbos.enqueued == [str(live.turn_id)]
+
+
+class _TitleFailed(RuntimeError):
+    """Stands in for any statement after the turn insert, or the commit itself, failing."""
+
+
+def _refuse_title(body: str) -> str:
+    raise _TitleFailed(body)
+
+
+def _in_memory_metrics(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    return reader
+
+
+def _admitted_points(reader: InMemoryMetricReader) -> list[tuple[str, str, int]]:
+    """A reader that collected nothing at all answers None rather than an empty reading."""
+    data = reader.get_metrics_data()
+    if data is None:
+        return []
+    return [
+        (point.attributes["surface"], point.attributes["admission_source"], point.value)
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == f"ufo.{ADMITTED_TURN_METRIC}"
+        for point in metric.data.data_points
+    ]
+
+
+async def test_an_admitted_turn_is_counted_under_its_surface_and_source(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The product board reads chat volume off this counter, so it counts the turn row rather than
+    the call: a message that folds into a turn already running adds no row and must add no count,
+    or every mid-turn interjection reads as another conversation."""
+    workspace_id, member_id, _agent_id, conversation_id = await _seed()
+    reader = _in_memory_metrics(monkeypatch)
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+
+    await admission.admit_member(workspace_id, conversation_id, "first", member_id)
+    await admission.admit_member(workspace_id, conversation_id, "folded", member_id)
+
+    assert _admitted_points(reader) == [("cli", "member", 1)]
+    assert await _turn_count(conversation_id) == 1
+
+
+async def test_an_admission_that_rolls_back_counts_nothing_and_its_retry_counts_once(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count is taken off the committed row, not beside the insert. A statement after the insert
+    or the commit itself can fail, and the surface then retries under the same idempotency key with
+    no committed turn to dedupe against: counted inside the transaction, the failed attempt would
+    add a turn that never existed and the retry would add the same turn again."""
+    workspace_id, member_id, _agent_id, conversation_id = await _seed()
+    reader = _in_memory_metrics(monkeypatch)
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    monkeypatch.setattr("ufo.surfaces.admission.conversation_name", _refuse_title)
+
+    with pytest.raises(_TitleFailed):
+        await admission.admit_member(
+            workspace_id, conversation_id, "first", member_id, idempotency_key="send-1"
+        )
+
+    assert await _turn_count(conversation_id) == 0
+    assert _admitted_points(reader) == []
+
+    monkeypatch.setattr("ufo.surfaces.admission.conversation_name", conversation_name)
+    await admission.admit_member(
+        workspace_id, conversation_id, "first", member_id, idempotency_key="send-1"
+    )
+
+    assert _admitted_points(reader) == [("cli", "member", 1)]
+    assert await _turn_count(conversation_id) == 1

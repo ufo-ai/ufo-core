@@ -17,10 +17,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ufo.o11y import emit_metric
 from ufo.schema import tables
 
 BALANCE_PRESENCE_TTL_SECONDS = 5.0
 BALANCE_PRESENCE_CACHE_MAX = 4096
+BALANCE_CHARGED_METRIC = "balance_charged_micro_usd_total"
 _no_balance: dict[UUID, float] = {}
 # How far a workspace whose card has already paid may run past the line before a gate stops it.
 # The refill job cannot be instant: it ticks, then Stripe answers, and one turn can outspend that
@@ -318,7 +320,10 @@ async def credit(
     both or neither, and a second delivery of the same payment credits nothing.
 
     Both amounts are signed and independent: a grant charges nothing, a volume tier grants more than
-    it charges, and a refund or a corrected credit carries both negative."""
+    it charges, and a refund or a corrected credit carries both negative.
+
+    The charge is counted by `count_charge`, which the caller calls on this answer once its own
+    transaction has committed."""
     insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
     credited = (
         await connection.execute(
@@ -362,6 +367,26 @@ async def credit(
     )
     _forget_absent_balance(workspace_id)
     return True
+
+
+def count_charge(charged_micro_usd: int) -> None:
+    """Count the money a purchase took, after the transaction that recorded it has committed, and
+    only where `credit` answered that this call was the one that recorded it.
+
+    It sits outside that transaction rather than inside `credit`, because `credit` runs in the
+    caller's: the transaction that credits also marks the payment's source, so a failure there rolls
+    the purchase back and the payment is retried under the same reference. A count taken inside
+    would add money the ledger never kept, and add it a second time on the retry, while a counter
+    cannot be taken back down.
+
+    A grant charges nothing and counts nothing, and neither does a refund: a counter cannot be taken
+    back down, and the only thing that records one is `ufoctl balance credit` with negative
+    amounts — an operator act in a process that installs no meter provider, where the count would be
+    a silent no-op. So the fleet's own charge is the whole producer, the board says as much, and a
+    correction is read off `balance_purchase` rather than off this series."""
+    if charged_micro_usd <= 0:
+        return
+    emit_metric(BALANCE_CHARGED_METRIC, charged_micro_usd)
 
 
 async def debit(connection: AsyncConnection, workspace_id: UUID, micro_usd: int) -> int:

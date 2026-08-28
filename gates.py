@@ -1559,6 +1559,29 @@ def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
     return failures
 
 
+def _census_period_failures(sources: dict[Path, str]) -> list[str]:
+    """The product board reads every workspace count out of one rollup bucket as wide as the census
+    period, so terraform holding a different number than the census fires on counts a workspace once
+    per tick the bucket covers — silently, and in the direction that looks like growth rather than
+    like a bug. Nothing but this holds the two together: one is a cron in Python, the other a rollup
+    width in HCL."""
+    from ufo.product import PRODUCT_CENSUS_SECONDS
+
+    declared = {
+        path.parent.name: int(found.group(1))
+        for path, source in sources.items()
+        if (found := re.search(r"product_census_seconds\s*=\s*(\d+)", source))
+    }
+    if not declared:
+        return ["product board: no env root declares product_census_seconds"]
+    return [
+        f"product board: {root} buckets workspace counts at {seconds}s, "
+        f"but the census fires every {PRODUCT_CENSUS_SECONDS}s"
+        for root, seconds in sorted(declared.items())
+        if seconds != PRODUCT_CENSUS_SECONDS
+    ]
+
+
 def _portal_style_failures() -> list[str]:
     """The portal's look lives in the Tailwind theme and the component set. A view that imports a
     stylesheet or emits a `<style>` tag can restyle a sibling it never named, which is how a rule
@@ -1929,6 +1952,7 @@ def main() -> int:
         failures.append(f"env roots: no terraform found under {ENV_ROOTS}")
     failures.extend(_shared_singleton_failures(terraform))
     failures.extend(_declared_flag_failures(terraform))
+    failures.extend(_census_period_failures(terraform))
 
     for failure in failures:
         print(f"GATE: {failure}")

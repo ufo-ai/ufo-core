@@ -31,7 +31,13 @@ from dbos import error as dbos_error
 from ufo.billing.accounting import ALLOW, BalanceGate, SpendEvaluator
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import failed_statement, owner_tx, workspace_tx
-from ufo.ext.context import ConversationProbes, ExtensionContext, TurnInvoker, context_for
+from ufo.ext.context import (
+    ConversationProbes,
+    ExtensionContext,
+    TurnInvoker,
+    context_for,
+    seated_member_workspaces,
+)
 from ufo.ext.manifest import (
     PAGE_CHANGE_CURSOR_KEY,
     HookContext,
@@ -45,6 +51,7 @@ from ufo.kinds.provisioning import AgentProvisioning
 from ufo.media.preview_renderer import PreviewRenderer
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import emit_metric, formatted_stack, log, log_error, warn
+from ufo.product import PRODUCT_CENSUS_JOB, PRODUCT_CENSUS_SCHEDULE, product_census
 from ufo.runtime.candidates import WorkspaceCandidates
 from ufo.sandbox.conversation import ConversationSandbox
 from ufo.schema import tables
@@ -559,11 +566,15 @@ def core_jobs(
     consumer's hook off its own cursor as its own workflow (the memory page indexer and fact deriver
     among them); the turn dispatcher recovers queued outbox rows and re-admits parked turns their
     caps now allow; the delivery sweep hands back the delegated children whose own execution could
-    not — a cancelled one above all, whose terminal is committed from outside it. None fires on its
-    own writes. (Memory-item indexing stays the memory extension's own job; page derivation is a
-    page_change hook this runner drives. Reclaiming a container is the carrier's own business, never
-    core's — the workspace lives inside the sandbox, so only a carrier knows whether dropping its
-    container takes the workspace with it.)"""
+    not — a cancelled one above all, whose terminal is committed from outside it; the product census
+    counts each workspace's place in the funnel, and is core because it reads nearly the whole core
+    schema to do it — an SDK seam wide enough to count `member`, `agent`, `connector_grant`,
+    `connection`, `credential`, `surface_installation`, `surface_address`, `turn` and
+    `balance_purchase` would be a wider public surface than the one consumer counting them is worth.
+    None fires on its own writes. (Memory-item indexing stays the memory extension's own job; page
+    derivation is a page_change hook this runner drives. Reclaiming a container is the carrier's
+    own business, never core's — the workspace lives inside the sandbox, so only a carrier knows
+    whether dropping its container takes the workspace with it.)"""
 
     async def _sync_sources(context: ExtensionContext) -> None:
         await sync_driver.run()
@@ -573,6 +584,9 @@ def core_jobs(
 
     async def _deliver_results(context: ExtensionContext) -> None:
         await delivery_sweep.run()
+
+    async def _census_product(context: ExtensionContext) -> None:
+        await product_census()
 
     async def _render_previews(context: ExtensionContext) -> None:
         assert preview_renderer is not None
@@ -624,6 +638,12 @@ def core_jobs(
             schedule=RESULT_DELIVERY_SCHEDULE,
             handler=_deliver_results,
             candidates=delivery_sweep.candidate_workspaces,
+        ),
+        JobSpec(
+            name=PRODUCT_CENSUS_JOB,
+            schedule=PRODUCT_CENSUS_SCHEDULE,
+            handler=_census_product,
+            candidates=seated_member_workspaces(),
         ),
         *(
             (

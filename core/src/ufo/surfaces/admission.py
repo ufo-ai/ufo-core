@@ -58,7 +58,7 @@ from ufo.db import workspace_tx
 from ufo.ext.context import AgentArchived
 from ufo.ext.surface import Admitted, conversation_name
 from ufo.hub import ArrivalQueued, Hub, Reply
-from ufo.o11y import current_traceparent, log, span
+from ufo.o11y import current_traceparent, emit_metric, log, span
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -77,6 +77,7 @@ from ufo.schema.records import (
     TerminalFrame,
     TerminalStatus,
     ToolIntent,
+    TurnAdmissionSource,
     TurnContext,
     TurnStatus,
     admits_spent_balance,
@@ -88,6 +89,7 @@ from ufo.workspace import ws_current
 
 QUEUED: TurnStatus = "queued"
 CANCELLED: TerminalStatus = "cancelled"
+ADMITTED_TURN_METRIC = "admitted_turn_total"
 
 
 class _SupersededByMember(Exception):
@@ -313,6 +315,7 @@ class Admission:
             raise ValueError("waiting on a member takes both watermarks, turn and arrival")
         dispatch_now = False
         opened_run = False
+        counted_source: TurnAdmissionSource | None = None
         folded_parked_turn: UUID | None = None
         arrival_id: UUID | None = None
         redispatch_workflow_id: str | None = None
@@ -718,6 +721,7 @@ class Admission:
                         updated_at=sa.func.now(),
                     )
                 )
+                counted_source = admission_source
                 await connection.execute(
                     sa.update(tables.conversation)
                     .where(
@@ -771,6 +775,16 @@ class Admission:
                     else Admitted(turn_id, opened_run=opened_run)
                 ),
                 comment,
+            )
+        if counted_source is not None:
+            # Counted off the committed row, never beside the insert: the statements after it and
+            # the commit itself can fail, and the surface then retries under the same idempotency
+            # key with nothing committed to dedupe against. One row is one turn, so the count
+            # follows the row.
+            emit_metric(
+                ADMITTED_TURN_METRIC,
+                surface=conversation.surface,
+                admission_source=counted_source,
             )
         if folded_parked_turn is not None:
             await self._enqueue(

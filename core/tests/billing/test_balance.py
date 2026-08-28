@@ -1,13 +1,19 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ufo import o11y
 from ufo.billing.balance import (
+    BALANCE_CHARGED_METRIC,
     balance_absent,
     balance_refusal_message,
     billing_screen_url,
+    count_charge,
     credit,
     read_balance,
     recent_purchases,
@@ -196,3 +202,89 @@ async def test_a_workspace_with_no_credits_lists_none(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id = await _workspace(connection)
         assert await recent_purchases(connection, workspace_id, 10) == ()
+
+
+class _TopupFailed(RuntimeError):
+    """Stands in for a statement after the credit, or the commit itself, failing."""
+
+
+async def _purchase(
+    workspace_id: UUID, granted: int, charged: int, reference: str, fail: bool = False
+) -> bool:
+    """Every charging caller in one shape: credit inside the transaction that also marks the
+    payment's source, then count the charge once that transaction has committed."""
+    async with workspace_tx() as connection:
+        added = await credit(connection, workspace_id, granted, charged, reference)
+        if fail:
+            raise _TopupFailed(reference)
+    if added:
+        count_charge(charged)
+    return added
+
+
+def _charged_points(reader: InMemoryMetricReader) -> list[int]:
+    """A reader that collected nothing at all answers None rather than an empty reading."""
+    data = reader.get_metrics_data()
+    if data is None:
+        return []
+    return [
+        point.value
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == f"ufo.{BALANCE_CHARGED_METRIC}"
+        for point in metric.data.data_points
+    ]
+
+
+def _in_memory_metrics(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    return reader
+
+
+async def test_the_charge_counter_follows_the_row_and_not_the_call(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dollars in is read off this counter, so it has to count what the ledger kept. A redelivered
+    payment adds no row and must add no dollars, and a grant charges nothing and is not revenue.
+
+    A refund counts nothing either, and that is the shape rather than an omission: a counter cannot
+    be taken back down, and the only thing that writes one is an operator verb in a process that
+    exports no metrics — so counting it here would state a fall the series can never show. The board
+    says so, and a correction is read off `balance_purchase`."""
+    reader = _in_memory_metrics(monkeypatch)
+    async with workspace_tx() as connection:
+        workspace_id = await _workspace(connection)
+
+    await _purchase(workspace_id, 100_000_000, 0, "signup")
+    await _purchase(workspace_id, 25_000_000, 25_000_000, "stripe/pi_1")
+    await _purchase(workspace_id, 25_000_000, 25_000_000, "stripe/pi_1")
+    await _purchase(workspace_id, -25_000_000, -25_000_000, "refund/pi_1")
+
+    assert _charged_points(reader) == [25_000_000]
+
+
+async def test_a_purchase_whose_transaction_rolls_back_counts_no_dollars(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`credit` runs in the caller's transaction, which also marks the payment's source, so the
+    credit and the mark stand or fall together. A count taken beside the insert would add money the
+    ledger never kept, and the refill job then retries the same payment intent and adds it again.
+    Counting after the commit is what makes the retry the first and only count."""
+    reader = _in_memory_metrics(monkeypatch)
+    async with workspace_tx() as connection:
+        workspace_id = await _workspace(connection)
+
+    with pytest.raises(_TopupFailed):
+        await _purchase(workspace_id, 25_000_000, 25_000_000, "stripe/pi_1", fail=True)
+
+    async with workspace_tx() as connection:
+        assert await recent_purchases(connection, workspace_id, 10) == ()
+    assert _charged_points(reader) == []
+
+    assert await _purchase(workspace_id, 25_000_000, 25_000_000, "stripe/pi_1")
+
+    assert _charged_points(reader) == [25_000_000]

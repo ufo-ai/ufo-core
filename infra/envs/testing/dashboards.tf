@@ -1434,3 +1434,246 @@ resource "datadog_dashboard" "sandbox_health" {
     }
   }
 }
+
+# The product funnel, derived rather than captured. Every number here comes off rows the product
+# already writes — a connector grant, an invited member, a charged purchase — so a stage redefined
+# next month re-derives itself over the whole history rather than starting from the day it shipped.
+#
+# `product_census` fires once per workspace per period and increments each stage that workspace has
+# reached, so the count of workspaces at a stage is one tick's worth of increments. Every workspace
+# count therefore counts with `.as_count()` like the rest of this file and pins the rollup to that
+# period, so one bucket holds exactly one tick and reads as the count the census recorded; a bucket
+# Datadog sizes for itself holds as many ticks as it is wide, which multiplies the number. `max`
+# then picks a whole bucket over the one still filling at the right-hand edge, and the toplists rank
+# by the same `max` so a stage reads the same in the big number and in the funnel.
+#
+# One board for both fleets, in the root the deploy pipeline applies.
+
+locals {
+  # `PRODUCT_CENSUS_SECONDS` in `core/src/ufo/product.py`, and held equal to it by
+  # `_census_period_failures` in the gates: the census period is the bucket every workspace count on
+  # this board is read out of, so a bucket wider than the census fires counts one workspace once per
+  # tick it holds and inflates every number here at once.
+  product_census_seconds = 600
+}
+
+resource "datadog_dashboard" "product" {
+  title       = "ufo product"
+  layout_type = "ordered"
+
+  template_variable {
+    name     = "env"
+    prefix   = "env"
+    defaults = ["testing"]
+  }
+
+  widget {
+    note_definition {
+      content          = <<-EOT
+        Workspace counts are a census, not a running total: a stage counts the workspaces standing
+        at it right now, and a workspace that reaches a later stage still counts at every earlier
+        one, so the funnel's steps never rise. The stages are seated, connector, invited, app,
+        chatted, active_1d, active_7d, paid. `app` counts an app the workspace built for itself: the
+        apps a pack ships reach every workspace, and are counted apart from the funnel below. Chats
+        and dollars are the other kind of number — events counted as they happen — so a range shows
+        their volume over it rather than a standing count.
+
+        What this board cannot say, because the rows are not ours to read:
+
+        - Signup conversion. The gateway deletes a claim that is never verified, so an address
+          submitted and abandoned leaves nothing. Acquisition starts at workspace creation.
+        - Whether a member arrived through the terminal or the browser, and whether they founded
+          their workspace or joined one. Both live in `ufo_control.onboard_claim`, which the fleet
+          holds no privilege on.
+        - Waitlist size. That table is Cloudflare D1, reachable only by the edge worker.
+        - Refunds and operator corrections. `dollars the fleet charged` counts what the fleet
+          charged a card; `ufoctl balance credit` writes a purchase in a process that exports no
+          metrics, so read a correction off `balance_purchase` rather than off this board.
+
+        A workspace is counted the tick after it changes, and one whose census is still running
+        absorbs a tick, so read a step change against the period rather than the minute.
+      EOT
+      background_color = "yellow"
+      font_size        = "14"
+      text_align       = "left"
+      show_tick        = false
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "workspaces"
+      autoscale = false
+      precision = 0
+      request {
+        q          = "sum:ufo.product_stage_total{$env,stage:seated}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "attached a connector"
+      autoscale = false
+      precision = 0
+      request {
+        q          = "sum:ufo.product_stage_total{$env,stage:connector}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "invited a teammate"
+      autoscale = false
+      precision = 0
+      request {
+        q          = "sum:ufo.product_stage_total{$env,stage:invited}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "chatted at least once"
+      autoscale = false
+      precision = 0
+      request {
+        q          = "sum:ufo.product_stage_total{$env,stage:chatted}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "chatted in the last 7 days"
+      autoscale = false
+      precision = 0
+      request {
+        q          = "sum:ufo.product_stage_total{$env,stage:active_7d}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title     = "paid"
+      autoscale = false
+      precision = 0
+      request {
+        q          = "sum:ufo.product_stage_total{$env,stage:paid}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+    }
+  }
+
+  # The funnel itself. Read downward: each step is a subset of the one above it, so the gap between
+  # two rows is where workspaces are stopping.
+  widget {
+    toplist_definition {
+      title = "workspaces by funnel stage"
+      request {
+        q = "top(sum:ufo.product_stage_total{$env} by {stage}.as_count().rollup(sum, ${local.product_census_seconds}), 8, 'max', 'desc')"
+      }
+    }
+  }
+
+  # What is attached, by the name the row carries rather than a name core holds: the connector's
+  # provider, the surface, the credential slot, the app. A connector added to the catalogue appears
+  # here with no change to this board.
+  widget {
+    toplist_definition {
+      title = "workspaces holding a connector, by provider"
+      request {
+        q = "top(sum:ufo.product_attach_total{$env,kind:connector} by {name}.as_count().rollup(sum, ${local.product_census_seconds}), 12, 'max', 'desc')"
+      }
+    }
+  }
+
+  widget {
+    toplist_definition {
+      title = "workspaces with a surface installed"
+      request {
+        q = "top(sum:ufo.product_attach_total{$env,kind:surface} by {name}.as_count().rollup(sum, ${local.product_census_seconds}), 12, 'max', 'desc')"
+      }
+    }
+  }
+
+  # An installation routes nothing until a member has proved an address against it, so this is the
+  # number that says a workspace can actually be reached on that surface. Read it against the
+  # installation count above: the difference is claims nobody finished.
+  widget {
+    toplist_definition {
+      title = "workspaces reachable on a surface"
+      request {
+        q = "top(sum:ufo.product_attach_total{$env,kind:address} by {name}.as_count().rollup(sum, ${local.product_census_seconds}), 12, 'max', 'desc')"
+      }
+    }
+  }
+
+  # Where GitHub and every bring-your-own-key connector appear: they are credential slots, not
+  # connector grants, so they are counted by slot rather than by provider.
+  widget {
+    toplist_definition {
+      title = "workspaces holding a credential, by slot"
+      request {
+        q = "top(sum:ufo.product_attach_total{$env,kind:credential} by {name}.as_count().rollup(sum, ${local.product_census_seconds}), 12, 'max', 'desc')"
+      }
+    }
+  }
+
+  # A pack provisions its apps into every workspace it covers, so this counts how far each shipped
+  # app reached and never what a member adopted: a name standing below the workspace count is a
+  # provision that did not land everywhere. The funnel's `app` step answers the other question — an
+  # app the workspace made for itself.
+  widget {
+    toplist_definition {
+      title = "workspaces each shipped app reached"
+      request {
+        q = "top(sum:ufo.product_attach_total{$env,kind:app} by {name}.as_count().rollup(sum, ${local.product_census_seconds}), 12, 'max', 'desc')"
+      }
+    }
+  }
+
+  # Counted at admission, so one row is one turn: a message that folds into a turn already running
+  # adds neither.
+  widget {
+    timeseries_definition {
+      title = "member chats by surface"
+      request {
+        q            = "sum:ufo.admitted_turn_total{$env,admission_source:member} by {surface}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  # `member` and `intent` are a person acting; `scheduled` and `internal` are the fleet acting on
+  # their behalf. Reading the two together is what says whether volume is demand or our own work.
+  widget {
+    timeseries_definition {
+      title = "turns admitted by source"
+      request {
+        q            = "sum:ufo.admitted_turn_total{$env} by {admission_source}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  # Money in, off the purchase the ledger kept rather than the call that asked for it and only once
+  # its transaction committed, so a rolled-back or redelivered payment is not counted. A signup grant
+  # charges nothing and never appears here, and neither does an operator's correction — see the note.
+  widget {
+    timeseries_definition {
+      title = "dollars the fleet charged"
+      request {
+        q            = "sum:ufo.balance_charged_micro_usd_total{$env}.as_count() / 1000000"
+        display_type = "bars"
+      }
+    }
+  }
+}

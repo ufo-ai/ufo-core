@@ -85,6 +85,10 @@ METRICS = (
     "objective_condition_total",
     "objective_frontier_injected_total",
     "objective_step_dispatched_total",
+    "product_stage_total",
+    "product_attach_total",
+    "admitted_turn_total",
+    "balance_charged_micro_usd_total",
 )
 ERROR_CLASS_DIMENSION = "error_class"
 PROFILE_DIMENSION = "profile"

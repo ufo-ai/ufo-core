@@ -3,7 +3,7 @@ import logging
 import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -20,11 +20,21 @@ from ufo.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.models.interface import Message, ModelEvent, ModelRequest, TextDelta
 from ufo.models.registry import ModelRegistry
 from ufo.o11y import BACKGROUND_PROFILE
+from ufo.product import (
+    ADDRESS_KIND,
+    APP_KIND,
+    CONNECTOR_KIND,
+    CREDENTIAL_KIND,
+    PRODUCT_ATTACH_METRIC,
+    PRODUCT_STAGE_METRIC,
+    SURFACE_KIND,
+    product_census,
+)
 from ufo.runtime import jobs as jobs_module
 from ufo.runtime.candidates import owner_candidates
 from ufo.runtime.jobs import CORE_EXTENSION, JobRunner, bindings_from
 from ufo.schema import tables
-from ufo.schema.records import Usage
+from ufo.schema.records import MEMBER_ADMISSION, TerminalFrame, Usage
 from ufo.workspace import ws, ws_current
 
 FIRE_TIMEOUT_SECONDS = 25
@@ -506,3 +516,392 @@ async def test_slow_workspace_does_not_starve_its_neighbors(
         release.set()
         DBOS.delete_schedule(key)
         jobs_module._firing = None
+
+
+async def _seeded_workspace(
+    *,
+    seated: bool = True,
+    invited: bool = False,
+    connector: str | None = None,
+    provisioned_app: str | None = None,
+    own_app: bool = False,
+    member_turn_days_ago: int | None = None,
+    charged_micro_usd: int = 0,
+    surface_installed: str | None = None,
+    proved_address: str | None = None,
+    claimed_address: str | None = None,
+    credential_slot: str | None = None,
+) -> UUID:
+    """One workspace standing at exactly the stages the arguments name, and no others.
+
+    Every row here is the row the product really writes, so a stage the census claims is a stage the
+    fleet would claim. The defaults seat a member and stop, which is the top of the funnel."""
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    member_id = uuid4()
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@work.com",
+                seated_at=sa.func.now() if seated else None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        if invited:
+            await connection.execute(
+                sa.insert(tables.member).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    email="invitee@work.com",
+                    invited_at=sa.func.now(),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="Main",
+                prompt="help",
+                model="auto",
+                provisioned_by=None if provisioned_app is None else "app_wiki",
+                provisioned_name=provisioned_app,
+                provisioned_version=None if provisioned_app is None else "1",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        if own_app:
+            await connection.execute(
+                sa.insert(tables.agent).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    name="Standup",
+                    prompt="post the standup",
+                    model="auto",
+                    owner_member_id=member_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key=str(conversation_id),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        if connector is not None:
+            connection_id = uuid4()
+            await connection.execute(
+                sa.insert(tables.connection).values(
+                    id=connection_id,
+                    workspace_id=workspace_id,
+                    provider=connector,
+                    account_id="acct",
+                    host="composio",
+                    owner_member_id=member_id,
+                    conversation_id=conversation_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.connector_grant).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    connection_id=connection_id,
+                    conversation_id=conversation_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if member_turn_days_ago is not None:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="done",
+                    inbound="hello",
+                    terminal=TerminalFrame(status="done", text="hi").model_dump(mode="json"),
+                    admission_source=MEMBER_ADMISSION,
+                    created_at=datetime.now(UTC) - timedelta(days=member_turn_days_ago),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if charged_micro_usd:
+            await connection.execute(
+                sa.insert(tables.balance_purchase).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    granted_micro_usd=charged_micro_usd,
+                    charged_micro_usd=charged_micro_usd,
+                    reference="stripe/pi_1",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if surface_installed is not None:
+            await connection.execute(
+                sa.insert(tables.surface_installation).values(
+                    workspace_id=workspace_id,
+                    surface=surface_installed,
+                    installation_id=str(workspace_id),
+                    agent_id=agent_id,
+                    routes_ingress=True,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if proved_address is not None:
+            await connection.execute(
+                sa.insert(tables.surface_address).values(
+                    surface=proved_address,
+                    address=f"proved:{workspace_id}",
+                    workspace_id=workspace_id,
+                    member_id=member_id,
+                    proved_by="code",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if claimed_address is not None:
+            await connection.execute(
+                sa.insert(tables.surface_address).values(
+                    surface=claimed_address,
+                    address=f"claimed:{workspace_id}",
+                    workspace_id=workspace_id,
+                    member_id=member_id,
+                    claim_expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        if credential_slot is not None:
+            await connection.execute(
+                sa.insert(tables.credential).values(
+                    workspace_id=workspace_id,
+                    slot=credential_slot,
+                    ciphertext=b"sealed",
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    return workspace_id
+
+
+def _census_points(reader: InMemoryMetricReader) -> dict[str, list[object]]:
+    data = reader.get_metrics_data()
+    assert data is not None
+    return {
+        metric.name: list(metric.data.data_points)
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+    }
+
+
+def _census_reader(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+    return reader
+
+
+async def test_the_census_counts_only_the_stages_a_workspace_has_reached(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stage is a claim about a row, so a workspace holding no connector, no invite and no
+    purchase must produce no such series at all — a stage that counts every workspace whatever it
+    did reads as progress that never happened."""
+    workspace_id = await _seeded_workspace(member_turn_days_ago=0)
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await product_census()
+
+    points = _census_points(reader)
+    assert {point.attributes["stage"] for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"]} == {
+        "seated",
+        "chatted",
+        "active_1d",
+        "active_7d",
+    }
+    assert f"ufo.{PRODUCT_ATTACH_METRIC}" not in points
+
+
+async def test_the_census_counts_every_stage_a_finished_workspace_reached(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ladder is cumulative: a workspace that paid also counts at every stage beneath it, which
+    is what lets the board read one series as a funnel whose steps never rise."""
+    workspace_id = await _seeded_workspace(
+        invited=True,
+        connector="gmail",
+        provisioned_app="wiki",
+        own_app=True,
+        member_turn_days_ago=0,
+        charged_micro_usd=25_000_000,
+    )
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await product_census()
+
+    points = _census_points(reader)
+    assert {point.attributes["stage"] for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"]} == {
+        "seated",
+        "connector",
+        "invited",
+        "app",
+        "chatted",
+        "active_1d",
+        "active_7d",
+        "paid",
+    }
+    assert all(point.value == 1 for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"])
+
+
+async def test_the_census_counts_the_app_stage_off_an_app_the_workspace_made_itself(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fleet provisions its own apps into every workspace, and `app_chat` provisions the main
+    agent, so provenance stands on a workspace that built nothing. Only an owner marks a member's
+    own act, and a stage every workspace reaches would report adoption nobody performed."""
+    provisioned = await _seeded_workspace(provisioned_app="wiki")
+    built = await _seeded_workspace(provisioned_app="wiki", own_app=True)
+
+    provisioned_reader = _census_reader(monkeypatch)
+    with ws(provisioned):
+        await product_census()
+    provisioned_stages = {
+        point.attributes["stage"]
+        for point in _census_points(provisioned_reader)[f"ufo.{PRODUCT_STAGE_METRIC}"]
+    }
+
+    built_reader = _census_reader(monkeypatch)
+    with ws(built):
+        await product_census()
+    built_stages = {
+        point.attributes["stage"]
+        for point in _census_points(built_reader)[f"ufo.{PRODUCT_STAGE_METRIC}"]
+    }
+
+    assert "app" not in provisioned_stages
+    assert "app" in built_stages
+
+
+async def test_the_census_ages_a_workspace_out_of_the_active_window_it_left(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`chatted` is forever and `active_*` is a window, so a workspace whose only member turn is
+    three days old must hold the week and have lost the day. Counting it active would make the
+    engagement graph a signup graph."""
+    workspace_id = await _seeded_workspace(member_turn_days_ago=3)
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await product_census()
+
+    stages = {
+        point.attributes["stage"] for point in _census_points(reader)[f"ufo.{PRODUCT_STAGE_METRIC}"]
+    }
+    assert "chatted" in stages
+    assert "active_7d" in stages
+    assert "active_1d" not in stages
+
+
+async def test_the_census_names_what_is_attached_without_holding_its_name(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slack, GitHub, iMessage and every bring-your-own-key connector reach the board as values read
+    off the column, so core counts them while naming none of them."""
+    workspace_id = await _seeded_workspace(
+        connector="gmail",
+        provisioned_app="wiki",
+        surface_installed="imessage",
+        credential_slot="github_app_installation",
+    )
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await product_census()
+
+    points = _census_points(reader)
+    assert {
+        (point.attributes["kind"], point.attributes["name"])
+        for point in points[f"ufo.{PRODUCT_ATTACH_METRIC}"]
+    } == {
+        (CONNECTOR_KIND, "gmail"),
+        (APP_KIND, "wiki"),
+        (SURFACE_KIND, "imessage"),
+        (CREDENTIAL_KIND, "github_app_installation"),
+    }
+
+
+async def test_the_census_counts_a_proved_address_apart_from_its_installation(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim a member started and never finished routes nothing, so it counts as a surface and
+    never as an address — conflating them would report an iMessage number for a workspace nobody
+    could message. The unreachable workspace holds a real unproved claim row, not an absent one:
+    absence would pass this test whether the proof were checked or not."""
+    bound = await _seeded_workspace(surface_installed="imessage", claimed_address="imessage")
+    reachable = await _seeded_workspace(surface_installed="imessage", proved_address="imessage")
+
+    bound_reader = _census_reader(monkeypatch)
+    with ws(bound):
+        await product_census()
+    bound_kinds = {
+        point.attributes["kind"]
+        for point in _census_points(bound_reader)[f"ufo.{PRODUCT_ATTACH_METRIC}"]
+    }
+
+    reachable_reader = _census_reader(monkeypatch)
+    with ws(reachable):
+        await product_census()
+    reachable_kinds = {
+        point.attributes["kind"]
+        for point in _census_points(reachable_reader)[f"ufo.{PRODUCT_ATTACH_METRIC}"]
+    }
+
+    assert bound_kinds == {SURFACE_KIND}
+    assert reachable_kinds == {SURFACE_KIND, ADDRESS_KIND}
+
+
+async def test_the_census_sees_only_the_workspace_it_is_bound_to(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One tick's increments are what the board divides by to get a workspace count, so a census
+    that could see a neighbour's rows would multiply every number on it."""
+    quiet = await _seeded_workspace()
+    await _seeded_workspace(connector="gmail", member_turn_days_ago=0, charged_micro_usd=25_000_000)
+    reader = _census_reader(monkeypatch)
+
+    with ws(quiet):
+        await product_census()
+
+    points = _census_points(reader)
+    assert {point.attributes["stage"] for point in points[f"ufo.{PRODUCT_STAGE_METRIC}"]} == {
+        "seated"
+    }
+    assert f"ufo.{PRODUCT_ATTACH_METRIC}" not in points

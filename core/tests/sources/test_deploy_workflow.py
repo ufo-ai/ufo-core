@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from infra.testing_secrets import SECRET_INPUTS
+from ufo.product import PRODUCT_CENSUS_SECONDS
 from ufo.sources.sync import SOURCE_SYNC_CHECK
 
 ROOT = Path(__file__).parents[3]
@@ -4340,6 +4341,7 @@ def test_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
         "prompt_cache",
         "evals",
         "sandbox_health",
+        "product",
     ]
     assert "env:testing" not in dashboards
     assert "env:prod" not in dashboards
@@ -4411,6 +4413,25 @@ def test_prompt_cache_dashboard_consumes_round_gap_and_ttl_metrics() -> None:
         "{$env,$profile,provider:anthropic,kind:cache_write_1h}" in dashboard
     )
     assert "value      = 65.2" in dashboard
+
+
+def test_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> None:
+    """One census tick counts every workspace once, so a workspace count is right only where the
+    bucket is the census period: a rate scaled by that period reads a narrower bucket as a whole
+    period, and a bucket Datadog sizes for itself holds as many ticks as it is wide. Every query on
+    this board therefore pins the rollup to the census period, and every toplist ranks by the same
+    `max` the big numbers take, so the funnel and the number above it cannot disagree."""
+    dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
+    census = re.findall(r'q\s+=\s+"([^"]*ufo\.product_(?:stage|attach)_total[^"]*)"', dashboard)
+
+    assert f"product_census_seconds = {PRODUCT_CENSUS_SECONDS}" in dashboard
+    assert len(census) == 12
+    assert "as_rate()" not in dashboard
+    for query in census:
+        assert ".as_count().rollup(sum, ${local.product_census_seconds})" in query
+        assert "${local.product_census_seconds} *" not in query
+        assert ("'max', 'desc')" in query) == ("by {" in query)
+    assert dashboard.count('aggregator = "max"') == 6
 
 
 @pytest.mark.parametrize(

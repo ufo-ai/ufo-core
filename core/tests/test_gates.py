@@ -7,6 +7,8 @@ import ast
 import importlib.util
 from pathlib import Path
 
+from ufo.product import PRODUCT_CENSUS_SECONDS
+
 _GATES_PATH = Path(__file__).resolve().parents[2] / "gates.py"
 _spec = importlib.util.spec_from_file_location("ufo_gates", _GATES_PATH)
 gates = importlib.util.module_from_spec(_spec)
@@ -851,3 +853,31 @@ def test_flag_gate_names_an_environment_with_no_map_of_its_own() -> None:
         {ENV_UFO_TF: PACK_CONFIG, EDGE_FLAGS: "locals {\n  portal_flags = {\n  }\n}\n"}
     )
     assert len(failures) == 1 and "no portal_flags map for testing" in failures[0]
+
+
+CENSUS_BOARD_TF = Path("infra/envs/testing/dashboards.tf")
+
+
+def test_census_period_gate_flags_a_board_bucketing_at_the_wrong_period() -> None:
+    """Terraform and the census hold the same number in two languages. A bucket wider than the
+    census fires counts one workspace once per tick it covers, which reads as growth rather than
+    as a bug, so it has to fail here instead."""
+    wrong = f"locals {{\n  product_census_seconds = {PRODUCT_CENSUS_SECONDS * 2}\n}}\n"
+
+    failures = gates._census_period_failures({CENSUS_BOARD_TF: wrong})
+
+    assert failures and f"every {PRODUCT_CENSUS_SECONDS}s" in failures[0]
+
+
+def test_census_period_gate_allows_the_period_the_census_fires_on() -> None:
+    right = f"locals {{\n  product_census_seconds = {PRODUCT_CENSUS_SECONDS}\n}}\n"
+
+    assert gates._census_period_failures({CENSUS_BOARD_TF: right}) == []
+
+
+def test_census_period_gate_flags_a_board_that_declares_no_period() -> None:
+    """A glob that matches nothing turns this gate into a no-op reporting success, which is the one
+    failure a gate must not have."""
+    failures = gates._census_period_failures({CENSUS_BOARD_TF: 'resource "datadog_dashboard" {}\n'})
+
+    assert failures == ["product board: no env root declares product_census_seconds"]

@@ -59,6 +59,7 @@ from ufo.sdk.balance import (
     BILLING_SCREEN_FRAGMENT,
     AutoTopup,
     configured_auto_topup,
+    count_charge,
     credit,
     mark_topup_verified,
     read_auto_topup,
@@ -800,6 +801,7 @@ class BalanceTopup:
             )
             await mark_topup_verified(connection, workspace_id)
         if added:
+            count_charge(wanted.amount_micro_usd)
             log(
                 "metronome.topped_up",
                 workspace_id=str(workspace_id),

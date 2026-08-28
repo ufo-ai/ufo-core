@@ -44,6 +44,7 @@ from ufo.ext.manifest import (
 from ufo.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.loop.delivery import DeliverySweep
 from ufo.loop.subagents import SubagentRegistry
+from ufo.product import PRODUCT_CENSUS_JOB
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_JOB,
@@ -3764,6 +3765,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         SOURCE_SYNC_JOB,
         TURN_DISPATCH_JOB,
         RESULT_DELIVERY_JOB,
+        PRODUCT_CENSUS_JOB,
     ]
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
@@ -3771,6 +3773,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
         f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}",
         f"{CORE_EXTENSION}:{RESULT_DELIVERY_JOB}",
+        f"{CORE_EXTENSION}:{PRODUCT_CENSUS_JOB}",
     }
 
 
